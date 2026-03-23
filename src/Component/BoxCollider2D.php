@@ -5,12 +5,14 @@ declare(strict_types=1);
 namespace PHPolygon\Component;
 
 use PHPolygon\ECS\AbstractComponent;
+use PHPolygon\ECS\Attribute\Category;
 use PHPolygon\ECS\Attribute\Property;
 use PHPolygon\ECS\Attribute\Serializable;
 use PHPolygon\Math\Rect;
 use PHPolygon\Math\Vec2;
 
 #[Serializable]
+#[Category('Physics')]
 class BoxCollider2D extends AbstractComponent
 {
     #[Property(editorHint: 'vec2')]

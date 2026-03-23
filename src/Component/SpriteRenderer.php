@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace PHPolygon\Component;
 
 use PHPolygon\ECS\AbstractComponent;
+use PHPolygon\ECS\Attribute\Category;
 use PHPolygon\ECS\Attribute\Property;
 use PHPolygon\ECS\Attribute\Range;
 use PHPolygon\ECS\Attribute\Serializable;
@@ -12,6 +13,7 @@ use PHPolygon\Math\Rect;
 use PHPolygon\Rendering\Color;
 
 #[Serializable]
+#[Category('Rendering')]
 class SpriteRenderer extends AbstractComponent
 {
     #[Property(editorHint: 'asset:texture')]

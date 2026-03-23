@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace PHPolygon\Component;
 
 use PHPolygon\ECS\AbstractComponent;
+use PHPolygon\ECS\Attribute\Category;
 use PHPolygon\ECS\Attribute\Hidden;
 use PHPolygon\ECS\Attribute\Property;
 use PHPolygon\ECS\Attribute\Range;
@@ -13,6 +14,7 @@ use PHPolygon\Math\Mat3;
 use PHPolygon\Math\Vec2;
 
 #[Serializable]
+#[Category('Core')]
 class Transform2D extends AbstractComponent
 {
     #[Property(editorHint: 'vec2')]

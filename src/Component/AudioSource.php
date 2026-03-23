@@ -5,12 +5,14 @@ declare(strict_types=1);
 namespace PHPolygon\Component;
 
 use PHPolygon\ECS\AbstractComponent;
+use PHPolygon\ECS\Attribute\Category;
 use PHPolygon\ECS\Attribute\Hidden;
 use PHPolygon\ECS\Attribute\Property;
 use PHPolygon\ECS\Attribute\Range;
 use PHPolygon\ECS\Attribute\Serializable;
 
 #[Serializable]
+#[Category('Audio')]
 class AudioSource extends AbstractComponent
 {
     #[Property]
