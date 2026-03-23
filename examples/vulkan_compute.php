@@ -1,19 +1,18 @@
 <?php
 
 /**
- * PHPolygon — Vulkan Compute Example
+ * PHPolygon — Vulkan Compute Example (Windowed)
  *
- * Runs a compute shader on the GPU via php-vulkan. The shader doubles every
- * element in a buffer of 1024 floats. The result is read back to PHP and
- * verified on the CPU.
+ * Uses a compute shader to generate a colorful animated pattern on the GPU,
+ * then presents it in a GLFW window via swapchain. Demonstrates the full
+ * Vulkan compute → graphics pipeline:
  *
- * This demonstrates the full Vulkan compute pipeline:
- *   Instance → PhysicalDevice → Device → Queue
- *   Buffer → DeviceMemory → bind
- *   ShaderModule (SPIR-V) → DescriptorSetLayout → PipelineLayout → Pipeline
- *   CommandPool → CommandBuffer → dispatch → fence wait → readback
+ *   Compute shader fills a storage buffer with pixel data
+ *   → copy to swapchain image → present
  *
- * No window or surface required — pure headless GPU compute.
+ * Controls:
+ *   SPACE  — Toggle animation
+ *   ESC    — Quit
  */
 
 declare(strict_types=1);
@@ -21,264 +20,326 @@ declare(strict_types=1);
 require_once __DIR__ . '/../vendor/autoload.php';
 
 // ---------------------------------------------------------------------------
-// 1. SPIR-V compute shader (compiled from GLSL offline)
-//
-// The GLSL source this was compiled from:
-//
-//   #version 450
-//   layout(local_size_x = 64) in;
-//   layout(std430, binding = 0) buffer DataBuffer {
-//       float data[];
-//   };
-//   void main() {
-//       uint idx = gl_GlobalInvocationID.x;
-//       data[idx] = data[idx] * 2.0;
-//   }
-//
-// Compile with: glslangValidator -V --target-env vulkan1.0 -S comp -o double.comp.spv double.comp.glsl
+// Config
+// ---------------------------------------------------------------------------
+$width  = 800;
+$height = 600;
+
+// ---------------------------------------------------------------------------
+// 1. Compile compute shader
 // ---------------------------------------------------------------------------
 
-$spirvPath = __DIR__ . '/../resources/shaders/compiled/double.comp.spv';
-
-// Check if pre-compiled SPIR-V exists, otherwise compile from embedded GLSL
-if (!file_exists($spirvPath)) {
-    $glslSource = <<<'GLSL'
+$computeGlsl = <<<'GLSL'
 #version 450
-layout(local_size_x = 64) in;
 
-layout(std430, binding = 0) buffer DataBuffer {
-    float data[];
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(std430, binding = 0) buffer OutputBuffer {
+    uint pixels[];
+};
+
+layout(push_constant) uniform PushConstants {
+    float time;
+    uint width;
+    uint height;
 };
 
 void main() {
-    uint idx = gl_GlobalInvocationID.x;
-    data[idx] = data[idx] * 2.0;
+    uvec2 pos = gl_GlobalInvocationID.xy;
+    if (pos.x >= width || pos.y >= height) return;
+
+    uint idx = pos.y * width + pos.x;
+
+    float u = float(pos.x) / float(width);
+    float v = float(pos.y) / float(height);
+
+    // Animated plasma pattern
+    float t = time * 0.8;
+    float val = sin(u * 10.0 + t)
+              + sin(v * 8.0 - t * 0.7)
+              + sin((u + v) * 6.0 + t * 1.3)
+              + sin(length(vec2(u - 0.5, v - 0.5)) * 12.0 - t * 2.0);
+    val = val * 0.25 + 0.5;
+
+    float r = sin(val * 3.14159 * 2.0) * 0.5 + 0.5;
+    float g = sin(val * 3.14159 * 2.0 + 2.094) * 0.5 + 0.5;
+    float b = sin(val * 3.14159 * 2.0 + 4.189) * 0.5 + 0.5;
+
+    uint ir = uint(clamp(r * 255.0, 0.0, 255.0));
+    uint ig = uint(clamp(g * 255.0, 0.0, 255.0));
+    uint ib = uint(clamp(b * 255.0, 0.0, 255.0));
+
+    pixels[idx] = ir | (ig << 8) | (ib << 16) | (255u << 24); // RGBA
 }
 GLSL;
 
-    // Write temporary GLSL file
-    $tmpGlsl = sys_get_temp_dir() . '/phpolygon_double.comp.glsl';
-    file_put_contents($tmpGlsl, $glslSource);
+$shaderDir = __DIR__ . '/../resources/shaders/compiled';
+if (!is_dir($shaderDir)) {
+    mkdir($shaderDir, 0755, true);
+}
+$computeSpv = "{$shaderDir}/plasma.comp.spv";
 
-    echo "Compiling GLSL → SPIR-V...\n";
-    $cmd = sprintf(
-        'glslangValidator -V --target-env vulkan1.0 -S comp -o %s %s 2>&1',
-        escapeshellarg($spirvPath),
-        escapeshellarg($tmpGlsl)
-    );
-    $output = [];
-    exec($cmd, $output, $exitCode);
-    unlink($tmpGlsl);
-
-    if ($exitCode !== 0) {
-        echo "Shader compilation failed:\n" . implode("\n", $output) . "\n";
+if (!file_exists($computeSpv)) {
+    $tmp = sys_get_temp_dir() . '/phpolygon_plasma.comp.glsl';
+    file_put_contents($tmp, $computeGlsl);
+    exec(sprintf('glslangValidator -V --target-env vulkan1.0 -S comp -o %s %s 2>&1',
+        escapeshellarg($computeSpv), escapeshellarg($tmp)), $out, $rc);
+    unlink($tmp);
+    if ($rc !== 0) {
+        echo "Shader compile failed:\n" . implode("\n", $out) . "\n";
         exit(1);
     }
-    echo "Compiled successfully → {$spirvPath}\n\n";
 }
 
 // ---------------------------------------------------------------------------
-// 2. Vulkan initialization
+// 2. GLFW window (no OpenGL context)
 // ---------------------------------------------------------------------------
 
-echo "=== PHPolygon Vulkan Compute Example ===\n\n";
-
-// Create instance (no validation layers for portability)
-$instance = new Vk\Instance(
-    appName: 'PHPolygon Compute',
-    appVersion: 1,
-    engineName: 'PHPolygon',
-    engineVersion: 1,
-    apiVersion: null,
-    enableValidation: false,
-    extensions: [],
-);
-echo "Vulkan {$instance->getVersion()}\n";
-
-// Pick first physical device
-$physicalDevices = $instance->getPhysicalDevices();
-if (empty($physicalDevices)) {
-    echo "No Vulkan devices found!\n";
-    exit(1);
-}
-
-$gpu = $physicalDevices[0];
-echo "GPU: {$gpu->getName()} ({$gpu->getTypeName()})\n";
-echo "API: {$gpu->getApiVersion()}\n";
-
-// Find a queue family that supports compute
-$queueFamilies = $gpu->getQueueFamilies();
-$computeFamily = null;
-foreach ($queueFamilies as $qf) {
-    if ($qf['compute']) {
-        $computeFamily = $qf['index'];
-        break;
+// macOS: GLFW needs DYLD_LIBRARY_PATH set before process starts to find libvulkan.
+// If not set, re-exec ourselves with the correct environment.
+if (PHP_OS_FAMILY === 'Darwin' && !getenv('DYLD_LIBRARY_PATH')) {
+    foreach (['/opt/homebrew/lib', '/usr/local/lib'] as $libDir) {
+        if (file_exists("{$libDir}/libvulkan.dylib")) {
+            $icd = dirname($libDir) . '/etc/vulkan/icd.d/MoltenVK_icd.json';
+            $env = "DYLD_LIBRARY_PATH={$libDir} VK_ICD_FILENAMES={$icd}";
+            $cmd = $env . ' ' . escapeshellarg(PHP_BINARY) . ' ' . escapeshellarg(__FILE__);
+            passthru($cmd, $exitCode);
+            exit($exitCode);
+        }
     }
 }
 
-if ($computeFamily === null) {
-    echo "No compute-capable queue family found!\n";
+glfwInit();
+glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
+glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
+
+$window = glfwCreateWindow($width, $height, 'PHPolygon — Vulkan Compute Plasma');
+if (!$window) {
+    echo "Failed to create GLFW window\n";
     exit(1);
 }
-echo "Compute queue family: {$computeFamily}\n\n";
-
-// Create logical device (queue families as array of {familyIndex, count})
-$device = new Vk\Device(
-    physicalDevice: $gpu,
-    queueFamilies: [['familyIndex' => $computeFamily, 'count' => 1]],
-    extensions: [],
-    features: null,
-);
-
-$queue = $device->getQueue($computeFamily, 0);
 
 // ---------------------------------------------------------------------------
-// 3. Create buffer and upload data
+// 3. Vulkan setup + surface + swapchain
 // ---------------------------------------------------------------------------
 
-$elementCount = 1024;
-$bufferSize   = $elementCount * 4; // 4 bytes per float
+echo "=== PHPolygon Vulkan Compute (Windowed) ===\n\n";
 
-echo "Buffer: {$elementCount} floats ({$bufferSize} bytes)\n";
+$instance = new Vk\Instance('PHPolygon Compute', 1, 'PHPolygon', 1, null, false, [
+    'VK_KHR_surface',
+    'VK_EXT_metal_surface',
+    'VK_KHR_portability_enumeration',
+]);
+$gpu = $instance->getPhysicalDevices()[0];
+echo "GPU: {$gpu->getName()}\n";
 
-// Create a storage buffer
-// Usage flags: storage buffer (0x20) | transfer src/dst (0x01 | 0x02)
-$buffer = new Vk\Buffer($device, $bufferSize, 0x20 | 0x01 | 0x02, 0);
+$surface = new Vk\Surface($instance, $window);
 
-// Find a host-visible memory type
-$memReqs  = $buffer->getMemoryRequirements();
+// Find queue family with compute + graphics + present support
+$queueFamilies = $gpu->getQueueFamilies();
+$queueFamily = null;
+foreach ($queueFamilies as $qf) {
+    if ($qf['compute'] && $qf['graphics'] && $gpu->getSurfaceSupport($qf['index'], $surface)) {
+        $queueFamily = $qf['index'];
+        break;
+    }
+}
+if ($queueFamily === null) {
+    echo "No suitable queue family found!\n";
+    exit(1);
+}
+
+$device = new Vk\Device($gpu, [['familyIndex' => $queueFamily, 'count' => 1]],
+    ['VK_KHR_swapchain'], null);
+$queue = $device->getQueue($queueFamily, 0);
 $memProps = $gpu->getMemoryProperties();
 
-$memTypeIndex = null;
-foreach ($memProps['types'] as $i => $type) {
-    if (($memReqs['memoryTypeBits'] & (1 << $i)) &&
-        $type['hostVisible'] && $type['hostCoherent']) {
-        $memTypeIndex = $i;
-        break;
-    }
-}
+// Swapchain
+$caps = $surface->getCapabilities($gpu);
+$formats = $surface->getFormats($gpu);
+$surfaceFormat = $formats[0]['format'];
+$imageCount = max($caps['minImageCount'], min(3, $caps['maxImageCount'] ?: 3));
 
-if ($memTypeIndex === null) {
-    echo "No suitable memory type found!\n";
-    exit(1);
-}
-
-$memory = new Vk\DeviceMemory($device, $memReqs['size'], $memTypeIndex);
-$buffer->bindMemory($memory, 0);
-
-// Write input data: [1.0, 2.0, 3.0, ..., 1024.0]
-$inputData = '';
-for ($i = 0; $i < $elementCount; $i++) {
-    $inputData .= pack('f', (float)($i + 1));
-}
-$memory->map(0, null);
-$memory->write($inputData, 0);
-
-echo "Input:  [1.0, 2.0, 3.0, ..., {$elementCount}.0]\n";
-
-// ---------------------------------------------------------------------------
-// 4. Create compute pipeline
-// ---------------------------------------------------------------------------
-
-// Descriptor set layout: one storage buffer at binding 0
-$descriptorSetLayout = new Vk\DescriptorSetLayout($device, [
-    [
-        'binding' => 0,
-        'descriptorType' => 7, // VK_DESCRIPTOR_TYPE_STORAGE_BUFFER
-        'descriptorCount' => 1,
-        'stageFlags' => 0x20,  // VK_SHADER_STAGE_COMPUTE_BIT
-    ],
+$swapchain = new Vk\Swapchain($device, $surface, [
+    'minImageCount' => $imageCount,
+    'imageFormat' => $surfaceFormat,
+    'imageColorSpace' => $formats[0]['colorSpace'],
+    'imageExtent' => ['width' => $width, 'height' => $height],
+    'imageArrayLayers' => 1,
+    'imageUsage' => 0x10 | 0x02, // COLOR_ATTACHMENT | TRANSFER_DST (for copy from compute buffer)
+    'imageSharingMode' => 0,
+    'preTransform' => $caps['currentTransform'],
+    'compositeAlpha' => 1,
+    'presentMode' => 2, // FIFO
+    'clipped' => true,
 ]);
 
-// Pipeline layout
-$pipelineLayout = new Vk\PipelineLayout($device, [$descriptorSetLayout], []);
-
-// Shader module from SPIR-V
-$shaderModule = Vk\ShaderModule::createFromFile($device, $spirvPath);
-
-// Compute pipeline
-$pipeline = Vk\Pipeline::createCompute($device, $pipelineLayout, $shaderModule, 'main');
-
-echo "Pipeline created ✓\n";
+$swapImages = $swapchain->getImages();
+echo "Swapchain: {$imageCount} images\n";
 
 // ---------------------------------------------------------------------------
-// 5. Descriptor set: bind the buffer
+// 4. Compute pipeline
 // ---------------------------------------------------------------------------
 
-$descriptorPool = new Vk\DescriptorPool($device, 1, [
-    ['type' => 7, 'descriptorCount' => 1], // STORAGE_BUFFER
-], 0);
-
-$descriptorSets = $descriptorPool->allocateSets([$descriptorSetLayout]);
-$descriptorSet  = $descriptorSets[0];
-
-// Write buffer descriptor
-$descriptorSet->writeBuffer(
-    binding: 0,
-    buffer: $buffer,
-    offset: 0,
-    range: $bufferSize,
-    type: 7, // VK_DESCRIPTOR_TYPE_STORAGE_BUFFER
-);
-
-// ---------------------------------------------------------------------------
-// 6. Record and submit command buffer
-// ---------------------------------------------------------------------------
-
-$commandPool = new Vk\CommandPool($device, $computeFamily, 0);
-$commandBuffers = $commandPool->allocateBuffers(1, true);
-$cmd = $commandBuffers[0];
-
-$cmd->begin(0x01); // VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT
-
-$cmd->bindPipeline(1, $pipeline); // VK_PIPELINE_BIND_POINT_COMPUTE = 1
-$cmd->bindDescriptorSets(1, $pipelineLayout, 0, [$descriptorSet]);
-
-// Dispatch: 1024 elements / 64 local_size_x = 16 work groups
-$workGroups = (int)ceil($elementCount / 64);
-$cmd->dispatch($workGroups, 1, 1);
-
-$cmd->end();
-
-echo "Dispatching {$workGroups} work groups ({$elementCount} invocations)...\n";
-
-$fence = new Vk\Fence($device, false);
-$queue->submit([$cmd], $fence, [], []);
-
-// Wait for GPU to finish
-$fence->wait(1_000_000_000); // 1 second timeout
-
-echo "GPU compute finished ✓\n\n";
-
-// ---------------------------------------------------------------------------
-// 7. Read back and verify results
-// ---------------------------------------------------------------------------
-
-$resultData = $memory->read($bufferSize, 0);
-$memory->unmap();
-
-$results = unpack('f*', $resultData);
-$results = array_values($results); // Re-index from 0
-
-// Verify: each element should be doubled
-$errors = 0;
-for ($i = 0; $i < $elementCount; $i++) {
-    $expected = ($i + 1) * 2.0;
-    if (abs($results[$i] - $expected) > 0.001) {
-        echo "MISMATCH at [{$i}]: expected {$expected}, got {$results[$i]}\n";
-        $errors++;
+/** Find a memory type index. */
+function findMemory(array $memProps, array $memReqs, bool $hostVisible): int {
+    foreach ($memProps['types'] as $i => $t) {
+        if (!($memReqs['memoryTypeBits'] & (1 << $i))) continue;
+        if ($hostVisible && (!$t['hostVisible'] || !$t['hostCoherent'])) continue;
+        if (!$hostVisible && !$t['deviceLocal']) continue;
+        return $i;
     }
+    throw new RuntimeException('No suitable memory type');
 }
 
-// Print first/last few results
-echo "Output: [{$results[0]}, {$results[1]}, {$results[2]}, ..., {$results[$elementCount - 1]}]\n";
+$bufferSize = $width * $height * 4; // RGBA pixels
 
-if ($errors === 0) {
-    echo "\n✓ All {$elementCount} elements verified — GPU compute correct!\n";
-} else {
-    echo "\n✗ {$errors} mismatches found.\n";
-    exit(1);
+// Storage buffer for compute output
+$storageBuffer = new Vk\Buffer($device, $bufferSize, 0x20 | 0x02, 0); // STORAGE | TRANSFER_SRC
+$sbMR = $storageBuffer->getMemoryRequirements();
+// Prefer device-local, fall back to host-visible
+$sbMemType = null;
+foreach ($memProps['types'] as $i => $t) {
+    if (!($sbMR['memoryTypeBits'] & (1 << $i))) continue;
+    if ($t['deviceLocal']) { $sbMemType = $i; break; }
+}
+if ($sbMemType === null) {
+    $sbMemType = findMemory($memProps, $sbMR, true);
+}
+$sbMem = new Vk\DeviceMemory($device, $sbMR['size'], $sbMemType);
+$storageBuffer->bindMemory($sbMem, 0);
+
+// Descriptor set layout + pool + set
+$descLayout = new Vk\DescriptorSetLayout($device, [
+    ['binding' => 0, 'descriptorType' => 7, 'descriptorCount' => 1, 'stageFlags' => 0x20],
+]);
+$descPool = new Vk\DescriptorPool($device, 1, [['type' => 7, 'descriptorCount' => 1]], 0);
+$descSets = $descPool->allocateSets([$descLayout]);
+$descSet = $descSets[0];
+$descSet->writeBuffer(0, $storageBuffer, 0, $bufferSize, 7);
+
+// Pipeline layout with push constants (time, width, height)
+$computeLayout = new Vk\PipelineLayout($device, [$descLayout], [
+    ['stageFlags' => 0x20, 'offset' => 0, 'size' => 12], // float + uint + uint = 12 bytes
+]);
+
+$shaderModule = Vk\ShaderModule::createFromFile($device, $computeSpv);
+$computePipeline = Vk\Pipeline::createCompute($device, $computeLayout, $shaderModule, 'main');
+echo "Compute pipeline created\n";
+
+// ---------------------------------------------------------------------------
+// 5. Sync + command pool
+// ---------------------------------------------------------------------------
+
+$imageAvailableSem = new Vk\Semaphore($device, false);
+$renderFinishedSem = new Vk\Semaphore($device, false);
+$fence = new Vk\Fence($device, true);
+
+$cmdPool = new Vk\CommandPool($device, $queueFamily, 0x02); // RESET_COMMAND_BUFFER_BIT
+$cmds = $cmdPool->allocateBuffers(1, true);
+$cmd = $cmds[0];
+
+// ---------------------------------------------------------------------------
+// 6. Render loop
+// ---------------------------------------------------------------------------
+
+echo "Rendering — SPACE toggle animation, ESC quit\n\n";
+
+$time = 0.0;
+$animating = true;
+$lastTime = microtime(true);
+
+$workGroupsX = (int)ceil($width / 16);
+$workGroupsY = (int)ceil($height / 16);
+
+glfwSetKeyCallback($window, function ($key, $scancode, $action, $mods) use (&$animating) {
+    if ($action === GLFW_PRESS && $key === GLFW_KEY_SPACE) {
+        $animating = !$animating;
+    }
+});
+
+while (!glfwWindowShouldClose($window)) {
+    glfwPollEvents();
+
+    if (glfwGetKey($window, GLFW_KEY_ESCAPE) === GLFW_PRESS) {
+        break;
+    }
+
+    $now = microtime(true);
+    $dt = $now - $lastTime;
+    $lastTime = $now;
+
+    if ($animating) {
+        $time += $dt;
+    }
+
+    // Wait for previous frame
+    $fence->wait(1_000_000_000);
+    $fence->reset();
+
+    $imageIndex = $swapchain->acquireNextImage($imageAvailableSem, null, 1_000_000_000);
+
+    // Push constant data: time (float) + width (uint32) + height (uint32)
+    $pushData = pack('fVV', $time, $width, $height);
+
+    $cmd->reset(0);
+    $cmd->begin(0x01);
+
+    // 1. Dispatch compute shader
+    $cmd->bindPipeline(1, $computePipeline); // COMPUTE bind point
+    $cmd->bindDescriptorSets(1, $computeLayout, 0, [$descSet]);
+    $cmd->pushConstants($computeLayout, 0x20, 0, $pushData);
+    $cmd->dispatch($workGroupsX, $workGroupsY, 1);
+
+    // 2. Barrier: compute write → transfer read
+    $cmd->pipelineBarrier(
+        0x00000800, // VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT
+        0x00001000, // VK_PIPELINE_STAGE_TRANSFER_BIT
+        0x00000020, // VK_ACCESS_SHADER_WRITE_BIT
+        0x00000800, // VK_ACCESS_TRANSFER_READ_BIT
+    );
+
+    // 3. Transition swapchain image: UNDEFINED → TRANSFER_DST
+    $cmd->imageMemoryBarrier(
+        $swapImages[$imageIndex],
+        0,  // VK_IMAGE_LAYOUT_UNDEFINED
+        7,  // VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL
+        0,
+        0x00000400, // VK_ACCESS_TRANSFER_WRITE_BIT
+        0x00000001, // VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT
+        0x00001000, // VK_PIPELINE_STAGE_TRANSFER_BIT
+        1,          // VK_IMAGE_ASPECT_COLOR_BIT
+    );
+
+    // 4. Copy storage buffer → swapchain image
+    $cmd->copyBufferToImage(
+        $storageBuffer,
+        $swapImages[$imageIndex],
+        7,  // TRANSFER_DST_OPTIMAL
+        $width,
+        $height,
+    );
+
+    // 5. Transition swapchain image: TRANSFER_DST → PRESENT_SRC
+    $cmd->imageMemoryBarrier(
+        $swapImages[$imageIndex],
+        7,  // VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL
+        Vk\Vk::IMAGE_LAYOUT_PRESENT_SRC_KHR,
+        0x00000400,
+        0,
+        0x00001000, // VK_PIPELINE_STAGE_TRANSFER_BIT
+        0x00002000, // VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT
+        1,
+    );
+
+    $cmd->end();
+
+    $queue->submit([$cmd], $fence, [$imageAvailableSem], [$renderFinishedSem]);
+    $queue->present([$swapchain], [$imageIndex], [$renderFinishedSem]);
 }
 
-// Cleanup is automatic via destructors
-echo "\nDone.\n";
+$device->waitIdle();
+glfwDestroyWindow($window);
+glfwTerminate();
+
+echo "Done.\n";

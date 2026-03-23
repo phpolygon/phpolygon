@@ -149,8 +149,8 @@ The `examples/` directory contains runnable demos:
 | `hello_world.php` | Minimal engine setup with NanoVG rendering |
 | `opengl_triangle.php` | Custom OpenGL 4.1 shaders with rotating triangle |
 | `opengl_cube.php` | 3D Phong-lit cube with camera orbit controls |
-| `vulkan_compute.php` | Headless Vulkan compute shader (GPU doubling) |
-| `vulkan_triangle.php` | Vulkan graphics pipeline with offscreen rendering |
+| `vulkan_compute.php` | Vulkan compute shader generating animated plasma in a window |
+| `vulkan_triangle.php` | Vulkan graphics pipeline with real-time rotating 3D pyramid |
 
 ## Roadmap
 
