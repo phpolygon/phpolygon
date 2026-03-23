@@ -210,8 +210,13 @@ $engine->onRender(function (Engine $engine, float $interpolation) use (&$program
 
     glUseProgram(0);
 
-    // --- Restart NanoVG for HUD overlay ---
-    $r->beginFrame();
+    // --- Restart NanoVG for HUD overlay (without clearing — preserve the triangle) ---
+    $vg = $r->getVGContext();
+    $vg->beginFrame(
+        (float)$engine->window->getWidth(),
+        (float)$engine->window->getHeight(),
+        $engine->window->getPixelRatio(),
+    );
 
     // HUD text
     $r->drawText('PHPolygon — OpenGL 4.1 Triangle', 20, 20, 22.0, Color::white());
