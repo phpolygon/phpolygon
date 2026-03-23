@@ -5,8 +5,10 @@ declare(strict_types=1);
 namespace PHPolygon\Tests\Audio;
 
 use PHPUnit\Framework\TestCase;
+use PHPolygon\Audio\AudioBackendInterface;
 use PHPolygon\Audio\AudioChannel;
 use PHPolygon\Audio\AudioManager;
+use PHPolygon\Audio\Backend\PHPGLFWAudioBackend;
 use PHPolygon\Audio\NullAudioBackend;
 
 class AudioManagerTest extends TestCase
@@ -156,5 +158,30 @@ class AudioManagerTest extends TestCase
 
         $this->assertNull($this->audio->getCurrentMusicClipId());
         $this->assertNull($this->audio->getClip('a'));
+    }
+
+    // ── PHPGLFWAudioBackend ─────────────────────────────────────
+
+    public function testPHPGLFWBackendImplementsInterface(): void
+    {
+        $this->assertTrue(
+            is_subclass_of(PHPGLFWAudioBackend::class, AudioBackendInterface::class)
+            || in_array(AudioBackendInterface::class, class_implements(PHPGLFWAudioBackend::class) ?: []),
+            'PHPGLFWAudioBackend must implement AudioBackendInterface'
+        );
+    }
+
+    public function testPHPGLFWBackendIsAvailableReturnsBool(): void
+    {
+        $this->assertIsBool(PHPGLFWAudioBackend::isAvailable());
+    }
+
+    public function testManagerAcceptsBackendViaConstructor(): void
+    {
+        // NullAudioBackend is always available; just verify the pattern works
+        $backend = new NullAudioBackend();
+        $manager = new AudioManager($backend);
+
+        $this->assertSame($backend, $manager->getBackend());
     }
 }

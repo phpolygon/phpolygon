@@ -111,9 +111,11 @@ class UIContextTest extends TestCase
 
     public function testCheckboxToggles(): void
     {
-        // Place cursor inside checkbox area
+        // Place cursor inside checkbox area, simulate release (click = release while hovered)
         $this->input->handleCursorPosEvent(15.0, 15.0);
-        $this->input->handleMouseButtonEvent(0, 1);
+        $this->input->handleMouseButtonEvent(0, 1); // press
+        $this->input->endFrame();
+        $this->input->handleMouseButtonEvent(0, 0); // release
 
         $this->ctx->begin(10.0, 10.0, 300.0);
         $result = $this->ctx->checkbox('cb1', 'Enable', false);
@@ -162,17 +164,17 @@ class UIContextTest extends TestCase
         $this->assertGreaterThan($y1, $y2);
     }
 
-    public function testInputSuppressedWhenHovered(): void
+    public function testAnyHoveredWhenMouseOverButton(): void
     {
-        // Mouse over the label area
+        // Mouse over the button area
         $this->input->handleCursorPosEvent(15.0, 15.0);
 
         $this->ctx->begin(10.0, 10.0, 300.0);
         $this->ctx->button('btn1', 'Hover me');
         $this->ctx->end();
 
-        // After end(), input should be suppressed because button was hovered
-        $this->assertTrue($this->input->isSuppressed());
+        // isAnyHovered() should be true — game code can suppress input manually
+        $this->assertTrue($this->ctx->isAnyHovered());
     }
 
     public function testInputNotSuppressedWhenNotHovered(): void

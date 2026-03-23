@@ -193,4 +193,71 @@ class LocaleManagerTest extends TestCase
         $this->locale->loadFile('en', $this->fixturesPath . '/en.json');
         $this->assertEquals('deep', $this->locale->get('a.b.c'));
     }
+
+    // ── choice() / Pluralization ────────────────────────────────
+
+    public function testChoiceTwoForms(): void
+    {
+        $this->locale->add('en', ['items' => 'one item|many items']);
+
+        $this->assertEquals('one item', $this->locale->choice('items', 1));
+        $this->assertEquals('many items', $this->locale->choice('items', 0));
+        $this->assertEquals('many items', $this->locale->choice('items', 5));
+    }
+
+    public function testChoiceThreeForms(): void
+    {
+        $this->locale->add('en', ['items' => 'no items|one item|:count items']);
+
+        $this->assertEquals('no items', $this->locale->choice('items', 0));
+        $this->assertEquals('one item', $this->locale->choice('items', 1));
+        $this->assertEquals('42 items', $this->locale->choice('items', 42));
+    }
+
+    public function testChoiceExplicitCount(): void
+    {
+        $this->locale->add('en', ['apples' => '{0} No apples|{1} One apple|[2,*] :count apples']);
+
+        $this->assertEquals('No apples', $this->locale->choice('apples', 0));
+        $this->assertEquals('One apple', $this->locale->choice('apples', 1));
+        $this->assertEquals('5 apples', $this->locale->choice('apples', 5));
+    }
+
+    public function testChoiceExplicitRange(): void
+    {
+        $this->locale->add('en', ['score' => '[0,0] Nothing|[1,3] A few|[4,*] Many']);
+
+        $this->assertEquals('Nothing', $this->locale->choice('score', 0));
+        $this->assertEquals('A few', $this->locale->choice('score', 2));
+        $this->assertEquals('Many', $this->locale->choice('score', 100));
+    }
+
+    public function testChoiceAutoAddsCount(): void
+    {
+        $this->locale->add('en', ['msg' => 'one|:count things']);
+
+        $this->assertEquals('7 things', $this->locale->choice('msg', 7));
+    }
+
+    public function testChoiceWithExtraParams(): void
+    {
+        $this->locale->add('en', ['items' => ':name has one item|:name has :count items']);
+
+        $this->assertEquals('Max has one item', $this->locale->choice('items', 1, ['name' => 'Max']));
+        $this->assertEquals('Max has 3 items', $this->locale->choice('items', 3, ['name' => 'Max']));
+    }
+
+    public function testChoiceSingleForm(): void
+    {
+        $this->locale->add('en', ['always' => 'always this']);
+
+        $this->assertEquals('always this', $this->locale->choice('always', 0));
+        $this->assertEquals('always this', $this->locale->choice('always', 1));
+        $this->assertEquals('always this', $this->locale->choice('always', 99));
+    }
+
+    public function testChoiceFallbackToKey(): void
+    {
+        $this->assertEquals('missing.plural', $this->locale->choice('missing.plural', 5));
+    }
 }
