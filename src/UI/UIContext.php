@@ -42,6 +42,10 @@ class UIContext
     /** Whether any widget was hovered this frame */
     private bool $anyHovered = false;
 
+    /** Viewport offset for letterboxing — mouse coords are adjusted by this */
+    private float $viewportOffsetX = 0.0;
+    private float $viewportOffsetY = 0.0;
+
     public function __construct(
         Renderer2DInterface $renderer,
         Input $input,
@@ -75,15 +79,12 @@ class UIContext
     }
 
     /**
-     * End a UI frame. Suppresses game input if any widget was hovered.
+     * End a UI frame.
      */
     public function end(): void
     {
-        if ($this->anyHovered) {
-            $this->input->suppress();
-        } else {
-            $this->input->unsuppress();
-        }
+        // Note: We no longer suppress/unsuppress input here.
+        // Game code can check isAnyHovered() and suppress manually if needed.
     }
 
     // ── Widgets ──────────────────────────────────────────────────
@@ -118,21 +119,28 @@ class UIContext
 
         $hovered = $this->isHovered($rect);
         $clicked = false;
+        $pressing = false;
 
         if ($hovered) {
             $this->hotWidget = $id;
             $this->anyHovered = true;
 
-            if ($this->input->isMouseButtonPressed(0)) {
+            if ($this->input->isMouseButtonDown(0)) {
                 $this->activeWidget = $id;
+                $pressing = true;
             }
-            if ($this->input->isMouseButtonReleased(0) && $this->activeWidget === $id) {
+            if ($this->input->isMouseButtonReleased(0)) {
                 $clicked = true;
+                $this->activeWidget = '';
+            }
+        } else {
+            // Release outside cancels active state
+            if ($this->activeWidget === $id && !$this->input->isMouseButtonDown(0)) {
                 $this->activeWidget = '';
             }
         }
 
-        $bg = $this->activeWidget === $id ? $s->activeColor
+        $bg = $pressing ? $s->activeColor
             : ($hovered ? $s->hoverColor : $s->backgroundColor);
 
         $this->renderer->drawRoundedRect($rect->x, $rect->y, $rect->width, $rect->height, $s->borderRadius, $bg);
@@ -161,7 +169,7 @@ class UIContext
         $hovered = $this->isHovered($fullRect);
         if ($hovered) {
             $this->anyHovered = true;
-            if ($this->input->isMouseButtonPressed(0)) {
+            if ($this->input->isMouseButtonReleased(0)) {
                 $value = !$value;
             }
         }
@@ -225,7 +233,7 @@ class UIContext
             $this->anyHovered = true;
         }
 
-        if ($hovered && $this->input->isMouseButtonPressed(0)) {
+        if ($hovered && $this->input->isMouseButtonDown(0)) {
             $this->activeWidget = $id;
         }
         if ($this->activeWidget === $id) {
@@ -290,12 +298,12 @@ class UIContext
         $focused = $this->focusedTextField === $id;
 
         // Click to focus
-        if ($hovered && $this->input->isMouseButtonPressed(0)) {
+        if ($hovered && $this->input->isMouseButtonReleased(0)) {
             $this->focusedTextField = $id;
             $this->textFieldBuffer = $value;
             $this->textFieldCursor = mb_strlen($value);
             $focused = true;
-        } elseif (!$hovered && $this->input->isMouseButtonPressed(0) && $focused) {
+        } elseif (!$hovered && $this->input->isMouseButtonReleased(0) && $focused) {
             // Click outside → unfocus
             $this->focusedTextField = '';
             $focused = false;
@@ -460,12 +468,27 @@ class UIContext
         $this->cursorY = $y;
     }
 
+    /**
+     * Set viewport offset for letterboxing. Mouse coordinates will be
+     * adjusted by this offset when hit-testing widgets.
+     */
+    public function setViewportOffset(float $x, float $y): void
+    {
+        $this->viewportOffsetX = $x;
+        $this->viewportOffsetY = $y;
+    }
+
     // ── Internals ────────────────────────────────────────────────
 
     private function isHovered(Rect $rect): bool
     {
         $mouse = $this->input->getMousePosition();
-        return $rect->contains($mouse);
+        // Adjust mouse position for viewport offset (letterboxing)
+        $adjustedMouse = new Vec2(
+            $mouse->x - $this->viewportOffsetX,
+            $mouse->y - $this->viewportOffsetY,
+        );
+        return $rect->contains($adjustedMouse);
     }
 
     private function advance(float $height): void

@@ -108,8 +108,6 @@ class Engine
                 if ($this->onUpdate !== null) {
                     ($this->onUpdate)($this, $dt);
                 }
-
-                $this->input->endFrame();
             },
             render: function (float $interpolation) {
                 $this->renderer2D->beginFrame();
@@ -122,6 +120,11 @@ class Engine
 
                 $this->renderer2D->endFrame();
                 $this->window->swapBuffers();
+
+                // endFrame must happen after render so UI widgets can read
+                // pressed/released states during the draw phase
+                $this->input->endFrame();
+
                 $this->window->pollEvents();
             },
             shouldStop: function (): bool {
