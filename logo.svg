@@ -1,0 +1,36 @@
+<svg width="560" height="140" viewBox="20 10 560 140" xmlns="http://www.w3.org/2000/svg">
+  <!-- Background -->
+  <rect x="20" y="10" width="560" height="140" rx="12" fill="#0d1117"/>
+
+  <defs>
+    <style>
+      .wordmark-php     { fill: #e6edf3; }
+      .wordmark-polygon { fill: #7F77DD; }
+      .tagline          { fill: #8b949e; }
+    </style>
+  </defs>
+
+  <!-- Logo mark: isometric low-poly crystal -->
+  <!-- Top face -->
+  <polygon fill="#7F77DD" points="80,20 130,48 80,76 30,48"/>
+  <!-- Left face -->
+  <polygon fill="#534AB7" points="30,48 80,76 80,132 30,104"/>
+  <!-- Right face -->
+  <polygon fill="#3C3489" points="80,76 130,48 130,104 80,132"/>
+  <!-- Inner detail: small triangle on top face -->
+  <polygon fill="#9B94E8" opacity="0.5" points="80,32 100,43 80,54 60,43"/>
+  <!-- Edge lines -->
+  <polyline fill="none" stroke="#1a1535" stroke-width="0.8" points="30,48 80,20 130,48"/>
+  <polyline fill="none" stroke="#1a1535" stroke-width="0.8" points="30,48 80,76"/>
+  <polyline fill="none" stroke="#1a1535" stroke-width="0.8" points="130,48 80,76"/>
+  <polyline fill="none" stroke="#1a1535" stroke-width="0.8" points="30,48 30,104 80,132"/>
+  <polyline fill="none" stroke="#1a1535" stroke-width="0.8" points="130,48 130,104 80,132"/>
+  <line fill="none" stroke="#1a1535" stroke-width="0.8" x1="80" y1="76" x2="80" y2="132"/>
+
+  <!-- Wordmark -->
+  <text class="wordmark-php"     x="162" y="100" font-family="system-ui, -apple-system, sans-serif" font-size="64" font-weight="500" letter-spacing="-1">PH</text>
+  <text class="wordmark-polygon" x="268" y="100" font-family="system-ui, -apple-system, sans-serif" font-size="64" font-weight="500" letter-spacing="-1">Polygon</text>
+
+  <!-- Tagline -->
+  <text class="tagline" x="162" y="128" font-family="system-ui, -apple-system, sans-serif" font-size="16" font-weight="400" letter-spacing="0.3">PHP-native game engine · AI-first authoring</text>
+</svg>
