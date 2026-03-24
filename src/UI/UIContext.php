@@ -316,21 +316,24 @@ class UIContext
     public function textField(string $id, string $label, string $value): string
     {
         $s = $this->style;
-        $labelH = $s->fontSize + $s->padding;
+        $hasLabel = $label !== '';
+        $labelH = $hasLabel ? $s->fontSize + $s->padding : 0.0;
         $fieldH = $s->fontSize + $s->padding * 2;
         $totalH = $labelH + $fieldH + $s->padding;
 
-        // Label
-        $this->renderer->drawText(
-            $label,
-            $this->cursorX + $s->padding,
-            $this->cursorY + $s->padding,
-            $s->fontSize,
-            $s->textColor,
-        );
+        // Label (only if non-empty)
+        if ($hasLabel) {
+            $this->renderer->drawText(
+                $label,
+                $this->cursorX + $s->padding,
+                $this->cursorY + $s->padding,
+                $s->fontSize,
+                $s->textColor,
+            );
+        }
 
         $fieldX = $this->cursorX + $s->padding;
-        $fieldY = $this->cursorY + $labelH + $s->padding;
+        $fieldY = $this->cursorY + ($hasLabel ? $labelH + $s->padding : 0.0);
         $fieldW = $this->regionWidth - $s->padding * 2;
         $fieldRect = new Rect($fieldX, $fieldY, $fieldW, $fieldH);
 
