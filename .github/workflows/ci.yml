@@ -124,19 +124,21 @@ jobs:
         run: vendor/bin/phpstan analyse --error-format=github
 
   vrt:
-    name: VRT (Alpine container)
+    name: VRT (Alpine 3.22)
     runs-on: ubuntu-latest
     container:
-      image: php:8.4-cli-alpine
+      image: alpine:3.22
 
     steps:
-      - name: Install system dependencies
+      - name: Install PHP and dependencies
         run: |
           apk add --no-cache \
-            git unzip freetype freetype-dev libpng libpng-dev \
-            libjpeg-turbo libjpeg-turbo-dev $PHPIZE_DEPS
-          docker-php-ext-configure gd --with-freetype --with-jpeg
-          docker-php-ext-install gd
+            php84 php84-gd php84-mbstring php84-phar php84-dom \
+            php84-xml php84-xmlwriter php84-tokenizer php84-openssl \
+            php84-ctype \
+            freetype libpng libjpeg-turbo \
+            git unzip
+          ln -s /usr/bin/php84 /usr/bin/php
 
       - uses: actions/checkout@v4
 
@@ -165,6 +167,7 @@ jobs:
             echo "$new"
             echo ""
             echo "To regenerate locally:"
+            echo "  docker build -f .docker/vrt.Dockerfile -t phpolygon-vrt ."
             echo "  docker run --rm -v \$(pwd):/app -w /app phpolygon-vrt \\"
             echo "    sh -c 'composer install --ignore-platform-reqs && PHPOLYGON_UPDATE_SNAPSHOTS=1 vendor/bin/phpunit tests/Testing/'"
             exit 1
