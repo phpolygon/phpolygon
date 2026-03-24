@@ -214,6 +214,18 @@ class Window
     }
 
     /**
+     * Resize the window (only in windowed mode).
+     */
+    public function setSize(int $width, int $height): void
+    {
+        glfwSetWindowSize($this->handle, $width, $height);
+        $this->width = $width;
+        $this->height = $height;
+        $this->windowedWidth = $width;
+        $this->windowedHeight = $height;
+    }
+
+    /**
      * Toggle between fullscreen and windowed mode.
      */
     public function toggleFullscreen(): void

@@ -30,10 +30,12 @@ class Input
 
     /** When true, key/mouse events are not recorded (UI is consuming input) */
     private bool $suppressed = false;
+    private int $suppressFrames = 0;
+    private float $suppressUntil = 0.0;
 
     public function handleKeyEvent(int $key, int $action): void
     {
-        if ($this->suppressed) {
+        if ($this->isSuppressed()) {
             return;
         }
         // GLFW_PRESS = 1, GLFW_RELEASE = 0, GLFW_REPEAT = 2
@@ -42,7 +44,7 @@ class Input
 
     public function handleMouseButtonEvent(int $button, int $action): void
     {
-        if ($this->suppressed) {
+        if ($this->isSuppressed()) {
             return;
         }
         $this->mouseDown[$button] = $action !== 0;
@@ -139,12 +141,26 @@ class Input
     }
 
     /**
-     * Suppress game input (key/mouse) for this frame.
-     * Char events still pass through so UI text fields keep working.
+     * Suppress game input (key/mouse). Char events still pass through.
+     *
+     * @param int   $frames  Number of frames to suppress (0 = until unsuppress())
+     * @param float $seconds Time-based suppression (0 = frame-based only)
      */
-    public function suppress(): void
+    public function suppress(int $frames = 0, float $seconds = 0.0): void
     {
         $this->suppressed = true;
+        if ($frames > 0) {
+            $this->suppressFrames = $frames;
+        }
+        if ($seconds > 0.0) {
+            $this->suppressUntil = microtime(true) + $seconds;
+        }
+        // Only clear input state for timed suppression (display mode changes).
+        // Simple suppress (no args) is used by UI hover and should not wipe state.
+        if ($frames > 0 || $seconds > 0.0) {
+            $this->keysDown = [];
+            $this->mouseDown = [];
+        }
     }
 
     /**
@@ -153,11 +169,13 @@ class Input
     public function unsuppress(): void
     {
         $this->suppressed = false;
+        $this->suppressFrames = 0;
+        $this->suppressUntil = 0.0;
     }
 
     public function isSuppressed(): bool
     {
-        return $this->suppressed;
+        return $this->suppressed || $this->suppressFrames > 0 || microtime(true) < $this->suppressUntil;
     }
 
     public function endFrame(): void
@@ -167,5 +185,13 @@ class Input
         $this->scrollX = 0.0;
         $this->scrollY = 0.0;
         $this->charBuffer = [];
+
+        // Frame-based suppression countdown
+        if ($this->suppressFrames > 0) {
+            $this->suppressFrames--;
+            if ($this->suppressFrames <= 0 && microtime(true) >= $this->suppressUntil) {
+                $this->suppressed = false;
+            }
+        }
     }
 }
