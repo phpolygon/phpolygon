@@ -1,0 +1,1171 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PHPolygon — PHP-Native Game Engine</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;500;600;700;800&family=IBM+Plex+Mono:wght@400;500&family=Inter:wght@300;400;500&display=swap" rel="stylesheet">
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg: #09090e;
+    --bg2: #0f0f17;
+    --bg3: #14141f;
+    --surface: #1a1a28;
+    --surface2: #22223a;
+    --purple: #7c3aed;
+    --purple-light: #9f67f5;
+    --purple-dim: #5b21b6;
+    --purple-faint: rgba(124, 58, 237, 0.12);
+    --purple-border: rgba(124, 58, 237, 0.35);
+    --text: #f0eeff;
+    --text-sec: #9992c8;
+    --text-muted: #5c5880;
+    --border: rgba(255,255,255,0.07);
+    --border-strong: rgba(255,255,255,0.14);
+    --green: #22c984;
+    --amber: #f59e0b;
+    --red: #ef4444;
+  }
+
+  html { scroll-behavior: smooth; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Inter', sans-serif;
+    font-weight: 400;
+    line-height: 1.7;
+    overflow-x: hidden;
+  }
+
+  body::before {
+    content: '';
+    position: fixed; inset: 0;
+    background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='1'/%3E%3C/svg%3E");
+    opacity: 0.025; pointer-events: none; z-index: 0;
+  }
+
+  .container { max-width: 1100px; margin: 0 auto; padding: 0 2rem; position: relative; z-index: 1; }
+  section { position: relative; z-index: 1; }
+
+  /* NAV */
+  nav {
+    position: fixed; top: 0; left: 0; right: 0; z-index: 100;
+    background: rgba(9,9,14,0.8); backdrop-filter: blur(20px);
+    border-bottom: 1px solid var(--border);
+    padding: 0 2rem; height: 60px;
+    display: flex; align-items: center;
+  }
+  .nav-inner {
+    max-width: 1100px; margin: 0 auto; width: 100%;
+    display: flex; align-items: center; justify-content: space-between;
+  }
+  .nav-logo { display: flex; align-items: center; gap: 10px; text-decoration: none; }
+  .nav-logo-mark { width: 32px; height: 32px; }
+  .nav-wordmark {
+    font-family: 'Syne', sans-serif; font-weight: 700;
+    font-size: 17px; letter-spacing: -0.02em; color: var(--text);
+  }
+  .nav-wordmark span { color: var(--purple-light); }
+  .nav-links { display: flex; gap: 2rem; list-style: none; }
+  .nav-links a {
+    font-size: 13px; font-weight: 500; color: var(--text-sec);
+    text-decoration: none; letter-spacing: 0.02em; transition: color 0.2s;
+  }
+  .nav-links a:hover { color: var(--text); }
+  .nav-cta {
+    font-family: 'Syne', sans-serif; font-size: 13px; font-weight: 600;
+    background: var(--purple); color: #fff; text-decoration: none;
+    padding: 7px 18px; border-radius: 6px; transition: background 0.2s, transform 0.15s;
+  }
+  .nav-cta:hover { background: var(--purple-light); transform: translateY(-1px); }
+
+  /* HERO */
+  .hero {
+    min-height: 100vh;
+    display: flex; flex-direction: column; justify-content: center;
+    padding: 120px 0 80px; overflow: hidden;
+  }
+  .hero-bg { position: absolute; inset: 0; z-index: 0; overflow: hidden; }
+  .hero-poly {
+    position: absolute; right: -5%; top: 50%; transform: translateY(-50%);
+    width: 55%; opacity: 0.18;
+  }
+  .hero-glow {
+    position: absolute; top: 30%; left: 50%; transform: translate(-50%, -50%);
+    width: 800px; height: 600px;
+    background: radial-gradient(ellipse at center, rgba(124,58,237,0.25) 0%, transparent 70%);
+    pointer-events: none;
+  }
+  .hero-content { position: relative; z-index: 1; max-width: 680px; }
+  .hero-badge {
+    display: inline-flex; align-items: center; gap: 8px;
+    background: var(--purple-faint); border: 1px solid var(--purple-border);
+    border-radius: 100px; padding: 5px 14px 5px 8px;
+    font-size: 12px; font-weight: 500; color: var(--purple-light);
+    letter-spacing: 0.04em; margin-bottom: 2rem;
+  }
+  .hero-badge-dot {
+    width: 6px; height: 6px; border-radius: 50%;
+    background: var(--amber); animation: pulse 2s ease-in-out infinite;
+  }
+  @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+  .hero h1 {
+    font-family: 'Syne', sans-serif; font-weight: 800;
+    font-size: clamp(3rem, 6vw, 5.5rem); line-height: 1.0;
+    letter-spacing: -0.04em; margin-bottom: 1.5rem;
+  }
+  .hero h1 .poly { color: var(--purple-light); }
+  .hero h1 .sub {
+    display: block; font-size: 0.38em; font-weight: 500;
+    color: var(--text-sec); letter-spacing: 0em;
+    margin-top: 0.4em; line-height: 1.4;
+  }
+  .hero-desc {
+    font-size: 18px; color: var(--text-sec); font-weight: 300;
+    max-width: 520px; margin-bottom: 2.5rem; line-height: 1.65;
+  }
+  .hero-desc strong { color: var(--text); font-weight: 500; }
+  .hero-actions { display: flex; gap: 12px; flex-wrap: wrap; }
+  .btn-primary {
+    font-family: 'Syne', sans-serif; font-weight: 600; font-size: 14px;
+    background: var(--purple); color: #fff;
+    padding: 12px 28px; border-radius: 8px; text-decoration: none;
+    transition: background 0.2s, transform 0.15s; border: 1px solid transparent;
+  }
+  .btn-primary:hover { background: var(--purple-light); transform: translateY(-2px); }
+  .btn-outline {
+    font-family: 'Syne', sans-serif; font-weight: 600; font-size: 14px;
+    background: transparent; color: var(--text-sec);
+    padding: 12px 28px; border-radius: 8px; text-decoration: none;
+    border: 1px solid var(--border-strong);
+    transition: color 0.2s, border-color 0.2s, transform 0.15s;
+  }
+  .btn-outline:hover { color: var(--text); border-color: rgba(255,255,255,0.3); transform: translateY(-2px); }
+
+  .hero-stats {
+    margin-top: 4rem; display: flex; gap: 2.5rem; flex-wrap: wrap;
+    padding-top: 2rem; border-top: 1px solid var(--border);
+  }
+  .hero-stat-val {
+    font-family: 'Syne', sans-serif; font-weight: 800; font-size: 2rem;
+    color: var(--text); letter-spacing: -0.04em;
+  }
+  .hero-stat-val span { color: var(--purple-light); }
+  .hero-stat-label {
+    font-size: 12px; color: var(--text-muted); letter-spacing: 0.08em;
+    text-transform: uppercase; margin-top: 2px;
+  }
+
+  /* SHARED */
+  .section-label {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 11px; font-weight: 500; letter-spacing: 0.15em;
+    color: var(--purple-light); text-transform: uppercase; margin-bottom: 1rem;
+  }
+  .section-heading {
+    font-family: 'Syne', sans-serif; font-weight: 700;
+    font-size: clamp(2rem, 4vw, 3rem); letter-spacing: -0.03em;
+    line-height: 1.1; margin-bottom: 1.2rem;
+  }
+  .section-sub {
+    font-size: 17px; color: var(--text-sec); font-weight: 300;
+    max-width: 560px; line-height: 1.65;
+  }
+  .section-sub strong { color: var(--text); font-weight: 500; }
+  .divider {
+    height: 1px;
+    background: linear-gradient(to right, transparent, var(--border-strong), transparent);
+  }
+
+  /* CODE BLOCKS */
+  .code-card {
+    background: var(--bg3); border: 1px solid var(--border);
+    border-radius: 12px; overflow: hidden;
+  }
+  .code-header {
+    background: var(--surface); padding: 12px 16px;
+    display: flex; align-items: center; gap: 8px;
+    border-bottom: 1px solid var(--border);
+  }
+  .code-dot { width: 10px; height: 10px; border-radius: 50%; }
+  .code-filename {
+    font-family: 'IBM Plex Mono', monospace; font-size: 11px;
+    color: var(--text-muted); margin-left: 4px;
+  }
+  .code-body { padding: 1.5rem; overflow-x: auto; }
+  pre {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 12.5px; line-height: 1.8; color: var(--text-sec); white-space: pre;
+  }
+  .kw { color: #c084fc; }
+  .fn { color: #67e8f9; }
+  .str { color: #86efac; }
+  .cm { color: var(--text-muted); font-style: italic; }
+  .num { color: #fb923c; }
+
+  /* FEATURES */
+  .features { padding: 100px 0; }
+  .features-grid {
+    display: grid; grid-template-columns: repeat(3, 1fr);
+    gap: 2px; margin-top: 4rem;
+    border: 1px solid var(--border); border-radius: 16px; overflow: hidden;
+  }
+  .feature-item {
+    background: var(--bg3); padding: 1.75rem;
+    transition: background 0.2s; cursor: default;
+  }
+  .feature-item:hover { background: var(--surface); }
+  .feature-icon {
+    width: 40px; height: 40px; border-radius: 10px;
+    background: var(--surface2); border: 1px solid var(--border);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 18px; margin-bottom: 1rem;
+  }
+  .feature-item h4 {
+    font-family: 'Syne', sans-serif; font-weight: 600; font-size: 14px;
+    letter-spacing: -0.01em; margin-bottom: 6px;
+  }
+  .feature-item p { font-size: 13px; color: var(--text-sec); line-height: 1.55; }
+  .feature-item code {
+    font-family: 'IBM Plex Mono', monospace; font-size: 11px;
+    color: var(--purple-light); background: var(--purple-faint);
+    padding: 1px 6px; border-radius: 3px;
+  }
+
+  /* QUICKSTART */
+  .quickstart { padding: 100px 0; background: var(--bg2); }
+  .quickstart-grid {
+    display: grid; grid-template-columns: 1fr 1fr;
+    gap: 48px; align-items: start; margin-top: 4rem;
+  }
+
+  /* ARCHITECTURE */
+  .arch { padding: 100px 0; }
+  .arch-layers {
+    margin-top: 4rem; display: flex; flex-direction: column; gap: 2px;
+    border-radius: 16px; overflow: hidden; border: 1px solid var(--border);
+  }
+  .arch-layer {
+    padding: 1.25rem 1.75rem;
+    display: flex; align-items: center; gap: 2rem;
+    background: var(--bg3); transition: background 0.2s; cursor: default;
+  }
+  .arch-layer:hover { background: var(--surface); }
+  .arch-layer + .arch-layer { border-top: 1px solid var(--border); }
+  .arch-layer.highlight { background: var(--purple-faint); }
+  .arch-layer.highlight:hover { background: rgba(124,58,237,0.2); }
+  .arch-layer-num {
+    font-family: 'IBM Plex Mono', monospace; font-size: 11px;
+    font-weight: 500; color: var(--text-muted); width: 20px; flex-shrink: 0;
+  }
+  .arch-layer-name {
+    font-family: 'Syne', sans-serif; font-weight: 600; font-size: 14px;
+    min-width: 180px; flex-shrink: 0; letter-spacing: -0.01em;
+  }
+  .arch-layer.highlight .arch-layer-name { color: var(--purple-light); }
+  .arch-layer-items { display: flex; gap: 8px; flex-wrap: wrap; flex: 1; }
+  .arch-tag {
+    font-size: 12px; font-family: 'IBM Plex Mono', monospace;
+    background: var(--surface2); border: 1px solid var(--border-strong);
+    color: var(--text-sec); padding: 3px 10px; border-radius: 4px;
+  }
+  .arch-tag.active {
+    background: var(--purple-faint); border-color: var(--purple-border);
+    color: var(--purple-light);
+  }
+  .arch-tag.future { opacity: 0.45; }
+  .arch-arrow {
+    display: flex; justify-content: center;
+    color: var(--text-muted); font-size: 18px;
+    padding: 2px 0; background: var(--bg2);
+  }
+
+  /* AI SECTION */
+  .ai-section { padding: 100px 0; background: var(--bg2); }
+  .ai-grid {
+    display: grid; grid-template-columns: 1fr 1fr;
+    gap: 60px; align-items: start; margin-top: 4rem;
+  }
+  .ai-flow { display: flex; flex-direction: column; gap: 0; }
+  .ai-step { display: flex; gap: 1.25rem; position: relative; }
+  .ai-step:not(:last-child)::before {
+    content: ''; position: absolute; left: 18px; top: 38px;
+    width: 1px; height: calc(100% - 6px); background: var(--border);
+  }
+  .ai-step-dot {
+    width: 36px; height: 36px; flex-shrink: 0;
+    background: var(--surface); border: 1px solid var(--border-strong);
+    border-radius: 50%; display: flex; align-items: center; justify-content: center;
+    font-family: 'IBM Plex Mono', monospace; font-size: 12px; font-weight: 500;
+    color: var(--text-muted); z-index: 1; margin-top: 2px;
+  }
+  .ai-step.active .ai-step-dot {
+    background: var(--purple-faint); border-color: var(--purple-border); color: var(--purple-light);
+  }
+  .ai-step-content { padding-bottom: 2rem; }
+  .ai-step-label {
+    font-family: 'IBM Plex Mono', monospace; font-size: 10px;
+    text-transform: uppercase; letter-spacing: 0.12em;
+    color: var(--text-muted); margin-bottom: 4px;
+  }
+  .ai-step.active .ai-step-label { color: var(--purple-light); }
+  .ai-step-title {
+    font-family: 'Syne', sans-serif; font-weight: 600; font-size: 15px;
+    margin-bottom: 4px; letter-spacing: -0.01em;
+  }
+  .ai-step-desc { font-size: 13.5px; color: var(--text-sec); line-height: 1.6; }
+  .ai-dialogue {
+    background: var(--bg3); border: 1px solid var(--border);
+    border-radius: 12px; overflow: hidden;
+  }
+  .dialogue-header {
+    padding: 12px 16px; background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    font-family: 'IBM Plex Mono', monospace; font-size: 11px;
+    color: var(--text-muted); display: flex; align-items: center; gap: 8px;
+  }
+  .dialogue-body { padding: 1.25rem; display: flex; flex-direction: column; gap: 12px; }
+  .msg { max-width: 90%; padding: 10px 14px; border-radius: 10px; font-size: 13.5px; line-height: 1.55; }
+  .msg-user {
+    background: var(--purple-faint); border: 1px solid var(--purple-border);
+    color: var(--text); align-self: flex-end; border-radius: 10px 10px 2px 10px;
+  }
+  .msg-ai {
+    background: var(--surface); border: 1px solid var(--border);
+    color: var(--text-sec); align-self: flex-start; border-radius: 10px 10px 10px 2px;
+  }
+  .msg-ai-header {
+    font-family: 'IBM Plex Mono', monospace; font-size: 10px;
+    color: var(--purple-light); letter-spacing: 0.08em;
+    margin-bottom: 6px; text-transform: uppercase;
+  }
+  .msg-actions { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+  .msg-action {
+    font-family: 'IBM Plex Mono', monospace; font-size: 11px;
+    background: rgba(124,58,237,0.15); border: 1px solid var(--purple-border);
+    color: var(--purple-light); padding: 3px 9px; border-radius: 4px;
+  }
+
+  /* EXAMPLES */
+  .examples { padding: 100px 0; }
+  .examples-grid {
+    display: grid; grid-template-columns: repeat(3, 1fr);
+    gap: 16px; margin-top: 4rem;
+  }
+  .example-card {
+    background: var(--bg3); border: 1px solid var(--border);
+    border-radius: 12px; overflow: hidden;
+    transition: border-color 0.2s, transform 0.2s;
+  }
+  .example-card:hover { border-color: var(--border-strong); transform: translateY(-3px); }
+  .example-thumb {
+    height: 130px; display: flex; align-items: center; justify-content: center;
+    border-bottom: 1px solid var(--border); overflow: hidden;
+  }
+  .example-body { padding: 1rem 1.25rem; }
+  .example-title {
+    font-family: 'Syne', sans-serif; font-weight: 600; font-size: 14px;
+    margin-bottom: 4px; letter-spacing: -0.01em;
+  }
+  .example-desc { font-size: 12.5px; color: var(--text-sec); line-height: 1.5; }
+  .example-tag {
+    font-family: 'IBM Plex Mono', monospace; font-size: 10px;
+    display: inline-block; margin-top: 8px;
+    background: var(--surface2); color: var(--text-muted);
+    padding: 2px 8px; border-radius: 4px; border: 1px solid var(--border);
+  }
+
+  /* GAMES */
+  .games { padding: 100px 0; background: var(--bg2); }
+  .games-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; margin-top: 4rem; }
+  .game-card {
+    background: var(--bg3); border: 1px solid var(--border);
+    border-radius: 16px; overflow: hidden;
+    transition: border-color 0.2s, transform 0.2s;
+  }
+  .game-card:hover { border-color: var(--border-strong); transform: translateY(-4px); }
+  .game-card-art { height: 200px; position: relative; overflow: hidden; }
+  .game-card-art svg { position: absolute; inset: 0; }
+  .game-card-body { padding: 1.5rem; }
+  .game-badge {
+    font-family: 'IBM Plex Mono', monospace; font-size: 10px;
+    text-transform: uppercase; letter-spacing: 0.12em;
+    padding: 3px 10px; border-radius: 4px; display: inline-block; margin-bottom: 10px;
+  }
+  .badge-2d { background: rgba(34,201,132,0.12); color: var(--green); border: 1px solid rgba(34,201,132,0.3); }
+  .badge-3d { background: rgba(124,58,237,0.12); color: var(--purple-light); border: 1px solid var(--purple-border); }
+  .badge-next { background: rgba(245,158,11,0.1); color: var(--amber); border: 1px solid rgba(245,158,11,0.3); }
+  .game-card-title {
+    font-family: 'Syne', sans-serif; font-weight: 700; font-size: 1.4rem;
+    letter-spacing: -0.03em; margin-bottom: 8px;
+  }
+  .game-card-desc { font-size: 13.5px; color: var(--text-sec); line-height: 1.6; margin-bottom: 1rem; }
+  .game-tags { display: flex; gap: 6px; flex-wrap: wrap; }
+  .game-tag {
+    font-size: 11px; font-family: 'IBM Plex Mono', monospace;
+    background: var(--surface2); color: var(--text-muted);
+    padding: 3px 9px; border-radius: 4px; border: 1px solid var(--border);
+  }
+
+  /* ROADMAP */
+  .roadmap { padding: 100px 0; }
+  .roadmap-table { margin-top: 4rem; border: 1px solid var(--border); border-radius: 16px; overflow: hidden; }
+  .roadmap-row {
+    display: grid; grid-template-columns: 80px 220px 1fr 120px;
+    align-items: center; gap: 1.5rem;
+    padding: 1.1rem 1.75rem;
+    background: var(--bg3); transition: background 0.2s;
+  }
+  .roadmap-row:hover { background: var(--surface); }
+  .roadmap-row + .roadmap-row { border-top: 1px solid var(--border); }
+  .roadmap-row.next { background: rgba(245,158,11,0.05); }
+  .roadmap-phase {
+    font-family: 'IBM Plex Mono', monospace; font-size: 12px;
+    color: var(--text-muted); font-weight: 500;
+  }
+  .roadmap-name {
+    font-family: 'Syne', sans-serif; font-weight: 600; font-size: 14px; letter-spacing: -0.01em;
+  }
+  .roadmap-desc { font-size: 13px; color: var(--text-sec); }
+  .roadmap-status {
+    font-family: 'IBM Plex Mono', monospace; font-size: 11px;
+    padding: 4px 12px; border-radius: 4px; text-align: center; font-weight: 500;
+  }
+  .status-done { background: rgba(34,201,132,0.1); color: var(--green); border: 1px solid rgba(34,201,132,0.3); }
+  .status-next { background: rgba(245,158,11,0.1); color: var(--amber); border: 1px solid rgba(245,158,11,0.3); }
+  .status-planned { background: var(--surface2); color: var(--text-muted); border: 1px solid var(--border); }
+  .roadmap-header {
+    display: grid; grid-template-columns: 80px 220px 1fr 120px;
+    gap: 1.5rem; padding: 0.75rem 1.75rem;
+    background: var(--surface); border-bottom: 1px solid var(--border);
+    font-size: 11px; font-family: 'IBM Plex Mono', monospace;
+    text-transform: uppercase; letter-spacing: 0.1em; color: var(--text-muted);
+  }
+
+  /* CTA */
+  .cta-section {
+    padding: 100px 0; background: var(--bg2);
+    text-align: center; position: relative; overflow: hidden;
+  }
+  .cta-glow {
+    position: absolute; top: 50%; left: 50%; transform: translate(-50%,-50%);
+    width: 600px; height: 400px;
+    background: radial-gradient(ellipse, rgba(124,58,237,0.2) 0%, transparent 70%);
+    pointer-events: none;
+  }
+  .cta-actions { display: flex; gap: 12px; justify-content: center; margin-top: 2.5rem; flex-wrap: wrap; }
+
+  footer {
+    background: var(--bg); border-top: 1px solid var(--border);
+    padding: 2rem; text-align: center;
+    font-size: 12px; color: var(--text-muted);
+    font-family: 'IBM Plex Mono', monospace; letter-spacing: 0.05em;
+  }
+  footer a { color: var(--purple-light); text-decoration: none; }
+
+  @media (max-width: 768px) {
+    .nav-links { display: none; }
+    .quickstart-grid, .ai-grid, .games-grid { grid-template-columns: 1fr; }
+    .features-grid, .examples-grid { grid-template-columns: 1fr; }
+    .roadmap-row, .roadmap-header { grid-template-columns: 60px 1fr 100px; }
+    .roadmap-desc { display: none; }
+    .hero-poly { opacity: 0.07; width: 90%; right: -20%; }
+    .arch-layer { flex-wrap: wrap; }
+  }
+
+  .fade-in { opacity: 0; transform: translateY(24px); animation: fadeUp 0.7s ease forwards; }
+  @keyframes fadeUp { to { opacity: 1; transform: translateY(0); } }
+  .fade-in:nth-child(1) { animation-delay: 0.1s; }
+  .fade-in:nth-child(2) { animation-delay: 0.2s; }
+  .fade-in:nth-child(3) { animation-delay: 0.3s; }
+  .fade-in:nth-child(4) { animation-delay: 0.4s; }
+  .fade-in:nth-child(5) { animation-delay: 0.5s; }
+</style>
+</head>
+<body>
+
+<!-- NAV -->
+<nav>
+  <div class="nav-inner">
+    <a href="#" class="nav-logo">
+      <svg class="nav-logo-mark" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <polygon points="16,2 28,9 28,23 16,30 4,23 4,9" fill="#1a1a28" stroke="#7c3aed" stroke-width="1"/>
+        <polygon points="16,2 28,9 16,13" fill="#9f67f5" opacity="0.9"/>
+        <polygon points="16,2 4,9 16,13" fill="#7c3aed" opacity="0.7"/>
+        <polygon points="4,9 16,13 16,30 4,23" fill="#5b21b6" opacity="0.8"/>
+        <polygon points="28,9 16,13 16,30 28,23" fill="#7c3aed" opacity="0.5"/>
+        <polygon points="16,13 4,9 28,9" fill="#c084fc" opacity="0.3"/>
+      </svg>
+      <span class="nav-wordmark"><span>PH</span><span>Polygon</span></span>
+    </a>
+    <ul class="nav-links">
+      <li><a href="#features">Features</a></li>
+      <li><a href="#architecture">Architecture</a></li>
+      <li><a href="#quickstart">Quickstart</a></li>
+      <li><a href="#examples">Examples</a></li>
+      <li><a href="#games">Games</a></li>
+    </ul>
+    <a href="https://github.com/hmennen90/phpolygon" class="nav-cta">GitHub →</a>
+  </div>
+</nav>
+
+<!-- HERO -->
+<section class="hero">
+  <div class="hero-bg">
+    <div class="hero-glow"></div>
+    <svg class="hero-poly" viewBox="0 0 600 700" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <polygon points="300,0 450,120 300,140" fill="#7c3aed" opacity="0.6"/>
+      <polygon points="300,0 150,120 300,140" fill="#9f67f5" opacity="0.4"/>
+      <polygon points="450,120 600,80 560,260" fill="#5b21b6" opacity="0.5"/>
+      <polygon points="300,140 450,120 420,280" fill="#6d28d9" opacity="0.4"/>
+      <polygon points="300,140 150,120 180,280" fill="#7c3aed" opacity="0.3"/>
+      <polygon points="0,160 150,120 180,280" fill="#5b21b6" opacity="0.35"/>
+      <polygon points="420,280 560,260 480,420" fill="#7c3aed" opacity="0.3"/>
+      <polygon points="300,140 420,280 360,420" fill="#9f67f5" opacity="0.25"/>
+      <polygon points="180,280 300,140 240,420" fill="#6d28d9" opacity="0.3"/>
+      <polygon points="360,420 480,420 400,560" fill="#6d28d9" opacity="0.25"/>
+      <polygon points="240,420 360,420 300,560" fill="#9f67f5" opacity="0.2"/>
+      <line x1="300" y1="0" x2="450" y2="120" stroke="#c084fc" stroke-width="0.5" opacity="0.4"/>
+      <line x1="300" y1="0" x2="150" y2="120" stroke="#c084fc" stroke-width="0.5" opacity="0.4"/>
+      <line x1="300" y1="140" x2="420" y2="280" stroke="#9f67f5" stroke-width="0.5" opacity="0.3"/>
+      <line x1="300" y1="140" x2="180" y2="280" stroke="#9f67f5" stroke-width="0.5" opacity="0.3"/>
+      <line x1="420" y1="280" x2="480" y2="420" stroke="#7c3aed" stroke-width="0.5" opacity="0.25"/>
+      <line x1="360" y1="420" x2="300" y2="560" stroke="#6d28d9" stroke-width="0.5" opacity="0.2"/>
+    </svg>
+  </div>
+  <div class="container">
+    <div class="hero-content">
+      <div class="hero-badge fade-in">
+        <span class="hero-badge-dot"></span>
+        Phase 5 — Code Tycoon next
+      </div>
+      <h1 class="fade-in">
+        <span class="ph">PH</span><span class="poly">Polygon</span>
+        <span class="sub">PHP-native game engine.<br>Built for humans and AI.</span>
+      </h1>
+      <p class="hero-desc fade-in">
+        A fully text-based, <strong>LLM-readable game stack</strong> built on PHP 8.2+ with OpenGL 4.1 and Vulkan. Write game logic, scenes, and UI in plain code — let Claude Code build the rest.
+      </p>
+      <div class="hero-actions fade-in">
+        <a href="#quickstart" class="btn-primary">Get Started</a>
+        <a href="#architecture" class="btn-outline">How it works</a>
+      </div>
+      <div class="hero-stats fade-in">
+        <div class="hero-stat">
+          <div class="hero-stat-val">PHP<span> 8.2+</span></div>
+          <div class="hero-stat-label">Requirement</div>
+        </div>
+        <div class="hero-stat">
+          <div class="hero-stat-val">132<span> tests</span></div>
+          <div class="hero-stat-label">311 assertions</div>
+        </div>
+        <div class="hero-stat">
+          <div class="hero-stat-val">2<span>D+3D</span></div>
+          <div class="hero-stat-label">NanoVG + Vulkan</div>
+        </div>
+        <div class="hero-stat">
+          <div class="hero-stat-val">0<span>dep</span></div>
+          <div class="hero-stat-label">Static binary output</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<div class="divider"></div>
+
+<!-- FEATURES -->
+<section class="features" id="features">
+  <div class="container">
+    <div class="section-label">// Features</div>
+    <h2 class="section-heading">Everything a game needs.<br>Nothing a web app has.</h2>
+    <p class="section-sub">
+      PHPolygon ships a complete, battle-tested set of engine systems. PHP 8.x Attributes drive serialization automatically — no <code>#[Property]</code> boilerplate, ever.
+    </p>
+    <div class="features-grid">
+      <div class="feature-item">
+        <div class="feature-icon">🧩</div>
+        <h4>Hybrid ECS</h4>
+        <p>Entities as PHP objects. Components with lifecycle hooks (<code>onAttach</code>, <code>onUpdate</code>, <code>onDetach</code>). Systems for cross-entity logic. Clear boundaries, always.</p>
+      </div>
+      <div class="feature-item">
+        <div class="feature-icon">#️⃣</div>
+        <h4>Attribute-driven serialization</h4>
+        <p><code>#[Property]</code>, <code>#[Range]</code>, <code>#[Hidden]</code>, <code>#[Serializable]</code> on component fields. Reflection handles the rest — zero manual JSON mapping.</p>
+      </div>
+      <div class="feature-item">
+        <div class="feature-icon">🏗️</div>
+        <h4>Scene system</h4>
+        <p>PHP-canonical scene definitions with fluent <code>SceneBuilder</code>. SceneManager with single/additive loading, parent-child hierarchy, and persistent entities across loads.</p>
+      </div>
+      <div class="feature-item">
+        <div class="feature-icon">🔄</div>
+        <h4>PHP ↔ JSON transpiler</h4>
+        <p>Bidirectional conversion for the editor pipeline. PHP is always the source of truth. JSON is the intermediate format for tooling. Full roundtrip fidelity guaranteed.</p>
+      </div>
+      <div class="feature-item">
+        <div class="feature-icon">⚡</div>
+        <h4>Physics 2D</h4>
+        <p>RigidBody2D, BoxCollider2D, AABB collision detection and response, raycasting, trigger and collision events — pure PHP, no external dependency.</p>
+      </div>
+      <div class="feature-item">
+        <div class="feature-icon">🎮</div>
+        <h4>Action-based input</h4>
+        <p>Named bindings (<code>jump</code>, <code>shoot</code>, <code>move_x</code>) instead of raw key codes. Axis support for analog movement. Fully remappable at runtime.</p>
+      </div>
+      <div class="feature-item">
+        <div class="feature-icon">🎨</div>
+        <h4>NanoVG renderer</h4>
+        <p>Camera2D, TextureManager, SpriteSheet — 2D rendering via NanoVG over OpenGL 4.1. Hardware-accelerated vector shapes, text, and sprites at native speed.</p>
+      </div>
+      <div class="feature-item">
+        <div class="feature-icon">🔧</div>
+        <h4>Editor infrastructure</h4>
+        <p>Inspector metadata via Reflection, component registry with category grouping, SceneDocument with full undo/redo, command bus for all editor operations.</p>
+      </div>
+      <div class="feature-item">
+        <div class="feature-icon">🔊</div>
+        <h4>Pluggable audio</h4>
+        <p>AudioBackendInterface with AudioSource component. Backend-agnostic by design — swap the implementation without touching a single line of game code.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<div class="divider"></div>
+
+<!-- QUICKSTART -->
+<section class="quickstart" id="quickstart">
+  <div class="container">
+    <div class="section-label">// Quickstart</div>
+    <h2 class="section-heading">Up and running<br>in five minutes.</h2>
+    <div class="quickstart-grid">
+      <div>
+        <p class="section-sub" style="margin-bottom:2rem;">Requires PHP 8.2+, <strong>php-glfw</strong> (OpenGL 4.1 + NanoVG), and Composer. Install once, build games forever.</p>
+        <div class="code-card" style="margin-bottom:1.5rem;">
+          <div class="code-header">
+            <span class="code-dot" style="background:#ef4444"></span>
+            <span class="code-dot" style="background:#f59e0b; margin-left:4px;"></span>
+            <span class="code-dot" style="background:#22c984; margin-left:4px;"></span>
+            <span class="code-filename">terminal</span>
+          </div>
+          <div class="code-body">
+<pre><span class="cm"># Install</span>
+composer require phpolygon/phpolygon
+
+<span class="cm"># Run a demo</span>
+php examples/hello_world.php
+php examples/vulkan_triangle.php</pre>
+          </div>
+        </div>
+        <div class="code-card">
+          <div class="code-header">
+            <span class="code-dot" style="background:#ef4444"></span>
+            <span class="code-dot" style="background:#f59e0b; margin-left:4px;"></span>
+            <span class="code-dot" style="background:#22c984; margin-left:4px;"></span>
+            <span class="code-filename">MainMenu.php — scene definition</span>
+          </div>
+          <div class="code-body">
+<pre><span class="kw">class</span> <span class="fn">MainMenu</span> <span class="kw">extends</span> <span class="fn">Scene</span>
+{
+    <span class="kw">public function</span> <span class="fn">build</span>(<span class="fn">SceneBuilder</span> <span class="fn">$b</span>): <span class="kw">void</span>
+    {
+        <span class="fn">$b</span>-><span class="fn">entity</span>(<span class="str">'Camera'</span>)
+            -><span class="fn">with</span>(<span class="kw">new</span> <span class="fn">Transform2D</span>())
+            -><span class="fn">with</span>(<span class="kw">new</span> <span class="fn">Camera2DComponent</span>());
+
+        <span class="fn">$b</span>-><span class="fn">entity</span>(<span class="str">'Player'</span>)
+            -><span class="fn">with</span>(<span class="kw">new</span> <span class="fn">Transform2D</span>(
+                position: <span class="kw">new</span> <span class="fn">Vec2</span>(<span class="num">100</span>, <span class="num">200</span>)
+            ))
+            -><span class="fn">child</span>(<span class="str">'Weapon'</span>)
+                -><span class="fn">with</span>(<span class="kw">new</span> <span class="fn">SpriteRenderer</span>(
+                    textureId: <span class="str">'sword.png'</span>
+                ));
+    }
+}</pre>
+          </div>
+        </div>
+      </div>
+      <div class="code-card">
+        <div class="code-header">
+          <span class="code-dot" style="background:#ef4444"></span>
+          <span class="code-dot" style="background:#f59e0b; margin-left:4px;"></span>
+          <span class="code-dot" style="background:#22c984; margin-left:4px;"></span>
+          <span class="code-filename">game.php — hello world</span>
+        </div>
+        <div class="code-body">
+<pre><span class="cm"><?php</span>
+
+<span class="kw">use</span> <span class="fn">PHPolygon\Engine</span>;
+<span class="kw">use</span> <span class="fn">PHPolygon\EngineConfig</span>;
+<span class="kw">use</span> <span class="fn">PHPolygon\Component\Transform2D</span>;
+<span class="kw">use</span> <span class="fn">PHPolygon\Component\SpriteRenderer</span>;
+<span class="kw">use</span> <span class="fn">PHPolygon\Math\Vec2</span>;
+
+<span class="fn">$engine</span> = <span class="kw">new</span> <span class="fn">Engine</span>(<span class="kw">new</span> <span class="fn">EngineConfig</span>(
+    title: <span class="str">'My Game'</span>,
+    width: <span class="num">1280</span>,
+    height: <span class="num">720</span>,
+    vsync: <span class="kw">true</span>,
+    targetTickRate: <span class="num">60.0</span>,
+));
+
+<span class="fn">$engine</span>-><span class="fn">onInit</span>(<span class="kw">function</span> (<span class="fn">$engine</span>) {
+    <span class="fn">$player</span> = <span class="fn">$engine</span>->world-><span class="fn">createEntity</span>();
+    <span class="fn">$player</span>-><span class="fn">attach</span>(<span class="kw">new</span> <span class="fn">Transform2D</span>(
+        position: <span class="kw">new</span> <span class="fn">Vec2</span>(<span class="num">640</span>, <span class="num">360</span>)
+    ));
+    <span class="fn">$player</span>-><span class="fn">attach</span>(<span class="kw">new</span> <span class="fn">SpriteRenderer</span>(
+        textureId: <span class="str">'player.png'</span>
+    ));
+});
+
+<span class="fn">$engine</span>-><span class="fn">onUpdate</span>(<span class="kw">function</span> (<span class="fn">$engine</span>, <span class="kw">float</span> <span class="fn">$dt</span>) {
+    <span class="cm">// game logic here, $dt = delta time</span>
+});
+
+<span class="fn">$engine</span>-><span class="fn">run</span>();</pre>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<div class="divider"></div>
+
+<!-- ARCHITECTURE -->
+<section class="arch" id="architecture">
+  <div class="container">
+    <div class="section-label">// Architecture</div>
+    <h2 class="section-heading">Five layers.<br>Clean separation.</h2>
+    <p class="section-sub">
+      From natural language to GPU in five distinct layers. PHP orchestrates — C extensions execute. The same model Lua uses in established engines, with a fully AI-readable and writable stack.
+    </p>
+    <div class="arch-layers">
+      <div class="arch-layer highlight">
+        <div class="arch-layer-num">01</div>
+        <div class="arch-layer-name">Authoring</div>
+        <div class="arch-layer-items">
+          <span class="arch-tag active">Claude Code</span>
+          <span class="arch-tag active">NativePHP Editor</span>
+          <span class="arch-tag">Manual / PhpStorm</span>
+        </div>
+      </div>
+      <div class="arch-arrow">↓</div>
+      <div class="arch-layer">
+        <div class="arch-layer-num">02</div>
+        <div class="arch-layer-name">Data Format</div>
+        <div class="arch-layer-items">
+          <span class="arch-tag active">*.scene.json</span>
+          <span class="arch-tag active">ui-layouts.json</span>
+          <span class="arch-tag active">physics-materials.json</span>
+          <span class="arch-tag active">savegames.json</span>
+        </div>
+      </div>
+      <div class="arch-arrow">↓</div>
+      <div class="arch-layer highlight">
+        <div class="arch-layer-num">03</div>
+        <div class="arch-layer-name">PHP Engine</div>
+        <div class="arch-layer-items">
+          <span class="arch-tag active">ECS</span>
+          <span class="arch-tag active">Scene</span>
+          <span class="arch-tag active">Component</span>
+          <span class="arch-tag active">System</span>
+          <span class="arch-tag active">Runtime</span>
+          <span class="arch-tag active">Physics</span>
+          <span class="arch-tag active">Input</span>
+          <span class="arch-tag active">Audio</span>
+          <span class="arch-tag active">Editor</span>
+          <span class="arch-tag active">Math</span>
+        </div>
+      </div>
+      <div class="arch-arrow">↓</div>
+      <div class="arch-layer">
+        <div class="arch-layer-num">04</div>
+        <div class="arch-layer-name">Render Abstraction</div>
+        <div class="arch-layer-items">
+          <span class="arch-tag active">RenderContextInterface</span>
+          <span class="arch-tag active">Renderer2D — NanoVG</span>
+          <span class="arch-tag future">Renderer3D — Vulkan (Phase 6)</span>
+        </div>
+      </div>
+      <div class="arch-arrow">↓</div>
+      <div class="arch-layer">
+        <div class="arch-layer-num">05</div>
+        <div class="arch-layer-name">C Extensions</div>
+        <div class="arch-layer-items">
+          <span class="arch-tag active">php-glfw ✓</span>
+          <span class="arch-tag active">php-vulkan ✓</span>
+          <span class="arch-tag active">php-steamworks ✓</span>
+          <span class="arch-tag future">php-jolt (Phase 6)</span>
+          <span class="arch-tag future">php-assimp (Phase 6)</span>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<div class="divider"></div>
+
+<!-- AI SECTION -->
+<section class="ai-section" id="ai">
+  <div class="container">
+    <div class="section-label">// AI-First Authoring</div>
+    <h2 class="section-heading">Natural language.<br>Running code.</h2>
+    <p class="section-sub">
+      The traditional game development pipeline collapses when your entire stack is LLM-readable. <strong>Claude Code is the primary authoring interface.</strong> Every step is a Git commit.
+    </p>
+    <div class="ai-grid">
+      <div class="ai-flow">
+        <div class="ai-step">
+          <div class="ai-step-dot">01</div>
+          <div class="ai-step-content">
+            <div class="ai-step-label">Traditional</div>
+            <div class="ai-step-title">Designer → Editor UI → Scene</div>
+            <div class="ai-step-desc">Click panels, drag nodes, adjust sliders. The editor is the primary creation surface. State lives in binary files.</div>
+          </div>
+        </div>
+        <div class="ai-step active">
+          <div class="ai-step-dot">→</div>
+          <div class="ai-step-content">
+            <div class="ai-step-label">PHPolygon</div>
+            <div class="ai-step-title">Describe → Claude generates → Live</div>
+            <div class="ai-step-desc">PHP scenes, components, and JSON layouts generated directly. The NativePHP editor visualises and fine-tunes. State lives in code.</div>
+          </div>
+        </div>
+        <div class="ai-step active">
+          <div class="ai-step-dot">✓</div>
+          <div class="ai-step-content">
+            <div class="ai-step-label">Result</div>
+            <div class="ai-step-title">Reviewable, testable, diffable</div>
+            <div class="ai-step-desc">Every file is a Git commit. PHPUnit covers game logic. No black-box editor state, no proprietary merge conflicts.</div>
+          </div>
+        </div>
+      </div>
+      <div class="ai-dialogue">
+        <div class="dialogue-header">
+          <svg width="10" height="10" viewBox="0 0 10 10"><circle cx="5" cy="5" r="5" fill="#22c984"/></svg>
+          Claude Code session
+        </div>
+        <div class="dialogue-body">
+          <div class="msg msg-user">Build a 2D underwater level — slow movement, bubble particles, oxygen bar UI</div>
+          <div class="msg msg-ai">
+            <div class="msg-ai-header">Claude Code</div>
+            Generating Level2.php (PHP-canonical) → WaterZone component with #[Property] attrs → OxygenSystem → ParticleDefinition (bubbles) → PlayerController velocity multiplier → oxygen-bar.json UI layout...
+            <div class="msg-actions">
+              <span class="msg-action">Level2.php</span>
+              <span class="msg-action">WaterZone.php</span>
+              <span class="msg-action">OxygenSystem.php</span>
+              <span class="msg-action">oxygen-bar.json</span>
+            </div>
+          </div>
+          <div class="msg msg-user">The oxygen bar should look like a blue lung that slowly empties</div>
+          <div class="msg msg-ai">
+            <div class="msg-ai-header">Claude Code</div>
+            Writing OxygenBarWidget.php — NanoVG bezier lung shape, fill animation bound to OxygenSystem.level via #[Serializable] property...
+            <div class="msg-actions">
+              <span class="msg-action">OxygenBarWidget.php</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<div class="divider"></div>
+
+<!-- EXAMPLES -->
+<section class="examples" id="examples">
+  <div class="container">
+    <div class="section-label">// Examples</div>
+    <h2 class="section-heading">Five runnable demos.<br>One <code style="font-size:0.7em;color:var(--purple-light)">php</code> command each.</h2>
+    <p class="section-sub">All examples live in <code style="font-family:'IBM Plex Mono',monospace;font-size:13px;color:var(--purple-light);background:var(--purple-faint);padding:2px 8px;border-radius:4px;">examples/</code> and cover the full rendering stack — from NanoVG 2D to Vulkan compute shaders.</p>
+    <div class="examples-grid">
+      <div class="example-card">
+        <div class="example-thumb" style="background:#0d1a12;">
+          <svg width="200" height="130" viewBox="0 0 200 130">
+            <rect width="200" height="130" fill="#0d1a12"/>
+            <line x1="20" y1="65" x2="180" y2="65" stroke="#22c984" stroke-width="0.3" opacity="0.2"/>
+            <line x1="20" y1="90" x2="180" y2="90" stroke="#22c984" stroke-width="0.3" opacity="0.2"/>
+            <line x1="60" y1="40" x2="60" y2="130" stroke="#22c984" stroke-width="0.3" opacity="0.2"/>
+            <line x1="100" y1="40" x2="100" y2="130" stroke="#22c984" stroke-width="0.3" opacity="0.2"/>
+            <line x1="140" y1="40" x2="140" y2="130" stroke="#22c984" stroke-width="0.3" opacity="0.2"/>
+            <rect x="88" y="78" width="14" height="14" fill="#22c984" opacity="0.85" rx="2"/>
+            <text x="25" y="55" font-family="monospace" font-size="8" fill="#22c984" opacity="0.7">FPS: 60</text>
+            <text x="25" y="118" font-family="monospace" font-size="7" fill="#22c984" opacity="0.4">WASD to move</text>
+          </svg>
+        </div>
+        <div class="example-body">
+          <div class="example-title">Hello World</div>
+          <div class="example-desc">Movable entity with Camera2D, grid background, HUD overlay. WASD controls, delta time.</div>
+          <span class="example-tag">NanoVG · 2D</span>
+        </div>
+      </div>
+      <div class="example-card">
+        <div class="example-thumb" style="background:#0a0f1a;">
+          <svg width="200" height="130" viewBox="0 0 200 130">
+            <rect width="200" height="130" fill="#0a0f1a"/>
+            <defs>
+              <linearGradient id="rgb1" x1="0%" y1="0%" x2="100%" y2="100%">
+                <stop offset="0%" stop-color="#ef4444"/>
+                <stop offset="50%" stop-color="#22c984"/>
+                <stop offset="100%" stop-color="#3b82f6"/>
+              </linearGradient>
+            </defs>
+            <polygon points="100,20 148,105 52,105" fill="url(#rgb1)" opacity="0.35"/>
+            <polygon points="100,20 148,105 52,105" fill="none" stroke="url(#rgb1)" stroke-width="1.5"/>
+            <text x="62" y="122" font-family="monospace" font-size="7" fill="#9992c8" opacity="0.6">vertex shader · rotating</text>
+          </svg>
+        </div>
+        <div class="example-body">
+          <div class="example-title">OpenGL Triangle</div>
+          <div class="example-desc">Rotating RGB triangle with custom vertex and fragment shaders, pulsing brightness animation.</div>
+          <span class="example-tag">OpenGL 4.1 · GLSL</span>
+        </div>
+      </div>
+      <div class="example-card">
+        <div class="example-thumb" style="background:#0a0a14;">
+          <svg width="200" height="130" viewBox="0 0 200 130">
+            <rect width="200" height="130" fill="#0a0a14"/>
+            <polygon points="100,18 148,48 148,88 100,118 52,88 52,48" fill="none" stroke="#9f67f5" stroke-width="0.8" opacity="0.7"/>
+            <polygon points="100,18 148,48 100,68" fill="#7c3aed" opacity="0.4"/>
+            <polygon points="100,18 52,48 100,68" fill="#9f67f5" opacity="0.25"/>
+            <polygon points="52,48 100,68 100,118 52,88" fill="#5b21b6" opacity="0.5"/>
+            <polygon points="148,48 100,68 100,118 148,88" fill="#7c3aed" opacity="0.35"/>
+            <text x="55" y="122" font-family="monospace" font-size="7" fill="#9992c8" opacity="0.6">phong · orbit cam · depth</text>
+          </svg>
+        </div>
+        <div class="example-body">
+          <div class="example-title">OpenGL 3D Cube</div>
+          <div class="example-desc">Phong-lit spinning cube. WASD camera orbit, scroll wheel zoom, depth testing enabled.</div>
+          <span class="example-tag">OpenGL 4.1 · 3D · Phong</span>
+        </div>
+      </div>
+      <div class="example-card">
+        <div class="example-thumb" style="background:#030308;">
+          <svg width="200" height="130" viewBox="0 0 200 130">
+            <rect width="200" height="130" fill="#030308"/>
+            <circle cx="60" cy="50" r="35" fill="none" stroke="#7c3aed" stroke-width="0.5" opacity="0.6"/>
+            <circle cx="60" cy="50" r="20" fill="#7c3aed" opacity="0.15"/>
+            <circle cx="140" cy="80" r="30" fill="none" stroke="#c084fc" stroke-width="0.5" opacity="0.5"/>
+            <circle cx="140" cy="80" r="15" fill="#c084fc" opacity="0.12"/>
+            <circle cx="100" cy="55" r="40" fill="none" stroke="#9f67f5" stroke-width="0.5" opacity="0.4"/>
+            <circle cx="100" cy="55" r="22" fill="#9f67f5" opacity="0.1"/>
+            <text x="42" y="122" font-family="monospace" font-size="7" fill="#9992c8" opacity="0.6">compute shader · swapchain</text>
+          </svg>
+        </div>
+        <div class="example-body">
+          <div class="example-title">Vulkan Compute</div>
+          <div class="example-desc">Compute shader generates animated plasma pattern, presented via Vulkan swapchain.</div>
+          <span class="example-tag">Vulkan · Compute Shader</span>
+        </div>
+      </div>
+      <div class="example-card">
+        <div class="example-thumb" style="background:#030308;">
+          <svg width="200" height="130" viewBox="0 0 200 130">
+            <rect width="200" height="130" fill="#030308"/>
+            <line x1="100" y1="22" x2="58" y2="98" stroke="#c084fc" stroke-width="0.8" opacity="0.8"/>
+            <line x1="100" y1="22" x2="142" y2="98" stroke="#c084fc" stroke-width="0.8" opacity="0.8"/>
+            <line x1="100" y1="22" x2="78" y2="108" stroke="#9f67f5" stroke-width="0.8" opacity="0.6"/>
+            <line x1="100" y1="22" x2="122" y2="108" stroke="#9f67f5" stroke-width="0.8" opacity="0.6"/>
+            <line x1="58" y1="98" x2="142" y2="98" stroke="#7c3aed" stroke-width="0.8" opacity="0.7"/>
+            <line x1="78" y1="108" x2="122" y2="108" stroke="#7c3aed" stroke-width="0.6" opacity="0.5"/>
+            <polygon points="100,22 58,98 142,98" fill="#7c3aed" opacity="0.12"/>
+            <text x="30" y="122" font-family="monospace" font-size="7" fill="#9992c8" opacity="0.6">push constants · perspective proj</text>
+          </svg>
+        </div>
+        <div class="example-body">
+          <div class="example-title">Vulkan Triangle</div>
+          <div class="example-desc">Rotating 3D pyramid with perspective projection, push constants, full swapchain pipeline.</div>
+          <span class="example-tag">Vulkan · 3D Pipeline</span>
+        </div>
+      </div>
+      <div class="example-card" style="display:flex;flex-direction:column;justify-content:center;align-items:center;min-height:196px;border:1px dashed var(--border);border-radius:12px;cursor:default;">
+        <div style="font-size:2rem;margin-bottom:0.75rem;opacity:0.3;">+</div>
+        <div style="font-family:'Syne',sans-serif;font-size:14px;font-weight:600;color:var(--text-muted);">More in examples/</div>
+        <div style="font-size:12px;color:var(--text-muted);margin-top:4px;font-family:'IBM Plex Mono',monospace;">php examples/*.php</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<div class="divider"></div>
+
+<!-- GAMES -->
+<section class="games" id="games">
+  <div class="container">
+    <div class="section-label">// Games</div>
+    <h2 class="section-heading">Built on PHPolygon.</h2>
+    <p class="section-sub">Two games in development — one proving the 2D stack, one preparing the 3D frontier.</p>
+    <div class="games-grid">
+      <div class="game-card">
+        <div class="game-card-art" style="background:#0d1117;">
+          <svg viewBox="0 0 400 200" xmlns="http://www.w3.org/2000/svg">
+            <rect width="400" height="200" fill="#0d1117"/>
+            <line x1="0" y1="40" x2="400" y2="40" stroke="#22c984" stroke-width="0.3" opacity="0.15"/>
+            <line x1="0" y1="80" x2="400" y2="80" stroke="#22c984" stroke-width="0.3" opacity="0.15"/>
+            <line x1="0" y1="120" x2="400" y2="120" stroke="#22c984" stroke-width="0.3" opacity="0.15"/>
+            <line x1="0" y1="160" x2="400" y2="160" stroke="#22c984" stroke-width="0.3" opacity="0.15"/>
+            <line x1="80" y1="0" x2="80" y2="200" stroke="#22c984" stroke-width="0.3" opacity="0.15"/>
+            <line x1="160" y1="0" x2="160" y2="200" stroke="#22c984" stroke-width="0.3" opacity="0.15"/>
+            <line x1="240" y1="0" x2="240" y2="200" stroke="#22c984" stroke-width="0.3" opacity="0.15"/>
+            <line x1="320" y1="0" x2="320" y2="200" stroke="#22c984" stroke-width="0.3" opacity="0.15"/>
+            <rect x="20" y="90" width="40" height="110" fill="#1a2a1a" stroke="#22c984" stroke-width="0.5" opacity="0.9"/>
+            <rect x="70" y="60" width="50" height="140" fill="#162216" stroke="#22c984" stroke-width="0.5" opacity="0.9"/>
+            <rect x="130" y="100" width="35" height="100" fill="#1a2a1a" stroke="#22c984" stroke-width="0.5" opacity="0.8"/>
+            <rect x="175" y="50" width="55" height="150" fill="#0f1f0f" stroke="#22c984" stroke-width="0.5" opacity="0.9"/>
+            <rect x="240" y="75" width="45" height="125" fill="#162216" stroke="#22c984" stroke-width="0.5" opacity="0.9"/>
+            <rect x="295" y="40" width="60" height="160" fill="#1a2a1a" stroke="#22c984" stroke-width="0.5" opacity="0.9"/>
+            <rect x="26" y="98" width="8" height="6" fill="#22c984" opacity="0.7"/>
+            <rect x="38" y="98" width="8" height="6" fill="#22c984" opacity="0.4"/>
+            <rect x="76" y="68" width="8" height="6" fill="#22c984" opacity="0.9"/>
+            <rect x="90" y="68" width="8" height="6" fill="#22c984" opacity="0.5"/>
+            <rect x="181" y="58" width="9" height="7" fill="#22c984" opacity="0.8"/>
+            <rect x="196" y="58" width="9" height="7" fill="#22c984" opacity="0.4"/>
+            <rect x="303" y="50" width="10" height="7" fill="#22c984" opacity="0.9"/>
+            <rect x="318" y="50" width="10" height="7" fill="#22c984" opacity="0.5"/>
+            <rect x="0" y="190" width="400" height="10" fill="#22c984" opacity="0.3"/>
+            <text x="20" y="178" font-family="monospace" font-size="11" fill="#22c984" opacity="0.8">1980 ►</text>
+            <text x="280" y="178" font-family="monospace" font-size="11" fill="#22c984" opacity="0.8">$ 24,800</text>
+          </svg>
+        </div>
+        <div class="game-card-body">
+          <span class="game-badge badge-2d">2D</span>
+          <span class="game-badge badge-next" style="margin-left:6px;">Phase 5 — Next</span>
+          <h3 class="game-card-title">Code Tycoon</h3>
+          <p class="game-card-desc">Build a software empire starting in 1980. Hire developers, ship projects, unlock programming languages as history unfolds. The engine's first full game.</p>
+          <div class="game-tags">
+            <span class="game-tag">Business Sim</span>
+            <span class="game-tag">NanoVG</span>
+            <span class="game-tag">ECS</span>
+            <span class="game-tag">Steam</span>
+          </div>
+        </div>
+      </div>
+      <div class="game-card">
+        <div class="game-card-art" style="background:#05040f;">
+          <svg viewBox="0 0 400 200" xmlns="http://www.w3.org/2000/svg">
+            <rect width="400" height="200" fill="#05040f"/>
+            <ellipse cx="200" cy="80" rx="180" ry="60" fill="#7c3aed" opacity="0.08"/>
+            <rect x="0" y="50" width="60" height="150" fill="#0a0915"/>
+            <rect x="65" y="20" width="80" height="180" fill="#080813"/>
+            <rect x="150" y="60" width="50" height="140" fill="#0a0915"/>
+            <rect x="210" y="10" width="90" height="190" fill="#070710"/>
+            <rect x="305" y="40" width="55" height="160" fill="#08080f"/>
+            <rect x="70" y="55" width="75" height="2" fill="#7c3aed" opacity="0.9"/>
+            <rect x="215" y="40" width="80" height="2" fill="#c084fc" opacity="0.8"/>
+            <rect x="310" y="75" width="45" height="1.5" fill="#e879f9" opacity="0.9"/>
+            <rect x="72" y="28" width="8" height="6" fill="#7c3aed" opacity="0.8"/>
+            <rect x="84" y="28" width="8" height="6" fill="#9f67f5" opacity="0.6"/>
+            <rect x="96" y="28" width="8" height="6" fill="#7c3aed" opacity="0.9"/>
+            <rect x="215" y="20" width="9" height="7" fill="#c084fc" opacity="0.9"/>
+            <rect x="230" y="20" width="9" height="7" fill="#7c3aed" opacity="0.6"/>
+            <rect x="245" y="20" width="9" height="7" fill="#9f67f5" opacity="0.8"/>
+            <rect x="0" y="170" width="400" height="30" fill="#07060e"/>
+            <rect x="0" y="168" width="400" height="2" fill="#7c3aed" opacity="0.15"/>
+            <rect x="18" y="18" width="40" height="20" fill="none" stroke="#22c984" stroke-width="0.5" opacity="0.5"/>
+            <text x="22" y="29" font-family="monospace" font-size="7" fill="#22c984" opacity="0.7">NET: 4.2ms</text>
+            <rect x="342" y="15" width="48" height="20" fill="none" stroke="#ef4444" stroke-width="0.5" opacity="0.5"/>
+            <text x="346" y="26" font-family="monospace" font-size="7" fill="#ef4444" opacity="0.7">HP  ████░</text>
+          </svg>
+        </div>
+        <div class="game-card-body">
+          <span class="game-badge badge-3d">3D</span>
+          <span class="game-badge" style="background:rgba(124,58,237,0.1);color:#c084fc;border:1px solid rgba(124,58,237,0.3);margin-left:6px;">Phase 6 — Planned</span>
+          <h3 class="game-card-title">Netrunner: Uprising</h3>
+          <p class="game-card-desc">Open-world cyberpunk RPG across seven cities. Tactical network combat, diegetic AR HUD, and deep NPC systems. The engine's 3D stress-test.</p>
+          <div class="game-tags">
+            <span class="game-tag">3D Cyberpunk</span>
+            <span class="game-tag">Vulkan</span>
+            <span class="game-tag">Jolt Physics</span>
+            <span class="game-tag">Open World</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<div class="divider"></div>
+
+<!-- ROADMAP -->
+<section class="roadmap" id="roadmap">
+  <div class="container">
+    <div class="section-label">// Roadmap</div>
+    <h2 class="section-heading">Phase by phase.<br>No theory — only milestones.</h2>
+    <div class="roadmap-table">
+      <div class="roadmap-header">
+        <span>Phase</span><span>Name</span><span>Description</span><span>Status</span>
+      </div>
+      <div class="roadmap-row">
+        <span class="roadmap-phase">Phase 1</span>
+        <span class="roadmap-name">Foundation</span>
+        <span class="roadmap-desc">ECS, runtime, Game Loop, NanoVG renderer, math primitives</span>
+        <span class="roadmap-status status-done">Done ✓</span>
+      </div>
+      <div class="roadmap-row">
+        <span class="roadmap-phase">Phase 2</span>
+        <span class="roadmap-name">Scene system</span>
+        <span class="roadmap-desc">SceneManager, hierarchy, prefabs, PHP ↔ JSON transpiler</span>
+        <span class="roadmap-status status-done">Done ✓</span>
+      </div>
+      <div class="roadmap-row">
+        <span class="roadmap-phase">Phase 3</span>
+        <span class="roadmap-name">Game systems</span>
+        <span class="roadmap-desc">Physics 2D, collision detection, action-based input mapping, audio</span>
+        <span class="roadmap-status status-done">Done ✓</span>
+      </div>
+      <div class="roadmap-row">
+        <span class="roadmap-phase">Phase 4</span>
+        <span class="roadmap-name">Editor infrastructure</span>
+        <span class="roadmap-desc">Inspector, component registry, SceneDocument with undo/redo, command bus</span>
+        <span class="roadmap-status status-done">Done ✓</span>
+      </div>
+      <div class="roadmap-row next">
+        <span class="roadmap-phase">Phase 5</span>
+        <span class="roadmap-name">Code Tycoon</span>
+        <span class="roadmap-desc">First full game — economy, progression, Steam integration, distribution</span>
+        <span class="roadmap-status status-next">Next →</span>
+      </div>
+      <div class="roadmap-row">
+        <span class="roadmap-phase">Phase 6</span>
+        <span class="roadmap-name">Vulkan 3D / Netrunner</span>
+        <span class="roadmap-desc">Renderer3D command buffers, Jolt physics C-extension, open-world streaming</span>
+        <span class="roadmap-status status-planned">Planned</span>
+      </div>
+    </div>
+  </div>
+</section>
+
+<div class="divider"></div>
+
+<!-- CTA -->
+<section class="cta-section">
+  <div class="cta-glow"></div>
+  <div class="container" style="position:relative;z-index:1;">
+    <div class="section-label" style="text-align:center;">// Open Source</div>
+    <h2 class="section-heading">The limits between<br>"PHP is for X"<br>dissolve when AI builds the bridge.</h2>
+    <p class="section-sub" style="margin:0 auto;text-align:center;">PHPolygon is MIT-licensed. 132 tests passing. Two games in development. Follow the build, contribute, or fork it for your own project.</p>
+    <div class="cta-actions">
+      <a href="https://github.com/hmennen90/phpolygon" class="btn-primary">View on GitHub</a>
+      <a href="https://github.com/hmennen90/phpolygon/tree/main/examples" class="btn-outline">Browse Examples</a>
+      <a href="https://github.com/hmennen90/phpolygon/blob/main/README.md" class="btn-outline">Documentation</a>
+    </div>
+  </div>
+</section>
+
+<!-- FOOTER -->
+<footer>
+  <div>PHPolygon &nbsp;·&nbsp; PHP 8.2+ · OpenGL 4.1 · Vulkan &nbsp;·&nbsp; MIT License &nbsp;·&nbsp; Built by <a href="https://github.com/hmennen90">Hendrik Mennen</a></div>
+  <div style="margin-top:8px;opacity:0.5;">php-glfw by <a href="https://github.com/mario-deluna">Mario Döring</a> &nbsp;·&nbsp; php-vulkan &amp; php-steamworks by PHPolygon &nbsp;·&nbsp; 132 tests · 311 assertions</div>
+</footer>
+
+</body>
+</html>

@@ -1,0 +1,312 @@
+#!/usr/bin/env php
+<?php
+
+declare(strict_types=1);
+
+/**
+ * PHPolygon CLI — Game build tool
+ *
+ * Usage:
+ *   php bin/phpolygon build [platform] [options]
+ *
+ * Platforms:
+ *   macos-arm64, macos-x86_64, linux-x86_64, linux-arm64, windows-x86_64
+ *   macos, linux, windows (all archs for that platform)
+ *   all (every platform)
+ *   (empty) = auto-detect current platform
+ *
+ * Options:
+ *   --dry-run          Show resolved config without building
+ *   --micro-sfx PATH   Path to a pre-built micro.sfx binary
+ *   --output DIR        Output directory (default: build/)
+ *   --variant NAME      Build variant: base or steam (default: base)
+ *   --type NAME         Build type from build.json (default: full)
+ */
+
+// Find autoloader
+$autoloadPaths = [
+    __DIR__ . '/../vendor/autoload.php',          // Standalone / dev
+    __DIR__ . '/../../../autoload.php',            // Installed as dependency
+];
+
+$autoloader = null;
+foreach ($autoloadPaths as $path) {
+    if (file_exists($path)) {
+        $autoloader = $path;
+        break;
+    }
+}
+
+if ($autoloader === null) {
+    fwrite(STDERR, "Error: Could not find autoloader. Run 'composer install' first.\n");
+    exit(1);
+}
+
+require $autoloader;
+
+use PHPolygon\Build\BuildConfig;
+use PHPolygon\Build\GameBuilder;
+use PHPolygon\Build\StaticPhpResolver;
+
+// --- Parse CLI arguments ---
+
+$args = array_slice($argv, 1);
+$command = null;
+$platformArg = '';
+$options = [
+    'dry-run' => false,
+    'micro-sfx' => null,
+    'output' => '',
+    'variant' => 'base',
+    'type' => 'full',
+];
+
+$i = 0;
+while ($i < count($args)) {
+    $arg = $args[$i];
+
+    if ($arg === '--dry-run') {
+        $options['dry-run'] = true;
+    } elseif ($arg === '--micro-sfx' && isset($args[$i + 1])) {
+        $options['micro-sfx'] = $args[++$i];
+    } elseif ($arg === '--output' && isset($args[$i + 1])) {
+        $options['output'] = $args[++$i];
+    } elseif ($arg === '-o' && isset($args[$i + 1])) {
+        $options['output'] = $args[++$i];
+    } elseif ($arg === '--variant' && isset($args[$i + 1])) {
+        $options['variant'] = $args[++$i];
+    } elseif ($arg === '--type' && isset($args[$i + 1])) {
+        $options['type'] = $args[++$i];
+    } elseif ($arg === '--help' || $arg === '-h') {
+        printUsage();
+        exit(0);
+    } elseif (!str_starts_with($arg, '-') && $command === null) {
+        $command = $arg;
+    } elseif (!str_starts_with($arg, '-') && $command !== null && $platformArg === '') {
+        $platformArg = $arg;
+    }
+    $i++;
+}
+
+// --- Dispatch ---
+
+if ($command === null || $command === 'help') {
+    printUsage();
+    exit(0);
+}
+
+if ($command !== 'build') {
+    fwrite(STDERR, "Unknown command: {$command}\n");
+    printUsage();
+    exit(1);
+}
+
+// --- Build command ---
+
+$projectRoot = getcwd() ?: dirname(__DIR__);
+$config = BuildConfig::load($projectRoot);
+
+$outputDir = $options['output'] !== '' ? $options['output'] : $projectRoot . '/build';
+$microSfxPath = $options['micro-sfx'];
+$variant = $options['variant'];
+$buildType = $options['type'];
+
+if (!in_array($variant, ['base', 'steam'], true)) {
+    fwrite(STDERR, "Error: Unknown variant '{$variant}'. Use 'base' or 'steam'.\n");
+    exit(1);
+}
+
+if ($buildType !== 'full' && !isset($config->buildTypes[$buildType])) {
+    $available = empty($config->buildTypes) ? '(none defined)' : implode(', ', array_keys($config->buildTypes));
+    fwrite(STDERR, "Error: Unknown build type '{$buildType}'. Available: full, {$available}\n");
+    exit(1);
+}
+
+$targets = resolveTargets($platformArg);
+
+if ($options['dry-run']) {
+    dryRun($config, $targets, $outputDir, $microSfxPath);
+    exit(0);
+}
+
+if (ini_get('phar.readonly')) {
+    fwrite(STDERR, "\033[31mError:\033[0m phar.readonly is enabled. Run with:\n");
+    fwrite(STDERR, "  php -d phar.readonly=0 vendor/bin/phpolygon build\n");
+    exit(1);
+}
+
+$builder = new GameBuilder($config);
+$builder->setLogger(function (string $level, string $message): void {
+    $prefix = match ($level) {
+        'success' => "\033[32m✓\033[0m",
+        'info' => "\033[34m→\033[0m",
+        default => ' ',
+    };
+    echo "  {$prefix} {$message}\n";
+});
+
+$results = [];
+foreach ($targets as $targetName => $target) {
+    echo "\n";
+    echo "\033[1mPHPolygon Game Builder\033[0m\n";
+    echo str_repeat('-', 50) . "\n";
+    echo "  Game:     {$config->name} v{$config->version}\n";
+    echo "  Target:   {$targetName}\n";
+    echo "  Variant:  {$variant}\n";
+    echo "  Type:     {$buildType}\n";
+    echo "  Output:   {$outputDir}\n";
+    echo str_repeat('-', 50) . "\n\n";
+
+    try {
+        $result = $builder->build(
+            $target['platform'],
+            $outputDir,
+            $microSfxPath,
+            $target['arch'],
+            $variant,
+            $buildType,
+        );
+        $results[$targetName] = $result;
+
+        echo "\n";
+        echo "  \033[32m✓\033[0m {$targetName} complete!\n";
+        echo sprintf("  PHAR:   %.2f MB\n", $result['pharSize'] / 1024 / 1024);
+        echo sprintf("  Binary: %.2f MB\n", $result['binarySize'] / 1024 / 1024);
+        echo sprintf("  Total:  %.2f MB\n", $result['bundleSize'] / 1024 / 1024);
+        echo "  Output: {$result['outputPath']}\n";
+    } catch (\Throwable $e) {
+        echo "\n";
+        fwrite(STDERR, "  \033[31m✗ {$targetName} failed:\033[0m {$e->getMessage()}\n");
+    }
+}
+
+if (count($results) > 0) {
+    echo "\n" . str_repeat('=', 50) . "\n";
+    echo sprintf("  \033[32m✓\033[0m Built %d/%d targets\n", count($results), count($targets));
+    foreach ($results as $name => $r) {
+        echo sprintf("  %-20s %.2f MB  %s\n", $name, $r['bundleSize'] / 1024 / 1024, $r['outputPath']);
+    }
+    echo str_repeat('=', 50) . "\n";
+}
+
+exit(count($results) === count($targets) ? 0 : 1);
+
+// --- Helper functions ---
+
+/**
+ * @return array<string, array{platform: string, arch: string}>
+ */
+function resolveTargets(string $platformArg): array
+{
+    $allTargets = [
+        'macos-arm64'     => ['platform' => 'macos',   'arch' => 'arm64'],
+        'macos-x86_64'    => ['platform' => 'macos',   'arch' => 'x86_64'],
+        'linux-x86_64'    => ['platform' => 'linux',   'arch' => 'x86_64'],
+        'linux-arm64'     => ['platform' => 'linux',   'arch' => 'arm64'],
+        'windows-x86_64'  => ['platform' => 'windows', 'arch' => 'x86_64'],
+    ];
+
+    if ($platformArg === '' || $platformArg === 'auto') {
+        $platform = StaticPhpResolver::detectPlatform();
+        $arch = StaticPhpResolver::detectArch();
+        $key = "{$platform}-{$arch}";
+        return [$key => ['platform' => $platform, 'arch' => $arch]];
+    }
+
+    if ($platformArg === 'all') {
+        return $allTargets;
+    }
+
+    if (isset($allTargets[$platformArg])) {
+        return [$platformArg => $allTargets[$platformArg]];
+    }
+
+    // Platform-only match
+    $matched = [];
+    foreach ($allTargets as $name => $target) {
+        if ($target['platform'] === $platformArg) {
+            $matched[$name] = $target;
+        }
+    }
+
+    if (!empty($matched)) {
+        return $matched;
+    }
+
+    fwrite(STDERR, "Unknown target: {$platformArg}\n");
+    fwrite(STDERR, "Available: " . implode(', ', array_keys($allTargets)) . ", macos, linux, windows, all\n");
+    exit(1);
+}
+
+/**
+ * @param array<string, array{platform: string, arch: string}> $targets
+ */
+function dryRun(BuildConfig $config, array $targets, string $outputDir, ?string $microSfxPath): void
+{
+    echo "\n\033[1mPHPolygon Build — Dry Run\033[0m\n";
+    echo str_repeat('-', 50) . "\n";
+
+    $data = $config->toArray();
+    $data['output'] = $outputDir;
+    $data['micro-sfx'] = $microSfxPath ?? '(auto-resolve)';
+    $data['targets'] = implode(', ', array_keys($targets));
+
+    foreach ($data as $key => $value) {
+        if (is_array($value)) {
+            echo sprintf("  \033[34m%-25s\033[0m %s\n", $key, json_encode($value));
+        } else {
+            echo sprintf("  \033[34m%-25s\033[0m %s\n", $key, $value);
+        }
+    }
+
+    echo "\n";
+    $resolver = new StaticPhpResolver();
+    foreach ($targets as $name => $target) {
+        try {
+            $sfxPath = $resolver->resolve($microSfxPath, $target['platform'], $target['arch']);
+            echo "  \033[32m✓\033[0m {$name}: micro.sfx found at {$sfxPath}\n";
+        } catch (\RuntimeException $e) {
+            echo "  \033[33m!\033[0m {$name}: " . explode("\n", $e->getMessage())[0] . "\n";
+        }
+    }
+
+    echo str_repeat('-', 50) . "\n";
+}
+
+function printUsage(): void
+{
+    echo <<<'USAGE'
+
+PHPolygon Game Builder
+
+Usage:
+  phpolygon build [platform] [options]
+
+Platforms:
+  macos-arm64        macOS Apple Silicon
+  macos-x86_64       macOS Intel
+  linux-x86_64       Linux x86_64
+  linux-arm64        Linux ARM64
+  windows-x86_64     Windows x86_64
+  macos              All macOS targets
+  linux              All Linux targets
+  windows            All Windows targets
+  all                Every platform
+  (empty)            Auto-detect current platform
+
+Options:
+  --dry-run          Show resolved config without building
+  --micro-sfx PATH   Path to a pre-built micro.sfx binary
+  -o, --output DIR   Output directory (default: build/)
+  --variant NAME     Build variant: base or steam (default: base)
+  --type NAME        Build type from build.json (default: full)
+  -h, --help         Show this help
+
+Examples:
+  phpolygon build                        Build for current platform
+  phpolygon build macos-arm64            Build for macOS ARM
+  phpolygon build all --variant steam    Build all platforms with Steam
+  phpolygon build --dry-run              Show config without building
+
+USAGE;
+}

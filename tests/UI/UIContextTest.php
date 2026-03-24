@@ -47,6 +47,7 @@ class UIContextTest extends TestCase
             public function drawCircleOutline(float $cx, float $cy, float $r, Color $color, float $lineWidth = 1.0): void {}
             public function drawLine(Vec2 $from, Vec2 $to, Color $color, float $width = 1.0): void {}
             public function drawText(string $text, float $x, float $y, float $size, Color $color): void { $this->record('drawText', func_get_args()); }
+            public function drawTextCentered(string $text, float $cx, float $cy, float $size, Color $color): void { $this->record('drawTextCentered', func_get_args()); }
             public function drawTextBox(string $text, float $x, float $y, float $breakWidth, float $size, Color $color): void {}
             public function drawSprite(Texture $texture, ?Rect $srcRegion, float $x, float $y, float $w, float $h, float $opacity = 1.0): void {}
             public function pushTransform(Mat3 $matrix): void {}

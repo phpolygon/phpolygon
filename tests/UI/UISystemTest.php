@@ -68,6 +68,7 @@ class UISystemTest extends TestCase
             public function drawCircleOutline(float $cx, float $cy, float $r, \PHPolygon\Rendering\Color $color, float $lineWidth = 1.0): void {}
             public function drawLine(\PHPolygon\Math\Vec2 $from, \PHPolygon\Math\Vec2 $to, \PHPolygon\Rendering\Color $color, float $width = 1.0): void {}
             public function drawText(string $text, float $x, float $y, float $size, \PHPolygon\Rendering\Color $color): void {}
+            public function drawTextCentered(string $text, float $cx, float $cy, float $size, \PHPolygon\Rendering\Color $color): void {}
             public function drawTextBox(string $text, float $x, float $y, float $breakWidth, float $size, \PHPolygon\Rendering\Color $color): void {}
             public function drawSprite(\PHPolygon\Rendering\Texture $texture, ?\PHPolygon\Math\Rect $srcRegion, float $x, float $y, float $w, float $h, float $opacity = 1.0): void {}
             public function pushTransform(\PHPolygon\Math\Mat3 $matrix): void {}

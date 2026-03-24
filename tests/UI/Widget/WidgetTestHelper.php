@@ -34,6 +34,7 @@ class WidgetTestHelper implements Renderer2DInterface
     public function drawCircleOutline(float $cx, float $cy, float $r, Color $color, float $lineWidth = 1.0): void {}
     public function drawLine(Vec2 $from, Vec2 $to, Color $color, float $width = 1.0): void {}
     public function drawText(string $text, float $x, float $y, float $size, Color $color): void { $this->calls[] = ['method' => 'drawText', 'args' => func_get_args()]; }
+    public function drawTextCentered(string $text, float $cx, float $cy, float $size, Color $color): void { $this->calls[] = ['method' => 'drawTextCentered', 'args' => func_get_args()]; }
     public function drawTextBox(string $text, float $x, float $y, float $breakWidth, float $size, Color $color): void {}
     public function drawSprite(Texture $texture, ?Rect $srcRegion, float $x, float $y, float $w, float $h, float $opacity = 1.0): void { $this->calls[] = ['method' => 'drawSprite', 'args' => func_get_args()]; }
     public function pushTransform(Mat3 $matrix): void {}

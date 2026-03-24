@@ -121,6 +121,14 @@ class Renderer2D implements Renderer2DInterface
         $this->vg->text($x, $y, $text);
     }
 
+    public function drawTextCentered(string $text, float $cx, float $cy, float $size, Color $color): void
+    {
+        $this->vg->fontSize($size);
+        $this->vg->fillColor($this->toVGColor($color));
+        $this->vg->textAlign(VGAlign::CENTER | VGAlign::MIDDLE);
+        $this->vg->text($cx, $cy, $text);
+    }
+
     public function drawTextBox(string $text, float $x, float $y, float $breakWidth, float $size, Color $color): void
     {
         $this->vg->fontSize($size);

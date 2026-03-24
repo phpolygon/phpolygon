@@ -24,6 +24,8 @@ interface Renderer2DInterface extends RenderContextInterface
 
     public function drawText(string $text, float $x, float $y, float $size, Color $color): void;
 
+    public function drawTextCentered(string $text, float $cx, float $cy, float $size, Color $color): void;
+
     public function drawTextBox(string $text, float $x, float $y, float $breakWidth, float $size, Color $color): void;
 
     public function drawSprite(Texture $texture, ?Rect $srcRegion, float $x, float $y, float $w, float $h, float $opacity = 1.0): void;

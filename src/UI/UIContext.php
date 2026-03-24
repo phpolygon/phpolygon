@@ -184,13 +184,7 @@ class UIContext
             : ($hovered ? $s->hoverColor : $s->backgroundColor);
 
         $this->renderer->drawRoundedRect($rect->x, $rect->y, $w, $h, $s->borderRadius, $bg);
-        $this->renderer->drawText(
-            $label,
-            $rect->x + $s->padding,
-            $rect->y + $s->padding,
-            $s->fontSize,
-            $s->textColor,
-        );
+        $this->renderer->drawTextCentered($label, $rect->x + $w * 0.5, $rect->y + $h * 0.5, $s->fontSize, $s->textColor);
 
         $this->advance($this->flow === 'horizontal' ? $w : $h);
         return $clicked;

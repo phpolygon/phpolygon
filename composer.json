@@ -26,6 +26,7 @@
             "PHPolygon\\Tests\\": "tests/"
         }
     },
+    "bin": ["bin/phpolygon"],
     "minimum-stability": "stable",
     "prefer-stable": true
 }
