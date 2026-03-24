@@ -34,9 +34,6 @@ class SceneManager
     /** @var array<string, list<SystemInterface>> Maps scene name => systems */
     private array $sceneSystems = [];
 
-    /** @var list<SystemInterface> Global systems that persist across scenes */
-    private array $globalSystems = [];
-
     public function __construct(
         private readonly Engine $engine,
     ) {}
@@ -181,7 +178,6 @@ class SceneManager
 
     public function addGlobalSystem(SystemInterface $system): void
     {
-        $this->globalSystems[] = $system;
         $this->engine->world->addSystem($system);
     }
 

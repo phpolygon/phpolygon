@@ -9,6 +9,7 @@ use RuntimeException;
 
 class CreateEntityCommand implements CommandInterface
 {
+    /** @param array<string, mixed> $args */
     public function __construct(private readonly array $args = []) {}
 
     public function execute(EditorContext $context): array
@@ -18,8 +19,8 @@ class CreateEntityCommand implements CommandInterface
             throw new RuntimeException("No active scene document");
         }
 
-        $name = $this->args['name'] ?? 'NewEntity';
-        $parent = $this->args['parent'] ?? null;
+        $name = is_string($this->args['name'] ?? null) ? $this->args['name'] : 'NewEntity';
+        $parent = is_string($this->args['parent'] ?? null) ? $this->args['parent'] : null;
 
         $doc->addEntity($name, $parent);
 

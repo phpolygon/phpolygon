@@ -10,6 +10,7 @@ use PHPolygon\Editor\Inspector\ComponentSchema;
 use PHPolygon\Editor\Inspector\InspectorMetadataExtractor;
 use ReflectionClass;
 use RuntimeException;
+use SplFileInfo;
 
 class ComponentRegistry
 {
@@ -47,12 +48,14 @@ class ComponentRegistry
             new \RecursiveDirectoryIterator($directory, \FilesystemIterator::SKIP_DOTS)
         );
 
+        /** @var SplFileInfo $file */
         foreach ($iterator as $file) {
             if ($file->getExtension() !== 'php') {
                 continue;
             }
 
-            $relativePath = str_replace($directory . DIRECTORY_SEPARATOR, '', $file->getPathname());
+            $pathname = $file->getPathname();
+            $relativePath = str_replace($directory . DIRECTORY_SEPARATOR, '', $pathname);
             $className = $namespace . str_replace(
                 [DIRECTORY_SEPARATOR, '.php'],
                 ['\\', ''],
@@ -76,6 +79,7 @@ class ComponentRegistry
                 continue;
             }
 
+            /** @var class-string<ComponentInterface> $className */
             $this->register($className);
         }
     }

@@ -6,18 +6,20 @@ namespace PHPolygon\Editor\Command;
 
 use PHPolygon\Editor\EditorContext;
 use PHPolygon\Editor\SceneDocument;
+use PHPolygon\Scene\Scene;
 use RuntimeException;
 
 class LoadSceneCommand implements CommandInterface
 {
+    /** @param array<string, mixed> $args */
     public function __construct(private readonly array $args = []) {}
 
     public function execute(EditorContext $context): array
     {
-        $sceneName = $this->args['scene'] ?? null;
-        if ($sceneName === null) {
+        if (!isset($this->args['scene'])) {
             throw new RuntimeException("Missing 'scene' argument");
         }
+        $sceneName = is_string($this->args['scene']) ? $this->args['scene'] : '';
 
         $scenesDir = $context->getScenesDir();
         $sceneFile = $scenesDir . DIRECTORY_SEPARATOR . $sceneName . '.php';
@@ -38,6 +40,9 @@ class LoadSceneCommand implements CommandInterface
         }
 
         $scene = new $className();
+        if (!$scene instanceof Scene) {
+            throw new RuntimeException("Class {$className} is not a Scene");
+        }
         $data = $context->transpiler->toArray($scene);
 
         $context->activeDocument = new SceneDocument($data);

@@ -211,6 +211,7 @@ class GdRenderer2D implements Renderer2DInterface
         if ($this->currentFont !== '' && isset($this->fonts[$this->currentFont])) {
             $bbox = imagettfbbox($size, 0, $this->fonts[$this->currentFont], $text);
             if ($bbox !== false) {
+                /** @var array<int, int> $bbox */
                 $textWidth = $bbox[2] - $bbox[0];
                 $textHeight = $bbox[1] - $bbox[7];
                 $this->drawText($text, $cx - $textWidth / 2, $cy - $textHeight / 2, $size, $color);
@@ -237,6 +238,7 @@ class GdRenderer2D implements Renderer2DInterface
         foreach ($words as $word) {
             $testLine = $line === '' ? $word : $line . ' ' . $word;
             $bbox = imagettfbbox($size, 0, $fontPath, $testLine);
+            /** @var array<int, int>|false $bbox */
             $lineWidth = $bbox !== false ? ($bbox[2] - $bbox[0]) : 0;
 
             if ($lineWidth > $breakWidth && $line !== '') {

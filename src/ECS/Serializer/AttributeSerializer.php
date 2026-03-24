@@ -113,20 +113,21 @@ class AttributeSerializer implements SerializerInterface
 
         if ($typeName === null || is_scalar($data) && in_array($typeName, ['int', 'float', 'string', 'bool'], true)) {
             return match ($typeName) {
-                'int' => (int)$data,
-                'float' => (float)$data,
-                'string' => (string)$data,
+                'int' => (int)(is_scalar($data) ? $data : 0),
+                'float' => (float)(is_scalar($data) ? $data : 0.0),
+                'string' => (string)(is_scalar($data) ? $data : ''),
                 'bool' => (bool)$data,
                 default => $data,
             };
         }
 
         if (is_array($data)) {
+            /** @var array<string, mixed> $data */
             return match ($typeName) {
-                Vec2::class => Vec2::fromArray($data),
-                Vec3::class => Vec3::fromArray($data),
-                Rect::class => Rect::fromArray($data),
-                Color::class => Color::fromArray($data),
+                Vec2::class => new Vec2($this->toFloat($data['x'] ?? 0), $this->toFloat($data['y'] ?? 0)),
+                Vec3::class => new Vec3($this->toFloat($data['x'] ?? 0), $this->toFloat($data['y'] ?? 0), $this->toFloat($data['z'] ?? 0)),
+                Rect::class => new Rect($this->toFloat($data['x'] ?? 0), $this->toFloat($data['y'] ?? 0), $this->toFloat($data['width'] ?? 0), $this->toFloat($data['height'] ?? 0)),
+                Color::class => new Color($this->toFloat($data['r'] ?? 0), $this->toFloat($data['g'] ?? 0), $this->toFloat($data['b'] ?? 0), $this->toFloat($data['a'] ?? 1)),
                 'array' => $data,
                 default => $this->tryDeserializeObject($data, $typeName),
             };
@@ -153,11 +154,25 @@ class AttributeSerializer implements SerializerInterface
 
         $class = new ReflectionClass($typeName);
         if (!empty($class->getAttributes(Serializable::class))) {
-            $actualClass = $data['_class'] ?? $typeName;
-            return $this->fromArray($data, $actualClass);
+            $candidate = isset($data['_class']) && is_string($data['_class']) ? $data['_class'] : $typeName;
+            if (!class_exists($candidate)) {
+                return $data;
+            }
+            return $this->fromArray($data, $candidate);
         }
 
         return $data;
+    }
+
+    private function toFloat(mixed $value): float
+    {
+        if (is_float($value) || is_int($value)) {
+            return (float) $value;
+        }
+        if (is_string($value) && is_numeric($value)) {
+            return (float) $value;
+        }
+        return 0.0;
     }
 
     /**

@@ -72,7 +72,7 @@ class SceneTranspiler
     {
         JsonSceneFormat::validate($data);
 
-        $generator = new PhpCodeGenerator($this->serializer);
+        $generator = new PhpCodeGenerator();
         return $generator->generate($data);
     }
 
@@ -85,6 +85,7 @@ class SceneTranspiler
         if (!is_array($data)) {
             throw new RuntimeException('Invalid JSON: ' . json_last_error_msg());
         }
+        /** @var array<string, mixed> $data */
         return $this->fromArray($data);
     }
 

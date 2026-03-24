@@ -90,11 +90,16 @@ class StaticPhpResolver
 
         $json = $this->httpGet($releaseUrl);
         $release = $json !== null ? json_decode($json, true) : null;
-        if (is_array($release) && isset($release['assets'])) {
+        if (is_array($release) && isset($release['assets']) && is_array($release['assets'])) {
             foreach ($release['assets'] as $asset) {
-                $name = $asset['name'] ?? '';
+                if (!is_array($asset)) {
+                    continue;
+                }
+                $name = isset($asset['name']) && is_string($asset['name']) ? $asset['name'] : '';
                 if (str_starts_with($name, $prefix) && str_ends_with($name, $suffix)) {
-                    $downloadUrl = $asset['browser_download_url'] ?? null;
+                    $downloadUrl = isset($asset['browser_download_url']) && is_string($asset['browser_download_url'])
+                        ? $asset['browser_download_url']
+                        : null;
                     $matchedAsset = $name;
                     break;
                 }
@@ -107,6 +112,8 @@ class StaticPhpResolver
         }
 
         $this->log("Downloading {$matchedAsset}...");
+
+        /** @var string $downloadUrl */
         $tempFile = tempnam(sys_get_temp_dir(), 'phpolygon-micro-');
         if ($tempFile === false) {
             return null;
@@ -122,7 +129,7 @@ class StaticPhpResolver
 
         // Extract micro.sfx from zip
         $actualFile = $tempFile;
-        if (str_ends_with($matchedAsset, '.zip') && class_exists(\ZipArchive::class)) {
+        if ($matchedAsset !== null && str_ends_with($matchedAsset, '.zip') && class_exists(\ZipArchive::class)) {
             $zip = new \ZipArchive();
             if ($zip->open($tempFile) === true) {
                 $extractDir = sys_get_temp_dir() . '/phpolygon-micro-extract-' . getmypid();
@@ -176,13 +183,17 @@ class StaticPhpResolver
         }
 
         foreach ($releases as $release) {
-            if (!isset($release['tag_name'], $release['url'])) {
+            if (!is_array($release) || !isset($release['tag_name'], $release['url'])) {
                 continue;
             }
-            if (!empty($release['assets'])) {
+            if (!empty($release['assets']) && is_array($release['assets'])) {
                 foreach ($release['assets'] as $asset) {
-                    if (str_contains($asset['name'] ?? '', 'micro')) {
-                        return $release['url'];
+                    if (!is_array($asset)) {
+                        continue;
+                    }
+                    $assetName = isset($asset['name']) && is_string($asset['name']) ? $asset['name'] : '';
+                    if (str_contains($assetName, 'micro')) {
+                        return is_string($release['url']) ? $release['url'] : null;
                     }
                 }
             }
@@ -197,6 +208,7 @@ class StaticPhpResolver
             new \RecursiveDirectoryIterator($dir, \FilesystemIterator::SKIP_DOTS),
             \RecursiveIteratorIterator::CHILD_FIRST
         );
+        /** @var \SplFileInfo $item */
         foreach ($it as $item) {
             $item->isDir() ? @rmdir($item->getPathname()) : @unlink($item->getPathname());
         }

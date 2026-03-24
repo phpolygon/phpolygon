@@ -51,10 +51,18 @@ class Window
         glfwSwapInterval($this->vsync ? 1 : 0);
 
         // Get content scale for HiDPI
-        glfwGetWindowContentScale($this->handle, $this->contentScaleX, $this->contentScaleY);
+        $csX = 1.0;
+        $csY = 1.0;
+        glfwGetWindowContentScale($this->handle, $csX, $csY);
+        $this->contentScaleX = is_float($csX) ? $csX : (is_int($csX) ? (float) $csX : 1.0);
+        $this->contentScaleY = is_float($csY) ? $csY : (is_int($csY) ? (float) $csY : 1.0);
 
         // Get actual framebuffer size
-        glfwGetFramebufferSize($this->handle, $this->framebufferWidth, $this->framebufferHeight);
+        $fbW = 0;
+        $fbH = 0;
+        glfwGetFramebufferSize($this->handle, $fbW, $fbH);
+        $this->framebufferWidth = is_int($fbW) ? $fbW : 0;
+        $this->framebufferHeight = is_int($fbH) ? $fbH : 0;
 
         // Set up input callbacks (php-glfw does NOT pass $window as first arg)
         glfwSetKeyCallback($this->handle, function (int $key, int $scancode, int $action, int $mods) use ($input) {
@@ -171,21 +179,33 @@ class Window
         }
 
         // Save windowed geometry for later restore
-        glfwGetWindowPos($this->handle, $this->windowedX, $this->windowedY);
+        $wx = 0;
+        $wy = 0;
+        glfwGetWindowPos($this->handle, $wx, $wy);
+        $this->windowedX = is_int($wx) ? $wx : 0;
+        $this->windowedY = is_int($wy) ? $wy : 0;
         $this->windowedWidth = $this->width;
         $this->windowedHeight = $this->height;
 
         $monitor = glfwGetPrimaryMonitor();
         $mode = glfwGetVideoMode($monitor);
 
+        // GLFWvidmode properties are provided by the php-glfw extension
+        // but not recognized by PHPStan stubs
+        /** @var int $modeWidth */
+        $modeWidth = $mode->width; // @phpstan-ignore property.notFound
+        /** @var int $modeHeight */
+        $modeHeight = $mode->height; // @phpstan-ignore property.notFound
+        /** @var int $modeRefresh */
+        $modeRefresh = $mode->refreshRate; // @phpstan-ignore property.notFound
         glfwSetWindowMonitor(
             $this->handle,
             $monitor,
             0,
             0,
-            $mode->width,
-            $mode->height,
-            $mode->refreshRate,
+            $modeWidth,
+            $modeHeight,
+            $modeRefresh,
         );
 
         $this->fullscreen = true;

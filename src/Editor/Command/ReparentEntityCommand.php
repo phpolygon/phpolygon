@@ -9,6 +9,7 @@ use RuntimeException;
 
 class ReparentEntityCommand implements CommandInterface
 {
+    /** @param array<string, mixed> $args */
     public function __construct(private readonly array $args = []) {}
 
     public function execute(EditorContext $context): array
@@ -18,8 +19,8 @@ class ReparentEntityCommand implements CommandInterface
             throw new RuntimeException("No active scene document");
         }
 
-        $entityName = $this->args['entity'] ?? null;
-        $newParent = $this->args['parent'] ?? null;
+        $entityName = is_string($this->args['entity'] ?? null) ? $this->args['entity'] : null;
+        $newParent = is_string($this->args['parent'] ?? null) ? $this->args['parent'] : null;
 
         if ($entityName === null) {
             throw new RuntimeException("Missing 'entity' argument");

@@ -39,14 +39,19 @@ class SaveSlot
      */
     public static function fromArray(array $raw): self
     {
+        /** @var array<string, mixed> $metadata */
+        $metadata = is_array($raw['metadata'] ?? null) ? $raw['metadata'] : [];
+        /** @var array<string, mixed> $data */
+        $data = is_array($raw['data'] ?? null) ? $raw['data'] : [];
+
         return new self(
-            index: $raw['index'],
-            name: $raw['name'],
-            createdAt: new \DateTimeImmutable($raw['createdAt']),
-            updatedAt: new \DateTimeImmutable($raw['updatedAt']),
-            playTime: (float) $raw['playTime'],
-            metadata: $raw['metadata'] ?? [],
-            data: $raw['data'] ?? [],
+            index: is_int($raw['index'] ?? null) ? $raw['index'] : 0,
+            name: is_string($raw['name'] ?? null) ? $raw['name'] : '',
+            createdAt: new \DateTimeImmutable(is_string($raw['createdAt'] ?? null) ? $raw['createdAt'] : 'now'),
+            updatedAt: new \DateTimeImmutable(is_string($raw['updatedAt'] ?? null) ? $raw['updatedAt'] : 'now'),
+            playTime: is_float($raw['playTime'] ?? null) ? $raw['playTime'] : (is_int($raw['playTime'] ?? null) ? (float) $raw['playTime'] : 0.0),
+            metadata: $metadata,
+            data: $data,
         );
     }
 }

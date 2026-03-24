@@ -20,8 +20,9 @@ class JsonSceneFormat
     {
         $version = $data['_version'] ?? null;
         if ($version !== null && $version > self::VERSION) {
+            $versionStr = is_int($version) ? $version : 0;
             throw new RuntimeException(
-                "Scene format version {$version} is not supported (max: " . self::VERSION . ")"
+                "Scene format version {$versionStr} is not supported (max: " . self::VERSION . ")"
             );
         }
 
@@ -34,6 +35,10 @@ class JsonSceneFormat
         }
 
         foreach ($data['entities'] as $i => $entity) {
+            if (!is_array($entity)) {
+                throw new RuntimeException("Entity at entities[{$i}] must be an array");
+            }
+            /** @var array<string, mixed> $entity */
             self::validateEntity($entity, "entities[{$i}]");
         }
     }
@@ -52,15 +57,19 @@ class JsonSceneFormat
         }
 
         foreach ($entity['components'] as $j => $component) {
-            if (!isset($component['_class']) || !is_string($component['_class'])) {
+            if (!is_array($component) || !isset($component['_class']) || !is_string($component['_class'])) {
                 throw new RuntimeException(
                     "Component at {$path}.components[{$j}] must have a '_class' string field"
                 );
             }
         }
 
-        if (isset($entity['children'])) {
+        if (isset($entity['children']) && is_array($entity['children'])) {
             foreach ($entity['children'] as $j => $child) {
+                if (!is_array($child)) {
+                    throw new RuntimeException("Child at {$path}.children[{$j}] must be an array");
+                }
+                /** @var array<string, mixed> $child */
                 self::validateEntity($child, "{$path}.children[{$j}]");
             }
         }

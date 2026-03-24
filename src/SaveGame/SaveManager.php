@@ -46,7 +46,7 @@ class SaveManager
         $slot = new SaveSlot(
             index: $slotIndex,
             name: $name,
-            createdAt: $existing?->createdAt ?? $now,
+            createdAt: $existing !== null ? $existing->createdAt : $now,
             updatedAt: $now,
             playTime: $playTime,
             metadata: $metadata,
@@ -74,7 +74,15 @@ class SaveManager
         }
 
         $content = file_get_contents($path);
-        $raw = json_decode($content, true, 512, JSON_THROW_ON_ERROR);
+        if ($content === false) {
+            return null;
+        }
+        $decoded = json_decode($content, true, 512, JSON_THROW_ON_ERROR);
+        if (!is_array($decoded)) {
+            return null;
+        }
+        /** @var array<string, mixed> $raw */
+        $raw = $decoded;
         $slot = SaveSlot::fromArray($raw);
         $this->slots[$slotIndex] = $slot;
 

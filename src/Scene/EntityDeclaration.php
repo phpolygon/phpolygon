@@ -67,6 +67,9 @@ class EntityDeclaration
         return $this->builder->entity($name);
     }
 
+    /**
+     * @param class-string<\PHPolygon\Scene\PrefabInterface> $prefabClass
+     */
     public function prefab(string $prefabClass, string $name): EntityDeclaration
     {
         return $this->builder->prefab($prefabClass, $name);

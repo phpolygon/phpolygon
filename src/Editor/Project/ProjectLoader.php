@@ -28,6 +28,7 @@ class ProjectLoader
             throw new RuntimeException("Invalid project manifest JSON: {$path}");
         }
 
+        /** @var array<string, mixed> $data */
         return $this->fromArray($data);
     }
 
@@ -45,14 +46,17 @@ class ProjectLoader
     {
         $this->validate($data);
 
+        /** @var array<string, string> $psr4Roots */
+        $psr4Roots = is_array($data['psr4Roots'] ?? null) ? $data['psr4Roots'] : [];
+
         return new ProjectManifest(
-            name: $data['name'],
-            version: $data['version'] ?? '0.1.0',
-            engineVersion: $data['engineVersion'] ?? '*',
-            scenesPath: $data['scenesPath'] ?? 'src/Scene',
-            assetsPath: $data['assetsPath'] ?? 'assets',
-            psr4Roots: $data['psr4Roots'] ?? [],
-            entryScene: $data['entryScene'] ?? '',
+            name: is_string($data['name']) ? $data['name'] : '',
+            version: is_string($data['version'] ?? null) ? $data['version'] : '0.1.0',
+            engineVersion: is_string($data['engineVersion'] ?? null) ? $data['engineVersion'] : '*',
+            scenesPath: is_string($data['scenesPath'] ?? null) ? $data['scenesPath'] : 'src/Scene',
+            assetsPath: is_string($data['assetsPath'] ?? null) ? $data['assetsPath'] : 'assets',
+            psr4Roots: $psr4Roots,
+            entryScene: is_string($data['entryScene'] ?? null) ? $data['entryScene'] : '',
         );
     }
 

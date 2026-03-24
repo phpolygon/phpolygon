@@ -33,11 +33,10 @@ class UIContext
     /** Current flow direction: 'vertical' or 'horizontal' */
     private string $flow = 'vertical';
 
-    /** Layout stack for nested begin/end pairs */
+    /** @var list<array{x: float, y: float, w: float, flow: string, hovered: bool}> Layout stack for nested begin/end pairs */
     private array $layoutStack = [];
 
-    /** Tracks the hot (hovered) and active (pressed) widget IDs */
-    private string $hotWidget = '';
+    /** Tracks the active (pressed) widget ID */
     private string $activeWidget = '';
 
     /** Text input state for the currently focused text field */
@@ -103,7 +102,7 @@ class UIContext
     {
         $wasHovered = $this->anyHovered;
 
-        if (!empty($this->layoutStack)) {
+        if (count($this->layoutStack) > 0) {
             $prev = array_pop($this->layoutStack);
             $this->cursorX = $prev['x'];
             $this->cursorY = $prev['y'];
@@ -166,7 +165,6 @@ class UIContext
         $pressing = false;
 
         if ($hovered) {
-            $this->hotWidget = $id;
             $this->anyHovered = true;
 
             if ($this->input->isMouseButtonDown(0)) {

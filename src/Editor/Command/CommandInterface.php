@@ -8,6 +8,11 @@ use PHPolygon\Editor\EditorContext;
 
 interface CommandInterface
 {
+    /**
+     * @param array<string, mixed> $args
+     */
+    public function __construct(array $args = []);
+
     /** @return array<string, mixed> */
     public function execute(EditorContext $context): array;
 }

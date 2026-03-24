@@ -1,7 +1,8 @@
-includes:
-    - phpstan-baseline.neon
-
 parameters:
     level: 10
     paths:
         - src
+    ignoreErrors:
+        -
+            identifier: trait.unused
+            path: src/Testing/VisualTestCase.php

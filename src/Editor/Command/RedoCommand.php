@@ -9,7 +9,9 @@ use RuntimeException;
 
 class RedoCommand implements CommandInterface
 {
-    public function __construct(private readonly array $args = []) {}
+    /** @param array<string, mixed> $args */
+    /** @param array<string, mixed> $args */
+    public function __construct(array $args = []) {}
 
     public function execute(EditorContext $context): array
     {

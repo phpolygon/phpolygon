@@ -47,7 +47,7 @@ class SceneDocument
 
     public function getName(): string
     {
-        return $this->data['name'] ?? '';
+        return is_string($this->data['name'] ?? null) ? $this->data['name'] : '';
     }
 
     // --- Entity operations ---
@@ -57,12 +57,21 @@ class SceneDocument
      */
     public function getEntities(): array
     {
-        return $this->data['entities'] ?? [];
+        $raw = $this->data['entities'] ?? [];
+        if (!is_array($raw)) {
+            return [];
+        }
+        /** @var list<array<string, mixed>> $entities */
+        $entities = array_values($raw);
+        return $entities;
     }
 
+    /**
+     * @return array<string, mixed>|null
+     */
     public function getEntity(string $name): ?array
     {
-        return $this->findEntity($name, $this->data['entities'] ?? []);
+        return $this->findEntity($name, $this->getEntities());
     }
 
     public function addEntity(string $name, ?string $parentName = null): void
@@ -75,9 +84,13 @@ class SceneDocument
         ];
 
         if ($parentName === null) {
-            $this->data['entities'][] = $newEntity;
+            $entities = $this->getEntities();
+            $entities[] = $newEntity;
+            $this->data['entities'] = $entities;
         } else {
-            $this->addEntityToParent($name, $parentName, $newEntity, $this->data['entities']);
+            $entities = $this->getEntities();
+            $this->addEntityToParent($name, $parentName, $newEntity, $entities);
+            $this->data['entities'] = $entities;
         }
 
         $this->dirty = true;
@@ -86,14 +99,16 @@ class SceneDocument
     public function removeEntity(string $name): void
     {
         $this->pushUndo();
-        $this->data['entities'] = $this->removeEntityFromList($name, $this->data['entities'] ?? []);
+        $this->data['entities'] = $this->removeEntityFromList($name, $this->getEntities());
         $this->dirty = true;
     }
 
     public function renameEntity(string $oldName, string $newName): void
     {
         $this->pushUndo();
-        $this->renameEntityInList($oldName, $newName, $this->data['entities']);
+        $entities = $this->getEntities();
+        $this->renameEntityInList($oldName, $newName, $entities);
+        $this->data['entities'] = $entities;
         $this->dirty = true;
     }
 
@@ -102,18 +117,23 @@ class SceneDocument
         $this->pushUndo();
 
         // Find and remove entity from current position
-        $entity = $this->findEntity($entityName, $this->data['entities'] ?? []);
+        $entity = $this->findEntity($entityName, $this->getEntities());
         if ($entity === null) {
             return;
         }
 
-        $this->data['entities'] = $this->removeEntityFromList($entityName, $this->data['entities']);
+        $entities = $this->removeEntityFromList($entityName, $this->getEntities());
+        $this->data['entities'] = $entities;
 
         if ($newParentName === null) {
             // Move to root
-            $this->data['entities'][] = $entity;
+            $entities = $this->getEntities();
+            $entities[] = $entity;
+            $this->data['entities'] = $entities;
         } else {
-            $this->addEntityToParent($entityName, $newParentName, $entity, $this->data['entities']);
+            $entities = $this->getEntities();
+            $this->addEntityToParent($entityName, $newParentName, $entity, $entities);
+            $this->data['entities'] = $entities;
         }
 
         $this->dirty = true;
@@ -130,7 +150,9 @@ class SceneDocument
 
         $component = array_merge(['_class' => $componentClass], $defaults);
         $this->modifyEntity($entityName, function (array &$entity) use ($component) {
-            $entity['components'][] = $component;
+            $components = is_array($entity['components'] ?? null) ? $entity['components'] : [];
+            $components[] = $component;
+            $entity['components'] = $components;
         });
 
         $this->dirty = true;
@@ -141,8 +163,10 @@ class SceneDocument
         $this->pushUndo();
 
         $this->modifyEntity($entityName, function (array &$entity) use ($componentClass) {
+            /** @var list<array<string, mixed>> $components */
+            $components = is_array($entity['components'] ?? null) ? $entity['components'] : [];
             $entity['components'] = array_values(array_filter(
-                $entity['components'] ?? [],
+                $components,
                 fn(array $c) => ($c['_class'] ?? '') !== $componentClass,
             ));
         });
@@ -155,7 +179,13 @@ class SceneDocument
         $this->pushUndo();
 
         $this->modifyEntity($entityName, function (array &$entity) use ($componentClass, $property, $value) {
+            if (!is_array($entity['components'] ?? null)) {
+                return;
+            }
             foreach ($entity['components'] as &$component) {
+                if (!is_array($component)) {
+                    continue;
+                }
                 if (($component['_class'] ?? '') === $componentClass) {
                     $component[$property] = $value;
                     return;
@@ -174,9 +204,15 @@ class SceneDocument
             return;
         }
 
-        $this->redoStack[] = json_encode($this->data);
+        $encoded = json_encode($this->data);
+        if (is_string($encoded)) {
+            $this->redoStack[] = $encoded;
+        }
         $snapshot = array_pop($this->undoStack);
-        $this->data = json_decode($snapshot, true);
+        $decoded = json_decode((string) $snapshot, true);
+        /** @var array<string, mixed> $data */
+        $data = is_array($decoded) ? $decoded : [];
+        $this->data = $data;
         $this->dirty = true;
     }
 
@@ -186,9 +222,15 @@ class SceneDocument
             return;
         }
 
-        $this->undoStack[] = json_encode($this->data);
+        $encoded = json_encode($this->data);
+        if (is_string($encoded)) {
+            $this->undoStack[] = $encoded;
+        }
         $snapshot = array_pop($this->redoStack);
-        $this->data = json_decode($snapshot, true);
+        $decoded = json_decode((string) $snapshot, true);
+        /** @var array<string, mixed> $data */
+        $data = is_array($decoded) ? $decoded : [];
+        $this->data = $data;
         $this->dirty = true;
     }
 
@@ -206,7 +248,10 @@ class SceneDocument
 
     private function pushUndo(): void
     {
-        $this->undoStack[] = json_encode($this->data);
+        $encoded = json_encode($this->data);
+        if (is_string($encoded)) {
+            $this->undoStack[] = $encoded;
+        }
         if (count($this->undoStack) > self::MAX_UNDO) {
             array_shift($this->undoStack);
         }
@@ -220,11 +265,13 @@ class SceneDocument
     private function findEntity(string $name, array $entities): ?array
     {
         foreach ($entities as $entity) {
-            if ($entity['name'] === $name) {
+            if (($entity['name'] ?? null) === $name) {
                 return $entity;
             }
-            if (isset($entity['children'])) {
-                $found = $this->findEntity($name, $entity['children']);
+            if (isset($entity['children']) && is_array($entity['children'])) {
+                /** @var list<array<string, mixed>> $children */
+                $children = $entity['children'];
+                $found = $this->findEntity($name, $children);
                 if ($found !== null) {
                     return $found;
                 }
@@ -241,11 +288,13 @@ class SceneDocument
     {
         $result = [];
         foreach ($entities as $entity) {
-            if ($entity['name'] === $name) {
+            if (($entity['name'] ?? null) === $name) {
                 continue;
             }
-            if (isset($entity['children'])) {
-                $entity['children'] = $this->removeEntityFromList($name, $entity['children']);
+            if (isset($entity['children']) && is_array($entity['children'])) {
+                /** @var list<array<string, mixed>> $entityChildren */
+                $entityChildren = $entity['children'];
+                $entity['children'] = $this->removeEntityFromList($name, $entityChildren);
                 if (empty($entity['children'])) {
                     unset($entity['children']);
                 }
@@ -256,18 +305,23 @@ class SceneDocument
     }
 
     /**
+     * @param array<string, mixed> $newEntity
      * @param list<array<string, mixed>> $entities
      */
     private function addEntityToParent(string $name, string $parentName, array $newEntity, array &$entities): void
     {
         foreach ($entities as &$entity) {
-            if ($entity['name'] === $parentName) {
-                $entity['children'] = $entity['children'] ?? [];
-                $entity['children'][] = $newEntity;
+            if (($entity['name'] ?? null) === $parentName) {
+                $children = isset($entity['children']) && is_array($entity['children']) ? $entity['children'] : [];
+                $children[] = $newEntity;
+                $entity['children'] = $children;
                 return;
             }
-            if (isset($entity['children'])) {
-                $this->addEntityToParent($name, $parentName, $newEntity, $entity['children']);
+            if (isset($entity['children']) && is_array($entity['children'])) {
+                /** @var list<array<string, mixed>> $entityChildren */
+                $entityChildren = $entity['children'];
+                $this->addEntityToParent($name, $parentName, $newEntity, $entityChildren);
+                $entity['children'] = $entityChildren;
             }
         }
     }
@@ -278,19 +332,24 @@ class SceneDocument
     private function renameEntityInList(string $oldName, string $newName, array &$entities): void
     {
         foreach ($entities as &$entity) {
-            if ($entity['name'] === $oldName) {
+            if (($entity['name'] ?? null) === $oldName) {
                 $entity['name'] = $newName;
                 return;
             }
-            if (isset($entity['children'])) {
-                $this->renameEntityInList($oldName, $newName, $entity['children']);
+            if (isset($entity['children']) && is_array($entity['children'])) {
+                /** @var list<array<string, mixed>> $entityChildren */
+                $entityChildren = $entity['children'];
+                $this->renameEntityInList($oldName, $newName, $entityChildren);
+                $entity['children'] = $entityChildren;
             }
         }
     }
 
     private function modifyEntity(string $name, callable $modifier): void
     {
-        $this->modifyEntityInList($name, $modifier, $this->data['entities']);
+        $entities = $this->getEntities();
+        $this->modifyEntityInList($name, $modifier, $entities);
+        $this->data['entities'] = $entities;
     }
 
     /**
@@ -299,12 +358,15 @@ class SceneDocument
     private function modifyEntityInList(string $name, callable $modifier, array &$entities): void
     {
         foreach ($entities as &$entity) {
-            if ($entity['name'] === $name) {
+            if (($entity['name'] ?? null) === $name) {
                 $modifier($entity);
                 return;
             }
-            if (isset($entity['children'])) {
-                $this->modifyEntityInList($name, $modifier, $entity['children']);
+            if (isset($entity['children']) && is_array($entity['children'])) {
+                /** @var list<array<string, mixed>> $entityChildren */
+                $entityChildren = $entity['children'];
+                $this->modifyEntityInList($name, $modifier, $entityChildren);
+                $entity['children'] = $entityChildren;
             }
         }
     }

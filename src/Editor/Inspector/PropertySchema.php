@@ -14,6 +14,7 @@ class PropertySchema
         public readonly mixed $default,
         public readonly ?string $editorHint,
         public readonly ?string $description,
+        /** @var array<string, float>|null */
         public readonly ?array $range,
     ) {}
 

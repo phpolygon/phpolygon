@@ -246,6 +246,7 @@ STUB_END;
         );
 
         $srcLen = strlen($src);
+        /** @var \SplFileInfo $item */
         foreach ($iterator as $item) {
             $relPath = substr($item->getPathname(), $srcLen + 1);
 
@@ -281,6 +282,7 @@ STUB_END;
             new RecursiveDirectoryIterator($src, FilesystemIterator::SKIP_DOTS),
             RecursiveIteratorIterator::SELF_FIRST
         );
+        /** @var \SplFileInfo $item */
         foreach ($iterator as $item) {
             $target = $dst . '/' . substr($item->getPathname(), strlen($src) + 1);
             if ($item->isDir()) {
@@ -298,6 +300,7 @@ STUB_END;
             new RecursiveDirectoryIterator($dir, FilesystemIterator::SKIP_DOTS),
             RecursiveIteratorIterator::CHILD_FIRST
         );
+        /** @var \SplFileInfo $item */
         foreach ($iterator as $item) {
             $item->isDir() ? rmdir($item->getPathname()) : unlink($item->getPathname());
         }

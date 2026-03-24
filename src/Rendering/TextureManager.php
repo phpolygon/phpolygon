@@ -36,8 +36,10 @@ class TextureManager
         $height = $tex2d->height();
 
         // Create OpenGL texture
+        $glId = 0;
         glGenTextures(1, $glId);
-        glBindTexture(GL_TEXTURE_2D, $glId);
+        $texId = is_int($glId) ? $glId : 0;
+        glBindTexture(GL_TEXTURE_2D, $texId);
 
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
@@ -58,7 +60,7 @@ class TextureManager
 
         glBindTexture(GL_TEXTURE_2D, 0);
 
-        $texture = new Texture($glId, $width, $height, $filePath);
+        $texture = new Texture($texId, $width, $height, $filePath);
         $this->textures[$id] = $texture;
         return $texture;
     }

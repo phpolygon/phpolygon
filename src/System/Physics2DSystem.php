@@ -233,8 +233,8 @@ class Physics2DSystem extends AbstractSystem
             return;
         }
 
-        $velA = $rbA?->velocity ?? Vec2::zero();
-        $velB = $rbB?->velocity ?? Vec2::zero();
+        $velA = $rbA !== null ? $rbA->velocity : Vec2::zero();
+        $velB = $rbB !== null ? $rbB->velocity : Vec2::zero();
         $relativeVelocity = $velA->sub($velB);
         $velocityAlongNormal = $relativeVelocity->dot($normal);
 
@@ -244,8 +244,8 @@ class Physics2DSystem extends AbstractSystem
         }
 
         $restitution = max(
-            $rbA?->restitution ?? 0.0,
-            $rbB?->restitution ?? 0.0,
+            $rbA !== null ? $rbA->restitution : 0.0,
+            $rbB !== null ? $rbB->restitution : 0.0,
         );
 
         $massA = $aKinematic ? PHP_FLOAT_MAX : $rbA->mass;
@@ -255,10 +255,10 @@ class Physics2DSystem extends AbstractSystem
 
         $j = -(1.0 + $restitution) * $velocityAlongNormal / ($invMassA + $invMassB);
 
-        if (!$aKinematic && $rbA !== null) {
+        if (!$aKinematic) {
             $rbA->velocity = $rbA->velocity->add($normal->mul($j * $invMassA));
         }
-        if (!$bKinematic && $rbB !== null) {
+        if (!$bKinematic) {
             $rbB->velocity = $rbB->velocity->sub($normal->mul($j * $invMassB));
         }
     }

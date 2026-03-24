@@ -9,14 +9,15 @@ use RuntimeException;
 
 class GetComponentSchemaCommand implements CommandInterface
 {
+    /** @param array<string, mixed> $args */
     public function __construct(private readonly array $args = []) {}
 
     public function execute(EditorContext $context): array
     {
-        $class = $this->args['class'] ?? null;
-        if ($class === null) {
+        if (!isset($this->args['class'])) {
             throw new RuntimeException("Missing 'class' argument");
         }
+        $class = is_string($this->args['class']) ? $this->args['class'] : '';
 
         return $context->components->get($class)->toArray();
     }

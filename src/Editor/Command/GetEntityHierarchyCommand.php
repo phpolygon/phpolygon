@@ -9,7 +9,9 @@ use RuntimeException;
 
 class GetEntityHierarchyCommand implements CommandInterface
 {
-    public function __construct(private readonly array $args = []) {}
+    /** @param array<string, mixed> $args */
+    /** @param array<string, mixed> $args */
+    public function __construct(array $args = []) {}
 
     public function execute(EditorContext $context): array
     {
@@ -29,15 +31,19 @@ class GetEntityHierarchyCommand implements CommandInterface
     {
         $result = [];
         foreach ($entities as $entity) {
+            /** @var list<array<string, mixed>> $components */
+            $components = $entity['components'] ?? [];
             $node = [
                 'name' => $entity['name'],
                 'components' => array_map(
                     fn(array $c) => $c['_class'] ?? 'Unknown',
-                    $entity['components'] ?? [],
+                    $components,
                 ),
             ];
             if (!empty($entity['children'])) {
-                $node['children'] = $this->buildTree($entity['children']);
+                /** @var list<array<string, mixed>> $children */
+                $children = $entity['children'];
+                $node['children'] = $this->buildTree($children);
             }
             $result[] = $node;
         }

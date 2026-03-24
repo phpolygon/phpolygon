@@ -59,11 +59,11 @@ class BuildConfig
         if (file_exists($composerFile)) {
             $composer = json_decode((string) file_get_contents($composerFile), true);
             if (is_array($composer)) {
-                if (isset($composer['name'])) {
+                if (isset($composer['name']) && is_string($composer['name'])) {
                     $parts = explode('/', $composer['name']);
                     $config->name = ucfirst(end($parts));
                 }
-                if (isset($composer['version'])) {
+                if (isset($composer['version']) && is_string($composer['version'])) {
                     $config->version = $composer['version'];
                 }
             }
@@ -74,6 +74,7 @@ class BuildConfig
         if (file_exists($buildFile)) {
             $build = json_decode((string) file_get_contents($buildFile), true);
             if (is_array($build)) {
+                /** @var array<string, mixed> $build */
                 $config->applyBuildJson($build);
             }
         }
@@ -86,21 +87,52 @@ class BuildConfig
      */
     private function applyBuildJson(array $data): void
     {
-        if (isset($data['name'])) $this->name = $data['name'];
-        if (isset($data['identifier'])) $this->identifier = $data['identifier'];
-        if (isset($data['version'])) $this->version = $data['version'];
-        if (isset($data['entry'])) $this->entry = $data['entry'];
-        if (isset($data['run'])) $this->run = $data['run'];
+        if (isset($data['name']) && is_string($data['name'])) $this->name = $data['name'];
+        if (isset($data['identifier']) && is_string($data['identifier'])) $this->identifier = $data['identifier'];
+        if (isset($data['version']) && is_string($data['version'])) $this->version = $data['version'];
+        if (isset($data['entry']) && is_string($data['entry'])) $this->entry = $data['entry'];
+        if (isset($data['run']) && is_string($data['run'])) $this->run = $data['run'];
 
-        if (isset($data['php']['extensions'])) $this->phpExtensions = $data['php']['extensions'];
-        if (isset($data['php']['bundleLibs'])) $this->bundleLibs = $data['php']['bundleLibs'];
+        $php = isset($data['php']) && is_array($data['php']) ? $data['php'] : [];
+        if (isset($php['extensions']) && is_array($php['extensions'])) {
+            /** @var array<string> $extensions */
+            $extensions = $php['extensions'];
+            $this->phpExtensions = $extensions;
+        }
+        if (isset($php['bundleLibs']) && is_array($php['bundleLibs'])) {
+            /** @var array<string, array<array{src: string, optional?: bool}>> $bundleLibs */
+            $bundleLibs = $php['bundleLibs'];
+            $this->bundleLibs = $bundleLibs;
+        }
 
-        if (isset($data['phar']['exclude'])) $this->pharExclude = $data['phar']['exclude'];
-        if (isset($data['phar']['additionalRequires'])) $this->additionalRequires = $data['phar']['additionalRequires'];
+        $phar = isset($data['phar']) && is_array($data['phar']) ? $data['phar'] : [];
+        if (isset($phar['exclude']) && is_array($phar['exclude'])) {
+            /** @var array<string> $exclude */
+            $exclude = $phar['exclude'];
+            $this->pharExclude = $exclude;
+        }
+        if (isset($phar['additionalRequires']) && is_array($phar['additionalRequires'])) {
+            /** @var array<string> $additionalRequires */
+            $additionalRequires = $phar['additionalRequires'];
+            $this->additionalRequires = $additionalRequires;
+        }
 
-        if (isset($data['resources']['external'])) $this->externalResources = $data['resources']['external'];
-        if (isset($data['platforms'])) $this->platforms = $data['platforms'];
-        if (isset($data['buildTypes'])) $this->buildTypes = $data['buildTypes'];
+        $resources = isset($data['resources']) && is_array($data['resources']) ? $data['resources'] : [];
+        if (isset($resources['external']) && is_array($resources['external'])) {
+            /** @var array<string> $external */
+            $external = $resources['external'];
+            $this->externalResources = $external;
+        }
+        if (isset($data['platforms']) && is_array($data['platforms'])) {
+            /** @var array<string, array<string, mixed>> $platforms */
+            $platforms = $data['platforms'];
+            $this->platforms = $platforms;
+        }
+        if (isset($data['buildTypes']) && is_array($data['buildTypes'])) {
+            /** @var array<string, array<string, mixed>> $buildTypes */
+            $buildTypes = $data['buildTypes'];
+            $this->buildTypes = $buildTypes;
+        }
     }
 
     /**

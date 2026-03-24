@@ -67,8 +67,11 @@ class GameBuilder
             $this->log('success', "Staged {$fileCount} files");
 
             // Phase 2b: Apply build type constant overrides
-            if ($buildType !== 'full' && isset($this->config->buildTypes[$buildType]['constants'])) {
-                $this->applyBuildTypeConstants($stagingDir, $this->config->buildTypes[$buildType]['constants']);
+            $buildTypeConfig = $this->config->buildTypes[$buildType] ?? [];
+            if ($buildType !== 'full' && isset($buildTypeConfig['constants']) && is_array($buildTypeConfig['constants'])) {
+                /** @var array<string, mixed> $constants */
+                $constants = $buildTypeConfig['constants'];
+                $this->applyBuildTypeConstants($stagingDir, $constants);
                 $this->log('info', "Applied build type '{$buildType}' constants");
             }
 
@@ -178,6 +181,7 @@ class GameBuilder
             new \RecursiveDirectoryIterator($path, \FilesystemIterator::SKIP_DOTS),
             \RecursiveIteratorIterator::LEAVES_ONLY
         );
+        /** @var \SplFileInfo $file */
         foreach ($iterator as $file) {
             $size += $file->getSize();
         }
@@ -190,6 +194,7 @@ class GameBuilder
             new \RecursiveDirectoryIterator($dir, \FilesystemIterator::SKIP_DOTS),
             \RecursiveIteratorIterator::CHILD_FIRST
         );
+        /** @var \SplFileInfo $item */
         foreach ($iterator as $item) {
             $item->isDir() ? rmdir($item->getPathname()) : unlink($item->getPathname());
         }

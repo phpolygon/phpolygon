@@ -27,6 +27,9 @@ namespace PHPolygon\Testing;
  * Update references:
  *   PHPOLYGON_UPDATE_SNAPSHOTS=1 vendor/bin/phpunit
  */
+/**
+ * @phpstan-require-extends \PHPUnit\Framework\TestCase
+ */
 trait VisualTestCase
 {
     /**

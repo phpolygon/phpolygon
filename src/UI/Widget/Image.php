@@ -24,8 +24,8 @@ class Image extends Widget
 
     public function measure(float $availableWidth, float $availableHeight, UIStyle $style): void
     {
-        $texW = $this->texture?->width ?? 0;
-        $texH = $this->texture?->height ?? 0;
+        $texW = $this->texture !== null ? $this->texture->width : 0;
+        $texH = $this->texture !== null ? $this->texture->height : 0;
 
         $this->measuredWidth = $this->sizing->fillWidth ? $availableWidth
             : ($this->sizing->width > 0 ? $this->sizing->width : (float) $texW);

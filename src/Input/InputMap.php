@@ -24,10 +24,14 @@ class InputMap
     public function addAction(string $name, InputBinding ...$bindings): self
     {
         $this->actions[$name] = new InputAction($name);
-        $this->bindings[$name] = $bindings;
+        $this->bindings[$name] = array_values($bindings);
         return $this;
     }
 
+    /**
+     * @param list<InputBinding> $positive
+     * @param list<InputBinding> $negative
+     */
     public function addAxis(string $name, array $positive, array $negative): self
     {
         $this->axes[$name] = [

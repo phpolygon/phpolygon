@@ -7,6 +7,7 @@ namespace PHPolygon\Editor\Registry;
 use PHPolygon\ECS\SystemInterface;
 use ReflectionClass;
 use RuntimeException;
+use SplFileInfo;
 
 class SystemRegistry
 {
@@ -38,12 +39,14 @@ class SystemRegistry
             new \RecursiveDirectoryIterator($directory, \FilesystemIterator::SKIP_DOTS)
         );
 
+        /** @var SplFileInfo $file */
         foreach ($iterator as $file) {
             if ($file->getExtension() !== 'php') {
                 continue;
             }
 
-            $relativePath = str_replace($directory . DIRECTORY_SEPARATOR, '', $file->getPathname());
+            $pathname = $file->getPathname();
+            $relativePath = str_replace($directory . DIRECTORY_SEPARATOR, '', $pathname);
             $className = $namespace . str_replace(
                 [DIRECTORY_SEPARATOR, '.php'],
                 ['\\', ''],
@@ -63,6 +66,7 @@ class SystemRegistry
                 continue;
             }
 
+            /** @var class-string<SystemInterface> $className */
             $this->register($className);
         }
     }
@@ -78,7 +82,7 @@ class SystemRegistry
         return $this->systems;
     }
 
-    /** @return array<string, mixed> */
+    /** @return list<array{class: string, shortName: string}> */
     public function toArray(): array
     {
         return array_values($this->systems);

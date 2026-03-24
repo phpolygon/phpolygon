@@ -12,9 +12,6 @@ class LocaleManager
     /** @var array<string, array<string, string>> locale => [key => translation] */
     private array $translations = [];
 
-    /** @var list<string> */
-    private array $loadedFiles = [];
-
     public function __construct(
         string $defaultLocale = 'en',
         string $fallbackLocale = 'en',
@@ -64,15 +61,22 @@ class LocaleManager
         }
 
         $content = file_get_contents($path);
-        $data = json_decode($content, true, 512, JSON_THROW_ON_ERROR);
+        if ($content === false) {
+            throw new \RuntimeException("Failed to read translation file: {$path}");
+        }
+
+        $decoded = json_decode($content, true, 512, JSON_THROW_ON_ERROR);
+        if (!is_array($decoded)) {
+            throw new \RuntimeException("Translation file must contain a JSON object: {$path}");
+        }
+        /** @var array<string, string|array<mixed>> $data */
+        $data = $decoded;
 
         $flat = $this->flatten($data);
         $this->translations[$locale] = array_merge(
             $this->translations[$locale] ?? [],
             $flat,
         );
-
-        $this->loadedFiles[] = $path;
     }
 
     /**
@@ -87,6 +91,9 @@ class LocaleManager
         }
 
         $files = glob($directory . '/*.json');
+        if ($files === false) {
+            return;
+        }
         foreach ($files as $file) {
             $locale = pathinfo($file, PATHINFO_FILENAME);
             $this->loadFile($locale, $file);
@@ -219,17 +226,20 @@ class LocaleManager
     /**
      * Flatten a nested array into dot-notation keys.
      *
+     * @param array<string|int, mixed> $data
      * @return array<string, string>
      */
     private function flatten(array $data, string $prefix = ''): array
     {
         $result = [];
         foreach ($data as $key => $value) {
-            $fullKey = $prefix !== '' ? $prefix . '.' . $key : $key;
+            $fullKey = $prefix !== '' ? $prefix . '.' . $key : (string) $key;
             if (is_array($value)) {
                 $result = array_merge($result, $this->flatten($value, $fullKey));
+            } elseif (is_string($value)) {
+                $result[$fullKey] = $value;
             } else {
-                $result[$fullKey] = (string) $value;
+                $result[$fullKey] = is_scalar($value) ? (string) $value : '';
             }
         }
         return $result;

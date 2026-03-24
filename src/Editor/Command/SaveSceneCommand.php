@@ -9,7 +9,9 @@ use RuntimeException;
 
 class SaveSceneCommand implements CommandInterface
 {
-    public function __construct(private readonly array $args = []) {}
+    /** @param array<string, mixed> $args */
+    /** @param array<string, mixed> $args */
+    public function __construct(array $args = []) {}
 
     public function execute(EditorContext $context): array
     {
@@ -21,7 +23,7 @@ class SaveSceneCommand implements CommandInterface
         $data = $doc->toArray();
         $phpCode = $context->transpiler->fromArray($data);
 
-        $sceneName = $data['name'] ?? 'untitled';
+        $sceneName = is_string($data['name'] ?? null) ? $data['name'] : 'untitled';
         $className = str_replace(' ', '', ucwords(str_replace(['_', '-'], ' ', $sceneName)));
         $scenesDir = $context->getScenesDir();
 

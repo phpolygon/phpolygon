@@ -8,6 +8,7 @@ use PHPolygon\Editor\EditorContext;
 
 class ListComponentsCommand implements CommandInterface
 {
+    /** @param array<string, mixed> $args */
     public function __construct(private readonly array $args = []) {}
 
     public function execute(EditorContext $context): array

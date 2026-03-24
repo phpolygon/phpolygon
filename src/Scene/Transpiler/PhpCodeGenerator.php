@@ -6,7 +6,6 @@ namespace PHPolygon\Scene\Transpiler;
 
 use PHPolygon\ECS\Attribute\Property;
 use PHPolygon\ECS\Attribute\Serializable;
-use PHPolygon\ECS\Serializer\AttributeSerializer;
 use PHPolygon\Math\Vec2;
 use PHPolygon\Math\Vec3;
 use PHPolygon\Rendering\Color;
@@ -16,9 +15,7 @@ use RuntimeException;
 
 class PhpCodeGenerator
 {
-    public function __construct(
-        private readonly AttributeSerializer $serializer,
-    ) {}
+    public function __construct() {}
 
     /**
      * Generate PHP Scene source code from a JSON-decoded scene array.
@@ -27,14 +24,17 @@ class PhpCodeGenerator
      */
     public function generate(array $data): string
     {
-        $sceneName = $data['name'];
+        $sceneName = is_string($data['name'] ?? null) ? $data['name'] : '';
         $className = $this->nameToClassName($sceneName);
-        $sceneClass = $data['_scene'] ?? null;
-        $namespace = $sceneClass ? $this->extractNamespace($sceneClass) : 'App\\Scene';
+        $sceneClass = isset($data['_scene']) && is_string($data['_scene']) ? $data['_scene'] : null;
+        $namespace = $sceneClass !== null ? $this->extractNamespace($sceneClass) : 'App\\Scene';
 
-        $systems = $data['systems'] ?? [];
-        $entities = $data['entities'] ?? [];
-        $config = $data['config'] ?? null;
+        /** @var list<string> $systems */
+        $systems = is_array($data['systems'] ?? null) ? $data['systems'] : [];
+        /** @var list<array<string, mixed>> $entities */
+        $entities = is_array($data['entities'] ?? null) ? $data['entities'] : [];
+        /** @var array<string, mixed>|null $config */
+        $config = isset($data['config']) && is_array($data['config']) ? $data['config'] : null;
 
         // Collect all use statements
         $uses = $this->collectUseStatements($entities, $systems, $config);
@@ -71,7 +71,7 @@ class PhpCodeGenerator
             $code .= "    {\n";
             $code .= "        return [\n";
             foreach ($systems as $system) {
-                $short = $this->shortName($system);
+                $short = $this->shortName((string) $system);
                 $code .= "            {$short}::class,\n";
             }
             $code .= "        ];\n";
@@ -97,12 +97,15 @@ class PhpCodeGenerator
      */
     private function generateEntityCode(array $entity, string $indent, string $builderVar): string
     {
-        $name = $entity['name'];
-        $prefab = $entity['prefab'] ?? null;
+        $name = is_string($entity['name'] ?? null) ? $entity['name'] : '';
+        $prefab = isset($entity['prefab']) && is_string($entity['prefab']) ? $entity['prefab'] : null;
         $persistent = $entity['persistent'] ?? false;
-        $tags = $entity['tags'] ?? [];
-        $components = $entity['components'] ?? [];
-        $children = $entity['children'] ?? [];
+        /** @var list<string> $tags */
+        $tags = is_array($entity['tags'] ?? null) ? $entity['tags'] : [];
+        /** @var list<array<string, mixed>> $components */
+        $components = is_array($entity['components'] ?? null) ? $entity['components'] : [];
+        /** @var list<array<string, mixed>> $children */
+        $children = is_array($entity['children'] ?? null) ? $entity['children'] : [];
 
         $code = '';
 
@@ -123,7 +126,7 @@ class PhpCodeGenerator
         }
 
         foreach ($tags as $tag) {
-            $code .= "\n{$indent}    ->tag(" . var_export($tag, true) . ")";
+            $code .= "\n{$indent}    ->tag(" . var_export((string) $tag, true) . ")";
         }
 
         // Children as chained ->child() calls
@@ -140,9 +143,11 @@ class PhpCodeGenerator
      */
     private function generateChildCode(array $child, string $indent): string
     {
-        $name = $child['name'];
-        $components = $child['components'] ?? [];
-        $children = $child['children'] ?? [];
+        $name = is_string($child['name'] ?? null) ? $child['name'] : '';
+        /** @var list<array<string, mixed>> $components */
+        $components = is_array($child['components'] ?? null) ? $child['components'] : [];
+        /** @var list<array<string, mixed>> $children */
+        $children = is_array($child['children'] ?? null) ? $child['children'] : [];
 
         $code = "{$indent}->child(" . var_export($name, true) . ")";
 
@@ -164,7 +169,7 @@ class PhpCodeGenerator
     private function generateComponentConstructor(array $data): string
     {
         $class = $data['_class'] ?? null;
-        if ($class === null) {
+        if (!is_string($class)) {
             throw new RuntimeException('Component data missing _class field');
         }
 
@@ -236,6 +241,7 @@ class PhpCodeGenerator
         }
 
         if (is_array($value)) {
+            /** @var array<int|string, mixed> $value */
             return match ($typeName) {
                 Vec2::class => $this->renderVec2($value),
                 Vec3::class => $this->renderVec3($value),
@@ -247,34 +253,45 @@ class PhpCodeGenerator
         return null;
     }
 
-    /** @param array<string, mixed> $value */
+    /** @param array<int|string, mixed> $value */
     private function renderVec2(array $value): string
     {
-        $x = $this->renderFloat((float)($value['x'] ?? $value[0] ?? 0));
-        $y = $this->renderFloat((float)($value['y'] ?? $value[1] ?? 0));
+        $x = $this->renderFloat($this->toFloat($value['x'] ?? $value[0] ?? 0));
+        $y = $this->renderFloat($this->toFloat($value['y'] ?? $value[1] ?? 0));
         return "new Vec2({$x}, {$y})";
     }
 
-    /** @param array<string, mixed> $value */
+    /** @param array<int|string, mixed> $value */
     private function renderVec3(array $value): string
     {
-        $x = $this->renderFloat((float)($value['x'] ?? $value[0] ?? 0));
-        $y = $this->renderFloat((float)($value['y'] ?? $value[1] ?? 0));
-        $z = $this->renderFloat((float)($value['z'] ?? $value[2] ?? 0));
+        $x = $this->renderFloat($this->toFloat($value['x'] ?? $value[0] ?? 0));
+        $y = $this->renderFloat($this->toFloat($value['y'] ?? $value[1] ?? 0));
+        $z = $this->renderFloat($this->toFloat($value['z'] ?? $value[2] ?? 0));
         return "new Vec3({$x}, {$y}, {$z})";
     }
 
-    /** @param array<string, mixed> $value */
+    /** @param array<int|string, mixed> $value */
     private function renderColor(array $value): string
     {
-        $r = $this->renderFloat((float)($value['r'] ?? 1));
-        $g = $this->renderFloat((float)($value['g'] ?? 1));
-        $b = $this->renderFloat((float)($value['b'] ?? 1));
-        $a = $this->renderFloat((float)($value['a'] ?? 1));
+        $r = $this->renderFloat($this->toFloat($value['r'] ?? 1));
+        $g = $this->renderFloat($this->toFloat($value['g'] ?? 1));
+        $b = $this->renderFloat($this->toFloat($value['b'] ?? 1));
+        $a = $this->renderFloat($this->toFloat($value['a'] ?? 1));
         return "new Color({$r}, {$g}, {$b}, {$a})";
     }
 
-    /** @param array<string, mixed> $value */
+    private function toFloat(mixed $value): float
+    {
+        if (is_float($value) || is_int($value)) {
+            return (float) $value;
+        }
+        if (is_string($value) && is_numeric($value)) {
+            return (float) $value;
+        }
+        return 0.0;
+    }
+
+    /** @param array<string|int, mixed> $value */
     private function renderArray(array $value): string
     {
         $items = [];
@@ -317,7 +334,7 @@ class PhpCodeGenerator
             $classes[] = $system;
         }
 
-        $this->collectEntityClasses($entities, $classes);
+        $this->collectEntityClasses(array_values($entities), $classes);
 
         if ($config !== null) {
             $classes[] = 'PHPolygon\\Scene\\SceneConfig';
@@ -331,23 +348,32 @@ class PhpCodeGenerator
     }
 
     /**
-     * @param array<string, mixed>[] $entities
+     * @param array<array<string, mixed>> $entities
      * @param list<string> $classes
      */
     private function collectEntityClasses(array $entities, array &$classes): void
     {
         foreach ($entities as $entity) {
-            if (isset($entity['prefab'])) {
+            if (isset($entity['prefab']) && is_string($entity['prefab'])) {
                 $classes[] = $entity['prefab'];
             }
-            foreach ($entity['components'] ?? [] as $component) {
-                if (isset($component['_class'])) {
-                    $classes[] = $component['_class'];
-                    $this->collectValueTypeClasses($component['_class'], $component, $classes);
+            $components = is_array($entity['components'] ?? null) ? $entity['components'] : [];
+            foreach ($components as $component) {
+                if (!is_array($component)) {
+                    continue;
+                }
+                if (isset($component['_class']) && is_string($component['_class'])) {
+                    $componentClass = $component['_class'];
+                    $classes[] = $componentClass;
+                    /** @var array<string, mixed> $typedComponent */
+                    $typedComponent = $component;
+                    $this->collectValueTypeClasses($componentClass, $typedComponent, $classes);
                 }
             }
-            if (isset($entity['children'])) {
-                $this->collectEntityClasses($entity['children'], $classes);
+            if (isset($entity['children']) && is_array($entity['children'])) {
+                /** @var list<array<string, mixed>> $entityChildren */
+                $entityChildren = $entity['children'];
+                $this->collectEntityClasses($entityChildren, $classes);
             }
         }
     }

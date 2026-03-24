@@ -57,7 +57,7 @@ class PlatformPackager
 
         // Copy icon if configured
         $macosConfig = $this->config->platforms['macos'] ?? [];
-        if (isset($macosConfig['icon'])) {
+        if (isset($macosConfig['icon']) && is_string($macosConfig['icon'])) {
             $iconPath = $this->config->projectRoot . '/' . $macosConfig['icon'];
             if (file_exists($iconPath)) {
                 copy($iconPath, $resourcesDir . '/' . basename($iconPath));
@@ -95,10 +95,12 @@ class PlatformPackager
         $identifier = $this->config->identifier;
         $version = $this->config->version;
         $macosConfig = $this->config->platforms['macos'] ?? [];
-        $minVersion = $macosConfig['minimumVersion'] ?? '12.0';
+        $minVersion = isset($macosConfig['minimumVersion']) && is_string($macosConfig['minimumVersion'])
+            ? $macosConfig['minimumVersion']
+            : '12.0';
 
         $iconFile = '';
-        if (isset($macosConfig['icon'])) {
+        if (isset($macosConfig['icon']) && is_string($macosConfig['icon'])) {
             $iconFile = basename($macosConfig['icon']);
         }
 
@@ -175,6 +177,7 @@ XML;
             new \RecursiveDirectoryIterator($src, \FilesystemIterator::SKIP_DOTS),
             \RecursiveIteratorIterator::SELF_FIRST
         );
+        /** @var \SplFileInfo $item */
         foreach ($iterator as $item) {
             $target = $dst . '/' . substr($item->getPathname(), strlen($src) + 1);
             if ($item->isDir()) {

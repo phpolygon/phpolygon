@@ -193,7 +193,7 @@ class WidgetTree
         // Focus management
         if ($hit instanceof TextInput) {
             $this->setFocus($hit);
-        } elseif (!($hit instanceof TextInput)) {
+        } else {
             $this->setFocus(null);
         }
 
