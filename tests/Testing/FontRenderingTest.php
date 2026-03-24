@@ -14,6 +14,8 @@ use PHPolygon\Testing\VisualTestCase;
  *
  * Because FreeType rendering can differ between OS versions,
  * these tests use platform-suffixed snapshots.
+ *
+ * @group font-vrt
  */
 class FontRenderingTest extends TestCase
 {

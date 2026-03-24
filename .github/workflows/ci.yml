@@ -36,8 +36,8 @@ jobs:
       - name: Install Composer dependencies
         run: composer install --no-interaction --ignore-platform-reqs
 
-      - name: Run PHPUnit
-        run: vendor/bin/phpunit
+      - name: Run PHPUnit (exclude font VRT)
+        run: vendor/bin/phpunit --exclude-group font-vrt
 
   tests-gpu:
     name: PHP ${{ matrix.php }} — GPU (xvfb)
@@ -80,8 +80,8 @@ jobs:
       - name: Install Composer dependencies
         run: composer install --no-interaction --ignore-platform-reqs
 
-      - name: Run PHPUnit with GPU
-        run: xvfb-run --auto-servernum vendor/bin/phpunit
+      - name: Run PHPUnit with GPU (exclude font VRT)
+        run: xvfb-run --auto-servernum vendor/bin/phpunit --exclude-group font-vrt
 
   static-analysis:
     name: PHPStan
@@ -96,6 +96,26 @@ jobs:
           php-version: '8.4'
           extensions: gd, mbstring, dom, xml
           coverage: none
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            php8.4-dev \
+            build-essential cmake \
+            libglfw3-dev \
+            libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev
+
+      - name: Build php-glfw
+        run: |
+          git clone https://github.com/mario-deluna/php-glfw
+          cd php-glfw
+          sudo phpize
+          ./configure --enable-glfw
+          make -j$(nproc)
+          sudo make install
+          cd ..
+          echo 'extension=glfw.so' | sudo tee -a $(php -r "echo php_ini_loaded_file();")
 
       - name: Install Composer dependencies
         run: composer install --no-interaction --ignore-platform-reqs
@@ -120,13 +140,16 @@ jobs:
       - name: Install Composer dependencies
         run: composer install --no-interaction --ignore-platform-reqs
 
-      - name: Run VRT tests
-        run: vendor/bin/phpunit tests/Testing/
+      - name: Run VRT tests (platform-neutral only)
+        run: vendor/bin/phpunit --exclude-group font-vrt tests/Testing/
 
-      - name: Check for uncommitted snapshot changes
+      - name: Check for snapshot changes (platform-neutral only)
         run: |
-          if [ -n "$(git status --porcelain tests/)" ]; then
-            echo "::error::VRT snapshots are out of date. Run tests locally and commit updated snapshots."
-            git diff --stat tests/
+          changed=$(git diff --name-only tests/ | grep -v '\-gd-' || true)
+          if [ -n "$changed" ]; then
+            echo "::error::Platform-neutral VRT snapshots are out of date:"
+            echo "$changed"
+            echo ""
+            echo "Run tests locally and commit updated snapshots."
             exit 1
           fi
