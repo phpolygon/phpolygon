@@ -311,9 +311,11 @@ function launchEditor(): void
     $projectRoot = getcwd() ?: dirname(__DIR__);
     putenv("PHPOLYGON_PROJECT_ROOT={$projectRoot}");
 
+    // native:run launches the Electron/Tauri desktop window with pre-built assets.
+    // For development with Vite hot-reload, use: cd editor && npm run native:dev
     $descriptors = [STDIN, STDOUT, STDERR];
     $process = proc_open(
-        ['php', 'artisan', 'native:serve'],
+        ['php', 'artisan', 'native:run', '--no-interaction'],
         $descriptors,
         $pipes,
         $editorDir,
