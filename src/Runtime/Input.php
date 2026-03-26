@@ -20,6 +20,12 @@ class Input implements InputInterface
     /** @var array<int, bool> Previous frame mouse button state */
     private array $mousePrev = [];
 
+    /** @var array<int, bool> Button had a PRESS event this frame (survives same-frame release) */
+    private array $mousePressedThisFrame = [];
+
+    /** @var array<int, bool> Key had a PRESS event this frame (survives same-frame release) */
+    private array $keyPressedThisFrame = [];
+
     private float $mouseX = 0.0;
     private float $mouseY = 0.0;
     private float $scrollX = 0.0;
@@ -39,7 +45,10 @@ class Input implements InputInterface
             return;
         }
         // GLFW_PRESS = 1, GLFW_RELEASE = 0, GLFW_REPEAT = 2
-        $this->keysDown[$key] = $action !== 0; // GLFW_RELEASE
+        $this->keysDown[$key] = $action !== 0;
+        if ($action === 1) { // GLFW_PRESS
+            $this->keyPressedThisFrame[$key] = true;
+        }
     }
 
     public function handleMouseButtonEvent(int $button, int $action): void
@@ -48,6 +57,9 @@ class Input implements InputInterface
             return;
         }
         $this->mouseDown[$button] = $action !== 0;
+        if ($action === 1) { // GLFW_PRESS
+            $this->mousePressedThisFrame[$button] = true;
+        }
     }
 
     public function handleCharEvent(int $codepoint): void
@@ -74,7 +86,7 @@ class Input implements InputInterface
 
     public function isKeyPressed(int $key): bool
     {
-        return ($this->keysDown[$key] ?? false) && !($this->keysPrev[$key] ?? false);
+        return $this->keyPressedThisFrame[$key] ?? false;
     }
 
     public function isKeyReleased(int $key): bool
@@ -89,7 +101,7 @@ class Input implements InputInterface
 
     public function isMouseButtonPressed(int $button): bool
     {
-        return ($this->mouseDown[$button] ?? false) && !($this->mousePrev[$button] ?? false);
+        return $this->mousePressedThisFrame[$button] ?? false;
     }
 
     public function isMouseButtonReleased(int $button): bool
@@ -160,6 +172,8 @@ class Input implements InputInterface
         if ($frames > 0 || $seconds > 0.0) {
             $this->keysDown = [];
             $this->mouseDown = [];
+            $this->keyPressedThisFrame = [];
+            $this->mousePressedThisFrame = [];
         }
     }
 
@@ -182,6 +196,8 @@ class Input implements InputInterface
     {
         $this->keysPrev = $this->keysDown;
         $this->mousePrev = $this->mouseDown;
+        $this->keyPressedThisFrame = [];
+        $this->mousePressedThisFrame = [];
         $this->scrollX = 0.0;
         $this->scrollY = 0.0;
         $this->charBuffer = [];
