@@ -14,10 +14,12 @@ use PHPolygon\Math\Vec3;
 class Physics3DSystem extends AbstractSystem
 {
     private Vec3 $gravity;
+    private float $groundPlaneY;
 
-    public function __construct(?Vec3 $gravity = null)
+    public function __construct(?Vec3 $gravity = null, float $groundPlaneY = 0.0)
     {
         $this->gravity = $gravity ?? new Vec3(0.0, -9.81, 0.0);
+        $this->groundPlaneY = $groundPlaneY;
     }
 
     public function setGravity(Vec3 $gravity): void
@@ -61,10 +63,10 @@ class Physics3DSystem extends AbstractSystem
                 $newPos->z + $radius,
             );
 
-            // Ground detection: floor at y = 0
+            // Ground detection: floor at configurable Y
             $controller->isGrounded = false;
-            if ($charMin->y <= 0.0) {
-                $newPos = new Vec3($newPos->x, $halfHeight, $newPos->z);
+            if ($charMin->y <= $this->groundPlaneY) {
+                $newPos = new Vec3($newPos->x, $this->groundPlaneY + $halfHeight, $newPos->z);
                 $controller->velocity = new Vec3($controller->velocity->x, 0.0, $controller->velocity->z);
                 $controller->isGrounded = true;
                 // Recompute AABB after ground snap

@@ -17,6 +17,7 @@ use PHPolygon\Rendering\Command\SetCamera;
 use PHPolygon\Rendering\Command\SetDirectionalLight;
 use PHPolygon\Rendering\Command\SetFog;
 use PHPolygon\Rendering\Command\SetSkybox;
+use PHPolygon\Rendering\Command\SetWaveAnimation;
 
 /**
  * OpenGL 4.1 3D renderer. Translates a RenderCommandList into GL draw calls.
@@ -78,6 +79,9 @@ class OpenGLRenderer3D implements Renderer3DInterface
 
     /** Cached uniform location for u_use_instancing */
     private int $useInstancingLoc = -1;
+
+    /** Global time for shader animations (seconds since start) */
+    private float $globalTime = 0.0;
 
     public function __construct(int $width = 1280, int $height = 720)
     {
@@ -145,6 +149,14 @@ class OpenGLRenderer3D implements Renderer3DInterface
             glUniform1i($this->useInstancingLoc, 0);
         }
 
+        // Time + wave animation defaults
+        $this->globalTime += 0.016; // ~60fps increment
+        $this->setUniformFloat('u_time', $this->globalTime);
+        $this->setUniformInt('u_vertex_anim', 0);
+        $this->setUniformFloat('u_wave_amplitude', 0.0);
+        $this->setUniformFloat('u_wave_frequency', 0.0);
+        $this->setUniformFloat('u_wave_phase', 0.0);
+
         $this->checkGLError('render() setup');
 
         // Pass 1: collect non-draw commands
@@ -200,7 +212,12 @@ class OpenGLRenderer3D implements Renderer3DInterface
         glDepthMask(true);
         glDisable(GL_BLEND);
         foreach ($commandList->getCommands() as $command) {
-            if ($command instanceof DrawMesh) {
+            if ($command instanceof SetWaveAnimation) {
+                $this->setUniformInt('u_vertex_anim', $command->enabled ? 1 : 0);
+                $this->setUniformFloat('u_wave_amplitude', $command->amplitude);
+                $this->setUniformFloat('u_wave_frequency', $command->frequency);
+                $this->setUniformFloat('u_wave_phase', $command->phase);
+            } elseif ($command instanceof DrawMesh) {
                 $mat = MaterialRegistry::get($command->materialId);
                 if ($mat === null || $mat->alpha >= 1.0) {
                     $this->drawMeshCommand($command->meshId, $command->materialId, $command->modelMatrix);
@@ -218,7 +235,12 @@ class OpenGLRenderer3D implements Renderer3DInterface
         glEnable(GL_BLEND);
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
         foreach ($commandList->getCommands() as $command) {
-            if ($command instanceof DrawMesh) {
+            if ($command instanceof SetWaveAnimation) {
+                $this->setUniformInt('u_vertex_anim', $command->enabled ? 1 : 0);
+                $this->setUniformFloat('u_wave_amplitude', $command->amplitude);
+                $this->setUniformFloat('u_wave_frequency', $command->frequency);
+                $this->setUniformFloat('u_wave_phase', $command->phase);
+            } elseif ($command instanceof DrawMesh) {
                 $mat = MaterialRegistry::get($command->materialId);
                 if ($mat !== null && $mat->alpha < 1.0) {
                     $this->drawMeshCommand($command->meshId, $command->materialId, $command->modelMatrix);
@@ -420,6 +442,23 @@ class OpenGLRenderer3D implements Renderer3DInterface
 
     private function applyMaterial(string $materialId): void
     {
+        // Procedural material mode: 0=standard, 1=sand, 2=water, 3=rock, 4=palm trunk, 5=palm leaf
+        $procMode = 0;
+        if (str_starts_with($materialId, 'sand_terrain')) {
+            $procMode = 1;
+        } elseif (str_starts_with($materialId, 'water_')) {
+            $procMode = 2;
+        } elseif (str_starts_with($materialId, 'rock')) {
+            $procMode = 3;
+        } elseif (str_starts_with($materialId, 'palm_trunk')) {
+            $procMode = 4;
+        } elseif (str_starts_with($materialId, 'palm_branch') || str_starts_with($materialId, 'palm_leaves') || str_starts_with($materialId, 'palm_leaf') || str_starts_with($materialId, 'palm_canopy') || str_starts_with($materialId, 'palm_frond')) {
+            $procMode = 5;
+        } elseif (str_starts_with($materialId, 'cloud_')) {
+            $procMode = 6;
+        }
+        $this->setUniformInt('u_proc_mode', $procMode);
+
         $material = MaterialRegistry::get($materialId);
         if ($material !== null) {
             $this->setUniformVec3('u_albedo', [$material->albedo->r, $material->albedo->g, $material->albedo->b]);
@@ -449,14 +488,14 @@ class OpenGLRenderer3D implements Renderer3DInterface
         $vertexCount = $meshData->vertexCount();
         $interleaved = [];
         for ($i = 0; $i < $vertexCount; $i++) {
-            $interleaved[] = $meshData->vertices[$i * 3];
-            $interleaved[] = $meshData->vertices[$i * 3 + 1];
-            $interleaved[] = $meshData->vertices[$i * 3 + 2];
-            $interleaved[] = $meshData->normals[$i * 3];
-            $interleaved[] = $meshData->normals[$i * 3 + 1];
-            $interleaved[] = $meshData->normals[$i * 3 + 2];
-            $interleaved[] = $meshData->uvs[$i * 2];
-            $interleaved[] = $meshData->uvs[$i * 2 + 1];
+            $interleaved[] = (float) $meshData->vertices[$i * 3];
+            $interleaved[] = (float) $meshData->vertices[$i * 3 + 1];
+            $interleaved[] = (float) $meshData->vertices[$i * 3 + 2];
+            $interleaved[] = (float) $meshData->normals[$i * 3];
+            $interleaved[] = (float) $meshData->normals[$i * 3 + 1];
+            $interleaved[] = (float) $meshData->normals[$i * 3 + 2];
+            $interleaved[] = (float) $meshData->uvs[$i * 2];
+            $interleaved[] = (float) $meshData->uvs[$i * 2 + 1];
         }
 
         $vbo = 0;
