@@ -23,16 +23,33 @@ class InstancedTerrainSystem extends AbstractSystem
 
     public function render(World $world): void
     {
+        static $frameCount = 0;
+
+        $entityCount = 0;
+        $totalMatrices = 0;
+        $materialCount = 0;
+
         foreach ($world->query(InstancedTerrain::class) as $entity) {
             $terrain = $entity->get(InstancedTerrain::class);
+            $entityCount++;
 
             foreach ($terrain->matricesByMaterial as $materialId => $matrices) {
+                $materialCount++;
+                $totalMatrices += count($matrices);
                 $this->commandList->add(new DrawMeshInstanced(
                     meshId: $terrain->meshId,
                     materialId: $materialId,
                     matrices: $matrices,
                 ));
             }
+        }
+
+        if ($frameCount < 3) {
+            fwrite(STDERR, sprintf(
+                "[InstancedTerrain] frame=%d entities=%d materials=%d matrices=%d cmdList=%d\n",
+                $frameCount, $entityCount, $materialCount, $totalMatrices, $this->commandList->count(),
+            ));
+            $frameCount++;
         }
     }
 }
