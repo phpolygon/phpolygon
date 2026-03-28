@@ -42,9 +42,22 @@ class Vec3
         return new self($this->x / $scalar, $this->y / $scalar, $this->z / $scalar);
     }
 
+    public function lengthSquared(): float
+    {
+        return $this->x * $this->x + $this->y * $this->y + $this->z * $this->z;
+    }
+
     public function length(): float
     {
-        return sqrt($this->x * $this->x + $this->y * $this->y + $this->z * $this->z);
+        return sqrt($this->lengthSquared());
+    }
+
+    public function distanceSquaredTo(Vec3 $other): float
+    {
+        $dx = $this->x - $other->x;
+        $dy = $this->y - $other->y;
+        $dz = $this->z - $other->z;
+        return $dx * $dx + $dy * $dy + $dz * $dz;
     }
 
     public function normalize(): self
