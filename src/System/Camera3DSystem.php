@@ -22,7 +22,7 @@ class Camera3DSystem extends AbstractSystem
         private readonly int $viewportHeight,
     ) {}
 
-    public function update(World $world, float $dt): void
+    public function render(World $world): void
     {
         foreach ($world->query(Camera3DComponent::class, Transform3D::class) as $entity) {
             $cam = $entity->get(Camera3DComponent::class);

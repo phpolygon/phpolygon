@@ -23,9 +23,9 @@ class Renderer3DSystem extends AbstractSystem
         private readonly RenderCommandList $commandList,
     ) {}
 
-    public function update(World $world, float $dt): void
+    public function render(World $world): void
     {
-        // Collect directional lights
+        // Collect lights in render() — must stay in sync with draws to avoid flickering
         foreach ($world->query(DirectionalLight::class, Transform3D::class) as $entity) {
             $light = $entity->get(DirectionalLight::class);
             $this->commandList->add(new SetDirectionalLight(
@@ -35,7 +35,6 @@ class Renderer3DSystem extends AbstractSystem
             ));
         }
 
-        // Collect point lights
         foreach ($world->query(PointLight::class, Transform3D::class) as $entity) {
             $light = $entity->get(PointLight::class);
             $transform = $entity->get(Transform3D::class);
@@ -46,10 +45,7 @@ class Renderer3DSystem extends AbstractSystem
                 $light->radius,
             ));
         }
-    }
 
-    public function render(World $world): void
-    {
         // Collect mesh draw calls
         foreach ($world->query(MeshRenderer::class, Transform3D::class) as $entity) {
             $mesh = $entity->get(MeshRenderer::class);
