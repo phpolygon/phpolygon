@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace PHPolygon\ECS;
 
 use PHPolygon\Component\Transform2D;
+use PHPolygon\Component\Transform3D;
 use RuntimeException;
 
 class World
@@ -65,6 +66,21 @@ class World
                     $parentTransform->childEntityIds = array_values(
                         array_filter($parentTransform->childEntityIds, fn(int $cid) => $cid !== $id)
                     );
+                }
+            }
+        }
+
+        // Cascade destroy children via Transform3D hierarchy
+        $transform3D = $this->tryGetComponent($id, Transform3D::class);
+        if ($transform3D instanceof Transform3D) {
+            foreach ($transform3D->childEntityIds as $childId) {
+                $this->destroyEntity($childId);
+            }
+
+            if ($transform3D->parentEntityId !== null && $this->isAlive($transform3D->parentEntityId)) {
+                $parentTransform3D = $this->tryGetComponent($transform3D->parentEntityId, Transform3D::class);
+                if ($parentTransform3D instanceof Transform3D) {
+                    $parentTransform3D->removeChild($transform3D, $id);
                 }
             }
         }

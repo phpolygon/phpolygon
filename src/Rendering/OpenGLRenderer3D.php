@@ -34,6 +34,11 @@ class OpenGLRenderer3D implements Renderer3DInterface
     private array $indexCountCache = [];
 
     private int $shaderProgram = 0;
+    private int $skyboxShaderProgram = 0;
+    private int $skyboxVao = 0;
+
+    /** @var array<string, int> GL cubemap texture IDs */
+    private array $cubemapCache = [];
 
     /** Accumulated per-frame point lights (capped at 8) */
     private int $pointLightCount = 0;
@@ -41,11 +46,18 @@ class OpenGLRenderer3D implements Renderer3DInterface
     /** @var array<int, array{pos: float[], color: float[], intensity: float, radius: float}> */
     private array $pointLights = [];
 
+    private ?string $pendingSkyboxId = null;
+
+    /** Cached view/projection matrices for skybox rendering */
+    private ?Mat4 $currentViewMatrix = null;
+    private ?Mat4 $currentProjectionMatrix = null;
+
     public function __construct(int $width = 1280, int $height = 720)
     {
         $this->width  = $width;
         $this->height = $height;
         $this->initShaders();
+        $this->initSkybox();
     }
 
     public function beginFrame(): void
@@ -94,6 +106,8 @@ class OpenGLRenderer3D implements Renderer3DInterface
         // Pass 1: collect non-draw commands
         foreach ($commandList->getCommands() as $command) {
             if ($command instanceof SetCamera) {
+                $this->currentViewMatrix = $command->viewMatrix;
+                $this->currentProjectionMatrix = $command->projectionMatrix;
                 $this->setUniformMat4('u_view', $command->viewMatrix);
                 $this->setUniformMat4('u_projection', $command->projectionMatrix);
 
@@ -125,8 +139,7 @@ class OpenGLRenderer3D implements Renderer3DInterface
                 $this->setUniformFloat('u_fog_far', $command->far);
 
             } elseif ($command instanceof SetSkybox) {
-                // Skybox not implemented in Phase 7 — skip silently
-                trigger_error('SetSkybox is not supported in OpenGLRenderer3D Phase 7', E_USER_WARNING);
+                $this->pendingSkyboxId = $command->cubemapId;
             }
         }
 
@@ -150,6 +163,12 @@ class OpenGLRenderer3D implements Renderer3DInterface
                 }
             }
         }
+
+        // Pass 3: skybox (drawn last with depth ≤ test so it fills background)
+        if ($this->pendingSkyboxId !== null && $this->currentViewMatrix !== null && $this->currentProjectionMatrix !== null) {
+            $this->renderSkybox($this->pendingSkyboxId);
+            $this->pendingSkyboxId = null;
+        }
     }
 
     private function drawMeshCommand(string $meshId, string $materialId, Mat4 $modelMatrix): void
@@ -164,7 +183,20 @@ class OpenGLRenderer3D implements Renderer3DInterface
         }
 
         $this->setUniformMat4('u_model', $modelMatrix);
-        // Phase 7: materialId is not resolved to a texture — use default albedo
+
+        // Resolve material properties
+        $material = MaterialRegistry::get($materialId);
+        if ($material !== null) {
+            $this->setUniformVec3('u_albedo', [$material->albedo->r, $material->albedo->g, $material->albedo->b]);
+            $this->setUniformVec3('u_emission', [$material->emission->r, $material->emission->g, $material->emission->b]);
+            $this->setUniformFloat('u_roughness', $material->roughness);
+            $this->setUniformFloat('u_metallic', $material->metallic);
+        } else {
+            $this->setUniformVec3('u_albedo', [0.8, 0.8, 0.8]);
+            $this->setUniformVec3('u_emission', [0.0, 0.0, 0.0]);
+            $this->setUniformFloat('u_roughness', 0.5);
+            $this->setUniformFloat('u_metallic', 0.0);
+        }
 
         glBindVertexArray($this->vaoCache[$meshId]);
         glDrawElements(GL_TRIANGLES, $this->indexCountCache[$meshId], GL_UNSIGNED_INT, 0);
@@ -317,5 +349,169 @@ class OpenGLRenderer3D implements Renderer3DInterface
         if ($loc >= 0) {
             glUniform1i($loc, $value);
         }
+    }
+
+    // ─── Skybox ───────────────────────────────────────────────────────────────
+
+    private function initSkybox(): void
+    {
+        // Compile skybox shaders
+        $vertSource = $this->loadShaderSource(__DIR__ . '/../../resources/shaders/source/skybox.vert.glsl');
+        $fragSource = $this->loadShaderSource(__DIR__ . '/../../resources/shaders/source/skybox.frag.glsl');
+
+        $vert = glCreateShader(GL_VERTEX_SHADER);
+        glShaderSource($vert, $vertSource);
+        glCompileShader($vert);
+        $vertStatus = 0;
+        glGetShaderiv($vert, GL_COMPILE_STATUS, $vertStatus);
+        if (!$vertStatus) {
+            $log = glGetShaderInfoLog($vert, 4096);
+            throw new \RuntimeException("Skybox vertex shader compile error:\n{$log}");
+        }
+
+        $frag = glCreateShader(GL_FRAGMENT_SHADER);
+        glShaderSource($frag, $fragSource);
+        glCompileShader($frag);
+        $fragStatus = 0;
+        glGetShaderiv($frag, GL_COMPILE_STATUS, $fragStatus);
+        if (!$fragStatus) {
+            $log = glGetShaderInfoLog($frag, 4096);
+            throw new \RuntimeException("Skybox fragment shader compile error:\n{$log}");
+        }
+
+        $program = glCreateProgram();
+        glAttachShader($program, $vert);
+        glAttachShader($program, $frag);
+        glLinkProgram($program);
+        $linkStatus = 0;
+        glGetProgramiv($program, GL_LINK_STATUS, $linkStatus);
+        if (!$linkStatus) {
+            $log = glGetProgramInfoLog($program, 4096);
+            throw new \RuntimeException("Skybox shader link error:\n{$log}");
+        }
+        glDeleteShader($vert);
+        glDeleteShader($frag);
+        $this->skyboxShaderProgram = $program;
+
+        // Create skybox cube VAO (unit cube, positions only)
+        /** @var float[] $skyboxVertices */
+        $skyboxVertices = [
+            -1.0,  1.0, -1.0,  -1.0, -1.0, -1.0,   1.0, -1.0, -1.0,   1.0, -1.0, -1.0,   1.0,  1.0, -1.0,  -1.0,  1.0, -1.0,
+            -1.0, -1.0,  1.0,  -1.0, -1.0, -1.0,  -1.0,  1.0, -1.0,  -1.0,  1.0, -1.0,  -1.0,  1.0,  1.0,  -1.0, -1.0,  1.0,
+             1.0, -1.0, -1.0,   1.0, -1.0,  1.0,   1.0,  1.0,  1.0,   1.0,  1.0,  1.0,   1.0,  1.0, -1.0,   1.0, -1.0, -1.0,
+            -1.0, -1.0,  1.0,  -1.0,  1.0,  1.0,   1.0,  1.0,  1.0,   1.0,  1.0,  1.0,   1.0, -1.0,  1.0,  -1.0, -1.0,  1.0,
+            -1.0,  1.0, -1.0,   1.0,  1.0, -1.0,   1.0,  1.0,  1.0,   1.0,  1.0,  1.0,  -1.0,  1.0,  1.0,  -1.0,  1.0, -1.0,
+            -1.0, -1.0, -1.0,  -1.0, -1.0,  1.0,   1.0, -1.0, -1.0,   1.0, -1.0, -1.0,  -1.0, -1.0,  1.0,   1.0, -1.0,  1.0,
+        ];
+
+        $vao = 0;
+        glGenVertexArrays(1, $vao);
+        if (!is_int($vao) || $vao === 0) {
+            throw new \RuntimeException('Failed to create skybox VAO');
+        }
+        glBindVertexArray($vao);
+
+        $vbo = 0;
+        glGenBuffers(1, $vbo);
+        if (!is_int($vbo) || $vbo === 0) {
+            throw new \RuntimeException('Failed to create skybox VBO');
+        }
+        glBindBuffer(GL_ARRAY_BUFFER, $vbo);
+        glBufferData(GL_ARRAY_BUFFER, new FloatBuffer($skyboxVertices), GL_STATIC_DRAW);
+
+        glVertexAttribPointer(0, 3, GL_FLOAT, false, 3 * 4, 0);
+        glEnableVertexAttribArray(0);
+
+        glBindVertexArray(0);
+        $this->skyboxVao = $vao;
+    }
+
+    private function loadCubemap(string $cubemapId): int
+    {
+        if (isset($this->cubemapCache[$cubemapId])) {
+            return $this->cubemapCache[$cubemapId];
+        }
+
+        $faces = CubemapRegistry::get($cubemapId);
+        if ($faces === null) {
+            return 0;
+        }
+
+        $texId = 0;
+        glGenTextures(1, $texId);
+        if (!is_int($texId) || $texId === 0) {
+            return 0;
+        }
+        glBindTexture(GL_TEXTURE_CUBE_MAP, $texId);
+
+        $facePaths = $faces->toArray();
+        for ($i = 0; $i < 6; $i++) {
+            $img = @imagecreatefrompng($facePaths[$i]);
+            if ($img === false) {
+                $img = @imagecreatefromjpeg($facePaths[$i]);
+            }
+            if ($img === false) {
+                glDeleteTextures(1, $texId);
+                return 0;
+            }
+
+            $w = imagesx($img);
+            $h = imagesy($img);
+            $data = '';
+            for ($y = 0; $y < $h; $y++) {
+                for ($x = 0; $x < $w; $x++) {
+                    $rgb = imagecolorat($img, $x, $y);
+                    $data .= chr(($rgb >> 16) & 0xFF) . chr(($rgb >> 8) & 0xFF) . chr($rgb & 0xFF);
+                }
+            }
+            imagedestroy($img);
+            glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + $i, 0, GL_RGB, $w, $h, 0, GL_RGB, GL_UNSIGNED_BYTE, $data);
+        }
+
+        glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
+
+        glBindTexture(GL_TEXTURE_CUBE_MAP, 0);
+        $this->cubemapCache[$cubemapId] = $texId;
+        return $texId;
+    }
+
+    private function renderSkybox(string $cubemapId): void
+    {
+        $texId = $this->loadCubemap($cubemapId);
+        if ($texId === 0) {
+            return;
+        }
+
+        // Draw skybox with depth ≤ (passes where nothing has been drawn, fails behind objects)
+        glDepthFunc(GL_LEQUAL);
+        glUseProgram($this->skyboxShaderProgram);
+
+        $viewLoc = glGetUniformLocation($this->skyboxShaderProgram, 'u_view');
+        if ($viewLoc >= 0 && $this->currentViewMatrix !== null) {
+            glUniformMatrix4fv($viewLoc, false, $this->currentViewMatrix->toArray());
+        }
+        $projLoc = glGetUniformLocation($this->skyboxShaderProgram, 'u_projection');
+        if ($projLoc >= 0 && $this->currentProjectionMatrix !== null) {
+            glUniformMatrix4fv($projLoc, false, $this->currentProjectionMatrix->toArray());
+        }
+
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_CUBE_MAP, $texId);
+        $skyboxLoc = glGetUniformLocation($this->skyboxShaderProgram, 'u_skybox');
+        if ($skyboxLoc >= 0) {
+            glUniform1i($skyboxLoc, 0);
+        }
+
+        glBindVertexArray($this->skyboxVao);
+        glDrawArrays(GL_TRIANGLES, 0, 36);
+        glBindVertexArray(0);
+
+        glDepthFunc(GL_LESS);
+        // Restore mesh shader for any subsequent draws
+        glUseProgram($this->shaderProgram);
     }
 }

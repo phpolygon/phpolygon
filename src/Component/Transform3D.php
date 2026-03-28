@@ -63,4 +63,27 @@ class Transform3D extends AbstractComponent
     {
         return $this->worldMatrix->getTranslation();
     }
+
+    /**
+     * Attach a child entity to this transform's hierarchy.
+     * Sets the child's parentEntityId and adds it to this transform's childEntityIds.
+     */
+    public function addChild(Transform3D $child, int $childEntityId, int $parentEntityId): void
+    {
+        $child->parentEntityId = $parentEntityId;
+        if (!in_array($childEntityId, $this->childEntityIds, true)) {
+            $this->childEntityIds[] = $childEntityId;
+        }
+    }
+
+    /**
+     * Remove a child entity from this transform's hierarchy.
+     */
+    public function removeChild(Transform3D $child, int $childEntityId): void
+    {
+        $child->parentEntityId = null;
+        $this->childEntityIds = array_values(
+            array_filter($this->childEntityIds, fn(int $id) => $id !== $childEntityId)
+        );
+    }
 }

@@ -21,6 +21,9 @@ uniform PointLight u_point_lights[8];
 uniform int u_point_light_count;
 
 uniform vec3 u_albedo;
+uniform vec3 u_emission;
+uniform float u_roughness;
+uniform float u_metallic;
 uniform vec3 u_fog_color;
 uniform float u_fog_near;
 uniform float u_fog_far;
@@ -47,6 +50,9 @@ void main() {
         float NdotPL = max(dot(N, normalize(L)), 0.0);
         color += u_albedo * u_point_lights[i].color * u_point_lights[i].intensity * NdotPL * atten;
     }
+
+    // Emission
+    color += u_emission;
 
     // Fog
     float fogDist = length(v_worldPos - u_camera_pos);

@@ -245,7 +245,7 @@ class VulkanRenderer3D implements Renderer3DInterface
                 ];
 
             } elseif ($command instanceof SetSkybox) {
-                trigger_error('SetSkybox is not supported in VulkanRenderer3D', E_USER_WARNING);
+                // Skybox requires a separate pipeline — Phase 8+ TODO
             }
         }
 
@@ -267,8 +267,12 @@ class VulkanRenderer3D implements Renderer3DInterface
 
         foreach ($commandList->getCommands() as $command) {
             if ($command instanceof DrawMesh) {
+                $this->resolveMaterial($command->materialId);
+                $this->uploadLightingUbo();
                 $this->drawMeshCommand($command->meshId, $command->modelMatrix);
             } elseif ($command instanceof DrawMeshInstanced) {
+                $this->resolveMaterial($command->materialId);
+                $this->uploadLightingUbo();
                 foreach ($command->matrices as $matrix) {
                     $this->drawMeshCommand($command->meshId, $matrix);
                 }
@@ -276,6 +280,16 @@ class VulkanRenderer3D implements Renderer3DInterface
         }
 
         $this->commandBuffer->endRenderPass();
+    }
+
+    private function resolveMaterial(string $materialId): void
+    {
+        $material = MaterialRegistry::get($materialId);
+        if ($material !== null) {
+            $this->albedo = [$material->albedo->r, $material->albedo->g, $material->albedo->b];
+        } else {
+            $this->albedo = [0.8, 0.8, 0.8];
+        }
     }
 
     private function drawMeshCommand(string $meshId, Mat4 $modelMatrix): void
