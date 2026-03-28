@@ -373,6 +373,121 @@ vec3 computePalmLeaf(vec3 worldPos, vec3 N, vec3 V, vec3 L, vec3 baseAlbedo, out
 }
 
 // ================================================================
+//  Procedural Wood Planks (beach hut walls/furniture)
+// ================================================================
+
+vec3 computeWoodPlanks(vec3 N, vec3 worldPos, vec3 baseAlbedo, out float roughOut) {
+    // Use world Y for horizontal planks, world XZ for grain direction
+    // Plank spacing — each plank ~0.15 units tall
+    float plankScale = 6.5;
+    float plankY = worldPos.y * plankScale;
+    float plankIndex = floor(plankY);
+    float withinPlank = fract(plankY);
+
+    // Gap between planks — dark thin line
+    float gap = smoothstep(0.0, 0.03, withinPlank) * smoothstep(1.0, 0.97, withinPlank);
+
+    // Each plank has a unique color shift based on its index
+    float plankHash = hash21(vec2(plankIndex * 17.3, plankIndex * 7.1));
+    float plankHash2 = hash21(vec2(plankIndex * 31.7, plankIndex * 13.3));
+
+    // Base wood color with per-plank variation
+    vec3 woodColor = baseAlbedo;
+    woodColor *= 0.8 + plankHash * 0.4; // brightness variation
+    woodColor = mix(woodColor, woodColor * vec3(1.05, 0.95, 0.85), plankHash2 * 0.3); // hue shift
+
+    // Wood grain — runs horizontally along the plank
+    float grainCoord = worldPos.x * 8.0 + worldPos.z * 8.0 + plankHash * 20.0;
+    float grain = sin(grainCoord + noise(vec2(grainCoord * 0.5, plankIndex)) * 3.0);
+    grain = grain * 0.5 + 0.5;
+    woodColor *= 0.9 + grain * 0.15;
+
+    // Fine grain detail
+    float fineGrain = noise(vec2(grainCoord * 3.0, worldPos.y * 2.0 + plankIndex * 5.0));
+    woodColor *= 0.95 + fineGrain * 0.1;
+
+    // Knot holes — rare dark circles
+    float knotSeed = hash21(vec2(plankIndex * 43.7, floor(grainCoord * 0.3)));
+    if (knotSeed > 0.92) {
+        vec2 knotCenter = vec2(
+            fract(knotSeed * 127.1) * 0.8 + 0.1,
+            0.5
+        );
+        vec2 knotUV = vec2(fract(grainCoord * 0.15), withinPlank);
+        float knotDist = length(knotUV - knotCenter);
+        if (knotDist < 0.08) {
+            woodColor *= 0.4 + knotDist * 5.0; // dark center, lighter rim
+        }
+    }
+
+    // Nail heads — small bright spots
+    float nailSeed = hash21(vec2(plankIndex * 11.1, 0.0));
+    if (fract(nailSeed * 7.7) > 0.7) {
+        vec2 nailPos = vec2(fract(nailSeed * 31.3) * 0.6 + 0.2, 0.5);
+        vec2 nailUV = vec2(fract((worldPos.x + worldPos.z) * 2.0), withinPlank);
+        if (length(nailUV - nailPos) < 0.015) {
+            woodColor = vec3(0.3, 0.3, 0.35); // metal nail
+        }
+    }
+
+    // Apply gap — dark line between planks
+    woodColor *= gap * 0.85 + 0.15;
+
+    // Weathering — random darker patches
+    float weather = fbm(worldPos.xz * 3.0 + worldPos.y * 2.0, 2);
+    woodColor *= 0.85 + weather * 0.2;
+
+    // Normal perturbation — grain direction bumps
+    float bumpX = noise(vec2(grainCoord + 0.1, worldPos.y * 8.0)) - 0.5;
+    float bumpY = (withinPlank < 0.04 || withinPlank > 0.96) ? -0.3 : 0.0; // gap indent
+    N = normalize(N + vec3(bumpX * 0.08, bumpY, bumpX * 0.05));
+
+    roughOut = 0.78 + plankHash * 0.15;
+    return woodColor;
+}
+
+// ================================================================
+//  Procedural Thatch / Straw (beach hut roof)
+// ================================================================
+
+vec3 computeThatch(vec3 N, vec3 worldPos, vec3 baseAlbedo, out float roughOut) {
+    // Straw strands running diagonally across the roof
+    float strandAngle = worldPos.x * 12.0 + worldPos.z * 6.0 + worldPos.y * 4.0;
+    float strand1 = sin(strandAngle) * 0.5 + 0.5;
+    float strand2 = sin(strandAngle * 1.7 + 3.0) * 0.5 + 0.5;
+    float strand3 = sin(strandAngle * 0.6 + 7.0) * 0.5 + 0.5;
+
+    // Straw density layers
+    float density = strand1 * 0.4 + strand2 * 0.35 + strand3 * 0.25;
+    density = smoothstep(0.2, 0.8, density);
+
+    // Color — golden straw with variation
+    vec3 strawColor = baseAlbedo;
+    float n = fbm(worldPos.xz * 5.0 + worldPos.y * 3.0, 3);
+    strawColor *= 0.75 + n * 0.5;
+
+    // Individual strand highlights
+    float strandHighlight = pow(strand1, 8.0);
+    strawColor += vec3(0.1, 0.08, 0.02) * strandHighlight;
+
+    // Darker gaps between strands
+    float strandGap = smoothstep(0.45, 0.5, strand1) * smoothstep(0.55, 0.5, strand1);
+    strawColor *= 1.0 - strandGap * 0.3;
+
+    // Weathering — some strands are darker/older
+    float age = noise(worldPos.xz * 8.0);
+    strawColor = mix(strawColor, strawColor * 0.6, smoothstep(0.7, 0.9, age) * 0.4);
+
+    // Normal perturbation for strand direction
+    float nx_p = sin(strandAngle + 0.1) * 0.1;
+    float nz_p = cos(strandAngle * 0.7) * 0.08;
+    N = normalize(N + vec3(nx_p, 0.0, nz_p));
+
+    roughOut = 0.92 + density * 0.06;
+    return strawColor;
+}
+
+// ================================================================
 //  Procedural Cloud
 // ================================================================
 
@@ -459,6 +574,17 @@ void main() {
     } else if (u_proc_mode == 5) {
         // Palm leaf
         albedo = computePalmLeaf(v_worldPos, N, V, L, u_albedo, roughness);
+
+    } else if (u_proc_mode == 7) {
+        // Wood planks — beach hut walls, furniture
+        albedo = computeWoodPlanks(N, v_worldPos, u_albedo, roughness);
+        float wnx = noise(v_worldPos.xz * 15.0 + vec2(0.1, 0.0));
+        float wnz = noise(v_worldPos.xz * 15.0 + vec2(0.0, 0.1));
+        N = normalize(N + vec3((wnx - 0.5) * 0.06, 0.0, (wnz - 0.5) * 0.06));
+
+    } else if (u_proc_mode == 8) {
+        // Thatch / straw — beach hut roof
+        albedo = computeThatch(N, v_worldPos, u_albedo, roughness);
 
     } else if (u_proc_mode == 6) {
         // Cloud — self-lit, skip PBR

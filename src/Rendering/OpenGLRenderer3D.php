@@ -452,6 +452,10 @@ class OpenGLRenderer3D implements Renderer3DInterface
             $procMode = 3;
         } elseif (str_starts_with($materialId, 'palm_trunk')) {
             $procMode = 4;
+        } elseif (str_starts_with($materialId, 'hut_wood') || str_starts_with($materialId, 'hut_door') || str_starts_with($materialId, 'hut_table') || str_starts_with($materialId, 'hut_chair') || str_starts_with($materialId, 'hut_floor') || str_starts_with($materialId, 'hut_window')) {
+            $procMode = 7;
+        } elseif (str_starts_with($materialId, 'hut_thatch')) {
+            $procMode = 8;
         } elseif (str_starts_with($materialId, 'palm_branch') || str_starts_with($materialId, 'palm_leaves') || str_starts_with($materialId, 'palm_leaf') || str_starts_with($materialId, 'palm_canopy') || str_starts_with($materialId, 'palm_frond')) {
             $procMode = 5;
         } elseif (str_starts_with($materialId, 'cloud_')) {
