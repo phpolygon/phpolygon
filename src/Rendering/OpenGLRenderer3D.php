@@ -64,6 +64,8 @@ class OpenGLRenderer3D implements Renderer3DInterface
     {
         glEnable(GL_DEPTH_TEST);
         glDepthFunc(GL_LESS);
+        glEnable(GL_MULTISAMPLE);
+        glDisable(GL_CULL_FACE);
         $this->pointLightCount = 0;
         $this->pointLights     = [];
     }
@@ -153,16 +155,46 @@ class OpenGLRenderer3D implements Renderer3DInterface
             $this->setUniformFloat("u_point_lights[{$i}].radius", $pl['radius']);
         }
 
-        // Pass 2: draw calls
+        // Pass 2a: opaque
+        glDepthMask(true);
+        glDisable(GL_BLEND);
         foreach ($commandList->getCommands() as $command) {
             if ($command instanceof DrawMesh) {
-                $this->drawMeshCommand($command->meshId, $command->materialId, $command->modelMatrix);
+                $mat = MaterialRegistry::get($command->materialId);
+                if ($mat === null || $mat->alpha >= 1.0) {
+                    $this->drawMeshCommand($command->meshId, $command->materialId, $command->modelMatrix);
+                }
             } elseif ($command instanceof DrawMeshInstanced) {
-                foreach ($command->matrices as $matrix) {
-                    $this->drawMeshCommand($command->meshId, $command->materialId, $matrix);
+                $mat = MaterialRegistry::get($command->materialId);
+                if ($mat === null || $mat->alpha >= 1.0) {
+                    foreach ($command->matrices as $matrix) {
+                        $this->drawMeshCommand($command->meshId, $command->materialId, $matrix);
+                    }
                 }
             }
         }
+
+        // Pass 2b: transparent
+        glDepthMask(false);
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        foreach ($commandList->getCommands() as $command) {
+            if ($command instanceof DrawMesh) {
+                $mat = MaterialRegistry::get($command->materialId);
+                if ($mat !== null && $mat->alpha < 1.0) {
+                    $this->drawMeshCommand($command->meshId, $command->materialId, $command->modelMatrix);
+                }
+            } elseif ($command instanceof DrawMeshInstanced) {
+                $mat = MaterialRegistry::get($command->materialId);
+                if ($mat !== null && $mat->alpha < 1.0) {
+                    foreach ($command->matrices as $matrix) {
+                        $this->drawMeshCommand($command->meshId, $command->materialId, $matrix);
+                    }
+                }
+            }
+        }
+        glDepthMask(true);
+        glDisable(GL_BLEND);
 
         // Pass 3: skybox (drawn last with depth ≤ test so it fills background)
         if ($this->pendingSkyboxId !== null && $this->currentViewMatrix !== null && $this->currentProjectionMatrix !== null) {
@@ -191,11 +223,13 @@ class OpenGLRenderer3D implements Renderer3DInterface
             $this->setUniformVec3('u_emission', [$material->emission->r, $material->emission->g, $material->emission->b]);
             $this->setUniformFloat('u_roughness', $material->roughness);
             $this->setUniformFloat('u_metallic', $material->metallic);
+            $this->setUniformFloat('u_alpha', $material->alpha);
         } else {
             $this->setUniformVec3('u_albedo', [0.8, 0.8, 0.8]);
             $this->setUniformVec3('u_emission', [0.0, 0.0, 0.0]);
             $this->setUniformFloat('u_roughness', 0.5);
             $this->setUniformFloat('u_metallic', 0.0);
+            $this->setUniformFloat('u_alpha', 1.0);
         }
 
         glBindVertexArray($this->vaoCache[$meshId]);

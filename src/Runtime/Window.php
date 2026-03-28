@@ -44,6 +44,8 @@ class Window
         glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GL_TRUE);
         glfwWindowHint(GLFW_RESIZABLE, $this->resizable ? GL_TRUE : GL_FALSE);
         glfwWindowHint(GLFW_VISIBLE, GL_FALSE);
+        // 4x MSAA — hardware anti-aliasing, zero cost on modern GPUs
+        glfwWindowHint(GLFW_SAMPLES, 4);
 
         $this->handle = glfwCreateWindow($this->width, $this->height, $this->title, null, null);
 
@@ -255,6 +257,16 @@ class Window
         } else {
             $this->setFullscreen();
         }
+    }
+
+    public function setCursorDisabled(): void
+    {
+        glfwSetInputMode($this->handle, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+    }
+
+    public function setCursorNormal(): void
+    {
+        glfwSetInputMode($this->handle, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
     }
 
     public function destroy(): void
