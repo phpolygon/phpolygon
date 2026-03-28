@@ -39,6 +39,12 @@ class GameBuilder
     public function build(string $platform, string $outputDir, ?string $microSfxPath = null, ?string $arch = null, string $variant = 'base', string $buildType = 'full'): array
     {
         $arch = $arch ?? StaticPhpResolver::detectArch();
+
+        // Auto-select ZTS variant when threading is enabled
+        if ($variant === 'base' && $this->config->enableThreading) {
+            $variant = $this->config->getPhpVariant();
+        }
+
         $suffix = $variant !== 'base' ? "-{$variant}" : '';
         if ($buildType !== 'full') {
             $suffix .= "-{$buildType}";

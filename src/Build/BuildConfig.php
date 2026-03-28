@@ -17,6 +17,9 @@ class BuildConfig
     /** @var array<string> */
     public array $phpExtensions = ['glfw', 'mbstring', 'zip', 'phar'];
 
+    /** Enable multithreading support (requires ZTS PHP + parallel extension) */
+    public bool $enableThreading = false;
+
     /** @var array<string, array<array{src: string, optional?: bool}>> Platform-specific native libs to bundle alongside the binary */
     public array $bundleLibs = [];
 
@@ -99,6 +102,9 @@ class BuildConfig
             $extensions = $php['extensions'];
             $this->phpExtensions = $extensions;
         }
+        if (isset($php['threading']) && $php['threading'] === true) {
+            $this->enableThreading = true;
+        }
         if (isset($php['bundleLibs']) && is_array($php['bundleLibs'])) {
             /** @var array<string, array<array{src: string, optional?: bool}>> $bundleLibs */
             $bundleLibs = $php['bundleLibs'];
@@ -136,6 +142,28 @@ class BuildConfig
     }
 
     /**
+     * Get the final list of PHP extensions, including parallel if threading is enabled.
+     *
+     * @return array<string>
+     */
+    public function getResolvedExtensions(): array
+    {
+        $extensions = $this->phpExtensions;
+        if ($this->enableThreading && !in_array('parallel', $extensions, true)) {
+            $extensions[] = 'parallel';
+        }
+        return $extensions;
+    }
+
+    /**
+     * Get the static-php-cli build variant (base or zts).
+     */
+    public function getPhpVariant(): string
+    {
+        return $this->enableThreading ? 'zts' : 'base';
+    }
+
+    /**
      * @return array<string, mixed>
      */
     public function toArray(): array
@@ -145,7 +173,9 @@ class BuildConfig
             'identifier' => $this->identifier,
             'version' => $this->version,
             'entry' => $this->entry,
-            'php.extensions' => $this->phpExtensions,
+            'php.extensions' => $this->getResolvedExtensions(),
+            'php.threading' => $this->enableThreading,
+            'php.variant' => $this->getPhpVariant(),
             'php.bundleLibs' => $this->bundleLibs,
             'phar.exclude' => $this->pharExclude,
             'phar.additionalRequires' => $this->additionalRequires,
