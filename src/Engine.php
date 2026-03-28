@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace PHPolygon;
 
 use PHPolygon\Audio\AudioManager;
+use PHPolygon\Audio\GLFWAudioBackend;
 use PHPolygon\ECS\World;
 use PHPolygon\Event\EventDispatcher;
 use PHPolygon\Locale\LocaleManager;
@@ -78,7 +79,9 @@ class Engine
             : new TextureManager($config->assetsPath);
         $this->gameLoop = new GameLoop($config->targetTickRate);
         $this->scenes = new SceneManager($this);
-        $this->audio = new AudioManager();
+        $this->audio = new AudioManager(
+            $this->headless ? null : new GLFWAudioBackend(),
+        );
         $this->locale = new LocaleManager($config->defaultLocale, $config->fallbackLocale);
         $this->saves = new SaveManager($config->savePath, $config->maxSaveSlots);
         $this->scheduler = ThreadSchedulerFactory::create($config);
