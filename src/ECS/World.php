@@ -27,6 +27,9 @@ class World
     /** @var list<SystemInterface> */
     private array $systems = [];
 
+    /** @var array<int, SystemPhase> Phase per system (index-aligned with $systems) */
+    private array $systemPhases = [];
+
     /** @var array<int, Entity> */
     private array $entityCache = [];
 
@@ -213,9 +216,10 @@ class World
 
     // --- Systems ---
 
-    public function addSystem(SystemInterface $system): void
+    public function addSystem(SystemInterface $system, SystemPhase $phase = SystemPhase::MainThread): void
     {
         $this->systems[] = $system;
+        $this->systemPhases[count($this->systems) - 1] = $phase;
         $system->register($this);
     }
 
@@ -225,13 +229,43 @@ class World
         if ($index !== false) {
             $system->unregister($this);
             array_splice($this->systems, $index, 1);
+            unset($this->systemPhases[$index]);
+            // Re-index phases
+            $this->systemPhases = array_values($this->systemPhases);
         }
     }
 
+    /**
+     * Update all systems sequentially (single-threaded mode, backward compatible).
+     */
     public function update(float $dt): void
     {
         foreach ($this->systems as $system) {
             $system->update($this, $dt);
+        }
+    }
+
+    /**
+     * Update only MainThread-phase systems. Used in pipelined mode.
+     */
+    public function updateMainThread(float $dt): void
+    {
+        foreach ($this->systems as $i => $system) {
+            if (($this->systemPhases[$i] ?? SystemPhase::MainThread) === SystemPhase::MainThread) {
+                $system->update($this, $dt);
+            }
+        }
+    }
+
+    /**
+     * Update only PostThread-phase systems. Called after thread results are applied.
+     */
+    public function updatePostThread(float $dt): void
+    {
+        foreach ($this->systems as $i => $system) {
+            if (($this->systemPhases[$i] ?? SystemPhase::MainThread) === SystemPhase::PostThread) {
+                $system->update($this, $dt);
+            }
         }
     }
 

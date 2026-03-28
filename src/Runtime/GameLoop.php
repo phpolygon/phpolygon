@@ -79,6 +79,66 @@ class GameLoop
         return $this->averageFps;
     }
 
+    /**
+     * Pipelined game loop for multithreaded execution.
+     *
+     * Per frame:
+     *   1. prepareAndSend() — extract state, send to worker threads
+     *   2. update() — main-thread-only systems (input, camera, player)
+     *   3. render() — draw with world state from previous frame's thread results
+     *   4. recvAndApply() — blocking recv from threads, apply deltas to World
+     *
+     * @param callable(): void $prepareAndSend
+     * @param callable(float): void $update
+     * @param callable(float): void $render
+     * @param callable(): void $recvAndApply
+     * @param callable(): bool $shouldStop
+     */
+    public function runPipelined(
+        callable $prepareAndSend,
+        callable $update,
+        callable $render,
+        callable $recvAndApply,
+        callable $shouldStop,
+    ): void {
+        $fixedDt = 1.0 / $this->targetTickRate;
+        $lag = 0;
+        $previousTime = Clock::now();
+
+        while (!$shouldStop()) {
+            $currentTime = Clock::now();
+            $elapsed = $currentTime - $previousTime;
+            $previousTime = $currentTime;
+            $lag += $elapsed;
+
+            // Record frame time
+            $this->frameTimeSamples[$this->sampleIndex] = $elapsed / 1_000_000_000.0;
+            $this->sampleIndex = ($this->sampleIndex + 1) % $this->sampleCount;
+
+            // Fixed-timestep updates
+            $tickCount = 0;
+            while ($lag >= $this->timestepNs && $tickCount < $this->maxUpdatesPerFrame) {
+                // 1. Send current state to worker threads
+                $prepareAndSend();
+
+                // 2. Run main-thread-only systems
+                $update($fixedDt);
+
+                $lag -= $this->timestepNs;
+                $tickCount++;
+
+                // 4. Receive thread results and apply
+                $recvAndApply();
+            }
+
+            // 3. Render with interpolation
+            $interpolation = $lag / $this->timestepNs;
+            $render((float) $interpolation);
+
+            $this->updateAverages();
+        }
+    }
+
     public function getTargetTickRate(): float
     {
         return $this->targetTickRate;

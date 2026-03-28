@@ -28,6 +28,9 @@ use PHPolygon\Runtime\Window;
 use PHPolygon\SaveGame\SaveManager;
 use PHPolygon\Scene\SceneManager;
 use PHPolygon\Scene\SceneManagerInterface;
+use PHPolygon\Thread\NullThreadScheduler;
+use PHPolygon\Thread\ThreadScheduler;
+use PHPolygon\Thread\ThreadSchedulerFactory;
 
 class Engine
 {
@@ -47,6 +50,7 @@ class Engine
     public Renderer2DInterface $renderer2D;
     public ?Renderer3DInterface $renderer3D;
     public readonly ?RenderCommandList $commandList3D;
+    public readonly ThreadScheduler|NullThreadScheduler $scheduler;
 
     private bool $running = false;
     private bool $headless;
@@ -77,6 +81,7 @@ class Engine
         $this->audio = new AudioManager();
         $this->locale = new LocaleManager($config->defaultLocale, $config->fallbackLocale);
         $this->saves = new SaveManager($config->savePath, $config->maxSaveSlots);
+        $this->scheduler = ThreadSchedulerFactory::create($config);
 
         if ($config->is3D) {
             $this->commandList3D = new RenderCommandList();
@@ -156,38 +161,77 @@ class Engine
             ($this->onInit)($this);
         }
 
+        $this->scheduler->boot();
         $this->running = true;
 
-        $this->gameLoop->run(
-            update: function (float $dt) {
-                $this->world->update($dt);
+        $isPipelined = $this->scheduler instanceof ThreadScheduler
+            && count($this->scheduler->getSubsystems()) > 0;
 
-                if ($this->onUpdate !== null) {
-                    ($this->onUpdate)($this, $dt);
-                }
-            },
-            render: function (float $interpolation) {
-                $this->renderer2D->beginFrame();
+        if ($isPipelined) {
+            $fixedDt = $this->gameLoop->getFixedDeltaTime();
+            $this->gameLoop->runPipelined(
+                prepareAndSend: function () use ($fixedDt) {
+                    $this->scheduler->sendAll($this->world, $fixedDt);
+                },
+                update: function (float $dt) {
+                    $this->world->updateMainThread($dt);
 
-                $this->world->render();
+                    if ($this->onUpdate !== null) {
+                        ($this->onUpdate)($this, $dt);
+                    }
+                },
+                render: function (float $interpolation) {
+                    $this->renderer2D->beginFrame();
 
-                if ($this->onRender !== null) {
-                    ($this->onRender)($this, $interpolation);
-                }
+                    $this->world->render();
 
-                $this->renderer2D->endFrame();
-                $this->window->swapBuffers();
+                    if ($this->onRender !== null) {
+                        ($this->onRender)($this, $interpolation);
+                    }
 
-                // endFrame must happen after render so UI widgets can read
-                // pressed/released states during the draw phase
-                $this->input->endFrame();
+                    $this->renderer2D->endFrame();
+                    $this->window->swapBuffers();
 
-                $this->window->pollEvents();
-            },
-            shouldStop: function (): bool {
-                return !$this->running || $this->window->shouldClose();
-            },
-        );
+                    $this->input->endFrame();
+                    $this->window->pollEvents();
+                },
+                recvAndApply: function () {
+                    $this->scheduler->recvAll($this->world);
+                    $this->world->updatePostThread($this->gameLoop->getFixedDeltaTime());
+                },
+                shouldStop: function (): bool {
+                    return !$this->running || $this->window->shouldClose();
+                },
+            );
+        } else {
+            $this->gameLoop->run(
+                update: function (float $dt) {
+                    $this->world->update($dt);
+
+                    if ($this->onUpdate !== null) {
+                        ($this->onUpdate)($this, $dt);
+                    }
+                },
+                render: function (float $interpolation) {
+                    $this->renderer2D->beginFrame();
+
+                    $this->world->render();
+
+                    if ($this->onRender !== null) {
+                        ($this->onRender)($this, $interpolation);
+                    }
+
+                    $this->renderer2D->endFrame();
+                    $this->window->swapBuffers();
+
+                    $this->input->endFrame();
+                    $this->window->pollEvents();
+                },
+                shouldStop: function (): bool {
+                    return !$this->running || $this->window->shouldClose();
+                },
+            );
+        }
 
         $this->shutdown();
     }
@@ -204,6 +248,7 @@ class Engine
 
     private function shutdown(): void
     {
+        $this->scheduler->shutdown();
         $this->audio->dispose();
         $this->textures->clear();
         $this->world->clear();

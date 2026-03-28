@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace PHPolygon;
 
+use PHPolygon\Thread\ThreadingMode;
+
 class EngineConfig
 {
     public function __construct(
@@ -21,5 +23,6 @@ class EngineConfig
         public readonly bool $headless = false,
         public readonly bool $is3D = false,
         public readonly string $renderBackend3D = 'opengl',
+        public readonly ?ThreadingMode $threadingMode = null,
     ) {}
 }
