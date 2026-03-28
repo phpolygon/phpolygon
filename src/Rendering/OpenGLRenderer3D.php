@@ -322,7 +322,7 @@ class OpenGLRenderer3D implements Renderer3DInterface
     {
         $loc = glGetUniformLocation($this->shaderProgram, $name);
         if ($loc >= 0) {
-            glUniformMatrix4fv($loc, false, $matrix->toArray());
+            glUniformMatrix4fv($loc, false, new \GL\Buffer\FloatBuffer($matrix->toArray()));
         }
     }
 
@@ -497,11 +497,11 @@ class OpenGLRenderer3D implements Renderer3DInterface
 
         $viewLoc = glGetUniformLocation($this->skyboxShaderProgram, 'u_view');
         if ($viewLoc >= 0 && $this->currentViewMatrix !== null) {
-            glUniformMatrix4fv($viewLoc, false, $this->currentViewMatrix->toArray());
+            glUniformMatrix4fv($viewLoc, false, new \GL\Buffer\FloatBuffer($this->currentViewMatrix->toArray()));
         }
         $projLoc = glGetUniformLocation($this->skyboxShaderProgram, 'u_projection');
         if ($projLoc >= 0 && $this->currentProjectionMatrix !== null) {
-            glUniformMatrix4fv($projLoc, false, $this->currentProjectionMatrix->toArray());
+            glUniformMatrix4fv($projLoc, false, new \GL\Buffer\FloatBuffer($this->currentProjectionMatrix->toArray()));
         }
 
         glActiveTexture(GL_TEXTURE0);
