@@ -78,7 +78,7 @@ $engine->onInit(function () use ($engine): void {
     $box->attach(new Transform3D(position: new Vec3(0.0, 0.0, 0.0)));
 });
 
-$engine->onUpdate(function (float $dt) use ($engine): void {
+$engine->onUpdate(function (\PHPolygon\Engine $engine, float $dt): void {
     // Rotate the box every frame
     foreach ($engine->world->query(MeshRenderer::class, Transform3D::class) as $entity) {
         $transform = $entity->get(Transform3D::class);

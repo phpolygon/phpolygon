@@ -178,6 +178,7 @@ class MetalRenderer3D implements Renderer3DInterface
         $depthDesc->setWidth($this->width);
         $depthDesc->setHeight($this->height);
         $depthDesc->setUsage(\Metal\TextureUsageRenderTarget);
+        $depthDesc->setStorageMode(\Metal\StorageModePrivate); // depth/stencil must be Private on Apple GPUs
         $depthTexture = $this->device->createTexture($depthDesc);
 
         $renderPass = new RenderPassDescriptor();
@@ -249,7 +250,7 @@ class MetalRenderer3D implements Renderer3DInterface
         // Metal copies up to 4 KB directly into the command stream — no buffer allocation.
         // Equivalent to Vulkan pushConstants() but simpler: no pipeline layout declaration needed.
         $modelBytes = pack('f16', ...$modelMatrix->toArray());
-        $encoder->setVertexBytes($modelBytes, strlen($modelBytes), 0);
+        $encoder->setVertexBytes($modelBytes, 0); // slot 0: model matrix (length implicit from string)
 
         $encoder->setVertexBuffer($this->meshCache[$meshId]['vb'], 0, 3); // slot 3: vertex data
         $encoder->drawIndexedPrimitives(
@@ -280,8 +281,10 @@ class MetalRenderer3D implements Renderer3DInterface
         }
 
         // StorageModeShared: CPU writes once at upload, GPU reads every frame.
-        $vb = $this->device->createBufferFromData($vertexData, \Metal\StorageModeShared);
-        $ib = $this->device->createBufferFromData($indexData,  \Metal\StorageModeShared);
+        $vb = $this->device->createBuffer(strlen($vertexData), \Metal\StorageModeShared);
+        $vb->writeRawContents($vertexData, 0);
+        $ib = $this->device->createBuffer(strlen($indexData), \Metal\StorageModeShared);
+        $ib->writeRawContents($indexData, 0);
 
         $this->meshCache[$meshId] = ['vb' => $vb, 'ib' => $ib, 'count' => count($meshData->indices)];
     }
