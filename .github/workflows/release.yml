@@ -121,3 +121,6 @@ jobs:
           body: ${{ steps.changelog.outputs.changelog }}
           prerelease: ${{ steps.version.outputs.prerelease == 'true' }}
           generate_release_notes: false
+
+      # editor-build.yml listens on 'push: tags: v*' and starts automatically.
+      # No explicit trigger needed — the tag push above is sufficient.

@@ -1,0 +1,84 @@
+name: Game Build
+
+# Builds a game project using the PHPolygon engine.
+# Triggered when a Release is published (editor-build.yml runs in parallel)
+# or manually for testing.
+#
+# Cross-platform strategy:
+#   micro.sfx binaries are downloaded from hmennen90/static-php-cli releases.
+#   No per-platform runner needed — build runs on ubuntu-latest for all targets.
+#   The only exception: macOS code signing requires a macOS runner (optional step).
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      game_repo:
+        description: 'Game repository (owner/repo) to build. Leave empty to use the engine itself with examples/.'
+        required: false
+      game_ref:
+        description: 'Branch, tag, or SHA to check out (default: main)'
+        required: false
+        default: 'main'
+      platforms:
+        description: 'Comma-separated platform targets (e.g. macos-arm64,linux-x86_64,windows)'
+        required: false
+        default: 'macos-arm64,macos-x86_64,linux-x86_64,windows'
+
+jobs:
+  build:
+    name: Game Build — ${{ matrix.platform }}
+    runs-on: ubuntu-latest   # All builds run on Linux; micro.sfx is downloaded per-target
+
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - macos-arm64
+          - macos-x86_64
+          - linux-x86_64
+          - windows
+
+    steps:
+      - name: Checkout PHPolygon engine
+        uses: actions/checkout@v4
+        with:
+          path: engine
+
+      # If a game repo is specified, check it out; otherwise use engine examples
+      - name: Checkout game project
+        if: inputs.game_repo != ''
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.game_repo }}
+          ref: ${{ inputs.game_ref || 'main' }}
+          path: game
+
+      - name: Setup PHP 8.3
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: mbstring, dom, xml, zip, phar
+          coverage: none
+
+      - name: Install PHPolygon engine dependencies
+        working-directory: engine
+        run: composer install --no-interaction --ignore-platform-reqs
+
+      - name: Build game for ${{ matrix.platform }}
+        working-directory: ${{ inputs.game_repo && 'game' || 'engine' }}
+        env:
+          PHPOLYGON_BUILD_PLATFORM: ${{ matrix.platform }}
+        run: |
+          php -d phar.readonly=0 ../engine/bin/phpolygon build ${{ matrix.platform }} \
+            --output-dir=dist/ \
+            --no-interaction
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: game-${{ matrix.platform }}
+          path: ${{ inputs.game_repo && 'game' || 'engine' }}/dist/
+          if-no-files-found: warn
+          retention-days: 7
