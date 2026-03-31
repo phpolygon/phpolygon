@@ -353,11 +353,12 @@ class MetalRenderer3D implements Renderer3DInterface
         $fragFn  = $library->getFunction('fragment_mesh3d');
 
         // Vertex layout: position(float3) + normal(float3) + uv(float2) = 32 bytes
+        // Slot 0 = model matrix (setVertexBytes), slot 1 = FrameUBO, so vertex data goes to slot 3.
         $vertexDesc = new VertexDescriptor();
-        $vertexDesc->setAttribute(0, \Metal\VertexFormatFloat3, 0,  0); // [[attribute(0)]] position
-        $vertexDesc->setAttribute(1, \Metal\VertexFormatFloat3, 12, 0); // [[attribute(1)]] normal
-        $vertexDesc->setAttribute(2, \Metal\VertexFormatFloat2, 24, 0); // [[attribute(2)]] uv
-        $vertexDesc->setLayout(0, 32);                                   // stride 32, buffer slot 0
+        $vertexDesc->setAttribute(0, \Metal\VertexFormatFloat3, 0,  3); // [[attribute(0)]] position  — buffer 3
+        $vertexDesc->setAttribute(1, \Metal\VertexFormatFloat3, 12, 3); // [[attribute(1)]] normal    — buffer 3
+        $vertexDesc->setAttribute(2, \Metal\VertexFormatFloat2, 24, 3); // [[attribute(2)]] uv        — buffer 3
+        $vertexDesc->setLayout(3, 32);                                   // stride 32, buffer slot 3
 
         $pipelineDesc = new RenderPipelineDescriptor();
         $pipelineDesc->setVertexFunction($vertFn);

@@ -104,12 +104,14 @@ class Engine
             $this->window = new NullWindow($config->width, $config->height, $config->title);
             $this->renderer2D = new NullRenderer2D($config->width, $config->height);
         } else {
+            $noApi = $config->is3D && in_array($config->renderBackend3D, ['vulkan', 'metal'], true);
             $this->window = new Window(
                 $config->width,
                 $config->height,
                 $config->title,
                 $config->vsync,
                 $config->resizable,
+                $noApi,
             );
         }
     }
@@ -154,7 +156,9 @@ class Engine
         }
 
         // Create Renderer2D after window is initialized (needs GL context)
-        if (!$this->headless) {
+        // Metal/Vulkan backends don't have an OpenGL context — use NullRenderer2D for 2D overlay.
+        $nativeBackend = $this->config->is3D && in_array($this->config->renderBackend3D, ['vulkan', 'metal'], true);
+        if (!$this->headless && !$nativeBackend) {
             $this->renderer2D = new Renderer2D($this->window);
 
             // Auto-load bundled fonts so text renders without manual setup
@@ -164,6 +168,8 @@ class Engine
                 $this->renderer2D->loadFont('semibold', $fontDir . '/Inter-SemiBold.ttf');
                 $this->renderer2D->setFont('regular');
             }
+        } elseif (!$this->headless && $nativeBackend) {
+            $this->renderer2D = new NullRenderer2D($this->config->width, $this->config->height);
         }
 
         if ($this->onInit !== null) {
@@ -189,7 +195,7 @@ class Engine
                         ($this->onUpdate)($this, $dt);
                     }
                 },
-                render: function (float $interpolation) {
+                render: function (float $interpolation) use ($nativeBackend) {
                     $this->renderer2D->beginFrame();
 
                     $this->world->render();
@@ -199,7 +205,9 @@ class Engine
                     }
 
                     $this->renderer2D->endFrame();
-                    $this->window->swapBuffers();
+                    if (!$nativeBackend) {
+                        $this->window->swapBuffers();
+                    }
 
                     $this->input->endFrame();
                     $this->window->pollEvents();
@@ -221,7 +229,7 @@ class Engine
                         ($this->onUpdate)($this, $dt);
                     }
                 },
-                render: function (float $interpolation) {
+                render: function (float $interpolation) use ($nativeBackend) {
                     $this->renderer2D->beginFrame();
 
                     $this->world->render();
@@ -231,7 +239,9 @@ class Engine
                     }
 
                     $this->renderer2D->endFrame();
-                    $this->window->swapBuffers();
+                    if (!$nativeBackend) {
+                        $this->window->swapBuffers();
+                    }
 
                     $this->input->endFrame();
                     $this->window->pollEvents();

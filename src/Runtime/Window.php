@@ -30,6 +30,7 @@ class Window
         private string $title,
         private bool $vsync = true,
         private bool $resizable = true,
+        private bool $noApi = false, // true for Vulkan/Metal — disables OpenGL context creation
     ) {}
 
     public function initialize(Input $input): void
@@ -38,19 +39,25 @@ class Window
             throw new RuntimeException('Failed to initialize GLFW');
         }
 
-        glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
-        glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 1);
-        glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
-        glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GL_TRUE);
+        if ($this->noApi) {
+            // Vulkan / Metal: no OpenGL context — the native backend manages the swapchain
+            glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
+        } else {
+            glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
+            glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 1);
+            glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
+            glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GL_TRUE);
+            glfwWindowHint(GLFW_SAMPLES, 4);
+        }
         glfwWindowHint(GLFW_RESIZABLE, $this->resizable ? GL_TRUE : GL_FALSE);
         glfwWindowHint(GLFW_VISIBLE, GL_FALSE);
-        // 4x MSAA — hardware anti-aliasing, zero cost on modern GPUs
-        glfwWindowHint(GLFW_SAMPLES, 4);
 
         $this->handle = glfwCreateWindow($this->width, $this->height, $this->title, null, null);
 
-        glfwMakeContextCurrent($this->handle);
-        glfwSwapInterval($this->vsync ? 1 : 0);
+        if (!$this->noApi) {
+            glfwMakeContextCurrent($this->handle);
+            glfwSwapInterval($this->vsync ? 1 : 0);
+        }
 
         // Get content scale for HiDPI
         $csX = 1.0;
