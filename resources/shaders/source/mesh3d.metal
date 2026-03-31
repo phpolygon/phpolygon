@@ -20,32 +20,38 @@ struct FrameUBO {
 };
 
 // ── Buffer slot 2: LightingUBO ───────────────────────────────────────────────
+//
+// PHP packs all vec3 fields as 3 consecutive floats (12 bytes) immediately
+// followed by the scalar field.  MSL's unqualified float3 is 16 bytes (same
+// as float4), which would silently misalign every field.  packed_float3 is
+// exactly 12 bytes and matches the PHP layout.
+//
 struct PointLight {
-    float3 position;
+    packed_float3 position;
     float  intensity;
-    float3 color;
+    packed_float3 color;
     float  radius;
 };
 
 struct LightingUBO {
-    float3 ambient_color;
+    packed_float3 ambient_color;
     float  ambient_intensity;
 
-    float3 dir_light_direction;
+    packed_float3 dir_light_direction;
     float  dir_light_intensity;
-    float3 dir_light_color;
+    packed_float3 dir_light_color;
     float  _pad0;
 
-    float3 albedo;
+    packed_float3 albedo;
     float  roughness;
 
-    float3 emission;
+    packed_float3 emission;
     float  metallic;
 
-    float3 fog_color;
+    packed_float3 fog_color;
     float  fog_near;
 
-    float3 camera_pos;
+    packed_float3 camera_pos;
     float  fog_far;
 
     int    point_light_count;
@@ -176,6 +182,12 @@ fragment float4 fragment_mesh3d(
     float fog_factor = clamp((fog_dist - light.fog_near) / (light.fog_far - light.fog_near), 0.0, 1.0);
     fog_factor = 1.0 - exp(-fog_factor * fog_factor * 3.0);
     color = mix(color, light.fog_color, fog_factor);
+
+    // ACES filmic tonemapping — preserves colour saturation better than Reinhard
+    {
+        const float a = 2.51, b = 0.03, c = 2.43, d = 0.59, e = 0.14;
+        color = clamp((color * (a * color + b)) / (color * (c * color + d) + e), 0.0, 1.0);
+    }
 
     // Gamma correction
     color = pow(max(color, float3(0.0)), float3(1.0 / 2.2));

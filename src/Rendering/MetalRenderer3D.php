@@ -26,6 +26,7 @@ use PHPolygon\Rendering\Command\SetCamera;
 use PHPolygon\Rendering\Command\SetDirectionalLight;
 use PHPolygon\Rendering\Command\SetFog;
 use PHPolygon\Rendering\Command\SetSkybox;
+use PHPolygon\Rendering\Command\SetSkyColors;
 
 /**
  * Native Apple Metal 3D renderer.
@@ -77,6 +78,8 @@ class MetalRenderer3D implements Renderer3DInterface
     private array $dirLight = [0.0, -1.0, 0.0, 0.0, 1.0, 1.0, 1.0];
     /** @var float[] [r, g, b] */
     private array $albedo = [0.8, 0.8, 0.8];
+    private float $roughness = 0.5;
+    private float $metallic  = 0.0;
     /** @var float[] [r, g, b, near, far] */
     private array $fog = [0.5, 0.5, 0.5, 50.0, 200.0];
     /** @var float[] [x, y, z] */
@@ -134,6 +137,8 @@ class MetalRenderer3D implements Renderer3DInterface
         $this->ambient    = [1.0, 1.0, 1.0, 0.1];
         $this->dirLight   = [0.0, -1.0, 0.0, 0.0, 1.0, 1.0, 1.0];
         $this->albedo     = [0.8, 0.8, 0.8];
+        $this->roughness  = 0.5;
+        $this->metallic   = 0.0;
         $this->fog        = [0.5, 0.5, 0.5, 50.0, 200.0];
         $this->cameraPos  = [0.0, 0.0, 0.0];
 
@@ -160,6 +165,10 @@ class MetalRenderer3D implements Renderer3DInterface
                 ];
             } elseif ($command instanceof SetFog) {
                 $this->fog = [$command->color->r, $command->color->g, $command->color->b, $command->near, $command->far];
+            } elseif ($command instanceof SetSkyColors) {
+                $this->clearR = $command->skyColor->r;
+                $this->clearG = $command->skyColor->g;
+                $this->clearB = $command->skyColor->b;
             } elseif ($command instanceof SetSkybox) {
                 // TODO Phase 7: Skybox pipeline
             }
@@ -223,16 +232,26 @@ class MetalRenderer3D implements Renderer3DInterface
         $encoder->endEncoding();
         $commandBuffer->presentDrawable($drawable);
         $commandBuffer->commit();
+
+        // Wait for the GPU to finish reading the shared buffers before the CPU
+        // writes new data in the next frame (prevents StorageModeShared race condition).
+        $commandBuffer->waitUntilCompleted();
     }
 
     // ── Private helpers ────────────────────────────────────────────────────
 
     private function resolveMaterial(string $materialId): void
     {
-        $material     = MaterialRegistry::get($materialId);
-        $this->albedo = $material !== null
-            ? [$material->albedo->r, $material->albedo->g, $material->albedo->b]
-            : [0.8, 0.8, 0.8];
+        $material = MaterialRegistry::get($materialId);
+        if ($material !== null) {
+            $this->albedo    = [$material->albedo->r, $material->albedo->g, $material->albedo->b];
+            $this->roughness = $material->roughness;
+            $this->metallic  = $material->metallic;
+        } else {
+            $this->albedo    = [0.8, 0.8, 0.8];
+            $this->roughness = 0.5;
+            $this->metallic  = 0.0;
+        }
     }
 
     private function drawMeshCommand(\Metal\RenderCommandEncoder $encoder, string $meshId, Mat4 $modelMatrix): void
@@ -311,8 +330,8 @@ class MetalRenderer3D implements Renderer3DInterface
         $data  = pack('f4', $this->ambient[0],   $this->ambient[1],   $this->ambient[2],   $this->ambient[3]);
         $data .= pack('f4', $this->dirLight[0],  $this->dirLight[1],  $this->dirLight[2],  $this->dirLight[3]);
         $data .= pack('f4', $this->dirLight[4],  $this->dirLight[5],  $this->dirLight[6],  0.0);
-        $data .= pack('f4', $this->albedo[0],    $this->albedo[1],    $this->albedo[2],    0.0);
-        $data .= pack('f4', 0.0, 0.0, 0.0, 0.0); // u_emission.xyz + u_metallic (not yet exposed)
+        $data .= pack('f4', $this->albedo[0], $this->albedo[1], $this->albedo[2], $this->roughness);
+        $data .= pack('f4', 0.0, 0.0, 0.0, $this->metallic);
         $data .= pack('f4', $this->fog[0],       $this->fog[1],       $this->fog[2],       $this->fog[3]);
         $data .= pack('f4', $this->cameraPos[0], $this->cameraPos[1], $this->cameraPos[2], $this->fog[4]);
         $plCount = count($this->pointLights);

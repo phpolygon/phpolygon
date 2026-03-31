@@ -138,6 +138,15 @@ class Engine
     {
         $this->window->initialize($this->input);
 
+        $nativeBackend = $this->config->is3D && in_array($this->config->renderBackend3D, ['vulkan', 'metal'], true);
+
+        // For native backends (Metal/Vulkan), pump the event loop once so AppKit
+        // completes window layout and sets proper NSView bounds before the renderer
+        // attaches its CAMetalLayer / Vulkan surface.
+        if (!$this->headless && $nativeBackend) {
+            $this->window->pollEvents();
+        }
+
         // Create GPU-backed renderers after window is initialized (need graphics context)
         if (!$this->headless && $this->config->is3D) {
             $this->renderer3D = match ($this->config->renderBackend3D) {
@@ -157,7 +166,6 @@ class Engine
 
         // Create Renderer2D after window is initialized (needs GL context)
         // Metal/Vulkan backends don't have an OpenGL context — use NullRenderer2D for 2D overlay.
-        $nativeBackend = $this->config->is3D && in_array($this->config->renderBackend3D, ['vulkan', 'metal'], true);
         if (!$this->headless && !$nativeBackend) {
             $this->renderer2D = new Renderer2D($this->window);
 
@@ -196,6 +204,9 @@ class Engine
                     }
                 },
                 render: function (float $interpolation) use ($nativeBackend) {
+                    if ($this->renderer3D !== null) {
+                        $this->renderer3D->beginFrame();
+                    }
                     $this->renderer2D->beginFrame();
 
                     $this->world->render();
@@ -230,6 +241,9 @@ class Engine
                     }
                 },
                 render: function (float $interpolation) use ($nativeBackend) {
+                    if ($this->renderer3D !== null) {
+                        $this->renderer3D->beginFrame();
+                    }
                     $this->renderer2D->beginFrame();
 
                     $this->world->render();
