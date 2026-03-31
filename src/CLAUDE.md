@@ -8,4 +8,10 @@
 | ID | Time | T | Title | Read |
 |----|------|---|-------|------|
 | #10334 | 9:54 PM | 🔵 | Phpolygon Engine class implements complete game loop with ECS and subsystem managers | ~499 |
+
+### Mar 24, 2026
+
+| ID | Time | T | Title | Read |
+|----|------|---|-------|------|
+| #10451 | 7:39 AM | 🟣 | Engine uses NullTextureManager in headless mode to avoid GPU texture loading | ~391 |
 </claude-mem-context>

@@ -139,8 +139,8 @@ class Engine
         if (!$this->headless && $this->config->is3D) {
             $this->renderer3D = match ($this->config->renderBackend3D) {
                 'vulkan' => new VulkanRenderer3D(
-                    $this->config->width,
-                    $this->config->height,
+                    $this->window->getFramebufferWidth(),   // physische Pixel (Retina-sicher)
+                    $this->window->getFramebufferHeight(),  // physische Pixel (Retina-sicher)
                     $this->window->getHandle(),
                 ),
                 default => new OpenGLRenderer3D($this->config->width, $this->config->height),

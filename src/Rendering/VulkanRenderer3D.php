@@ -360,7 +360,19 @@ class VulkanRenderer3D implements Renderer3DInterface
 
     private function uploadFrameUbo(): void
     {
-        $data = pack('f16', ...$this->viewMatrix) . pack('f16', ...$this->projMatrix);
+        // Vulkan clip correction (column-major):
+        //   Row 1 negiert  → Y-Achse flippen (OpenGL Y-up → Vulkan Y-down)
+        //   Z-Spalte ×0.5, Offset +0.5 → Z-Bereich [-1,1] → [0,1]
+        // Anwendung links der Projektionsmatrix: correctedProj = clipMatrix * proj
+        $vulkanClip = new Mat4([
+             1.0,  0.0,  0.0,  0.0,
+             0.0, -1.0,  0.0,  0.0,
+             0.0,  0.0,  0.5,  0.0,
+             0.0,  0.0,  0.5,  1.0,
+        ]);
+        $correctedProj = $vulkanClip->multiply(new Mat4($this->projMatrix));
+        $data = pack('f16', ...$this->viewMatrix)
+              . pack('f16', ...$correctedProj->toArray());
         $this->frameUboMem->write($data, 0);
     }
 
@@ -370,6 +382,8 @@ class VulkanRenderer3D implements Renderer3DInterface
         $data .= pack('f4', $this->dirLight[0], $this->dirLight[1], $this->dirLight[2], $this->dirLight[3]);
         $data .= pack('f4', $this->dirLight[4], $this->dirLight[5], $this->dirLight[6], 0.0);
         $data .= pack('f4', $this->albedo[0], $this->albedo[1], $this->albedo[2], 0.0);
+        // u_emission.xyz + u_metallic — not yet driven from PHP side, send zeros
+        $data .= pack('f4', 0.0, 0.0, 0.0, 0.0);
         $data .= pack('f4', $this->fog[0], $this->fog[1], $this->fog[2], $this->fog[3]);
         $data .= pack('f4', $this->cameraPos[0], $this->cameraPos[1], $this->cameraPos[2], $this->fog[4]);
         $plCount = count($this->pointLights);
