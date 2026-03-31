@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+#
+# compile-metal — Compile Metal shaders to .metallib
+#
+# Requires Xcode (not just Command Line Tools).
+# Run once after editing resources/shaders/source/*.metal
+#
+# Usage:
+#   bin/compile-metal               # compile all .metal files
+#   bin/compile-metal mesh3d        # compile mesh3d.metal only
+#
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SRC_DIR="$REPO_ROOT/resources/shaders/source"
+OUT_DIR="$REPO_ROOT/resources/shaders/compiled"
+
+if ! xcrun --find metal &>/dev/null; then
+    echo "error: Metal compiler not found."
+    echo "       Install Xcode from the App Store (Command Line Tools are not sufficient)."
+    exit 1
+fi
+
+METAL="$(xcrun --find metal)"
+
+# Determine which shaders to compile
+if [[ $# -gt 0 ]]; then
+    NAMES=("$@")
+else
+    NAMES=()
+    for f in "$SRC_DIR"/*.metal; do
+        NAMES+=("$(basename "$f" .metal)")
+    done
+fi
+
+for NAME in "${NAMES[@]}"; do
+    SRC="$SRC_DIR/${NAME}.metal"
+    LIB="$OUT_DIR/${NAME}.metallib"
+
+    if [[ ! -f "$SRC" ]]; then
+        echo "warning: $SRC not found, skipping"
+        continue
+    fi
+
+    echo "  compiling $NAME.metal → ${NAME}.metallib"
+    "$METAL" "$SRC" -o "$LIB"
+done
+
+echo "done."

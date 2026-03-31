@@ -44,7 +44,7 @@ class BVH
         $node = new self($bounds['min'], $bounds['max']);
 
         if (count($triangles) <= self::LEAF_THRESHOLD) {
-            $node->triangles = array_values($triangles);
+            $node->triangles = $triangles;
             return $node;
         }
 
@@ -74,7 +74,7 @@ class BVH
 
         // Fallback: if one side is empty, make this a leaf
         if (empty($leftTris) || empty($rightTris)) {
-            $node->triangles = array_values($triangles);
+            $node->triangles = $triangles;
             return $node;
         }
 

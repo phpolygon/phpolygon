@@ -47,6 +47,7 @@ class ShadowMapRenderer
         if ($this->initialized) return;
 
         // Create depth texture
+        $texId = 0;
         glGenTextures(1, $texId);
         $this->depthTexture = $texId;
         glBindTexture(GL_TEXTURE_2D, $this->depthTexture);
@@ -63,6 +64,7 @@ class ShadowMapRenderer
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_COMPARE_FUNC, GL_LEQUAL);
 
         // Create FBO
+        $fboId = 0;
         glGenFramebuffers(1, $fboId);
         $this->fbo = $fboId;
         glBindFramebuffer(GL_FRAMEBUFFER, $this->fbo);

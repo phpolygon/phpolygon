@@ -11,6 +11,7 @@ use PHPolygon\Event\EventDispatcher;
 use PHPolygon\Locale\LocaleManager;
 use PHPolygon\Rendering\Camera2D;
 use PHPolygon\Rendering\NullRenderer2D;
+use PHPolygon\Rendering\MetalRenderer3D;
 use PHPolygon\Rendering\NullRenderer3D;
 use PHPolygon\Rendering\OpenGLRenderer3D;
 use PHPolygon\Rendering\VulkanRenderer3D;
@@ -139,8 +140,13 @@ class Engine
         if (!$this->headless && $this->config->is3D) {
             $this->renderer3D = match ($this->config->renderBackend3D) {
                 'vulkan' => new VulkanRenderer3D(
-                    $this->window->getFramebufferWidth(),   // physische Pixel (Retina-sicher)
-                    $this->window->getFramebufferHeight(),  // physische Pixel (Retina-sicher)
+                    $this->window->getFramebufferWidth(),
+                    $this->window->getFramebufferHeight(),
+                    $this->window->getHandle(),
+                ),
+                'metal' => new MetalRenderer3D(
+                    $this->window->getFramebufferWidth(),
+                    $this->window->getFramebufferHeight(),
                     $this->window->getHandle(),
                 ),
                 default => new OpenGLRenderer3D($this->config->width, $this->config->height),

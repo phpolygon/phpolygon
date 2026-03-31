@@ -15,9 +15,6 @@ class SpatialHash3D
     /** @var array<string, list<int>> Cell key → entity IDs */
     private array $cells = [];
 
-    /** @var array<int, true> Inserted entity IDs (for pair dedup) */
-    private array $entities = [];
-
     public function __construct(
         private readonly float $cellSize = 2.0,
     ) {}
@@ -25,13 +22,10 @@ class SpatialHash3D
     public function clear(): void
     {
         $this->cells = [];
-        $this->entities = [];
     }
 
     public function insert(int $entityId, Vec3 $min, Vec3 $max): void
     {
-        $this->entities[$entityId] = true;
-
         $invCell = 1.0 / $this->cellSize;
         $x0 = (int) floor($min->x * $invCell);
         $y0 = (int) floor($min->y * $invCell);

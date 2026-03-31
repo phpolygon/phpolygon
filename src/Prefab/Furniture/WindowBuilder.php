@@ -73,14 +73,16 @@ class WindowBuilder
             ->with(new MeshRenderer(meshId: 'cylinder', materialId: $materials->primary));
         $names[] = "{$p}_WindowH";
 
-        $builder->entity("{$p}_WindowV")
-            ->with(new Transform3D(
-                position: $position,
-                rotation: $rotation,
-                scale: new Vec3($bt * 0.5, $this->height * 0.5, $bt * 0.5),
-            ))
-            ->with(new MeshRenderer(meshId: 'cylinder', materialId: $materials->primary));
-        $names[] = "{$p}_WindowV";
+        if ($this->style !== 'horizontal') {
+            $builder->entity("{$p}_WindowV")
+                ->with(new Transform3D(
+                    position: $position,
+                    rotation: $rotation,
+                    scale: new Vec3($bt * 0.5, $this->height * 0.5, $bt * 0.5),
+                ))
+                ->with(new MeshRenderer(meshId: 'cylinder', materialId: $materials->primary));
+            $names[] = "{$p}_WindowV";
+        }
 
         if ($this->hasFrame) {
             $fw = $this->frameWidth;

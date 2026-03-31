@@ -57,8 +57,8 @@ class EnvironmentalSystem extends AbstractSystem
         if ($weather === null) return;
 
         // Find Wind component and adjust bounds
-        foreach ($world->query(\App\Component\Wind::class) as $entity) {
-            $wind = $entity->get(\App\Component\Wind::class);
+        foreach ($world->query(\PHPolygon\Component\Wind::class) as $entity) {
+            $wind = $entity->get(\PHPolygon\Component\Wind::class);
 
             // Storm increases max wind
             $wind->maxIntensity = 1.0 + $weather->stormIntensity * 0.5;

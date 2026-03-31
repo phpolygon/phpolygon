@@ -71,8 +71,8 @@ class PrecipitationSystem extends AbstractSystem
         $windX = 0.0;
         $windZ = 0.0;
         $windIntensity = 0.0;
-        foreach ($world->query(\App\Component\Wind::class) as $entity) {
-            $wind = $entity->get(\App\Component\Wind::class);
+        foreach ($world->query(\PHPolygon\Component\Wind::class) as $entity) {
+            $wind = $entity->get(\PHPolygon\Component\Wind::class);
             $windIntensity = $wind->intensity;
             $windX = $wind->direction->x * $windIntensity;
             $windZ = $wind->direction->z * $windIntensity;

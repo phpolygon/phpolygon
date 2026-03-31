@@ -62,7 +62,6 @@ class WedgeMesh
         $indices[] = 6; $indices[] = 8; $indices[] = 9;
 
         // --- Left slope (+Z side → peak) ---
-        $leftEdge = [0.0, 1.0 - (-1.0), $pz - 1.0]; // direction along slope
         $ln = self::normalizeArr([0.0, -(($pz) - 1.0), 2.0]);
         self::addVertex($vertices, $normals, $uvs, 1, -1, 1, $ln, 0.0, 0.0);
         self::addVertex($vertices, $normals, $uvs, -1, -1, 1, $ln, 1.0, 0.0);
@@ -83,7 +82,12 @@ class WedgeMesh
         return new MeshData($vertices, $normals, $uvs, $indices);
     }
 
-    /** @param float[] $n */
+    /**
+     * @param float[] &$v
+     * @param float[] &$n
+     * @param float[] &$u
+     * @param float[] $normal
+     */
     private static function addVertex(
         array &$v, array &$n, array &$u,
         float $x, float $y, float $z,
@@ -95,7 +99,10 @@ class WedgeMesh
         $u[] = $uvX; $u[] = $uvY;
     }
 
-    /** @param float[] $v @return float[] */
+    /**
+     * @param float[] $v
+     * @return float[]
+     */
     private static function normalizeArr(array $v): array
     {
         $len = sqrt($v[0] * $v[0] + $v[1] * $v[1] + $v[2] * $v[2]);

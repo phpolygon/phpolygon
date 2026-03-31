@@ -6,6 +6,7 @@ namespace PHPolygon\Tests\Component;
 
 use PHPUnit\Framework\TestCase;
 use PHPolygon\Component\BoxCollider3D;
+use PHPolygon\Math\Mat4;
 use PHPolygon\Math\Vec3;
 
 class BoxCollider3DTest extends TestCase
@@ -24,7 +25,7 @@ class BoxCollider3DTest extends TestCase
     public function testWorldAABBCenteredOnPosition(): void
     {
         $collider = new BoxCollider3D(size: new Vec3(4.0, 2.0, 6.0));
-        $aabb = $collider->getWorldAABB(new Vec3(10.0, 5.0, 0.0));
+        $aabb = $collider->getWorldAABB(Mat4::translation(10.0, 5.0, 0.0));
 
         $this->assertEqualsWithDelta(8.0, $aabb['min']->x, 0.001);
         $this->assertEqualsWithDelta(4.0, $aabb['min']->y, 0.001);
@@ -40,7 +41,7 @@ class BoxCollider3DTest extends TestCase
             size: new Vec3(2.0, 2.0, 2.0),
             offset: new Vec3(0.0, 1.0, 0.0),
         );
-        $aabb = $collider->getWorldAABB(Vec3::zero());
+        $aabb = $collider->getWorldAABB(Mat4::identity());
 
         $this->assertEqualsWithDelta(-1.0, $aabb['min']->x, 0.001);
         $this->assertEqualsWithDelta(0.0, $aabb['min']->y, 0.001); // offset 1 - halfSize 1

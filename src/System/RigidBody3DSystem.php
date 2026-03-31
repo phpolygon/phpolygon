@@ -105,6 +105,7 @@ class RigidBody3DSystem extends AbstractSystem
         return $bodies;
     }
 
+    /** @param array<int, array{entityId: int, rigid: RigidBody3D, transform: Transform3D, collider: BoxCollider3D, min: Vec3, max: Vec3, posX: float, posY: float, posZ: float}> &$bodies */
     private function computeKinematicVelocities(array &$bodies, float $dt): void
     {
         $invDt = 1.0 / $dt;
@@ -126,6 +127,7 @@ class RigidBody3DSystem extends AbstractSystem
         }
     }
 
+    /** @param array<int, array{entityId: int, rigid: RigidBody3D, transform: Transform3D, collider: BoxCollider3D, min: Vec3, max: Vec3, posX: float, posY: float, posZ: float}> &$bodies */
     private function integrate(array &$bodies, float $dt): void
     {
         $gx = $this->gravity->x;
@@ -160,6 +162,7 @@ class RigidBody3DSystem extends AbstractSystem
     }
 
     /**
+     * @param array<int, array{entityId: int, rigid: RigidBody3D, transform: Transform3D, collider: BoxCollider3D, min: Vec3, max: Vec3, posX: float, posY: float, posZ: float}> &$bodies
      * @return list<Collision3D>
      */
     private function detectAndSolveBodyCollisions(array &$bodies): array
@@ -214,6 +217,7 @@ class RigidBody3DSystem extends AbstractSystem
         return $collisions;
     }
 
+    /** @param array<int, array{entityId: int, rigid: RigidBody3D, transform: Transform3D, collider: BoxCollider3D, min: Vec3, max: Vec3, posX: float, posY: float, posZ: float}> &$bodies */
     private function resolveStaticCollisions(World $world, array &$bodies): void
     {
         // Collect static colliders each frame (no RigidBody3D, just BoxCollider3D)
@@ -286,6 +290,7 @@ class RigidBody3DSystem extends AbstractSystem
         }
     }
 
+    /** @param array<int, array{entityId: int, rigid: RigidBody3D, transform: Transform3D, collider: BoxCollider3D, min: Vec3, max: Vec3, posX: float, posY: float, posZ: float}> &$bodies */
     private function characterPush(World $world, array &$bodies, float $dt): void
     {
         foreach ($world->query(CharacterController3D::class, Transform3D::class) as $charEntity) {
@@ -346,6 +351,7 @@ class RigidBody3DSystem extends AbstractSystem
         }
     }
 
+    /** @param array<int, array{entityId: int, rigid: RigidBody3D, transform: Transform3D, collider: BoxCollider3D, min: Vec3, max: Vec3, posX: float, posY: float, posZ: float}> &$bodies */
     private function writeBack(array &$bodies): void
     {
         foreach ($bodies as &$body) {
@@ -362,6 +368,7 @@ class RigidBody3DSystem extends AbstractSystem
 
     // --- Helpers ---
 
+    /** @param array{entityId: int, rigid: RigidBody3D, transform: Transform3D, collider: BoxCollider3D, min: Vec3, max: Vec3, posX: float, posY: float, posZ: float} &$body */
     private function updateAABB(array &$body): void
     {
         $aabb = $body['collider']->getWorldAABB(
@@ -375,6 +382,10 @@ class RigidBody3DSystem extends AbstractSystem
         $body['max'] = $aabb['max'];
     }
 
+    /**
+     * @param array{entityId: int, rigid: RigidBody3D, transform: Transform3D, collider: BoxCollider3D, min: Vec3, max: Vec3, posX: float, posY: float, posZ: float} &$a
+     * @param array{entityId: int, rigid: RigidBody3D, transform: Transform3D, collider: BoxCollider3D, min: Vec3, max: Vec3, posX: float, posY: float, posZ: float} &$b
+     */
     private function testAABBOverlap(array &$a, array &$b, int $idA, int $idB): ?Collision3D
     {
         $overlapX = min($a['max']->x, $b['max']->x) - max($a['min']->x, $b['min']->x);
@@ -400,6 +411,10 @@ class RigidBody3DSystem extends AbstractSystem
         return new Collision3D($idA, $idB, new Vec3(0, 0, $sign), $overlapZ, new Vec3($cx, $cy, $cz));
     }
 
+    /**
+     * @param array{entityId: int, rigid: RigidBody3D, transform: Transform3D, collider: BoxCollider3D, min: Vec3, max: Vec3, posX: float, posY: float, posZ: float} &$a
+     * @param array{entityId: int, rigid: RigidBody3D, transform: Transform3D, collider: BoxCollider3D, min: Vec3, max: Vec3, posX: float, posY: float, posZ: float} &$b
+     */
     private function resolveImpulse(array &$a, array &$b, Collision3D $collision): void
     {
         $rigidA = $a['rigid'];

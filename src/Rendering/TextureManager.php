@@ -38,7 +38,7 @@ class TextureManager
         // Create OpenGL texture
         $glId = 0;
         glGenTextures(1, $glId);
-        $texId = is_int($glId) ? $glId : 0;
+        $texId = $glId;
         glBindTexture(GL_TEXTURE_2D, $texId);
 
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);

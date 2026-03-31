@@ -114,8 +114,8 @@ class WeatherSystem extends AbstractSystem
 
         // --- Fog (high humidity + low wind + temp near dew point) ---
         $windIntensity = 0.5; // Will be read from Wind component by EnvironmentalSystem
-        foreach ($world->query(\App\Component\Wind::class) as $entity) {
-            $windIntensity = $entity->get(\App\Component\Wind::class)->intensity;
+        foreach ($world->query(\PHPolygon\Component\Wind::class) as $entity) {
+            $windIntensity = $entity->get(\PHPolygon\Component\Wind::class)->intensity;
             break;
         }
 

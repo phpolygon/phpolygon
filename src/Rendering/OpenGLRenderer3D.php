@@ -566,7 +566,8 @@ class OpenGLRenderer3D implements Renderer3DInterface
     private function resolveProcMode(string $materialId): int
     {
         // Extract prefix (first segment before '_' + number, or full ID)
-        $prefix = strtok($materialId, '0123456789');
+        $prefixRaw = strtok($materialId, '0123456789');
+        $prefix = $prefixRaw === false ? $materialId : $prefixRaw;
 
         $mode = match (true) {
             str_starts_with($prefix, 'sand_terrain') => 1,
@@ -699,6 +700,7 @@ class OpenGLRenderer3D implements Renderer3DInterface
         glUseProgram($program);
 
         // Dummy cubemap (1×1, for u_environment_map on unit 5)
+        $dcm = 0;
         glGenTextures(1, $dcm);
         $this->dummyCubemap = $dcm;
         glBindTexture(GL_TEXTURE_CUBE_MAP, $this->dummyCubemap);
@@ -712,6 +714,7 @@ class OpenGLRenderer3D implements Renderer3DInterface
         $this->setUniformInt('u_environment_map', 5);
 
         // Dummy depth texture (1×1, for u_shadow_map on unit 6)
+        $ddt = 0;
         glGenTextures(1, $ddt);
         $this->dummyDepthTex = $ddt;
         glBindTexture(GL_TEXTURE_2D, $this->dummyDepthTex);
@@ -725,6 +728,7 @@ class OpenGLRenderer3D implements Renderer3DInterface
         $this->setUniformInt('u_shadow_map', 6);
 
         // Dummy cloud shadow (1×1, for u_cloud_shadow_map on unit 7)
+        $dcs = 0;
         glGenTextures(1, $dcs);
         $this->dummyCloudTex = $dcs;
         glBindTexture(GL_TEXTURE_2D, $this->dummyCloudTex);
@@ -866,7 +870,7 @@ class OpenGLRenderer3D implements Renderer3DInterface
 
         $texId = 0;
         glGenTextures(1, $texId);
-        if (!is_int($texId) || $texId === 0) {
+        if ($texId === 0) {
             return 0;
         }
         glBindTexture(GL_TEXTURE_CUBE_MAP, $texId);
@@ -922,6 +926,7 @@ class OpenGLRenderer3D implements Renderer3DInterface
             $this->shadowMap = new ShadowMapRenderer(resolution: 2048);
             $this->shadowMap->initialize();
         }
+        $shadowMap = $this->shadowMap;
 
         // Use the BRIGHTEST directional light for shadow casting (sun by day, moon by night)
         $lightDir = null;
@@ -940,7 +945,7 @@ class OpenGLRenderer3D implements Renderer3DInterface
         }
 
         // Update light-space matrix
-        $this->shadowMap->updateLightMatrix($lightDir);
+        $shadowMap->updateLightMatrix($lightDir);
 
         // Ensure all sampler units have valid textures during shadow passes
         glActiveTexture(GL_TEXTURE6);
@@ -950,11 +955,11 @@ class OpenGLRenderer3D implements Renderer3DInterface
         glActiveTexture(GL_TEXTURE0);
 
         // Shadow pass: render depth only
-        $this->shadowMap->beginShadowPass();
+        $shadowMap->beginShadowPass();
         glUseProgram($this->shaderProgram);
 
         // Set light-space matrix as view+projection for shadow pass
-        $lsm = $this->shadowMap->getLightSpaceMatrix();
+        $lsm = $shadowMap->getLightSpaceMatrix();
         $this->setUniformMat4('u_view', $lsm);
         $this->setUniformMat4('u_projection', \PHPolygon\Math\Mat4::identity());
 
@@ -995,15 +1000,16 @@ class OpenGLRenderer3D implements Renderer3DInterface
             }
         }
 
-        $this->shadowMap->endShadowPass();
+        $shadowMap->endShadowPass();
 
         // --- Cloud shadow pass: render cloud opacity from sun's perspective ---
         if ($this->cloudShadow === null) {
             $this->cloudShadow = new CloudShadowRenderer(resolution: 1024);
             $this->cloudShadow->initialize();
         }
+        $cloudShadow = $this->cloudShadow;
 
-        $this->cloudShadow->beginPass();
+        $cloudShadow->beginPass();
         glUseProgram($this->shaderProgram);
 
         // Same light-space view as geometry shadows
@@ -1044,17 +1050,17 @@ class OpenGLRenderer3D implements Renderer3DInterface
             }
         }
 
-        $this->cloudShadow->endPass();
+        $cloudShadow->endPass();
 
         // Bind both shadow maps for main pass
         glUseProgram($this->shaderProgram);
-        $this->shadowMap->bind(6);
+        $shadowMap->bind(6);
         $this->setUniformInt('u_shadow_map', 6);
         $this->setUniformMat4('u_light_space_matrix', $lsm);
         $this->setUniformInt('u_has_shadow_map', 1);
 
         if ($hasCloudGeometry) {
-            $this->cloudShadow->bind(7);
+            $cloudShadow->bind(7);
             $this->setUniformInt('u_cloud_shadow_map', 7);
             $this->setUniformInt('u_has_cloud_shadow', 1);
         }

@@ -147,7 +147,7 @@ class Physics3DSystem extends AbstractSystem
                     $radius,
                     $meshColliders,
                     $entity->id,
-                    $boxData['boxTopY'] ?? [],
+                    $boxData['boxTopY'],
                 );
 
                 // Final AABB update after mesh collision resolution
@@ -374,12 +374,10 @@ class Physics3DSystem extends AbstractSystem
                 $meshCollider->lastWorldMatrixArr = $worldMatrixArr;
             }
 
-            if ($meshCollider->bvh !== null) {
-                $colliders[] = [
-                    'entityId' => $entity->id,
-                    'bvh' => $meshCollider->bvh,
-                ];
-            }
+            $colliders[] = [
+                'entityId' => $entity->id,
+                'bvh' => $meshCollider->bvh,
+            ];
         }
 
         return $colliders;

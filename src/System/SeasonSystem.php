@@ -91,7 +91,10 @@ class SeasonSystem extends AbstractSystem
         }
     }
 
-    /** @return array{temp: float, humidity: float} */
+    /**
+     * @param array<int, array{time: float, temp: float, humidity: float}> $keys
+     * @return array{temp: float, humidity: float}
+     */
     private static function interpolateClimate(array $keys, float $t): array
     {
         for ($i = 0; $i < count($keys) - 1; $i++) {
@@ -108,7 +111,10 @@ class SeasonSystem extends AbstractSystem
         return ['temp' => $keys[0]['temp'], 'humidity' => $keys[0]['humidity']];
     }
 
-    /** @return array{r: float, g: float, b: float} */
+    /**
+     * @param array<int, array{time: float, r: float, g: float, b: float}> $keys
+     * @return array{r: float, g: float, b: float}
+     */
     private static function interpolateRGB(array $keys, float $t): array
     {
         for ($i = 0; $i < count($keys) - 1; $i++) {

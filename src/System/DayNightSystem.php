@@ -92,11 +92,9 @@ class DayNightSystem extends AbstractSystem
     ) {}
 
     private ?DayNightCycle $cachedCycle = null;
-    private float $lastDt = 0.0;
 
     public function update(World $world, float $dt): void
     {
-        $this->lastDt = $dt;
         foreach ($world->query(DayNightCycle::class) as $entity) {
             $this->cachedCycle = $entity->get(DayNightCycle::class);
             break;

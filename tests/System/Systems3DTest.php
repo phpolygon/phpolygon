@@ -37,7 +37,7 @@ class Systems3DTest extends TestCase
         $entity->attach(new Camera3DComponent(fov: 60.0, active: true));
         $entity->attach(new Transform3D(new Vec3(0.0, 0.0, 5.0)));
 
-        $world->update(0.016);
+        $world->render();
 
         $cameras = $commandList->ofType(SetCamera::class);
         $this->assertCount(1, $cameras);
@@ -55,7 +55,7 @@ class Systems3DTest extends TestCase
         $entity->attach(new Camera3DComponent());
         $entity->attach(new Transform3D(new Vec3(0.0, 5.0, 10.0)));
 
-        $world->update(0.016);
+        $world->render();
 
         $cameras = $commandList->ofType(SetCamera::class);
         $this->assertCount(1, $cameras);
@@ -142,9 +142,11 @@ class Systems3DTest extends TestCase
         $entity->attach(new DirectionalLight(new Vec3(0.0, -1.0, 0.0)));
         $entity->attach(new Transform3D());
 
-        $world->update(0.016);
+        $world->render();
 
-        $lights = $commandList->ofType(SetDirectionalLight::class);
+        $lastList = $renderer->getLastCommandList();
+        $this->assertNotNull($lastList);
+        $lights = $lastList->ofType(SetDirectionalLight::class);
         $this->assertCount(1, $lights);
     }
 

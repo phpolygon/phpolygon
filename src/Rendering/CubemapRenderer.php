@@ -47,6 +47,7 @@ class CubemapRenderer
         if ($this->initialized) return;
 
         // Create cubemap texture
+        $texId = 0;
         glGenTextures(1, $texId);
         $this->cubemapTexture = $texId;
         glBindTexture(GL_TEXTURE_CUBE_MAP, $this->cubemapTexture);
@@ -67,10 +68,12 @@ class CubemapRenderer
         glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
 
         // Create FBO
+        $fboId = 0;
         glGenFramebuffers(1, $fboId);
         $this->fbo = $fboId;
 
         // Depth renderbuffer
+        $rboId = 0;
         glGenRenderbuffers(1, $rboId);
         $this->depthRbo = $rboId;
         glBindRenderbuffer(GL_RENDERBUFFER, $this->depthRbo);

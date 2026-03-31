@@ -37,6 +37,7 @@ class CloudShadowRenderer
         if ($this->initialized) return;
 
         // Color texture — stores cloud opacity in R channel
+        $texId = 0;
         glGenTextures(1, $texId);
         $this->colorTexture = $texId;
         glBindTexture(GL_TEXTURE_2D, $this->colorTexture);
@@ -49,12 +50,14 @@ class CloudShadowRenderer
         glTexParameterfv(GL_TEXTURE_2D, GL_TEXTURE_BORDER_COLOR, new \GL\Buffer\FloatBuffer([0.0, 0.0, 0.0, 0.0]));
 
         // Depth renderbuffer (needed for correct occlusion between overlapping clouds)
+        $rboId = 0;
         glGenRenderbuffers(1, $rboId);
         $this->depthRbo = $rboId;
         glBindRenderbuffer(GL_RENDERBUFFER, $this->depthRbo);
         glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, $this->resolution, $this->resolution);
 
         // FBO
+        $fboId = 0;
         glGenFramebuffers(1, $fboId);
         $this->fbo = $fboId;
         glBindFramebuffer(GL_FRAMEBUFFER, $this->fbo);

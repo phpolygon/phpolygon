@@ -18,6 +18,7 @@ class MetalMaterials
     /** @var array<string, array{id: string, material: Material}>|null */
     private static ?array $cache = null;
 
+    /** @return array<string, array{id: string, material: Material}> */
     public static function all(): array
     {
         if (self::$cache !== null) {
