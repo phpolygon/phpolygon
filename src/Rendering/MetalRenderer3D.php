@@ -4,28 +4,17 @@ declare(strict_types=1);
 
 namespace PHPolygon\Rendering;
 
-use Mt\Buffer;
-use Mt\CommandQueue;
-use Mt\CompareFunction;
-use Mt\CullMode;
-use Mt\DepthStencilDescriptor;
-use Mt\DepthStencilState;
-use Mt\Device;
-use Mt\IndexType;
-use Mt\Layer;
-use Mt\LoadAction;
-use Mt\PixelFormat;
-use Mt\PrimitiveType;
-use Mt\RenderPassDescriptor;
-use Mt\RenderPipelineDescriptor;
-use Mt\RenderPipelineState;
-use Mt\ResourceOptions;
-use Mt\StoreAction;
-use Mt\TextureDescriptor;
-use Mt\TextureUsage;
-use Mt\VertexDescriptor;
-use Mt\VertexFormat;
-use Mt\Winding;
+use Metal\Buffer;
+use Metal\CommandQueue;
+use Metal\DepthStencilDescriptor;
+use Metal\DepthStencilState;
+use Metal\Device;
+use Metal\Layer;
+use Metal\RenderPassDescriptor;
+use Metal\RenderPipelineDescriptor;
+use Metal\RenderPipelineState;
+use Metal\TextureDescriptor;
+use Metal\VertexDescriptor;
 use PHPolygon\Geometry\MeshData;
 use PHPolygon\Geometry\MeshRegistry;
 use PHPolygon\Math\Mat4;
@@ -40,7 +29,7 @@ use PHPolygon\Rendering\Command\SetSkybox;
 
 /**
  * Native Apple Metal 3D renderer.
- * Translates a RenderCommandList into Metal draw calls via ext-metal (php-metal).
+ * Translates a RenderCommandList into Metal draw calls via ext-metal (php-metal-gpu).
  *
  * Advantages over VulkanRenderer3D (via MoltenVK):
  *  - No Vulkan→Metal translation layer — direct Metal API calls
@@ -49,7 +38,7 @@ use PHPolygon\Rendering\Command\SetSkybox;
  *  - Simpler synchronisation model (Metal manages most frame sync internally)
  *
  * Requires:
- *  - ext-metal (php-metal) installed
+ *  - ext-metal (php-metal-gpu) installed
  *  - GLFW window created with GLFW_CLIENT_API = GLFW_NO_API
  *  - macOS 12+ (Monterey) for full Metal 3 support
  *
@@ -75,7 +64,7 @@ class MetalRenderer3D implements Renderer3DInterface
     private Buffer $frameUbo;
     private Buffer $lightingUbo;
 
-    /** Pre-compiled .metallib (xcrun metal + xcrun metallib at build time) */
+    /** Pre-compiled .metallib (xcrun metal at build time) */
     private const METALLIB_PATH = __DIR__ . '/../../resources/shaders/compiled/mesh3d.metallib';
 
     /** @var float[] */
@@ -185,33 +174,35 @@ class MetalRenderer3D implements Renderer3DInterface
 
         // Depth texture — recreated each frame (simple; optimise with caching if needed)
         $depthDesc = new TextureDescriptor();
-        $depthDesc->setPixelFormat(PixelFormat::Depth32Float);
+        $depthDesc->setPixelFormat(\Metal\PixelFormatDepth32Float);
         $depthDesc->setWidth($this->width);
         $depthDesc->setHeight($this->height);
-        $depthDesc->setUsage(TextureUsage::RenderTarget);
-        $depthTexture = $this->device->newTexture($depthDesc);
+        $depthDesc->setUsage(\Metal\TextureUsageRenderTarget);
+        $depthTexture = $this->device->createTexture($depthDesc);
 
         $renderPass = new RenderPassDescriptor();
-        $renderPass->setColorAttachment(
-            0, $colorTexture,
-            LoadAction::Clear, StoreAction::Store,
-            $this->clearR, $this->clearG, $this->clearB, 1.0,
-        );
-        $renderPass->setDepthAttachment($depthTexture, LoadAction::Clear, StoreAction::Store, 1.0);
+        $renderPass->setColorAttachmentTexture(0, $colorTexture);
+        $renderPass->setColorAttachmentLoadAction(0, \Metal\LoadActionClear);
+        $renderPass->setColorAttachmentStoreAction(0, \Metal\StoreActionStore);
+        $renderPass->setColorAttachmentClearColor(0, $this->clearR, $this->clearG, $this->clearB, 1.0);
+        $renderPass->setDepthAttachmentTexture($depthTexture);
+        $renderPass->setDepthAttachmentLoadAction(\Metal\LoadActionClear);
+        $renderPass->setDepthAttachmentStoreAction(\Metal\StoreActionStore);
+        $renderPass->setDepthAttachmentClearDepth(1.0);
 
         // ── Encode draw calls ──────────────────────────────────────────────
-        $commandBuffer = $this->commandQueue->commandBuffer();
-        $encoder       = $commandBuffer->renderCommandEncoder($renderPass);
+        $commandBuffer = $this->commandQueue->createCommandBuffer();
+        $encoder       = $commandBuffer->createRenderCommandEncoder($renderPass);
 
         $encoder->setRenderPipelineState($this->pipeline);
         $encoder->setDepthStencilState($this->depthStencilState);
-        $encoder->setCullMode(CullMode::Back);
-        $encoder->setFrontFacingWinding(Winding::CounterClockwise);
+        $encoder->setCullMode(\Metal\CullModeBack);
+        $encoder->setFrontFacingWinding(\Metal\WindingCounterClockwise);
         $encoder->setViewport(0.0, 0.0, (float) $this->width, (float) $this->height, 0.0, 1.0);
         $encoder->setScissorRect(0, 0, $this->width, $this->height);
 
         // Bind UBOs — indices match [[buffer(N)]] in mesh3d.metal
-        $encoder->setVertexBuffer($this->frameUbo,    0, 1); // slot 1: FrameUBO
+        $encoder->setVertexBuffer($this->frameUbo,   0, 1); // slot 1: FrameUBO
         $encoder->setFragmentBuffer($this->lightingUbo, 0, 2); // slot 2: LightingUBO
 
         foreach ($commandList->getCommands() as $command) {
@@ -243,7 +234,7 @@ class MetalRenderer3D implements Renderer3DInterface
             : [0.8, 0.8, 0.8];
     }
 
-    private function drawMeshCommand(\Mt\RenderCommandEncoder $encoder, string $meshId, Mat4 $modelMatrix): void
+    private function drawMeshCommand(\Metal\RenderCommandEncoder $encoder, string $meshId, Mat4 $modelMatrix): void
     {
         $meshData = MeshRegistry::get($meshId);
         if ($meshData === null) {
@@ -262,10 +253,11 @@ class MetalRenderer3D implements Renderer3DInterface
 
         $encoder->setVertexBuffer($this->meshCache[$meshId]['vb'], 0, 3); // slot 3: vertex data
         $encoder->drawIndexedPrimitives(
-            PrimitiveType::Triangle,
+            \Metal\PrimitiveTypeTriangle,
             $this->meshCache[$meshId]['count'],
-            IndexType::UInt32,
+            \Metal\IndexTypeUInt32,
             $this->meshCache[$meshId]['ib'],
+            0,
         );
     }
 
@@ -288,8 +280,8 @@ class MetalRenderer3D implements Renderer3DInterface
         }
 
         // StorageModeShared: CPU writes once at upload, GPU reads every frame.
-        $vb = $this->device->newBufferWithBytes($vertexData, strlen($vertexData), ResourceOptions::StorageModeShared);
-        $ib = $this->device->newBufferWithBytes($indexData,  strlen($indexData),  ResourceOptions::StorageModeShared);
+        $vb = $this->device->createBufferFromData($vertexData, \Metal\StorageModeShared);
+        $ib = $this->device->createBufferFromData($indexData,  \Metal\StorageModeShared);
 
         $this->meshCache[$meshId] = ['vb' => $vb, 'ib' => $ib, 'count' => count($meshData->indices)];
     }
@@ -298,7 +290,6 @@ class MetalRenderer3D implements Renderer3DInterface
     {
         // Metal NDC: Y points UP (same as OpenGL) — no Y-flip needed.
         // Z range is 0..1 (same as Vulkan) — Z correction still required.
-        // Compare to VulkanRenderer3D which needs the full Y+Z correction.
         $metalClip = new Mat4([
             1.0, 0.0, 0.0, 0.0,
             0.0, 1.0, 0.0, 0.0,  // Y row stays positive — Metal Y-up
@@ -308,7 +299,7 @@ class MetalRenderer3D implements Renderer3DInterface
         $correctedProj = $metalClip->multiply(new Mat4($this->projMatrix));
         $data = pack('f16', ...$this->viewMatrix)
               . pack('f16', ...$correctedProj->toArray());
-        $this->frameUbo->write($data, 0);
+        $this->frameUbo->writeRawContents($data, 0);
     }
 
     private function uploadLightingUbo(): void
@@ -332,17 +323,19 @@ class MetalRenderer3D implements Renderer3DInterface
                 $data .= pack('f8', 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
             }
         }
-        $this->lightingUbo->write($data, 0);
+        $this->lightingUbo->writeRawContents($data, 0);
     }
 
     private function initMetal(\GLFWwindow $windowHandle): void
     {
-        $this->device       = Device::createSystemDefault();
-        $this->commandQueue = $this->device->newCommandQueue();
+        $this->device       = \Metal\createSystemDefaultDevice();
+        $this->commandQueue = $this->device->createCommandQueue();
 
         // Attach CAMetalLayer to the GLFW window's NSView.
+        // glfwGetCocoaWindow() returns the NSWindow pointer as an integer (macOS only).
         // Must happen before any nextDrawable() calls.
-        $this->layer = new Layer($windowHandle, $this->device, PixelFormat::BGRA8Unorm);
+        $nsWindowPtr  = glfwGetCocoaWindow($windowHandle);
+        $this->layer  = new Layer($nsWindowPtr, $this->device, \Metal\PixelFormatBGRA8Unorm);
         $this->layer->setDrawableSize($this->width, $this->height);
 
         $this->createPipeline();
@@ -352,39 +345,39 @@ class MetalRenderer3D implements Renderer3DInterface
 
     private function createPipeline(): void
     {
-        $library = $this->device->newLibraryWithFile(self::METALLIB_PATH);
-        $vertFn  = $library->newFunction('vertex_mesh3d');
-        $fragFn  = $library->newFunction('fragment_mesh3d');
+        $library = $this->device->createLibraryWithFile(self::METALLIB_PATH);
+        $vertFn  = $library->getFunction('vertex_mesh3d');
+        $fragFn  = $library->getFunction('fragment_mesh3d');
 
         // Vertex layout: position(float3) + normal(float3) + uv(float2) = 32 bytes
         $vertexDesc = new VertexDescriptor();
-        $vertexDesc->setAttribute(0, VertexFormat::Float3, 0,  0); // [[attribute(0)]] position
-        $vertexDesc->setAttribute(1, VertexFormat::Float3, 12, 0); // [[attribute(1)]] normal
-        $vertexDesc->setAttribute(2, VertexFormat::Float2, 24, 0); // [[attribute(2)]] uv
-        $vertexDesc->setLayout(0, 32);                              // stride 32, buffer slot 0
+        $vertexDesc->setAttribute(0, \Metal\VertexFormatFloat3, 0,  0); // [[attribute(0)]] position
+        $vertexDesc->setAttribute(1, \Metal\VertexFormatFloat3, 12, 0); // [[attribute(1)]] normal
+        $vertexDesc->setAttribute(2, \Metal\VertexFormatFloat2, 24, 0); // [[attribute(2)]] uv
+        $vertexDesc->setLayout(0, 32);                                   // stride 32, buffer slot 0
 
         $pipelineDesc = new RenderPipelineDescriptor();
         $pipelineDesc->setVertexFunction($vertFn);
         $pipelineDesc->setFragmentFunction($fragFn);
-        $pipelineDesc->setColorAttachmentPixelFormat(0, PixelFormat::BGRA8Unorm);
-        $pipelineDesc->setDepthAttachmentPixelFormat(PixelFormat::Depth32Float);
+        $pipelineDesc->getColorAttachment(0)->setPixelFormat(\Metal\PixelFormatBGRA8Unorm);
+        $pipelineDesc->setDepthAttachmentPixelFormat(\Metal\PixelFormatDepth32Float);
         $pipelineDesc->setVertexDescriptor($vertexDesc);
 
-        $this->pipeline = $this->device->newRenderPipelineState($pipelineDesc);
+        $this->pipeline = $this->device->createRenderPipelineState($pipelineDesc);
     }
 
     private function createDepthStencilState(): void
     {
         $desc = new DepthStencilDescriptor();
-        $desc->setDepthCompareFunction(CompareFunction::Less);
+        $desc->setDepthCompareFunction(\Metal\CompareFunctionLess);
         $desc->setDepthWriteEnabled(true);
-        $this->depthStencilState = $this->device->newDepthStencilState($desc);
+        $this->depthStencilState = $this->device->createDepthStencilState($desc);
     }
 
     private function createUBOs(): void
     {
         // StorageModeShared: accessible by both CPU and GPU — ideal for UBOs written each frame
-        $this->frameUbo    = $this->device->newBuffer(self::FRAME_UBO_SIZE,    ResourceOptions::StorageModeShared);
-        $this->lightingUbo = $this->device->newBuffer(self::LIGHTING_UBO_SIZE, ResourceOptions::StorageModeShared);
+        $this->frameUbo    = $this->device->createBuffer(self::FRAME_UBO_SIZE,    \Metal\StorageModeShared);
+        $this->lightingUbo = $this->device->createBuffer(self::LIGHTING_UBO_SIZE, \Metal\StorageModeShared);
     }
 }
