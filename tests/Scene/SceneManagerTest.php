@@ -76,8 +76,7 @@ class SceneManagerTest extends TestCase
 
     protected function setUp(): void
     {
-        // Engine constructor does not require GL context
-        $this->engine = new Engine(new EngineConfig());
+        $this->engine = new Engine(new EngineConfig(headless: true));
         $this->scenes = $this->engine->scenes;
     }
 
