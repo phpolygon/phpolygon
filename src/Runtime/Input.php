@@ -81,7 +81,7 @@ class Input implements InputInterface
 
     public function isKeyDown(int $key): bool
     {
-        return $this->keysDown[$key] ?? false;
+        return (bool)($this->keysDown[$key] ?? false);
     }
 
     public function isKeyPressed(int $key): bool
@@ -91,22 +91,22 @@ class Input implements InputInterface
 
     public function isKeyReleased(int $key): bool
     {
-        return !($this->keysDown[$key] ?? false) && ($this->keysPrev[$key] ?? false);
+        return !(bool)($this->keysDown[$key] ?? false) && (bool)($this->keysPrev[$key] ?? false);
     }
 
     public function isMouseButtonDown(int $button): bool
     {
-        return $this->mouseDown[$button] ?? false;
+        return (bool)($this->mouseDown[$button] ?? false);
     }
 
     public function isMouseButtonPressed(int $button): bool
     {
-        return $this->mousePressedThisFrame[$button] ?? false;
+        return (bool)($this->mousePressedThisFrame[$button] ?? false);
     }
 
     public function isMouseButtonReleased(int $button): bool
     {
-        return !($this->mouseDown[$button] ?? false) && ($this->mousePrev[$button] ?? false);
+        return !(bool)($this->mouseDown[$button] ?? false) && (bool)($this->mousePrev[$button] ?? false);
     }
 
     public function getMousePosition(): Vec2
