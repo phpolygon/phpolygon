@@ -35,6 +35,10 @@ class Wind extends AbstractComponent
     #[Property]
     public float $gustiness;
 
+    /** Frequency of wind gusts in Hz (cycles per second) */
+    #[Property]
+    public float $gustFrequency;
+
     /** Minimum intensity clamp (set by EnvironmentalSystem based on weather) */
     #[Hidden]
     public float $minIntensity;
@@ -50,13 +54,15 @@ class Wind extends AbstractComponent
     public function __construct(
         float $baseIntensity = 0.5,
         float $gustiness = 0.3,
+        float $gustFrequency = 0.2,
     ) {
-        $this->baseIntensity = $baseIntensity;
-        $this->gustiness     = $gustiness;
-        $this->intensity     = $baseIntensity;
-        $this->time          = 0.0;
-        $this->minIntensity  = 0.0;
-        $this->maxIntensity  = 2.0;
-        $this->direction     = new Vec3(1.0, 0.0, 0.0);
+        $this->baseIntensity  = $baseIntensity;
+        $this->gustiness      = $gustiness;
+        $this->gustFrequency  = $gustFrequency;
+        $this->intensity      = $baseIntensity;
+        $this->time           = 0.0;
+        $this->minIntensity   = 0.0;
+        $this->maxIntensity   = 2.0;
+        $this->direction      = new Vec3(1.0, 0.0, 0.0);
     }
 }
