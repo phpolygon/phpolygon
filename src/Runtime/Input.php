@@ -86,6 +86,9 @@ class Input implements InputInterface
 
     public function isKeyPressed(int $key): bool
     {
+        if ($this->isSuppressed()) {
+            return false;
+        }
         return (bool)($this->keyPressedThisFrame[$key] ?? false);
     }
 
