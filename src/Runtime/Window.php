@@ -104,8 +104,6 @@ class Window
             $input->handleCharEvent($codepoint);
         });
 
-        $this->attachSizeCallbacks();
-
         glfwShowWindow($this->handle);
         $this->initialized = true;
     }
@@ -124,6 +122,30 @@ class Window
     public function pollEvents(): void
     {
         glfwPollEvents();
+        // Poll window and framebuffer size every frame instead of relying on
+        // glfwSetFramebufferSizeCallback / glfwSetWindowSizeCallback.
+        // Those callbacks are invoked re-entrantly during glfwSetWindowMonitor
+        // while the PHP value stack is inconsistent, corrupting adjacent zvals
+        // regardless of what the closure body does. Polling here is equivalent
+        // for a single-window application and eliminates the corruption entirely.
+        $w = 0;
+        $h = 0;
+        glfwGetWindowSize($this->handle, $w, $h);
+        if (is_int($w) && $w > 0) {
+            $this->width = $w;
+        }
+        if (is_int($h) && $h > 0) {
+            $this->height = $h;
+        }
+        $fbW = 0;
+        $fbH = 0;
+        glfwGetFramebufferSize($this->handle, $fbW, $fbH);
+        if (is_int($fbW) && $fbW > 0) {
+            $this->framebufferWidth = $fbW;
+        }
+        if (is_int($fbH) && $fbH > 0) {
+            $this->framebufferHeight = $fbH;
+        }
     }
 
     public function swapBuffers(): void
@@ -227,14 +249,6 @@ class Window
         // deferred AppKit "window close" events are discarded by shouldClose().
         $this->suppressCloseUntil = microtime(true) + self::SUPPRESS_CLOSE_SECS;
 
-        // Replace size callbacks with static no-ops before the blocking call.
-        // php-glfw invokes PHP closures synchronously during the AppKit animation
-        // while the PHP value stack is inconsistent. The integer arguments to the
-        // size callbacks ($width=1792, $height=1120) land in wrong stack positions
-        // and corrupt adjacent zvals (arrays become ints). Static no-op closures
-        // have no captures and no writes, eliminating the corruption entirely.
-        $this->attachNoOpSizeCallbacks();
-
         glfwSetWindowMonitor(
             $this->handle,
             $monitor,
@@ -249,11 +263,9 @@ class Window
         // fullscreen animation. Reset it so the game loop does not exit.
         glfwSetWindowShouldClose($this->handle, 0);
 
-        // Read actual post-switch dimensions and restore real callbacks.
         $this->readFramebufferSize();
         $this->width  = $modeWidth;
         $this->height = $modeHeight;
-        $this->attachSizeCallbacks();
 
         $this->fullscreen = true;
     }
@@ -270,7 +282,6 @@ class Window
         }
 
         if ($this->fullscreen) {
-            $this->attachNoOpSizeCallbacks();
             glfwSetWindowMonitor(
                 $this->handle,
                 null,
@@ -284,7 +295,6 @@ class Window
             $this->readFramebufferSize();
             $this->width = $this->windowedWidth;
             $this->height = $this->windowedHeight;
-            $this->attachSizeCallbacks();
             $this->fullscreen = false;
         } else {
             $wx = 0;
@@ -314,7 +324,6 @@ class Window
     {
         if ($this->fullscreen) {
             $this->suppressCloseUntil = microtime(true) + self::SUPPRESS_CLOSE_SECS;
-            $this->attachNoOpSizeCallbacks();
             glfwSetWindowMonitor(
                 $this->handle,
                 null,
@@ -328,7 +337,6 @@ class Window
             $this->readFramebufferSize();
             $this->width = $this->windowedWidth;
             $this->height = $this->windowedHeight;
-            $this->attachSizeCallbacks();
             $this->fullscreen = false;
         } elseif ($this->borderless) {
             // glfwRestoreWindow un-maximizes before re-adding decorations; then
@@ -380,43 +388,9 @@ class Window
     // ── Internal helpers ────────────────────────────────────────────────────
 
     /**
-     * Register real framebuffer/window-size callbacks that update internal state.
-     * Called once from initialize() and again after every glfwSetWindowMonitor call.
-     */
-    private function attachSizeCallbacks(): void
-    {
-        glfwSetFramebufferSizeCallback($this->handle, function (int $width, int $height) {
-            $this->framebufferWidth = $width;
-            $this->framebufferHeight = $height;
-        });
-        glfwSetWindowSizeCallback($this->handle, function (int $width, int $height) {
-            $this->width = $width;
-            $this->height = $height;
-        });
-    }
-
-    /**
-     * Temporarily replace size callbacks with static no-ops.
-     *
-     * php-glfw invokes PHP closures synchronously during glfwSetWindowMonitor
-     * while the PHP value stack is in an inconsistent re-entrant state. The
-     * integer arguments passed to size callbacks ($width, $height) are pushed
-     * onto the wrong stack positions, corrupting adjacent zvals — manifesting
-     * as properties/arrays of unrelated objects (Input, EventDispatcher) being
-     * overwritten with garbage integers.
-     *
-     * Static no-op closures have no object captures and no property writes,
-     * so even if they are invoked on a broken stack the damage surface is zero.
-     * Real callbacks are restored via attachSizeCallbacks() after the call.
-     */
-    private function attachNoOpSizeCallbacks(): void
-    {
-        glfwSetFramebufferSizeCallback($this->handle, static function (int $w, int $h): void {});
-        glfwSetWindowSizeCallback($this->handle, static function (int $w, int $h): void {});
-    }
-
-    /**
      * Re-read actual framebuffer dimensions from GLFW after a mode switch.
+     * pollEvents() handles the per-frame update; this is for the immediate
+     * post-switch read before the next frame.
      */
     private function readFramebufferSize(): void
     {
