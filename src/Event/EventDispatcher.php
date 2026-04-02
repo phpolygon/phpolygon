@@ -18,12 +18,6 @@ class EventDispatcher
     {
         $class = get_class($event);
         $listeners = $this->listeners[$class] ?? [];
-        // is_array() guard is intentional: glfwSetWindowMonitor corrupts PHP
-        // zvals during the AppKit fullscreen animation, and $listeners can
-        // receive a garbage int value despite the PHPDoc type. Do not remove.
-        if (!is_array($listeners)) {
-            return;
-        }
         foreach ($listeners as $listener) {
             $listener($event);
         }

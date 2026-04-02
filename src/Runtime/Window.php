@@ -17,8 +17,18 @@ class Window
     private float $contentScaleY = 1.0;
     private bool $initialized = false;
     private bool $fullscreen = false;
+    private bool $borderless = false;
 
-    /** Stored windowed position/size for restoring after fullscreen */
+    /**
+     * Timestamp set when entering fullscreen or borderless mode.
+     * shouldClose() suppresses the close flag for SUPPRESS_CLOSE_SECS seconds
+     * after a mode switch so macOS AppKit's deferred "window close" event
+     * (fired at the end of the fullscreen animation) does not terminate the loop.
+     */
+    private float $suppressCloseUntil = 0.0;
+    private const float SUPPRESS_CLOSE_SECS = 2.0;
+
+    /** Stored windowed position/size for restoring after fullscreen or borderless */
     private int $windowedX = 0;
     private int $windowedY = 0;
     private int $windowedWidth = 0;
@@ -94,15 +104,7 @@ class Window
             $input->handleCharEvent($codepoint);
         });
 
-        glfwSetFramebufferSizeCallback($this->handle, function (int $width, int $height) {
-            $this->framebufferWidth = $width;
-            $this->framebufferHeight = $height;
-        });
-
-        glfwSetWindowSizeCallback($this->handle, function (int $width, int $height) {
-            $this->width = $width;
-            $this->height = $height;
-        });
+        $this->attachSizeCallbacks();
 
         glfwShowWindow($this->handle);
         $this->initialized = true;
@@ -110,7 +112,13 @@ class Window
 
     public function shouldClose(): bool
     {
-        return (bool)glfwWindowShouldClose($this->handle);
+        $glfwFlag = (bool)glfwWindowShouldClose($this->handle);
+        $now      = microtime(true);
+        if ($now < $this->suppressCloseUntil) {
+            glfwSetWindowShouldClose($this->handle, 0);
+            return false;
+        }
+        return $glfwFlag;
     }
 
     public function pollEvents(): void
@@ -178,8 +186,13 @@ class Window
         return $this->fullscreen;
     }
 
+    public function isBorderless(): bool
+    {
+        return $this->borderless;
+    }
+
     /**
-     * Switch to borderless fullscreen on the primary monitor.
+     * Switch to exclusive fullscreen on the primary monitor.
      */
     public function setFullscreen(): void
     {
@@ -187,26 +200,41 @@ class Window
             return;
         }
 
-        // Save windowed geometry for later restore
-        $wx = 0;
-        $wy = 0;
-        glfwGetWindowPos($this->handle, $wx, $wy);
-        $this->windowedX = is_int($wx) ? $wx : 0;
-        $this->windowedY = is_int($wy) ? $wy : 0;
-        $this->windowedWidth = $this->width;
-        $this->windowedHeight = $this->height;
+        if ($this->borderless) {
+            glfwSetWindowAttrib($this->handle, GLFW_DECORATED, GL_TRUE);
+            $this->borderless = false;
+        } else {
+            $wx = 0;
+            $wy = 0;
+            glfwGetWindowPos($this->handle, $wx, $wy);
+            $this->windowedX = is_int($wx) ? $wx : 0;
+            $this->windowedY = is_int($wy) ? $wy : 0;
+            $this->windowedWidth = $this->width;
+            $this->windowedHeight = $this->height;
+        }
 
         $monitor = glfwGetPrimaryMonitor();
         $mode = glfwGetVideoMode($monitor);
 
-        // GLFWvidmode properties are provided by the php-glfw extension
-        // but not recognized by PHPStan stubs
         /** @var int $modeWidth */
         $modeWidth = $mode->width; // @phpstan-ignore property.notFound
         /** @var int $modeHeight */
         $modeHeight = $mode->height; // @phpstan-ignore property.notFound
         /** @var int $modeRefresh */
         $modeRefresh = $mode->refreshRate; // @phpstan-ignore property.notFound
+
+        // Arm the close-suppression timer before the mode switch so that any
+        // deferred AppKit "window close" events are discarded by shouldClose().
+        $this->suppressCloseUntil = microtime(true) + self::SUPPRESS_CLOSE_SECS;
+
+        // Replace size callbacks with static no-ops before the blocking call.
+        // php-glfw invokes PHP closures synchronously during the AppKit animation
+        // while the PHP value stack is inconsistent. The integer arguments to the
+        // size callbacks ($width=1792, $height=1120) land in wrong stack positions
+        // and corrupt adjacent zvals (arrays become ints). Static no-op closures
+        // have no captures and no writes, eliminating the corruption entirely.
+        $this->attachNoOpSizeCallbacks();
+
         glfwSetWindowMonitor(
             $this->handle,
             $monitor,
@@ -217,7 +245,66 @@ class Window
             $modeRefresh,
         );
 
+        // macOS sets the window-should-close flag as a side effect of the AppKit
+        // fullscreen animation. Reset it so the game loop does not exit.
+        glfwSetWindowShouldClose($this->handle, 0);
+
+        // Read actual post-switch dimensions and restore real callbacks.
+        $this->readFramebufferSize();
+        $this->width  = $modeWidth;
+        $this->height = $modeHeight;
+        $this->attachSizeCallbacks();
+
         $this->fullscreen = true;
+    }
+
+    /**
+     * Borderless windowed fullscreen: removes window decorations and maximizes.
+     * Uses glfwMaximizeWindow (not glfwSetWindowSize) to avoid triggering macOS
+     * AppKit's automatic Spaces-fullscreen entry, which fires a deferred close event.
+     */
+    public function setBorderless(): void
+    {
+        if ($this->borderless) {
+            return;
+        }
+
+        if ($this->fullscreen) {
+            $this->attachNoOpSizeCallbacks();
+            glfwSetWindowMonitor(
+                $this->handle,
+                null,
+                $this->windowedX,
+                $this->windowedY,
+                $this->windowedWidth,
+                $this->windowedHeight,
+                0,
+            );
+            glfwSetWindowShouldClose($this->handle, 0);
+            $this->readFramebufferSize();
+            $this->width = $this->windowedWidth;
+            $this->height = $this->windowedHeight;
+            $this->attachSizeCallbacks();
+            $this->fullscreen = false;
+        } else {
+            $wx = 0;
+            $wy = 0;
+            glfwGetWindowPos($this->handle, $wx, $wy);
+            $this->windowedX = is_int($wx) ? $wx : 0;
+            $this->windowedY = is_int($wy) ? $wy : 0;
+            $this->windowedWidth = $this->width;
+            $this->windowedHeight = $this->height;
+        }
+
+        $this->suppressCloseUntil = microtime(true) + self::SUPPRESS_CLOSE_SECS;
+
+        // Remove decorations, then maximise — glfwMaximizeWindow is the macOS-safe
+        // approach. Using glfwSetWindowPos+glfwSetWindowSize to exactly fill the screen
+        // triggers AppKit's automatic Spaces-fullscreen entry and fires a deferred
+        // window-close notification that exits the game loop.
+        glfwSetWindowAttrib($this->handle, GLFW_DECORATED, GL_FALSE);
+        glfwMaximizeWindow($this->handle);
+        $this->borderless = true;
     }
 
     /**
@@ -225,21 +312,35 @@ class Window
      */
     public function setWindowed(): void
     {
-        if (!$this->fullscreen) {
-            return;
+        if ($this->fullscreen) {
+            $this->suppressCloseUntil = microtime(true) + self::SUPPRESS_CLOSE_SECS;
+            $this->attachNoOpSizeCallbacks();
+            glfwSetWindowMonitor(
+                $this->handle,
+                null,
+                $this->windowedX,
+                $this->windowedY,
+                $this->windowedWidth,
+                $this->windowedHeight,
+                0,
+            );
+            glfwSetWindowShouldClose($this->handle, 0);
+            $this->readFramebufferSize();
+            $this->width = $this->windowedWidth;
+            $this->height = $this->windowedHeight;
+            $this->attachSizeCallbacks();
+            $this->fullscreen = false;
+        } elseif ($this->borderless) {
+            // glfwRestoreWindow un-maximizes before re-adding decorations; then
+            // we reposition and resize to the saved windowed geometry.
+            glfwRestoreWindow($this->handle);
+            glfwSetWindowAttrib($this->handle, GLFW_DECORATED, GL_TRUE);
+            glfwSetWindowPos($this->handle, $this->windowedX, $this->windowedY);
+            glfwSetWindowSize($this->handle, $this->windowedWidth, $this->windowedHeight);
+            $this->width = $this->windowedWidth;
+            $this->height = $this->windowedHeight;
+            $this->borderless = false;
         }
-
-        glfwSetWindowMonitor(
-            $this->handle,
-            null,
-            $this->windowedX,
-            $this->windowedY,
-            $this->windowedWidth,
-            $this->windowedHeight,
-            0,
-        );
-
-        $this->fullscreen = false;
     }
 
     /**
@@ -274,6 +375,56 @@ class Window
     public function setCursorNormal(): void
     {
         glfwSetInputMode($this->handle, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
+    }
+
+    // ── Internal helpers ────────────────────────────────────────────────────
+
+    /**
+     * Register real framebuffer/window-size callbacks that update internal state.
+     * Called once from initialize() and again after every glfwSetWindowMonitor call.
+     */
+    private function attachSizeCallbacks(): void
+    {
+        glfwSetFramebufferSizeCallback($this->handle, function (int $width, int $height) {
+            $this->framebufferWidth = $width;
+            $this->framebufferHeight = $height;
+        });
+        glfwSetWindowSizeCallback($this->handle, function (int $width, int $height) {
+            $this->width = $width;
+            $this->height = $height;
+        });
+    }
+
+    /**
+     * Temporarily replace size callbacks with static no-ops.
+     *
+     * php-glfw invokes PHP closures synchronously during glfwSetWindowMonitor
+     * while the PHP value stack is in an inconsistent re-entrant state. The
+     * integer arguments passed to size callbacks ($width, $height) are pushed
+     * onto the wrong stack positions, corrupting adjacent zvals — manifesting
+     * as properties/arrays of unrelated objects (Input, EventDispatcher) being
+     * overwritten with garbage integers.
+     *
+     * Static no-op closures have no object captures and no property writes,
+     * so even if they are invoked on a broken stack the damage surface is zero.
+     * Real callbacks are restored via attachSizeCallbacks() after the call.
+     */
+    private function attachNoOpSizeCallbacks(): void
+    {
+        glfwSetFramebufferSizeCallback($this->handle, static function (int $w, int $h): void {});
+        glfwSetWindowSizeCallback($this->handle, static function (int $w, int $h): void {});
+    }
+
+    /**
+     * Re-read actual framebuffer dimensions from GLFW after a mode switch.
+     */
+    private function readFramebufferSize(): void
+    {
+        $fbW = 0;
+        $fbH = 0;
+        glfwGetFramebufferSize($this->handle, $fbW, $fbH);
+        $this->framebufferWidth  = is_int($fbW) ? $fbW : $this->framebufferWidth;
+        $this->framebufferHeight = is_int($fbH) ? $fbH : $this->framebufferHeight;
     }
 
     public function destroy(): void

@@ -8,7 +8,7 @@ use PHPolygon\Math\Rect;
 use PHPolygon\Math\Vec2;
 use PHPolygon\Rendering\Color;
 use PHPolygon\Rendering\Renderer2DInterface;
-use PHPolygon\Runtime\Input;
+use PHPolygon\Runtime\InputInterface;
 
 /**
  * Immediate-mode UI context.
@@ -20,7 +20,7 @@ use PHPolygon\Runtime\Input;
 class UIContext
 {
     private Renderer2DInterface $renderer;
-    private Input $input;
+    private InputInterface $input;
     private UIStyle $style;
 
     /** Layout cursor — auto-advances after each widget */
@@ -61,7 +61,7 @@ class UIContext
 
     public function __construct(
         Renderer2DInterface $renderer,
-        Input $input,
+        InputInterface $input,
         ?UIStyle $style = null,
     ) {
         $this->renderer = $renderer;
@@ -69,7 +69,7 @@ class UIContext
         $this->style = $style ?? UIStyle::dark();
     }
 
-    public function getInput(): Input
+    public function getInput(): InputInterface
     {
         return $this->input;
     }

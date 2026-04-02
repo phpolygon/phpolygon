@@ -391,6 +391,64 @@ The stub defines these at runtime:
 
 ---
 
+## UIContext — immediate-mode UI
+
+`UIContext` (`src/UI/UIContext.php`) is PHPolygon's immediate-mode UI toolkit.
+Games must use it for interactive widgets rather than reimplementing hit-testing.
+
+```php
+use PHPolygon\UI\UIContext;
+use PHPolygon\UI\UIStyle;
+
+$ui = new UIContext($renderer, $input, new UIStyle(...));
+
+// In render():
+$ui->begin($x, $y, $width);              // vertical flow (default)
+if ($ui->button('id', 'Label', $w)) { }  // returns true on release
+$val = $ui->checkbox('id', 'Label', $val);
+$ui->label('Text');
+$ui->separator();
+$curY = $ui->getCursorY();               // snapshot for chained begin()s
+$ui->end();
+
+$ui->begin($x, $curY, $width, 'horizontal');
+$ui->button('id', 'Label', $btnW, $disabled);
+$ui->end();
+```
+
+- Constructor accepts `InputInterface`, not the concrete `Input` class.
+- `button()` uses `isMouseButtonReleased` internally — safe on macOS.
+- `disabled=true` makes a button non-clickable; styled via `UIStyle::disabledColor` /
+  `disabledTextColor` (use a distinct colour to indicate "currently selected").
+- `UIContext` must be called from `render()`, not `update()` (input state uses
+  `mousePrev` snapshotted by `endFrame()`, which runs between update and render).
+
+---
+
+## Window — mode switching (macOS notes)
+
+`Window` (`src/Runtime/Window.php`) wraps GLFW and provides:
+- `setFullscreen()` — exclusive fullscreen via `glfwSetWindowMonitor(monitor, ...)`
+- `setBorderless()` — decorations removed + `glfwMaximizeWindow()` (macOS-safe)
+- `setWindowed()` — restore saved windowed geometry; calls `glfwRestoreWindow()` first when coming from borderless
+- `toggleFullscreen()` — convenience
+
+**macOS-specific**: `glfwSetWindowMonitor()` (exclusive fullscreen) and
+`glfwSetWindowAttrib(DECORATED, false)` can trigger a deferred AppKit
+"window will close" notification. `Window` arms a `suppressCloseUntil` timer
+before each mode switch; `shouldClose()` resets the close flag and returns `false`
+for 2 seconds after any transition.
+
+**Never use `glfwSetWindowPos` + `glfwSetWindowSize` to fill the screen for
+borderless mode.** This triggers AppKit's automatic Spaces-fullscreen entry and
+fires a deferred close event that terminates the game loop.
+Use `glfwMaximizeWindow()` instead.
+
+**Never pass `false` (bool) to `glfwSetWindowShouldClose()`** — the binding
+requires `int`. Use `glfwSetWindowShouldClose($handle, 0)`.
+
+---
+
 ## Headless mode
 
 The engine can run without a GPU, display server, or OpenGL context.

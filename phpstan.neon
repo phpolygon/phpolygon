@@ -1,9 +1,5 @@
 parameters:
     level: 10
-    # php-glfw fires PHP closures synchronously during glfwSetWindowMonitor,
-    # corrupting zvals at runtime. Guards like is_array() on PHPDoc-typed values
-    # are intentional defensive checks — PHPDoc types are not always reliable.
-    treatPhpDocTypesAsCertain: false
     paths:
         - src
     excludePaths:
