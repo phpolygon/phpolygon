@@ -6,6 +6,7 @@ namespace PHPolygon\System;
 
 use PHPolygon\Component\BoxCollider3D;
 use PHPolygon\Component\CharacterController3D;
+use PHPolygon\Component\HeightmapCollider3D;
 use PHPolygon\Component\MeshCollider3D;
 use PHPolygon\Component\Transform3D;
 use PHPolygon\ECS\AbstractSystem;
@@ -153,6 +154,23 @@ class Physics3DSystem extends AbstractSystem
                 // Final AABB update after mesh collision resolution
                 $charMin = new Vec3($newPos->x - $radius, $newPos->y - $halfHeight, $newPos->z - $radius);
                 $charMax = new Vec3($newPos->x + $radius, $newPos->y + $halfHeight, $newPos->z + $radius);
+            }
+
+            // Heightmap terrain collision — O(1) bilinear query per heightmap
+            foreach ($world->query(HeightmapCollider3D::class) as $hmEntity) {
+                $hm = $hmEntity->get(HeightmapCollider3D::class);
+                if (!$hm->isPopulated()) {
+                    continue;
+                }
+                $terrainY = $hm->getHeightAt($newPos->x, $newPos->z);
+                $feetY = $newPos->y - $halfHeight;
+                if ($feetY < $terrainY) {
+                    $newPos = new Vec3($newPos->x, $terrainY + $halfHeight, $newPos->z);
+                    if ($controller->velocity->y < 0.0) {
+                        $controller->velocity = new Vec3($controller->velocity->x, 0.0, $controller->velocity->z);
+                    }
+                    $controller->isGrounded = true;
+                }
             }
 
             // Safety net: prevent falling through the world

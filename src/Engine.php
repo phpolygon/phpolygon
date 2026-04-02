@@ -160,7 +160,10 @@ class Engine
                     $this->window->getFramebufferHeight(),
                     $this->window->getHandle(),
                 ),
-                default => new OpenGLRenderer3D($this->config->width, $this->config->height),
+                default => new OpenGLRenderer3D(
+                    $this->window->getFramebufferWidth(),
+                    $this->window->getFramebufferHeight(),
+                ),
             };
         }
 
@@ -204,6 +207,15 @@ class Engine
                     }
                 },
                 render: function (float $interpolation) use ($nativeBackend) {
+                    // Sync viewport to framebuffer every frame — handles Retina HiDPI and window resize
+                    if ($this->renderer3D !== null && !$nativeBackend) {
+                        $fbW = $this->window->getFramebufferWidth();
+                        $fbH = $this->window->getFramebufferHeight();
+                        if ($fbW > 0 && $fbH > 0) {
+                            $this->renderer3D->setViewport(0, 0, $fbW, $fbH);
+                        }
+                    }
+
                     if ($this->renderer3D !== null) {
                         $this->renderer3D->beginFrame();
                     }
@@ -244,6 +256,15 @@ class Engine
                     }
                 },
                 render: function (float $interpolation) use ($nativeBackend) {
+                    // Sync viewport to framebuffer every frame — handles Retina HiDPI and window resize
+                    if ($this->renderer3D !== null && !$nativeBackend) {
+                        $fbW = $this->window->getFramebufferWidth();
+                        $fbH = $this->window->getFramebufferHeight();
+                        if ($fbW > 0 && $fbH > 0) {
+                            $this->renderer3D->setViewport(0, 0, $fbW, $fbH);
+                        }
+                    }
+
                     if ($this->renderer3D !== null) {
                         $this->renderer3D->beginFrame();
                     }
