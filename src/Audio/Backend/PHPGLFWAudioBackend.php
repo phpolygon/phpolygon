@@ -28,6 +28,7 @@ class PHPGLFWAudioBackend implements AudioBackendInterface
 
     private int $nextPlaybackId = 1;
     private float $masterVolume = 1.0;
+    private bool $disposed = false;
 
     public function __construct()
     {
@@ -108,10 +109,17 @@ class PHPGLFWAudioBackend implements AudioBackendInterface
 
     public function dispose(): void
     {
+        if ($this->disposed) return;
+        $this->disposed = true;
         $this->stopAll();
         $this->sounds = [];
         $this->clipPaths = [];
         $this->engine->stop();
+    }
+
+    public function __destruct()
+    {
+        $this->dispose();
     }
 
     private function getOrLoadSound(string $clipId): GLSound
