@@ -194,7 +194,7 @@ class OpenGLRenderer3D implements Renderer3DInterface
                 $this->currentViewMatrix = $command->viewMatrix;
                 $this->currentProjectionMatrix = $command->projectionMatrix;
                 $this->setUniformMat4('u_view', $command->viewMatrix);
-                $this->setUniformMat4('u_projection', $this->currentProjectionMatrix);
+                $this->setUniformMat4('u_projection', $command->projectionMatrix);
 
                 $cameraPos = $command->viewMatrix->inverse()->getTranslation();
                 $this->setUniformVec3('u_camera_pos', [$cameraPos->x, $cameraPos->y, $cameraPos->z]);
