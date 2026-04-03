@@ -207,11 +207,22 @@ class LocaleManagerTest extends TestCase
 
     public function testChoiceThreeForms(): void
     {
-        $this->locale->add('en', ['items' => 'no items|one item|:count items']);
+        // Three positional forms for Slavic locales (one|few|many).
+        // For English (two CLDR categories) the 3rd form is never reached;
+        // use a Russian locale to exercise all three indices.
+        $manager = new LocaleManager('ru');
+        $manager->add('ru', ['items' => 'предмет|предмета|предметов']);
 
-        $this->assertEquals('no items', $this->locale->choice('items', 0));
-        $this->assertEquals('one item', $this->locale->choice('items', 1));
-        $this->assertEquals('42 items', $this->locale->choice('items', 42));
+        $this->assertEquals('предмет', $manager->choice('items', 1));   // one
+        $this->assertEquals('предмета', $manager->choice('items', 3));  // few
+        $this->assertEquals('предметов', $manager->choice('items', 5)); // many
+
+        // For a zero/one/many pattern in English, use explicit {n} syntax instead.
+        $this->locale->add('en', ['things' => '{0} no things|{1} one thing|[2,*] :count things']);
+
+        $this->assertEquals('no things', $this->locale->choice('things', 0));
+        $this->assertEquals('one thing', $this->locale->choice('things', 1));
+        $this->assertEquals('42 things', $this->locale->choice('things', 42));
     }
 
     public function testChoiceExplicitCount(): void

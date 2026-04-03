@@ -188,39 +188,115 @@ class LocaleManager
             return $forms[0];
         }
 
-        // Check for explicit count matches: {0} None|{1} One|[2,*] Many
+        // Check for explicit count/range matches: {0} None|{1} One|[2,*] Many
+        $hasExplicit = false;
         foreach ($forms as $form) {
-            $form = trim($form);
-            if (preg_match('/^\{(\d+)\}\s*(.+)$/', $form, $m)) {
-                if ((int) $m[1] === $count) {
-                    return $m[2];
+            $trimmed = trim($form);
+            if (preg_match('/^\{\d+\}/', $trimmed) || preg_match('/^\[\d+,/', $trimmed)) {
+                $hasExplicit = true;
+                break;
+            }
+        }
+
+        if ($hasExplicit) {
+            foreach ($forms as $form) {
+                $form = trim($form);
+                if (preg_match('/^\{(\d+)\}\s*(.+)$/', $form, $m)) {
+                    if ((int) $m[1] === $count) {
+                        return $m[2];
+                    }
+                    continue;
                 }
-                continue;
-            }
-            if (preg_match('/^\[(\d+),\s*(\d+|\*)\]\s*(.+)$/', $form, $m)) {
-                $min = (int) $m[1];
-                $max = $m[2] === '*' ? PHP_INT_MAX : (int) $m[2];
-                if ($count >= $min && $count <= $max) {
-                    return $m[3];
+                if (preg_match('/^\[(\d+),\s*(\d+|\*)\]\s*(.+)$/', $form, $m)) {
+                    $min = (int) $m[1];
+                    $max = $m[2] === '*' ? PHP_INT_MAX : (int) $m[2];
+                    if ($count >= $min && $count <= $max) {
+                        return $m[3];
+                    }
+                    continue;
                 }
-                continue;
             }
+            return trim(end($forms));
         }
 
-        // Simple two-form: singular|plural
-        if (count($forms) === 2) {
-            return $count === 1 ? trim($forms[0]) : trim($forms[1]);
+        // Positional forms — use CLDR plural index for the current locale.
+        // This supports languages with more than two plural forms (e.g. Slavic languages).
+        $index = min($this->getPluralIndex($this->currentLocale, $count), count($forms) - 1);
+        return trim($forms[$index]);
+    }
+
+    /**
+     * Return the CLDR plural form index for a given locale and count.
+     *
+     * Index 0 = one/singular, 1 = few, 2 = many/other.
+     * For two-form languages (Germanic, Romance, …) only 0 and 1 are used.
+     */
+    private function getPluralIndex(string $locale, int $n): int
+    {
+        // Languages with no grammatical number distinction (East Asian, South-East Asian)
+        if (in_array($locale, ['ja', 'ko', 'zh-CN', 'zh-TW', 'zh', 'th', 'vi', 'id', 'ms'], true)) {
+            return 0;
         }
 
-        // Three forms: zero|one|many
-        if (count($forms) === 3) {
-            if ($count === 0) {
-                return trim($forms[0]);
+        // Slavic: Russian, Ukrainian, Bulgarian
+        // one:  n mod 10 == 1 AND n mod 100 != 11
+        // few:  n mod 10 in 2..4 AND n mod 100 not in 12..14
+        // many: everything else
+        if (in_array($locale, ['ru', 'uk', 'bg'], true)) {
+            $mod10 = $n % 10;
+            $mod100 = $n % 100;
+            if ($mod10 === 1 && $mod100 !== 11) {
+                return 0;
             }
-            return $count === 1 ? trim($forms[1]) : trim($forms[2]);
+            if ($mod10 >= 2 && $mod10 <= 4 && ($mod100 < 10 || $mod100 >= 20)) {
+                return 1;
+            }
+            return 2;
         }
 
-        return trim(end($forms));
+        // Polish
+        // one:  n == 1
+        // few:  n mod 10 in 2..4 AND n mod 100 not in 12..14
+        // many: everything else
+        if ($locale === 'pl') {
+            $mod10 = $n % 10;
+            $mod100 = $n % 100;
+            if ($n === 1) {
+                return 0;
+            }
+            if ($mod10 >= 2 && $mod10 <= 4 && ($mod100 < 10 || $mod100 >= 20)) {
+                return 1;
+            }
+            return 2;
+        }
+
+        // Czech
+        // one: n == 1 | few: n in 2..4 | many: else
+        if ($locale === 'cs') {
+            if ($n === 1) {
+                return 0;
+            }
+            if ($n >= 2 && $n <= 4) {
+                return 1;
+            }
+            return 2;
+        }
+
+        // Romanian
+        // one: n == 1 | few: n == 0 or n mod 100 in 1..19 | many: else
+        if ($locale === 'ro') {
+            if ($n === 1) {
+                return 0;
+            }
+            $mod100 = $n % 100;
+            if ($n === 0 || ($mod100 >= 1 && $mod100 <= 19)) {
+                return 1;
+            }
+            return 2;
+        }
+
+        // Default: two-form (one vs. other) — covers Germanic, Romance, Greek, Turkish, …
+        return $n === 1 ? 0 : 1;
     }
 
     /**

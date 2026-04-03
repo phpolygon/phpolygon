@@ -34,6 +34,9 @@ class Window
     private int $windowedWidth = 0;
     private int $windowedHeight = 0;
 
+    /** Stored so callbacks can be restored after a glfwSetWindowMonitor call. */
+    private ?Input $input = null;
+
     public function __construct(
         private int $width,
         private int $height,
@@ -83,26 +86,8 @@ class Window
         $this->framebufferWidth = is_int($fbW) ? $fbW : 0;
         $this->framebufferHeight = is_int($fbH) ? $fbH : 0;
 
-        // Set up input callbacks (php-glfw does NOT pass $window as first arg)
-        glfwSetKeyCallback($this->handle, function (int $key, int $scancode, int $action, int $mods) use ($input) {
-            $input->handleKeyEvent($key, $action);
-        });
-
-        glfwSetMouseButtonCallback($this->handle, function (int $button, int $action, int $mods) use ($input) {
-            $input->handleMouseButtonEvent($button, $action);
-        });
-
-        glfwSetCursorPosCallback($this->handle, function (float $x, float $y) use ($input) {
-            $input->handleCursorPosEvent($x, $y);
-        });
-
-        glfwSetScrollCallback($this->handle, function (float $xOffset, float $yOffset) use ($input) {
-            $input->handleScrollEvent($xOffset, $yOffset);
-        });
-
-        glfwSetCharCallback($this->handle, function (int $codepoint) use ($input) {
-            $input->handleCharEvent($codepoint);
-        });
+        $this->input = $input;
+        $this->attachRealCallbacks();
 
         glfwShowWindow($this->handle);
         $this->initialized = true;
@@ -249,6 +234,10 @@ class Window
         // deferred AppKit "window close" events are discarded by shouldClose().
         $this->suppressCloseUntil = microtime(true) + self::SUPPRESS_CLOSE_SECS;
 
+        // Swap to static no-op callbacks so re-entrant GLFW invocations during
+        // glfwSetWindowMonitor cannot corrupt PHP zvals. Restored immediately after.
+        $this->attachNoOpCallbacks();
+
         glfwSetWindowMonitor(
             $this->handle,
             $monitor,
@@ -258,6 +247,8 @@ class Window
             $modeHeight,
             $modeRefresh,
         );
+
+        $this->attachRealCallbacks();
 
         // macOS sets the window-should-close flag as a side effect of the AppKit
         // fullscreen animation. Reset it so the game loop does not exit.
@@ -282,6 +273,7 @@ class Window
         }
 
         if ($this->fullscreen) {
+            $this->attachNoOpCallbacks();
             glfwSetWindowMonitor(
                 $this->handle,
                 null,
@@ -291,6 +283,7 @@ class Window
                 $this->windowedHeight,
                 0,
             );
+            $this->attachRealCallbacks();
             glfwSetWindowShouldClose($this->handle, 0);
             $this->readFramebufferSize();
             $this->width = $this->windowedWidth;
@@ -324,6 +317,7 @@ class Window
     {
         if ($this->fullscreen) {
             $this->suppressCloseUntil = microtime(true) + self::SUPPRESS_CLOSE_SECS;
+            $this->attachNoOpCallbacks();
             glfwSetWindowMonitor(
                 $this->handle,
                 null,
@@ -333,6 +327,7 @@ class Window
                 $this->windowedHeight,
                 0,
             );
+            $this->attachRealCallbacks();
             glfwSetWindowShouldClose($this->handle, 0);
             $this->readFramebufferSize();
             $this->width = $this->windowedWidth;
@@ -386,6 +381,47 @@ class Window
     }
 
     // ── Internal helpers ────────────────────────────────────────────────────
+
+    /**
+     * Replace all GLFW input callbacks with static no-ops before a blocking
+     * glfwSetWindowMonitor call. php-glfw invokes registered PHP closures
+     * re-entrantly during the call while the PHP value stack is inconsistent;
+     * the integer arguments ($width, $height, $refreshRate …) corrupt adjacent
+     * zvals (e.g. World::$components, Input::$keyPressedThisFrame).
+     * Static no-ops have no captures and no writes — zero corruption damage.
+     */
+    private function attachNoOpCallbacks(): void
+    {
+        glfwSetKeyCallback($this->handle, static function (int $key, int $scancode, int $action, int $mods): void {});
+        glfwSetMouseButtonCallback($this->handle, static function (int $button, int $action, int $mods): void {});
+        glfwSetCursorPosCallback($this->handle, static function (float $x, float $y): void {});
+        glfwSetScrollCallback($this->handle, static function (float $xOffset, float $yOffset): void {});
+        glfwSetCharCallback($this->handle, static function (int $codepoint): void {});
+    }
+
+    /** Restore real input callbacks after a glfwSetWindowMonitor call. */
+    private function attachRealCallbacks(): void
+    {
+        $input = $this->input;
+        if ($input === null) {
+            return;
+        }
+        glfwSetKeyCallback($this->handle, function (int $key, int $scancode, int $action, int $mods) use ($input): void {
+            $input->handleKeyEvent($key, $action);
+        });
+        glfwSetMouseButtonCallback($this->handle, function (int $button, int $action, int $mods) use ($input): void {
+            $input->handleMouseButtonEvent($button, $action);
+        });
+        glfwSetCursorPosCallback($this->handle, function (float $x, float $y) use ($input): void {
+            $input->handleCursorPosEvent($x, $y);
+        });
+        glfwSetScrollCallback($this->handle, function (float $xOffset, float $yOffset) use ($input): void {
+            $input->handleScrollEvent($xOffset, $yOffset);
+        });
+        glfwSetCharCallback($this->handle, function (int $codepoint) use ($input): void {
+            $input->handleCharEvent($codepoint);
+        });
+    }
 
     /**
      * Re-read actual framebuffer dimensions from GLFW after a mode switch.
