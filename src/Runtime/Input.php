@@ -54,7 +54,6 @@ class Input implements InputInterface
     public function handleMouseButtonEvent(int $button, int $action): void
     {
         $actionLabel = match($action) { 0 => 'RELEASE', 1 => 'PRESS', default => "action=$action" };
-        error_log("[Input] mouse button=$button $actionLabel suppressed=" . ($this->isSuppressed() ? 'yes' : 'no'));
 
         if ($this->isSuppressed()) {
             return;
