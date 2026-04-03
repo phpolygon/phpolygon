@@ -271,4 +271,99 @@ class LocaleManagerTest extends TestCase
     {
         $this->assertEquals('missing.plural', $this->locale->choice('missing.plural', 5));
     }
+
+    // ── CLDR plural index per locale ─────────────────────────────
+
+    public function testPluralRulesRussian(): void
+    {
+        foreach (['ru', 'uk', 'bg'] as $locale) {
+            $m = new LocaleManager($locale);
+            $m->add($locale, ['x' => 'one|few|many']);
+            // one: mod10==1 && mod100!=11
+            $this->assertSame('one',  $m->choice('x', 1),  "$locale n=1");
+            $this->assertSame('one',  $m->choice('x', 21), "$locale n=21");
+            $this->assertSame('one',  $m->choice('x', 51), "$locale n=51");
+            // few: mod10 in 2-4 && mod100 not in 12-14
+            $this->assertSame('few',  $m->choice('x', 2),  "$locale n=2");
+            $this->assertSame('few',  $m->choice('x', 3),  "$locale n=3");
+            $this->assertSame('few',  $m->choice('x', 4),  "$locale n=4");
+            $this->assertSame('few',  $m->choice('x', 22), "$locale n=22");
+            // many: everything else (including 11-14)
+            $this->assertSame('many', $m->choice('x', 5),  "$locale n=5");
+            $this->assertSame('many', $m->choice('x', 11), "$locale n=11");
+            $this->assertSame('many', $m->choice('x', 12), "$locale n=12");
+            $this->assertSame('many', $m->choice('x', 100),"$locale n=100");
+        }
+    }
+
+    public function testPluralRulesPolish(): void
+    {
+        $m = new LocaleManager('pl');
+        $m->add('pl', ['x' => 'one|few|many']);
+        $this->assertSame('one',  $m->choice('x', 1));
+        $this->assertSame('few',  $m->choice('x', 2));
+        $this->assertSame('few',  $m->choice('x', 3));
+        $this->assertSame('few',  $m->choice('x', 4));
+        $this->assertSame('few',  $m->choice('x', 22));
+        $this->assertSame('few',  $m->choice('x', 24));
+        $this->assertSame('many', $m->choice('x', 5));
+        $this->assertSame('many', $m->choice('x', 11));
+        $this->assertSame('many', $m->choice('x', 12));
+        $this->assertSame('many', $m->choice('x', 14));
+        $this->assertSame('many', $m->choice('x', 100));
+    }
+
+    public function testPluralRulesCzech(): void
+    {
+        $m = new LocaleManager('cs');
+        $m->add('cs', ['x' => 'one|few|many']);
+        $this->assertSame('one',  $m->choice('x', 1));
+        $this->assertSame('few',  $m->choice('x', 2));
+        $this->assertSame('few',  $m->choice('x', 3));
+        $this->assertSame('few',  $m->choice('x', 4));
+        $this->assertSame('many', $m->choice('x', 5));
+        $this->assertSame('many', $m->choice('x', 10));
+        $this->assertSame('many', $m->choice('x', 100));
+    }
+
+    public function testPluralRulesRomanian(): void
+    {
+        $m = new LocaleManager('ro');
+        $m->add('ro', ['x' => 'one|few|many']);
+        $this->assertSame('one',  $m->choice('x', 1));
+        // few: n==0 or n mod 100 in 1-19
+        $this->assertSame('few',  $m->choice('x', 0));
+        $this->assertSame('few',  $m->choice('x', 2));
+        $this->assertSame('few',  $m->choice('x', 15));
+        $this->assertSame('few',  $m->choice('x', 19));
+        $this->assertSame('few',  $m->choice('x', 119)); // mod100=19
+        // many: mod100 >= 20
+        $this->assertSame('many', $m->choice('x', 20));
+        $this->assertSame('many', $m->choice('x', 100));
+        $this->assertSame('many', $m->choice('x', 120)); // mod100=20
+    }
+
+    public function testPluralRulesEastAsian(): void
+    {
+        foreach (['ja', 'ko', 'zh-CN', 'zh-TW', 'th', 'vi', 'id'] as $locale) {
+            $m = new LocaleManager($locale);
+            $m->add($locale, ['x' => 'only']);
+            foreach ([0, 1, 2, 5, 100] as $n) {
+                $this->assertSame('only', $m->choice('x', $n), "$locale n=$n");
+            }
+        }
+    }
+
+    public function testPluralRulesTwoForm(): void
+    {
+        $locales = ['de', 'nl', 'sv', 'da', 'no', 'fi', 'fr', 'it', 'es', 'pt', 'el', 'tr', 'hu'];
+        foreach ($locales as $locale) {
+            $m = new LocaleManager($locale);
+            $m->add($locale, ['x' => 'singular|plural']);
+            $this->assertSame('singular', $m->choice('x', 1),  "$locale n=1");
+            $this->assertSame('plural',   $m->choice('x', 0),  "$locale n=0");
+            $this->assertSame('plural',   $m->choice('x', 2),  "$locale n=2");
+            $this->assertSame('plural',   $m->choice('x', 100),"$locale n=100");
+        }
+    }
 }
