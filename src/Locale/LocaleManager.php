@@ -65,9 +65,14 @@ class LocaleManager
             throw new \RuntimeException("Failed to read translation file: {$path}");
         }
 
-        $decoded = json_decode($content, true, 512, JSON_THROW_ON_ERROR);
-        if (!is_array($decoded)) {
-            throw new \RuntimeException("Translation file must contain a JSON object: {$path}");
+        try {
+            $decoded = json_decode($content, true, 512, JSON_THROW_ON_ERROR);
+            if (!is_array($decoded)) {
+                throw new \RuntimeException("Translation file must contain a JSON object: {$path}");
+            }
+        }catch(\JsonException) {
+            trigger_error("Error while load Translation: {$path}", E_USER_WARNING);
+            $decoded = [];
         }
         /** @var array<string, string|array<mixed>> $data */
         $data = $decoded;
