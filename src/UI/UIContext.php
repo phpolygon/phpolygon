@@ -52,6 +52,9 @@ class UIContext
     private string $textFieldBuffer = '';
     private int $textFieldCursor = 0;
 
+    /** ID of the currently open dropdown (empty = none open) */
+    private string $openDropdown = '';
+
     /** Whether any widget was hovered this frame */
     private bool $anyHovered = false;
 
@@ -431,6 +434,92 @@ class UIContext
 
         $this->advance($totalH);
         return $value;
+    }
+
+    /**
+     * Dropdown selector. Returns the (possibly new) selected index.
+     *
+     * Click on the closed field toggles the option list open.
+     * Clicking an option selects it and closes the list.
+     * Clicking outside closes the list without changing the selection.
+     *
+     * The open list is drawn as an overlay — only the closed button height
+     * is advanced in the layout so widgets below are not pushed down.
+     *
+     * @param list<string> $options
+     * @param float        $width   Override width (0 = regionWidth)
+     */
+    public function dropdown(string $id, array $options, int $selectedIndex, float $width = 0.0): int
+    {
+        $s = $this->style;
+        $h = $s->fontSize + $s->padding * 2;
+        $w = $width > 0.0 ? min($width, $this->regionWidth) : $this->regionWidth;
+
+        $fieldRect = new Rect($this->cursorX, $this->cursorY, $w, $h);
+        $isOpen = $this->openDropdown === $id;
+        $hovered = $this->isHovered($fieldRect);
+
+        if ($hovered) {
+            $this->anyHovered = true;
+            if ($this->input->isMouseButtonReleased(0)) {
+                $this->openDropdown = $isOpen ? '' : $id;
+                $isOpen = !$isOpen;
+            }
+        }
+
+        // Draw the closed button
+        $bg = ($hovered || $isOpen) ? $s->hoverColor : $s->backgroundColor;
+        $this->renderer->drawRoundedRect($fieldRect->x, $fieldRect->y, $w, $h, $s->borderRadius, $bg);
+        $this->renderer->drawRectOutline($fieldRect->x, $fieldRect->y, $w, $h, $s->borderColor, $s->borderWidth);
+
+        $selected = $options[$selectedIndex] ?? '';
+        $this->renderer->drawText($selected, $fieldRect->x + $s->padding, $fieldRect->y + $s->padding, $s->fontSize, $s->textColor);
+
+        $arrow = $isOpen ? '▲' : '▼';
+        $this->renderer->drawText($arrow, $fieldRect->right() - $s->fontSize - $s->padding, $fieldRect->y + $s->padding, $s->fontSize * 0.75, $s->textColor);
+
+        // Draw the open option list (overlay — does not affect layout cursor)
+        if ($isOpen && count($options) > 0) {
+            $rowH = $h;
+            $listY = $fieldRect->y + $h + 2.0;
+            $listH = $rowH * count($options);
+            $listRect = new Rect($fieldRect->x, $listY, $w, $listH);
+
+            $listHovered = $this->isHovered($listRect);
+            if ($listHovered) {
+                $this->anyHovered = true;
+            }
+
+            $this->renderer->drawRoundedRect($listRect->x, $listRect->y, $w, $listH, $s->borderRadius, $s->backgroundColor);
+            $this->renderer->drawRectOutline($listRect->x, $listRect->y, $w, $listH, $s->borderColor, $s->borderWidth);
+
+            foreach ($options as $i => $opt) {
+                $optRect = new Rect($fieldRect->x, $listY + $i * $rowH, $w, $rowH);
+                $optHovered = $this->isHovered($optRect);
+
+                if ($optHovered) {
+                    $this->anyHovered = true;
+                    $this->renderer->drawRoundedRect($optRect->x, $optRect->y, $w, $rowH, $s->borderRadius, $s->hoverColor);
+                    if ($this->input->isMouseButtonReleased(0)) {
+                        $selectedIndex = $i;
+                        $this->openDropdown = '';
+                        $isOpen = false;
+                    }
+                } elseif ($i === $selectedIndex) {
+                    $this->renderer->drawRoundedRect($optRect->x, $optRect->y, $w, $rowH, $s->borderRadius, $s->accentColor->withAlpha(0.25));
+                }
+
+                $this->renderer->drawText($opt, $optRect->x + $s->padding, $optRect->y + $s->padding, $s->fontSize, $s->textColor);
+            }
+
+            // Click outside closes without changing selection
+            if (!$hovered && !$listHovered && $this->input->isMouseButtonReleased(0)) {
+                $this->openDropdown = '';
+            }
+        }
+
+        $this->advance($h);
+        return $selectedIndex;
     }
 
     /**
