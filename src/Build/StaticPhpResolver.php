@@ -29,7 +29,7 @@ class StaticPhpResolver
 
     /**
      * Resolve a micro.sfx binary path.
-     * Priority: explicit path > cached > download from GitHub Release
+     * Priority: explicit path > download from GitHub Release (if newer) > cached
      */
     public function resolve(?string $explicitPath, string $platform, string $arch, string $variant = 'base'): string
     {
@@ -41,18 +41,19 @@ class StaticPhpResolver
             return $explicitPath;
         }
 
-        // 2. Check cache
         $cacheKey = $variant !== 'base' ? "{$platform}-{$arch}-{$variant}" : "{$platform}-{$arch}";
         $cachedPath = $this->cacheDir . "/{$cacheKey}/micro.sfx";
-        if (file_exists($cachedPath)) {
-            return $cachedPath;
-        }
 
-        // 3. Download from GitHub Release
-        $this->log("No cached micro.sfx for {$cacheKey}, checking GitHub releases...");
-        $downloaded = $this->downloadFromRelease($platform, $arch, $variant);
+        // 2. Check GitHub for a newer release, download if available
+        $downloaded = $this->downloadIfNewer($platform, $arch, $variant, $cachedPath);
         if ($downloaded !== null) {
             return $downloaded;
+        }
+
+        // 3. Fall back to cached version
+        if (file_exists($cachedPath)) {
+            $this->log("Using cached micro.sfx for {$cacheKey}");
+            return $cachedPath;
         }
 
         throw new \RuntimeException(
@@ -66,7 +67,46 @@ class StaticPhpResolver
         );
     }
 
-    private function downloadFromRelease(string $platform, string $arch, string $variant = 'base'): ?string
+    /**
+     * Check if a newer release exists on GitHub than the cached binary.
+     * Downloads and caches if newer; returns null if cache is up-to-date or offline.
+     */
+    private function downloadIfNewer(string $platform, string $arch, string $variant, string $cachedPath): ?string
+    {
+        $releaseUrl = $this->findLatestRuntimeRelease();
+        if ($releaseUrl === null) {
+            return null;
+        }
+
+        $json = $this->httpGet($releaseUrl);
+        $release = $json !== null ? json_decode($json, true) : null;
+        if (!is_array($release)) {
+            return null;
+        }
+
+        // Compare release date with cached file mtime
+        $publishedAt = isset($release['published_at']) && is_string($release['published_at'])
+            ? strtotime($release['published_at'])
+            : null;
+
+        if ($publishedAt !== false && $publishedAt !== null && file_exists($cachedPath)) {
+            $cachedMtime = filemtime($cachedPath);
+            if ($cachedMtime !== false && $cachedMtime >= $publishedAt) {
+                return null; // cache is up-to-date
+            }
+            $this->log("Newer release found, updating cache...");
+        }
+
+        /** @var array<string, mixed> $release */
+        return $this->downloadFromReleaseData($release, $platform, $arch, $variant);
+    }
+
+    /**
+     * Download micro.sfx from a parsed GitHub release response.
+     *
+     * @param array<string, mixed> $release
+     */
+    private function downloadFromReleaseData(array $release, string $platform, string $arch, string $variant): ?string
     {
         $osName = match (true) {
             $platform === 'macos' && $arch === 'arm64'   => 'macos-aarch64',
@@ -77,20 +117,12 @@ class StaticPhpResolver
             default                                       => "{$platform}-{$arch}",
         };
 
-        $releaseUrl = $this->findLatestRuntimeRelease();
-        if ($releaseUrl === null) {
-            $this->log("No runtime releases found on GitHub");
-            return null;
-        }
-
         $downloadUrl = null;
         $matchedAsset = null;
         $prefix = "micro-sfx-{$variant}-";
         $suffix = "-{$osName}.zip";
 
-        $json = $this->httpGet($releaseUrl);
-        $release = $json !== null ? json_decode($json, true) : null;
-        if (is_array($release) && isset($release['assets']) && is_array($release['assets'])) {
+        if (isset($release['assets']) && is_array($release['assets'])) {
             foreach ($release['assets'] as $asset) {
                 if (!is_array($asset)) {
                     continue;
