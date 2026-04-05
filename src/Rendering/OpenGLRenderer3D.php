@@ -16,6 +16,7 @@ use PHPolygon\Rendering\Command\SetAmbientLight;
 use PHPolygon\Rendering\Command\SetCamera;
 use PHPolygon\Rendering\Command\SetDirectionalLight;
 use PHPolygon\Rendering\Command\SetFog;
+use PHPolygon\Rendering\Command\SetShader;
 use PHPolygon\Rendering\Command\SetSkybox;
 use PHPolygon\Rendering\Command\SetWaveAnimation;
 
@@ -60,8 +61,18 @@ class OpenGLRenderer3D implements Renderer3DInterface
     private array $staticInstanceCountCache = [];
 
 
-    private int $shaderProgram = 0;
-    private int $skyboxShaderProgram = 0;
+    /** @var array<string, int> Compiled GL program per shader ID */
+    private array $shaderProgramCache = [];
+
+    /** Currently active GL program handle (for uniform calls) */
+    private int $activeProgram = 0;
+
+    /** @var array<int, array<string, int>> Cached uniform locations per program handle */
+    private array $uniformLocationCache = [];
+
+    /** Frame-level shader override from SetShader command (null = use material's shader) */
+    private ?string $shaderOverride = null;
+
     private int $skyboxVao = 0;
 
     /** @var array<string, int> GL cubemap texture IDs */
@@ -80,8 +91,6 @@ class OpenGLRenderer3D implements Renderer3DInterface
     private ?Mat4 $currentViewMatrix = null;
     private ?Mat4 $currentProjectionMatrix = null;
 
-    /** Cached uniform location for u_use_instancing */
-    private int $useInstancingLoc = -1;
 
     /** Global time for shader animations (seconds since start) */
     private float $globalTime = 0.0;
@@ -95,9 +104,24 @@ class OpenGLRenderer3D implements Renderer3DInterface
     {
         $this->width  = $width;
         $this->height = $height;
+
+        // Register all built-in shaders (games can override by registering before construction)
+        $builtins = [
+            'default' => ['mesh3d.vert.glsl', 'mesh3d.frag.glsl'],
+            'unlit'   => ['unlit.vert.glsl', 'unlit.frag.glsl'],
+            'normals' => ['normals.vert.glsl', 'normals.frag.glsl'],
+            'depth'   => ['depth.vert.glsl', 'depth.frag.glsl'],
+            'skybox'  => ['skybox.vert.glsl', 'skybox.frag.glsl'],
+        ];
+        $shaderDir = __DIR__ . '/../../resources/shaders/source/';
+        foreach ($builtins as $id => [$vert, $frag]) {
+            if (!ShaderRegistry::has($id)) {
+                ShaderRegistry::register($id, new ShaderDefinition($shaderDir . $vert, $shaderDir . $frag));
+            }
+        }
+
         $this->initShaders();
         $this->initSkybox();
-        $this->useInstancingLoc = glGetUniformLocation($this->shaderProgram, 'u_use_instancing');
     }
 
     public function beginFrame(): void
@@ -140,8 +164,10 @@ class OpenGLRenderer3D implements Renderer3DInterface
         glClear(GL_DEPTH_BUFFER_BIT);
         $this->pointLightCount = 0;
         $this->pointLights     = [];
+        $this->shaderOverride = null;
 
-        glUseProgram($this->shaderProgram);
+        $defaultProgram = $this->shaderProgramCache['default'];
+        $this->useShaderProgram($defaultProgram);
 
         // Defaults
         $this->setUniformVec3('u_ambient_color', [1.0, 1.0, 1.0]);
@@ -155,9 +181,7 @@ class OpenGLRenderer3D implements Renderer3DInterface
         $this->setUniformVec3('u_albedo', [0.8, 0.8, 0.8]);
 
         // Instancing off by default
-        if ($this->useInstancingLoc >= 0) {
-            glUniform1i($this->useInstancingLoc, 0);
-        }
+        $this->setUniformInt('u_use_instancing', 0);
 
         // Re-bind dummy textures (created during shader init) and reset flags
         glActiveTexture(GL_TEXTURE5);
@@ -291,7 +315,9 @@ class OpenGLRenderer3D implements Renderer3DInterface
         glDepthMask(true);
         glDisable(GL_BLEND);
         foreach ($commandList->getCommands() as $command) {
-            if ($command instanceof SetWaveAnimation) {
+            if ($command instanceof SetShader) {
+                $this->shaderOverride = $command->shaderId;
+            } elseif ($command instanceof SetWaveAnimation) {
                 $this->setUniformInt('u_vertex_anim', $command->enabled ? 1 : 0);
                 $this->setUniformFloat('u_wave_amplitude', $command->amplitude);
                 $this->setUniformFloat('u_wave_frequency', $command->frequency);
@@ -299,11 +325,13 @@ class OpenGLRenderer3D implements Renderer3DInterface
             } elseif ($command instanceof DrawMesh) {
                 $mat = MaterialRegistry::get($command->materialId);
                 if ($mat === null || $mat->alpha >= 1.0) {
+                    $this->activateShaderForMaterial($mat);
                     $this->drawMeshCommand($command->meshId, $command->materialId, $command->modelMatrix);
                 }
             } elseif ($command instanceof DrawMeshInstanced) {
                 $mat = MaterialRegistry::get($command->materialId);
                 if ($mat === null || $mat->alpha >= 1.0) {
+                    $this->activateShaderForMaterial($mat);
                     $this->drawMeshInstancedCommand($command->meshId, $command->materialId, $command->matrices, $command->isStatic);
                 }
             }
@@ -314,7 +342,9 @@ class OpenGLRenderer3D implements Renderer3DInterface
         glEnable(GL_BLEND);
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
         foreach ($commandList->getCommands() as $command) {
-            if ($command instanceof SetWaveAnimation) {
+            if ($command instanceof SetShader) {
+                $this->shaderOverride = $command->shaderId;
+            } elseif ($command instanceof SetWaveAnimation) {
                 $this->setUniformInt('u_vertex_anim', $command->enabled ? 1 : 0);
                 $this->setUniformFloat('u_wave_amplitude', $command->amplitude);
                 $this->setUniformFloat('u_wave_frequency', $command->frequency);
@@ -322,11 +352,13 @@ class OpenGLRenderer3D implements Renderer3DInterface
             } elseif ($command instanceof DrawMesh) {
                 $mat = MaterialRegistry::get($command->materialId);
                 if ($mat !== null && $mat->alpha < 1.0) {
+                    $this->activateShaderForMaterial($mat);
                     $this->drawMeshCommand($command->meshId, $command->materialId, $command->modelMatrix);
                 }
             } elseif ($command instanceof DrawMeshInstanced) {
                 $mat = MaterialRegistry::get($command->materialId);
                 if ($mat !== null && $mat->alpha < 1.0) {
+                    $this->activateShaderForMaterial($mat);
                     $this->drawMeshInstancedCommand($command->meshId, $command->materialId, $command->matrices, $command->isStatic);
                 }
             }
@@ -357,9 +389,7 @@ class OpenGLRenderer3D implements Renderer3DInterface
         }
 
         // Ensure instancing is off
-        if ($this->useInstancingLoc >= 0) {
-            glUniform1i($this->useInstancingLoc, 0);
-        }
+        $this->setUniformInt('u_use_instancing', 0);
 
         $this->setUniformMat4('u_model', $modelMatrix);
         $this->applyMaterial($materialId);
@@ -446,9 +476,7 @@ class OpenGLRenderer3D implements Renderer3DInterface
         glBufferData(GL_ARRAY_BUFFER, $buffer, GL_DYNAMIC_DRAW);
 
         // Enable instancing in shader
-        if ($this->useInstancingLoc >= 0) {
-            glUniform1i($this->useInstancingLoc, 1);
-        }
+        $this->setUniformInt('u_use_instancing', 1);
 
         $this->applyMaterial($materialId);
 
@@ -460,9 +488,7 @@ class OpenGLRenderer3D implements Renderer3DInterface
         );
         $this->checkGLError("drawMeshInstanced({$meshId}, {$materialId}, n={$instanceCount})");
 
-        if ($this->useInstancingLoc >= 0) {
-            glUniform1i($this->useInstancingLoc, 0);
-        }
+        $this->setUniformInt('u_use_instancing', 0);
 
         glBindVertexArray(0);
     }
@@ -521,6 +547,59 @@ class OpenGLRenderer3D implements Renderer3DInterface
 
     /** @var array<string, int> Material prefix → proc_mode cache */
     private static array $procModeCache = [];
+
+    /**
+     * Activate the correct shader program for a draw call.
+     * Priority: SetShader override > Material's shader > default.
+     * Re-uploads per-frame uniforms when switching programs.
+     */
+    private function activateShaderForMaterial(?Material $material): void
+    {
+        $shaderId = $this->shaderOverride ?? ($material !== null ? $material->shader : 'default');
+        $program = $this->resolveShaderProgram($shaderId);
+
+        if ($this->activeProgram !== $program) {
+            $this->useShaderProgram($program);
+            $this->reuploadFrameUniforms();
+        }
+    }
+
+    /**
+     * Re-upload per-frame uniforms (camera, lights, fog, time) after a shader switch.
+     * Custom shaders only receive uniforms they declare — missing uniforms are silently ignored.
+     */
+    private function reuploadFrameUniforms(): void
+    {
+        if ($this->currentViewMatrix !== null) {
+            $this->setUniformMat4('u_view', $this->currentViewMatrix);
+        }
+        if ($this->currentProjectionMatrix !== null) {
+            $this->setUniformMat4('u_projection', $this->currentProjectionMatrix);
+        }
+        if ($this->currentViewMatrix !== null) {
+            $cameraPos = $this->currentViewMatrix->inverse()->getTranslation();
+            $this->setUniformVec3('u_camera_pos', [$cameraPos->x, $cameraPos->y, $cameraPos->z]);
+        }
+
+        $this->setUniformFloat('u_time', $this->globalTime);
+
+        // Lights
+        $this->setUniformInt('u_dir_light_count', $this->dirLightCount);
+        for ($i = 0; $i < $this->dirLightCount; $i++) {
+            $dl = $this->dirLights[$i];
+            $this->setUniformVec3("u_dir_lights[{$i}].direction", $dl['dir']);
+            $this->setUniformVec3("u_dir_lights[{$i}].color", $dl['color']);
+            $this->setUniformFloat("u_dir_lights[{$i}].intensity", $dl['intensity']);
+        }
+        $this->setUniformInt('u_point_light_count', $this->pointLightCount);
+        for ($i = 0; $i < $this->pointLightCount; $i++) {
+            $pl = $this->pointLights[$i];
+            $this->setUniformVec3("u_point_lights[{$i}].position", $pl['pos']);
+            $this->setUniformVec3("u_point_lights[{$i}].color", $pl['color']);
+            $this->setUniformFloat("u_point_lights[{$i}].intensity", $pl['intensity']);
+            $this->setUniformFloat("u_point_lights[{$i}].radius", $pl['radius']);
+        }
+    }
 
     private function applyMaterial(string $materialId): void
     {
@@ -656,10 +735,14 @@ class OpenGLRenderer3D implements Renderer3DInterface
         $this->indexCountCache[$meshId] = count($meshData->indices);
     }
 
-    private function initShaders(): void
+    /**
+     * Compile and link a shader program from a ShaderDefinition.
+     * Returns the GL program handle. Result is cached in shaderProgramCache.
+     */
+    private function compileShader(string $shaderId, ShaderDefinition $definition): int
     {
-        $vertSource = $this->loadShaderSource(__DIR__ . '/../../resources/shaders/source/mesh3d.vert.glsl');
-        $fragSource = $this->loadShaderSource(__DIR__ . '/../../resources/shaders/source/mesh3d.frag.glsl');
+        $vertSource = $this->loadShaderSource($definition->vertexPath);
+        $fragSource = $this->loadShaderSource($definition->fragmentPath);
 
         $vert = glCreateShader(GL_VERTEX_SHADER);
         glShaderSource($vert, $vertSource);
@@ -669,7 +752,7 @@ class OpenGLRenderer3D implements Renderer3DInterface
         glGetShaderiv($vert, GL_COMPILE_STATUS, $vertStatus);
         if (!$vertStatus) {
             $log = glGetShaderInfoLog($vert, 4096);
-            throw new \RuntimeException("Vertex shader compile error:\n{$log}");
+            throw new \RuntimeException("Vertex shader compile error ({$shaderId}):\n{$log}");
         }
 
         $frag = glCreateShader(GL_FRAGMENT_SHADER);
@@ -680,7 +763,7 @@ class OpenGLRenderer3D implements Renderer3DInterface
         glGetShaderiv($frag, GL_COMPILE_STATUS, $fragStatus);
         if (!$fragStatus) {
             $log = glGetShaderInfoLog($frag, 4096);
-            throw new \RuntimeException("Fragment shader compile error:\n{$log}");
+            throw new \RuntimeException("Fragment shader compile error ({$shaderId}):\n{$log}");
         }
 
         $program = glCreateProgram();
@@ -692,13 +775,55 @@ class OpenGLRenderer3D implements Renderer3DInterface
         glGetProgramiv($program, GL_LINK_STATUS, $linkStatus);
         if (!$linkStatus) {
             $log = glGetProgramInfoLog($program, 4096);
-            throw new \RuntimeException("Shader program link error:\n{$log}");
+            throw new \RuntimeException("Shader program link error ({$shaderId}):\n{$log}");
         }
 
         glDeleteShader($vert);
         glDeleteShader($frag);
 
-        $this->shaderProgram = $program;
+        $this->shaderProgramCache[$shaderId] = $program;
+        return $program;
+    }
+
+    /**
+     * Resolve a shader ID to a compiled GL program. Compiles on first use.
+     * Falls back to 'default' if the requested shader is not registered.
+     */
+    private function resolveShaderProgram(string $shaderId): int
+    {
+        if (isset($this->shaderProgramCache[$shaderId])) {
+            return $this->shaderProgramCache[$shaderId];
+        }
+
+        $definition = ShaderRegistry::get($shaderId);
+        if ($definition === null) {
+            // Fall back to default
+            return $this->shaderProgramCache['default'];
+        }
+
+        return $this->compileShader($shaderId, $definition);
+    }
+
+    /**
+     * Switch the active GL program if it differs from the current one.
+     */
+    private function useShaderProgram(int $program): void
+    {
+        if ($this->activeProgram !== $program) {
+            glUseProgram($program);
+            $this->activeProgram = $program;
+        }
+    }
+
+    private function initShaders(): void
+    {
+        $defaultDef = ShaderRegistry::get('default');
+        if ($defaultDef === null) {
+            throw new \RuntimeException('Default shader not registered in ShaderRegistry');
+        }
+
+        $program = $this->compileShader('default', $defaultDef);
+        $this->activeProgram = $program;
 
         // Create dummy textures and bind samplers immediately after linking.
         // This prevents "unloadable texture" warnings on the first frame.
@@ -756,9 +881,20 @@ class OpenGLRenderer3D implements Renderer3DInterface
         return $source;
     }
 
+    private function getUniformLocation(string $name): int
+    {
+        $program = $this->activeProgram;
+        if (isset($this->uniformLocationCache[$program][$name])) {
+            return $this->uniformLocationCache[$program][$name];
+        }
+        $loc = glGetUniformLocation($program, $name);
+        $this->uniformLocationCache[$program][$name] = $loc;
+        return $loc;
+    }
+
     private function setUniformMat4(string $name, Mat4 $matrix): void
     {
-        $loc = glGetUniformLocation($this->shaderProgram, $name);
+        $loc = $this->getUniformLocation($name);
         if ($loc >= 0) {
             glUniformMatrix4fv($loc, false, new FloatBuffer($matrix->toArray()));
         }
@@ -767,7 +903,7 @@ class OpenGLRenderer3D implements Renderer3DInterface
     /** @param float[] $value */
     private function setUniformVec3(string $name, array $value): void
     {
-        $loc = glGetUniformLocation($this->shaderProgram, $name);
+        $loc = $this->getUniformLocation($name);
         if ($loc >= 0) {
             glUniform3f($loc, $value[0], $value[1], $value[2]);
         }
@@ -775,7 +911,7 @@ class OpenGLRenderer3D implements Renderer3DInterface
 
     private function setUniformFloat(string $name, float $value): void
     {
-        $loc = glGetUniformLocation($this->shaderProgram, $name);
+        $loc = $this->getUniformLocation($name);
         if ($loc >= 0) {
             glUniform1f($loc, $value);
         }
@@ -783,7 +919,7 @@ class OpenGLRenderer3D implements Renderer3DInterface
 
     private function setUniformInt(string $name, int $value): void
     {
-        $loc = glGetUniformLocation($this->shaderProgram, $name);
+        $loc = $this->getUniformLocation($name);
         if ($loc >= 0) {
             glUniform1i($loc, $value);
         }
@@ -793,42 +929,7 @@ class OpenGLRenderer3D implements Renderer3DInterface
 
     private function initSkybox(): void
     {
-        $vertSource = $this->loadShaderSource(__DIR__ . '/../../resources/shaders/source/skybox.vert.glsl');
-        $fragSource = $this->loadShaderSource(__DIR__ . '/../../resources/shaders/source/skybox.frag.glsl');
-
-        $vert = glCreateShader(GL_VERTEX_SHADER);
-        glShaderSource($vert, $vertSource);
-        glCompileShader($vert);
-        $vertStatus = 0;
-        glGetShaderiv($vert, GL_COMPILE_STATUS, $vertStatus);
-        if (!$vertStatus) {
-            $log = glGetShaderInfoLog($vert, 4096);
-            throw new \RuntimeException("Skybox vertex shader compile error:\n{$log}");
-        }
-
-        $frag = glCreateShader(GL_FRAGMENT_SHADER);
-        glShaderSource($frag, $fragSource);
-        glCompileShader($frag);
-        $fragStatus = 0;
-        glGetShaderiv($frag, GL_COMPILE_STATUS, $fragStatus);
-        if (!$fragStatus) {
-            $log = glGetShaderInfoLog($frag, 4096);
-            throw new \RuntimeException("Skybox fragment shader compile error:\n{$log}");
-        }
-
-        $program = glCreateProgram();
-        glAttachShader($program, $vert);
-        glAttachShader($program, $frag);
-        glLinkProgram($program);
-        $linkStatus = 0;
-        glGetProgramiv($program, GL_LINK_STATUS, $linkStatus);
-        if (!$linkStatus) {
-            $log = glGetProgramInfoLog($program, 4096);
-            throw new \RuntimeException("Skybox shader link error:\n{$log}");
-        }
-        glDeleteShader($vert);
-        glDeleteShader($frag);
-        $this->skyboxShaderProgram = $program;
+        $this->resolveShaderProgram('skybox');
 
         /** @var float[] $skyboxVertices */
         $skyboxVertices = [
@@ -961,7 +1062,7 @@ class OpenGLRenderer3D implements Renderer3DInterface
 
         // Shadow pass: render depth only
         $shadowMap->beginShadowPass();
-        glUseProgram($this->shaderProgram);
+        $this->useShaderProgram($this->shaderProgramCache['default']);
 
         // Set light-space matrix as view+projection for shadow pass
         $lsm = $shadowMap->getLightSpaceMatrix();
@@ -995,9 +1096,7 @@ class OpenGLRenderer3D implements Renderer3DInterface
                     if (!isset($this->vaoCache[$command->meshId])) {
                         $this->uploadMesh($command->meshId, $meshData);
                     }
-                    if ($this->useInstancingLoc >= 0) {
-                        glUniform1i($this->useInstancingLoc, 0);
-                    }
+                    $this->setUniformInt('u_use_instancing', 0);
                     glBindVertexArray($this->vaoCache[$command->meshId]);
                     glDrawElements(GL_TRIANGLES, $this->indexCountCache[$command->meshId], GL_UNSIGNED_INT, 0);
                     glBindVertexArray(0);
@@ -1015,7 +1114,7 @@ class OpenGLRenderer3D implements Renderer3DInterface
         $cloudShadow = $this->cloudShadow;
 
         $cloudShadow->beginPass();
-        glUseProgram($this->shaderProgram);
+        $this->useShaderProgram($this->shaderProgramCache['default']);
 
         // Same light-space view as geometry shadows
         $this->setUniformMat4('u_view', $lsm);
@@ -1045,9 +1144,7 @@ class OpenGLRenderer3D implements Renderer3DInterface
                 if (!isset($this->vaoCache[$command->meshId])) {
                     $this->uploadMesh($command->meshId, $meshData);
                 }
-                if ($this->useInstancingLoc >= 0) {
-                    glUniform1i($this->useInstancingLoc, 0);
-                }
+                $this->setUniformInt('u_use_instancing', 0);
                 glBindVertexArray($this->vaoCache[$command->meshId]);
                 glDrawElements(GL_TRIANGLES, $this->indexCountCache[$command->meshId], GL_UNSIGNED_INT, 0);
                 glBindVertexArray(0);
@@ -1058,7 +1155,7 @@ class OpenGLRenderer3D implements Renderer3DInterface
         $cloudShadow->endPass();
 
         // Bind both shadow maps for main pass
-        glUseProgram($this->shaderProgram);
+        $this->useShaderProgram($this->shaderProgramCache['default']);
         $shadowMap->bind(6);
         $this->setUniformInt('u_shadow_map', 6);
         $this->setUniformMat4('u_light_space_matrix', $lsm);
@@ -1082,30 +1179,25 @@ class OpenGLRenderer3D implements Renderer3DInterface
         }
 
         glDepthFunc(GL_LEQUAL);
-        glUseProgram($this->skyboxShaderProgram);
+        $this->useShaderProgram($this->resolveShaderProgram('skybox'));
 
-        $viewLoc = glGetUniformLocation($this->skyboxShaderProgram, 'u_view');
-        if ($viewLoc >= 0 && $this->currentViewMatrix !== null) {
-            glUniformMatrix4fv($viewLoc, false, new FloatBuffer($this->currentViewMatrix->toArray()));
+        if ($this->currentViewMatrix !== null) {
+            $this->setUniformMat4('u_view', $this->currentViewMatrix);
         }
-        $projLoc = glGetUniformLocation($this->skyboxShaderProgram, 'u_projection');
-        if ($projLoc >= 0 && $this->currentProjectionMatrix !== null) {
-            glUniformMatrix4fv($projLoc, false, new FloatBuffer($this->currentProjectionMatrix->toArray()));
+        if ($this->currentProjectionMatrix !== null) {
+            $this->setUniformMat4('u_projection', $this->currentProjectionMatrix);
         }
 
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_CUBE_MAP, $texId);
-        $skyboxLoc = glGetUniformLocation($this->skyboxShaderProgram, 'u_skybox');
-        if ($skyboxLoc >= 0) {
-            glUniform1i($skyboxLoc, 0);
-        }
+        $this->setUniformInt('u_skybox', 0);
 
         glBindVertexArray($this->skyboxVao);
         glDrawArrays(GL_TRIANGLES, 0, 36);
         glBindVertexArray(0);
 
         glDepthFunc(GL_LESS);
-        glUseProgram($this->shaderProgram);
+        $this->useShaderProgram($this->shaderProgramCache['default']);
     }
 
     /**

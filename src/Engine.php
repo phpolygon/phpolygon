@@ -19,6 +19,7 @@ use PHPolygon\Rendering\Renderer2D;
 use PHPolygon\Rendering\Renderer2DInterface;
 use PHPolygon\Rendering\RenderCommandList;
 use PHPolygon\Rendering\Renderer3DInterface;
+use PHPolygon\Rendering\ShaderManager;
 use PHPolygon\Rendering\TextureManager;
 use PHPolygon\Testing\NullTextureManager;
 use PHPolygon\Runtime\Clock;
@@ -53,6 +54,7 @@ class Engine
     public Renderer2DInterface $renderer2D;
     public ?Renderer3DInterface $renderer3D;
     public readonly ?RenderCommandList $commandList3D;
+    public readonly ShaderManager $shaders;
     public readonly ThreadScheduler|NullThreadScheduler $scheduler;
 
     private bool $running = false;
@@ -100,6 +102,8 @@ class Engine
             $this->commandList3D = null;
             $this->renderer3D = null;
         }
+
+        $this->shaders = new ShaderManager($this->commandList3D);
 
         if ($this->headless) {
             $this->window = new NullWindow($config->width, $config->height, $config->title);

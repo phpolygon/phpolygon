@@ -68,4 +68,34 @@ class MaterialTest extends TestCase
         $this->assertContains('brick', $ids);
         $this->assertContains('metal', $ids);
     }
+
+    public function testDefaultShaderIsDefault(): void
+    {
+        $m = Material::default();
+        $this->assertSame('default', $m->shader);
+    }
+
+    public function testCustomShaderProperty(): void
+    {
+        $m = new Material(shader: 'unlit');
+        $this->assertSame('unlit', $m->shader);
+    }
+
+    public function testShaderPropertyWithOtherParams(): void
+    {
+        $m = new Material(
+            albedo: Color::red(),
+            roughness: 0.3,
+            shader: 'normals',
+        );
+        $this->assertSame('normals', $m->shader);
+        $this->assertEqualsWithDelta(1.0, $m->albedo->r, 1e-6);
+        $this->assertEqualsWithDelta(0.3, $m->roughness, 1e-6);
+    }
+
+    public function testFactoryMethodsUseDefaultShader(): void
+    {
+        $this->assertSame('default', Material::color(Color::white())->shader);
+        $this->assertSame('default', Material::emissive(Color::white(), Color::white())->shader);
+    }
 }

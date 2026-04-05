@@ -86,9 +86,66 @@ All commands are plain PHP value objects (no methods, only constructor propertie
 | `DrawMeshInstanced` | `meshId: string`, `materialId: string`, `matrices: Mat4[]` |
 | `SetSkybox` | `cubemapId: string` |
 | `SetFog` | `color: Color`, `near: float`, `far: float` |
+| `SetShader` | `shaderId: ?string` — override active shader for subsequent draws; `null` resets to material-driven |
 
 Commands are appended to `RenderCommandList` during the scene tick. The
 `Renderer3DSystem` flushes the list once per frame.
+
+### Shader management
+
+Games control shaders via the `Shader` facade or `$engine->shaders`:
+
+```php
+use PHPolygon\Support\Facades\Shader;
+
+Shader::available();           // ['default', 'unlit', 'normals', 'depth', 'skybox']
+Shader::use('unlit');          // global override — all draws use 'unlit'
+Shader::active();              // 'unlit'
+Shader::isOverridden();        // true
+Shader::reset();               // back to material-driven selection
+
+// Register a custom shader
+Shader::register('toon', new ShaderDefinition(
+    'resources/shaders/source/toon.vert.glsl',
+    'resources/shaders/source/toon.frag.glsl',
+));
+
+// Per-material shader assignment
+MaterialRegistry::register('debug_flat', new Material(
+    albedo: new Color(1.0, 0.0, 1.0),
+    shader: 'unlit',
+));
+```
+
+**Architecture:**
+- **`ShaderManager`** (`$engine->shaders`) — game-facing service, emits `SetShader`
+  commands into the `RenderCommandList`
+- **`Shader` facade** — static proxy to `ShaderManager`
+- **`ShaderDefinition`** — value object: `vertexPath`, `fragmentPath` (GLSL sources)
+- **`ShaderRegistry`** — static registry mapping shader IDs to definitions
+- **`Material::$shader`** — string ID (defaults to `'default'`), per-material shader
+- **`SetShader` command** — render command for frame-level override
+
+Priority: `SetShader` override > `Material::$shader` > `'default'`
+
+Built-in shaders (registered automatically by the renderer):
+
+| Shader ID | Purpose | Source files |
+|---|---|---|
+| `default` | Full PBR: lighting, shadows, fog, 10 procedural modes | `mesh3d.vert/frag.glsl` |
+| `unlit` | Albedo + emission + fog only, no lighting (perf baseline) | `unlit.vert/frag.glsl` |
+| `normals` | Debug: visualize surface normals as RGB | `normals.vert/frag.glsl` |
+| `depth` | Debug: visualize depth buffer (white=near, black=far) | `depth.vert/frag.glsl` |
+| `skybox` | Cubemap skybox (used internally by SetSkybox command) | `skybox.vert/frag.glsl` |
+
+All built-in shaders can be overridden by registering a shader with the same ID
+before the renderer is constructed. Custom shaders are compiled lazily on first
+use and cached. Unknown shader IDs fall back to `'default'`.
+
+Custom shaders must use the same vertex attribute layout as built-in shaders
+(location 0–2: position/normal/uv, 3–6: instance matrix). Uniforms that the
+shader does not declare are silently ignored — a minimal shader only needs
+`u_model`, `u_view`, `u_projection`, and `u_use_instancing`.
 
 ### GPU backends
 | Backend | Status | Target |

@@ -17,6 +17,7 @@ class Material
         public readonly float $metallic = 0.0,
         public readonly Color $emission = new Color(0.0, 0.0, 0.0),
         public readonly float $alpha = 1.0,
+        public readonly string $shader = 'default',
     ) {}
 
     public static function default(): self
