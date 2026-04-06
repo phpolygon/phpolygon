@@ -98,7 +98,7 @@ Games control shaders via the `Shader` facade or `$engine->shaders`:
 ```php
 use PHPolygon\Support\Facades\Shader;
 
-Shader::available();           // ['default', 'unlit', 'normals', 'depth', 'skybox']
+Shader::available();           // ['default', 'unlit', 'normals', 'depth', 'shadow', 'skybox']
 Shader::use('unlit');          // global override — all draws use 'unlit'
 Shader::active();              // 'unlit'
 Shader::isOverridden();        // true
@@ -136,6 +136,7 @@ Built-in shaders (registered automatically by the renderer):
 | `unlit` | Albedo + emission + fog only, no lighting (perf baseline) | `unlit.vert/frag.glsl` |
 | `normals` | Debug: visualize surface normals as RGB | `normals.vert/frag.glsl` |
 | `depth` | Debug: visualize depth buffer (white=near, black=far) | `depth.vert/frag.glsl` |
+| `shadow` | Depth-only pass for shadow maps (used internally by renderer) | `shadow.vert/frag.glsl` |
 | `skybox` | Cubemap skybox (used internally by SetSkybox command) | `skybox.vert/frag.glsl` |
 
 All built-in shaders can be overridden by registering a shader with the same ID
