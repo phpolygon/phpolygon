@@ -15,6 +15,11 @@ use PHPolygon\Runtime\Window;
 class Renderer2D implements Renderer2DInterface
 {
     private VGContext $vg;
+    private int $currentTextAlign = VGAlign::LEFT | VGAlign::TOP;
+    private string $currentFont = 'inter-regular';
+
+    /** @var list<array{font: string, align: int}> */
+    private array $stateStack = [];
 
     public function __construct(
         private readonly Window $window,
@@ -33,6 +38,9 @@ class Renderer2D implements Renderer2DInterface
         glClear(GL_COLOR_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
 
         $this->vg->beginFrame((float)$width, (float)$height, $pixelRatio);
+        $this->currentTextAlign = VGAlign::LEFT | VGAlign::TOP;
+        $this->vg->textAlign($this->currentTextAlign);
+        $this->stateStack = [];
     }
 
     public function endFrame(): void
@@ -124,25 +132,37 @@ class Renderer2D implements Renderer2DInterface
 
     public function drawText(string $text, float $x, float $y, float $size, Color $color): void
     {
+        $this->vg->fontFace($this->currentFont);
         $this->vg->fontSize($size);
         $this->vg->fillColor($this->toVGColor($color));
-        $this->vg->textAlign(VGAlign::LEFT | VGAlign::TOP);
+        $this->vg->textAlign($this->currentTextAlign);
         $this->vg->text($x, $y, $text);
     }
 
     public function drawTextCentered(string $text, float $cx, float $cy, float $size, Color $color): void
     {
+        $this->vg->fontFace($this->currentFont);
         $this->vg->fontSize($size);
         $this->vg->fillColor($this->toVGColor($color));
-        $this->vg->textAlign(VGAlign::CENTER | VGAlign::MIDDLE);
-        $this->vg->text($cx, $cy, $text);
+
+        // Manual centering via textBounds — VGAlign::MIDDLE shifts when CJK
+        // fallback fonts change the primary font's ascender/descender metrics.
+        $this->vg->textAlign(VGAlign::LEFT | VGAlign::TOP);
+        $bounds = new \GL\Math\Vec4(0.0, 0.0, 0.0, 0.0);
+        $this->vg->textBounds(0, 0, $text, $bounds);
+        \assert($bounds instanceof \GL\Math\Vec4);
+        $textW = $bounds->z - $bounds->x;
+        $textH = $bounds->w - $bounds->y;
+
+        $this->vg->text($cx - $textW / 2.0, $cy - $textH / 2.0, $text);
     }
 
     public function drawTextBox(string $text, float $x, float $y, float $breakWidth, float $size, Color $color): void
     {
+        $this->vg->fontFace($this->currentFont);
         $this->vg->fontSize($size);
         $this->vg->fillColor($this->toVGColor($color));
-        $this->vg->textAlign(VGAlign::LEFT | VGAlign::TOP);
+        $this->vg->textAlign($this->currentTextAlign);
         $this->vg->textBox($x, $y, $breakWidth, $text);
     }
 
@@ -207,7 +227,68 @@ class Renderer2D implements Renderer2DInterface
 
     public function setFont(string $name): void
     {
+        $this->currentFont = $name;
         $this->vg->fontFace($name);
+    }
+
+    public function setTextAlign(int $align): void
+    {
+        $this->currentTextAlign = $align;
+        $this->vg->textAlign($align);
+    }
+
+    public function measureText(string $text, float $size): TextMetrics
+    {
+        $this->vg->fontFace($this->currentFont);
+        $this->vg->fontSize($size);
+        $bounds = new \GL\Math\Vec4(0.0, 0.0, 0.0, 0.0);
+        $this->vg->textBounds(0, 0, $text, $bounds);
+        \assert($bounds instanceof \GL\Math\Vec4);
+        return new TextMetrics($bounds->z - $bounds->x, $bounds->w - $bounds->y);
+    }
+
+    public function measureTextBox(string $text, float $breakWidth, float $size): TextMetrics
+    {
+        $this->vg->fontFace($this->currentFont);
+        $this->vg->fontSize($size);
+        $bounds = new \GL\Math\Vec4(0.0, 0.0, 0.0, 0.0);
+        $this->vg->textBoxBounds(0, 0, $breakWidth, $text, $bounds);
+        \assert($bounds instanceof \GL\Math\Vec4);
+        return new TextMetrics($bounds->z - $bounds->x, $bounds->w - $bounds->y);
+    }
+
+    public function addFallbackFont(string $baseFont, string $fallbackFont): void
+    {
+        $this->vg->addFallbackFont($baseFont, $fallbackFont);
+    }
+
+    public function setGlobalAlpha(float $alpha): void
+    {
+        $this->vg->globalAlpha($alpha);
+    }
+
+    public function drawArc(float $cx, float $cy, float $r, float $startAngle, float $endAngle, Color $color, int $direction = 0): void
+    {
+        $this->vg->beginPath();
+        $this->vg->arc($cx, $cy, $r, $startAngle, $endAngle, $direction);
+        $this->vg->fillColor($this->toVGColor($color));
+        $this->vg->fill();
+    }
+
+    public function saveState(): void
+    {
+        $this->stateStack[] = ['font' => $this->currentFont, 'align' => $this->currentTextAlign];
+        $this->vg->save();
+    }
+
+    public function restoreState(): void
+    {
+        $this->vg->restore();
+        if (!empty($this->stateStack)) {
+            $saved = array_pop($this->stateStack);
+            $this->currentFont = $saved['font'];
+            $this->currentTextAlign = $saved['align'];
+        }
     }
 
     public function getVGContext(): VGContext

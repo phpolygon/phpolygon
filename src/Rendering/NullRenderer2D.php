@@ -53,4 +53,27 @@ class NullRenderer2D implements Renderer2DInterface
     public function popScissor(): void {}
     public function loadFont(string $name, string $path): void {}
     public function setFont(string $name): void {}
+    public function setTextAlign(int $align): void {}
+
+    public function measureText(string $text, float $size): TextMetrics
+    {
+        // Rough estimate: average character width ~0.6 * size
+        return new TextMetrics(strlen($text) * $size * 0.6, $size);
+    }
+
+    public function measureTextBox(string $text, float $breakWidth, float $size): TextMetrics
+    {
+        // Estimate line count based on character width
+        $charWidth = $size * 0.6;
+        $lineWidth = $breakWidth > 0 ? $breakWidth : 1.0;
+        $totalCharsWidth = strlen($text) * $charWidth;
+        $lines = max(1, (int)ceil($totalCharsWidth / $lineWidth));
+        return new TextMetrics(min($totalCharsWidth, $lineWidth), $lines * $size * 1.2);
+    }
+
+    public function addFallbackFont(string $baseFont, string $fallbackFont): void {}
+    public function setGlobalAlpha(float $alpha): void {}
+    public function drawArc(float $cx, float $cy, float $r, float $startAngle, float $endAngle, Color $color, int $direction = 0): void {}
+    public function saveState(): void {}
+    public function restoreState(): void {}
 }

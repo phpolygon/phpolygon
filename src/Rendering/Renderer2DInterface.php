@@ -43,4 +43,55 @@ interface Renderer2DInterface extends RenderContextInterface
     public function loadFont(string $name, string $path): void;
 
     public function setFont(string $name): void;
+
+    /**
+     * Sets the text alignment for subsequent drawText/drawTextCentered/drawTextBox calls.
+     * Use TextAlign constants combined with bitwise OR, e.g. TextAlign::CENTER | TextAlign::MIDDLE.
+     */
+    public function setTextAlign(int $align): void;
+
+    /**
+     * Measures the width and height of a single line of text without drawing it.
+     */
+    public function measureText(string $text, float $size): TextMetrics;
+
+    /**
+     * Measures the bounding box of text wrapped at the given breakWidth.
+     */
+    public function measureTextBox(string $text, float $breakWidth, float $size): TextMetrics;
+
+    /**
+     * Registers a fallback font to be used when glyphs are missing from the base font.
+     * Primarily used for CJK character support.
+     */
+    public function addFallbackFont(string $baseFont, string $fallbackFont): void;
+
+    /**
+     * Sets the global alpha (opacity) applied to all subsequent draw calls.
+     * Value should be between 0.0 (fully transparent) and 1.0 (fully opaque).
+     */
+    public function setGlobalAlpha(float $alpha): void;
+
+    /**
+     * Draws a filled arc (pie slice).
+     *
+     * @param float $cx Center X
+     * @param float $cy Center Y
+     * @param float $r Radius
+     * @param float $startAngle Start angle in radians
+     * @param float $endAngle End angle in radians
+     * @param int $direction Winding direction: 0 = counter-clockwise (CCW), 1 = clockwise (CW)
+     */
+    public function drawArc(float $cx, float $cy, float $r, float $startAngle, float $endAngle, Color $color, int $direction = 0): void;
+
+    /**
+     * Saves the current drawing state (transform, scissor, font, alpha, text alignment)
+     * onto an internal stack.
+     */
+    public function saveState(): void;
+
+    /**
+     * Restores the most recently saved drawing state from the internal stack.
+     */
+    public function restoreState(): void;
 }

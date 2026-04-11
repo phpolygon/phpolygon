@@ -78,6 +78,14 @@ class UISystemTest extends TestCase
             public function popScissor(): void {}
             public function loadFont(string $name, string $path): void {}
             public function setFont(string $name): void {}
+            public function setTextAlign(int $align): void {}
+            public function measureText(string $text, float $size): \PHPolygon\Rendering\TextMetrics { return new \PHPolygon\Rendering\TextMetrics(strlen($text) * $size * 0.6, $size); }
+            public function measureTextBox(string $text, float $breakWidth, float $size): \PHPolygon\Rendering\TextMetrics { return new \PHPolygon\Rendering\TextMetrics($breakWidth, $size); }
+            public function addFallbackFont(string $baseFont, string $fallbackFont): void {}
+            public function setGlobalAlpha(float $alpha): void {}
+            public function drawArc(float $cx, float $cy, float $r, float $startAngle, float $endAngle, \PHPolygon\Rendering\Color $color, int $direction = 0): void {}
+            public function saveState(): void {}
+            public function restoreState(): void {}
         };
 
         return new UISystem($renderer, new \PHPolygon\Runtime\Input());

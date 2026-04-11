@@ -10,6 +10,8 @@ use PHPolygon\Math\Vec2;
 use PHPolygon\Rendering\Color;
 use PHPolygon\Rendering\NullRenderer2D;
 use PHPolygon\Rendering\Renderer2DInterface;
+use PHPolygon\Rendering\TextAlign;
+use PHPolygon\Rendering\TextMetrics;
 use PHPolygon\Rendering\Texture;
 
 /**
@@ -27,6 +29,14 @@ class GdRenderer2D implements Renderer2DInterface
     /** @var array<string, string> font name → file path */
     private array $fonts = [];
     private string $currentFont = '';
+    private int $textAlign = TextAlign::DEFAULT;
+    private float $globalAlpha = 1.0;
+
+    /**
+     * State stack for saveState()/restoreState().
+     * @var list<array{string, int, float, Mat3}>
+     */
+    private array $savedStates = [];
 
     /** @var list<Mat3> */
     private array $transformStack = [];
@@ -329,6 +339,119 @@ class GdRenderer2D implements Renderer2DInterface
     public function setFont(string $name): void
     {
         $this->currentFont = $name;
+    }
+
+    public function setTextAlign(int $align): void
+    {
+        $this->textAlign = $align;
+    }
+
+    public function measureText(string $text, float $size): TextMetrics
+    {
+        if ($this->currentFont !== '' && isset($this->fonts[$this->currentFont])) {
+            $bbox = imagettfbbox($size, 0, $this->fonts[$this->currentFont], $text);
+            if ($bbox !== false) {
+                /** @var array<int, int> $bbox */
+                return new TextMetrics((float)($bbox[2] - $bbox[0]), (float)($bbox[1] - $bbox[7]));
+            }
+        }
+        return new TextMetrics(strlen($text) * $size * 0.6, $size);
+    }
+
+    public function measureTextBox(string $text, float $breakWidth, float $size): TextMetrics
+    {
+        if ($this->currentFont === '' || !isset($this->fonts[$this->currentFont])) {
+            $charWidth = $size * 0.6;
+            $totalWidth = strlen($text) * $charWidth;
+            $lines = max(1, (int)ceil($totalWidth / max(1.0, $breakWidth)));
+            return new TextMetrics(min($totalWidth, $breakWidth), $lines * $size * 1.4);
+        }
+
+        $fontPath = $this->fonts[$this->currentFont];
+        $words = explode(' ', $text);
+        $line = '';
+        $lineHeight = $size * 1.4;
+        $maxWidth = 0.0;
+        $totalHeight = 0.0;
+
+        foreach ($words as $word) {
+            $testLine = $line === '' ? $word : $line . ' ' . $word;
+            $bbox = imagettfbbox($size, 0, $fontPath, $testLine);
+            /** @var array<int, int>|false $bbox */
+            $lineWidth = $bbox !== false ? (float)($bbox[2] - $bbox[0]) : 0.0;
+
+            if ($lineWidth > $breakWidth && $line !== '') {
+                /** @var array<int, int>|false $lineBbox */
+                $lineBbox = imagettfbbox($size, 0, $fontPath, $line);
+                if ($lineBbox !== false) {
+                    $maxWidth = max($maxWidth, (float)($lineBbox[2] - $lineBbox[0]));
+                }
+                $totalHeight += $lineHeight;
+                $line = $word;
+            } else {
+                $line = $testLine;
+            }
+        }
+        if ($line !== '') {
+            /** @var array<int, int>|false $lineBbox */
+            $lineBbox = imagettfbbox($size, 0, $fontPath, $line);
+            if ($lineBbox !== false) {
+                $maxWidth = max($maxWidth, (float)($lineBbox[2] - $lineBbox[0]));
+            }
+            $totalHeight += $lineHeight;
+        }
+
+        return new TextMetrics($maxWidth, $totalHeight);
+    }
+
+    public function addFallbackFont(string $baseFont, string $fallbackFont): void
+    {
+        // GD does not support fallback font chains
+    }
+
+    public function setGlobalAlpha(float $alpha): void
+    {
+        $this->globalAlpha = $alpha;
+    }
+
+    public function drawArc(float $cx, float $cy, float $r, float $startAngle, float $endAngle, Color $color, int $direction = 0): void
+    {
+        [$tx, $ty] = $this->transformPoint($cx, $cy);
+        $gdColor = $this->allocateColor($color);
+        // GD expects degrees, NanoVG uses radians
+        $startDeg = (int) round(rad2deg($startAngle));
+        $endDeg = (int) round(rad2deg($endAngle));
+        if ($direction === 1) {
+            // CW in GD
+            [$startDeg, $endDeg] = [$endDeg, $startDeg];
+        }
+        imagefilledarc(
+            $this->image,
+            (int) round($tx),
+            (int) round($ty),
+            (int) round($r * 2),
+            (int) round($r * 2),
+            $startDeg,
+            $endDeg,
+            $gdColor,
+            IMG_ARC_PIE,
+        );
+    }
+
+    public function saveState(): void
+    {
+        $this->savedStates[] = [$this->currentFont, $this->textAlign, $this->globalAlpha, $this->currentTransform];
+        $this->transformStack[] = $this->currentTransform;
+    }
+
+    public function restoreState(): void
+    {
+        if (!empty($this->savedStates)) {
+            [$this->currentFont, $this->textAlign, $this->globalAlpha, $this->currentTransform] = array_pop($this->savedStates);
+        }
+        if (!empty($this->transformStack)) {
+            array_pop($this->transformStack);
+        }
     }
 
     // --- Private helpers ---

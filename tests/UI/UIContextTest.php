@@ -7,6 +7,7 @@ namespace PHPolygon\Tests\UI;
 use PHPUnit\Framework\TestCase;
 use PHPolygon\Rendering\Renderer2DInterface;
 use PHPolygon\Rendering\Color;
+use PHPolygon\Rendering\TextMetrics;
 use PHPolygon\Rendering\Texture;
 use PHPolygon\Math\Mat3;
 use PHPolygon\Math\Rect;
@@ -57,6 +58,14 @@ class UIContextTest extends TestCase
             public function popScissor(): void {}
             public function loadFont(string $name, string $path): void {}
             public function setFont(string $name): void {}
+            public function setTextAlign(int $align): void {}
+            public function measureText(string $text, float $size): TextMetrics { return new TextMetrics(strlen($text) * $size * 0.6, $size); }
+            public function measureTextBox(string $text, float $breakWidth, float $size): TextMetrics { return new TextMetrics($breakWidth, $size); }
+            public function addFallbackFont(string $baseFont, string $fallbackFont): void {}
+            public function setGlobalAlpha(float $alpha): void {}
+            public function drawArc(float $cx, float $cy, float $r, float $startAngle, float $endAngle, Color $color, int $direction = 0): void {}
+            public function saveState(): void {}
+            public function restoreState(): void {}
         };
 
         $this->ctx = new UIContext($renderer, $this->input);

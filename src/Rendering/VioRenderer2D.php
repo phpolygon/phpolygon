@@ -18,6 +18,10 @@ class VioRenderer2D implements Renderer2DInterface
 
     private string $currentFontName = '';
 
+    private int $textAlign = TextAlign::DEFAULT;
+
+    private float $globalAlpha = 1.0;
+
     /** @var array<string, string> Font name -> file path */
     private array $fontPaths = [];
 
@@ -26,6 +30,13 @@ class VioRenderer2D implements Renderer2DInterface
 
     /** @var array<int, VioTexture> Texture glId/objectId -> VioTexture */
     private array $vioTextures = [];
+
+    /**
+     * State stack for saveState()/restoreState().
+     * Each entry stores: [fontName, textAlign, globalAlpha]
+     * @var list<array{string, int, float}>
+     */
+    private array $stateStack = [];
 
     /**
      * Auto-incrementing z-order counter. Every draw call gets a unique z value,
@@ -251,6 +262,109 @@ class VioRenderer2D implements Renderer2DInterface
     public function setFont(string $name): void
     {
         $this->currentFontName = $name;
+    }
+
+    public function setTextAlign(int $align): void
+    {
+        $this->textAlign = $align;
+    }
+
+    public function measureText(string $text, float $size): TextMetrics
+    {
+        $font = $this->resolveFont($size);
+        if ($font === null) {
+            // Estimate based on size if no font is loaded
+            return new TextMetrics(strlen($text) * $size * 0.6, $size);
+        }
+        $metrics = vio_text_measure($font, $text);
+        return new TextMetrics((float)$metrics['width'], (float)$metrics['height']);
+    }
+
+    public function measureTextBox(string $text, float $breakWidth, float $size): TextMetrics
+    {
+        $font = $this->resolveFont($size);
+        if ($font === null) {
+            return new TextMetrics($breakWidth, $size);
+        }
+
+        // Word-wrap and measure each line, same algorithm as drawTextBox
+        $words = explode(' ', $text);
+        $line = '';
+        $lineHeight = $size * 1.2;
+        $maxWidth = 0.0;
+        $totalHeight = 0.0;
+
+        foreach ($words as $word) {
+            $testLine = $line === '' ? $word : $line . ' ' . $word;
+            $metrics = vio_text_measure($font, $testLine);
+            if ($metrics['width'] > $breakWidth && $line !== '') {
+                $lineMetrics = vio_text_measure($font, $line);
+                $maxWidth = max($maxWidth, (float)$lineMetrics['width']);
+                $totalHeight += $lineHeight;
+                $line = $word;
+            } else {
+                $line = $testLine;
+            }
+        }
+        if ($line !== '') {
+            $lineMetrics = vio_text_measure($font, $line);
+            $maxWidth = max($maxWidth, (float)$lineMetrics['width']);
+            $totalHeight += $lineHeight;
+        }
+
+        return new TextMetrics($maxWidth, $totalHeight);
+    }
+
+    public function addFallbackFont(string $baseFont, string $fallbackFont): void
+    {
+        // VIO does not currently support fallback fonts at runtime.
+        // This is a no-op; CJK support must be handled by loading
+        // a combined font file for the VIO backend.
+    }
+
+    public function setGlobalAlpha(float $alpha): void
+    {
+        $this->globalAlpha = $alpha;
+    }
+
+    public function drawArc(float $cx, float $cy, float $r, float $startAngle, float $endAngle, Color $color, int $direction = 0): void
+    {
+        // Approximate the arc as a filled polygon using line segments
+        $segments = max(16, (int)(abs($endAngle - $startAngle) / (M_PI * 2) * 64));
+        $step = ($endAngle - $startAngle) / $segments;
+        if ($direction === 1) {
+            // CW: swap direction
+            $step = -$step;
+        }
+
+        // Draw as a series of triangles from center
+        $argb = $this->colorToArgb($color);
+        $z = $this->nextZ();
+        for ($i = 0; $i < $segments; $i++) {
+            $a1 = $startAngle + $step * $i;
+            $a2 = $startAngle + $step * ($i + 1);
+            $x1 = $cx + cos($a1) * $r;
+            $y1 = $cy + sin($a1) * $r;
+            $x2 = $cx + cos($a2) * $r;
+            $y2 = $cy + sin($a2) * $r;
+            // Draw as two lines forming a triangle sector (visual approximation)
+            vio_line($this->ctx, $x1, $y1, $x2, $y2, ['color' => $argb, 'width' => 1.0, 'z' => $z]);
+        }
+    }
+
+    public function saveState(): void
+    {
+        $this->stateStack[] = [$this->currentFontName, $this->textAlign, $this->globalAlpha];
+        // Also push transform/scissor state in VIO
+        vio_push_transform($this->ctx, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0);
+    }
+
+    public function restoreState(): void
+    {
+        if (!empty($this->stateStack)) {
+            [$this->currentFontName, $this->textAlign, $this->globalAlpha] = array_pop($this->stateStack);
+        }
+        vio_pop_transform($this->ctx);
     }
 
     public function registerVioTexture(int $textureId, VioTexture $vioTexture): void

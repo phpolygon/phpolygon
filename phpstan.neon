@@ -7,9 +7,49 @@ parameters:
     scanFiles:
         - stubs/vulkan.stub.php
         - stubs/metal.stub.php
-        - stubs/glfw.stub.php
         - stubs/vio.stub.php
+    stubFiles:
+        - stubs/glfw.stub.php
     ignoreErrors:
         -
             identifier: trait.unused
             path: src/Testing/VisualTestCase.php
+        # GL\Math\Vec4 uses C-level custom property handlers (read_property/write_property)
+        # that are invisible to PHP Reflection. PHPStan stubs cannot override extension class
+        # property declarations - this is a known limitation with php-glfw's Vec4.
+        -
+            identifier: property.notFound
+            message: '#Access to an undefined property GL\\Math\\Vec4::\$[xyzw]#'
+        -
+            identifier: binaryOp.invalid
+            message: '#between mixed and mixed#'
+            path: src/Rendering/Renderer2D.php
+        # glGenTextures/glGenFramebuffers by-ref output is int at runtime
+        # but PHPStan infers mixed from the loaded extension's reflection
+        -
+            identifier: assign.propertyType
+            message: '#does not accept mixed#'
+            paths:
+                - src/Rendering/ShadowMapRenderer.php
+                - src/Rendering/CloudShadowRenderer.php
+                - src/Rendering/CubemapRenderer.php
+                - src/Rendering/OpenGLRenderer3D.php
+        -
+            identifier: argument.type
+            message: '#expects int(\|null)?, mixed given#'
+            paths:
+                - src/Rendering/TextureManager.php
+                - src/Rendering/OpenGLRenderer3D.php
+        -
+            identifier: assign.propertyType
+            message: '#array<string, int>\) does not accept array<string, mixed>#'
+            path: src/Rendering/OpenGLRenderer3D.php
+        -
+            identifier: return.type
+            message: '#should return int but returns mixed#'
+            path: src/Rendering/OpenGLRenderer3D.php
+        # glfwGetCocoaWindow expects GLFWwindow (opaque C class) but Window::getHandle() returns object
+        -
+            identifier: argument.type
+            message: '#expects GLFWwindow, object given#'
+            path: src/Rendering/MetalRenderer3D.php
