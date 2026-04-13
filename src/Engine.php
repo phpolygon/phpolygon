@@ -162,12 +162,15 @@ class Engine
     {
         $engine = new self($config);
 
-        $engine->window->initialize($engine->input);
+        if ($engine->window instanceof VioWindow) {
+            $engine->window->initialize($engine->input);
+        } elseif ($engine->window instanceof Window && $engine->input instanceof Input) {
+            $engine->window->initialize($engine->input);
+        }
 
-        if ($engine->useVio) {
-            $vioCtx = $engine->window->getContext();
-            $engine->renderer2D = new VioRenderer2D($vioCtx);
-        } else {
+        if ($engine->useVio && $engine->window instanceof VioWindow) {
+            $engine->renderer2D = new VioRenderer2D($engine->window->getContext());
+        } elseif ($engine->window instanceof Window) {
             $engine->renderer2D = new Renderer2D($engine->window);
         }
 
@@ -200,26 +203,34 @@ class Engine
         $fbW = $this->window->getFramebufferWidth();
         $fbH = $this->window->getFramebufferHeight();
 
-        if ($this->useVio) {
-            $vioCtx = $this->window->getContext();
-            $pixels = vio_read_pixels($vioCtx);
-            // vio_read_pixels returns window-size pixels, not framebuffer-size
+        if ($this->useVio && $this->window instanceof VioWindow) {
+            /** @var string $pixels */
+            $pixels = vio_read_pixels($this->window->getContext());
             $pixelCount = (int)(strlen($pixels) / 4);
             $winW = $this->window->getWidth();
             $winH = $this->window->getHeight();
-            $readW = ($pixelCount === $winW * $winH) ? $winW : $fbW;
-            $readH = ($pixelCount === $winW * $winH) ? $winH : $fbH;
+            $readW = max(1, ($pixelCount === $winW * $winH) ? $winW : $fbW);
+            $readH = max(1, ($pixelCount === $winW * $winH) ? $winH : $fbH);
             $fullImg = imagecreatetruecolor($readW, $readH);
+            $pixelLen = strlen($pixels);
             for ($y = 0; $y < $readH; $y++) {
                 for ($x = 0; $x < $readW; $x++) {
                     $idx = ($y * $readW + $x) * 4;
-                    if ($idx + 2 >= strlen($pixels)) break 2;
-                    imagesetpixel($fullImg, $x, $y, imagecolorallocate($fullImg, ord($pixels[$idx]), ord($pixels[$idx + 1]), ord($pixels[$idx + 2])));
+                    if ($idx + 2 >= $pixelLen) break 2;
+                    $r = ord($pixels[$idx]);
+                    $g = ord($pixels[$idx + 1]);
+                    $b = ord($pixels[$idx + 2]);
+                    $color = imagecolorallocate($fullImg, $r, $g, $b);
+                    if ($color !== false) {
+                        imagesetpixel($fullImg, $x, $y, $color);
+                    }
                 }
             }
             $fbW = $readW;
             $fbH = $readH;
         } else {
+            $fbW = max(1, $fbW);
+            $fbH = max(1, $fbH);
             $size = $fbW * $fbH * 4;
             $buf = new \GL\Buffer\UByteBuffer(array_fill(0, $size, 0));
             glReadPixels(0, 0, $fbW, $fbH, GL_RGBA, GL_UNSIGNED_BYTE, $buf);
@@ -227,13 +238,19 @@ class Engine
             for ($y = 0; $y < $fbH; $y++) {
                 for ($x = 0; $x < $fbW; $x++) {
                     $idx = ((($fbH - 1 - $y) * $fbW) + $x) * 4;
-                    imagesetpixel($fullImg, $x, $y, imagecolorallocate($fullImg, $buf[$idx], $buf[$idx + 1], $buf[$idx + 2]));
+                    $r = (int)($buf[$idx] ?? 0);
+                    $g = (int)($buf[$idx + 1] ?? 0);
+                    $b = (int)($buf[$idx + 2] ?? 0);
+                    $color = imagecolorallocate($fullImg, $r, $g, $b);
+                    if ($color !== false) {
+                        imagesetpixel($fullImg, $x, $y, $color);
+                    }
                 }
             }
         }
 
-        $logicalW = $this->config->width;
-        $logicalH = $this->config->height;
+        $logicalW = max(1, $this->config->width);
+        $logicalH = max(1, $this->config->height);
         if ($fbW !== $logicalW || $fbH !== $logicalH) {
             $img = imagecreatetruecolor($logicalW, $logicalH);
             imagecopyresampled($img, $fullImg, 0, 0, 0, 0, $logicalW, $logicalH, $fbW, $fbH);
