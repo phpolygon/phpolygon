@@ -295,7 +295,7 @@ class UIContext
             $this->anyHovered = true;
         }
 
-        if ($this->input->isMouseButtonReleased(0)) {
+        if (!$this->input->isMouseButtonDown(0)) {
             $this->mouseReleasedSinceLastSlider = true;
         }
 
