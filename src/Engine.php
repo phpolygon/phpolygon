@@ -162,15 +162,11 @@ class Engine
     {
         $engine = new self($config);
 
-        if ($engine->window instanceof VioWindow) {
-            $engine->window->initialize($engine->input);
-        } elseif ($engine->window instanceof Window && $engine->input instanceof Input) {
-            $engine->window->initialize($engine->input);
-        }
-
         if ($engine->useVio && $engine->window instanceof VioWindow) {
+            $engine->window->initialize($engine->input);
             $engine->renderer2D = new VioRenderer2D($engine->window->getContext());
-        } elseif ($engine->window instanceof Window) {
+        } elseif ($engine->input instanceof Input) {
+            $engine->window->initialize($engine->input);
             $engine->renderer2D = new Renderer2D($engine->window);
         }
 
@@ -204,49 +200,9 @@ class Engine
         $fbH = $this->window->getFramebufferHeight();
 
         if ($this->useVio && $this->window instanceof VioWindow) {
-            /** @var string $pixels */
-            $pixels = vio_read_pixels($this->window->getContext());
-            $pixelCount = (int)(strlen($pixels) / 4);
-            $winW = $this->window->getWidth();
-            $winH = $this->window->getHeight();
-            $readW = max(1, ($pixelCount === $winW * $winH) ? $winW : $fbW);
-            $readH = max(1, ($pixelCount === $winW * $winH) ? $winH : $fbH);
-            $fullImg = imagecreatetruecolor($readW, $readH);
-            $pixelLen = strlen($pixels);
-            for ($y = 0; $y < $readH; $y++) {
-                for ($x = 0; $x < $readW; $x++) {
-                    $idx = ($y * $readW + $x) * 4;
-                    if ($idx + 2 >= $pixelLen) break 2;
-                    $r = ord($pixels[$idx]);
-                    $g = ord($pixels[$idx + 1]);
-                    $b = ord($pixels[$idx + 2]);
-                    $color = imagecolorallocate($fullImg, $r, $g, $b);
-                    if ($color !== false) {
-                        imagesetpixel($fullImg, $x, $y, $color);
-                    }
-                }
-            }
-            $fbW = $readW;
-            $fbH = $readH;
+            $fullImg = self::captureVio($this->window, $fbW, $fbH);
         } else {
-            $fbW = max(1, $fbW);
-            $fbH = max(1, $fbH);
-            $size = $fbW * $fbH * 4;
-            $buf = new \GL\Buffer\UByteBuffer(array_fill(0, $size, 0));
-            glReadPixels(0, 0, $fbW, $fbH, GL_RGBA, GL_UNSIGNED_BYTE, $buf);
-            $fullImg = imagecreatetruecolor($fbW, $fbH);
-            for ($y = 0; $y < $fbH; $y++) {
-                for ($x = 0; $x < $fbW; $x++) {
-                    $idx = ((($fbH - 1 - $y) * $fbW) + $x) * 4;
-                    $r = (int)($buf[$idx] ?? 0);
-                    $g = (int)($buf[$idx + 1] ?? 0);
-                    $b = (int)($buf[$idx + 2] ?? 0);
-                    $color = imagecolorallocate($fullImg, $r, $g, $b);
-                    if ($color !== false) {
-                        imagesetpixel($fullImg, $x, $y, $color);
-                    }
-                }
-            }
+            $fullImg = self::captureGL(max(1, $fbW), max(1, $fbH));
         }
 
         $logicalW = max(1, $this->config->width);
@@ -270,6 +226,64 @@ class Engine
     {
         $this->onRender = $callback;
         return $this;
+    }
+
+    /**
+     * Capture framebuffer via VIO's vio_read_pixels.
+     * @param positive-int $fbW Framebuffer width
+     * @param positive-int $fbH Framebuffer height
+     */
+    private static function captureVio(VioWindow $window, int $fbW, int $fbH): \GdImage
+    {
+        $pixels = vio_read_pixels($window->getContext());
+        $pixelCount = (int)(strlen($pixels) / 4);
+        $winW = $window->getWidth();
+        $winH = $window->getHeight();
+        // vio_read_pixels may return window-size rather than framebuffer-size
+        $readW = max(1, ($pixelCount === $winW * $winH) ? $winW : $fbW);
+        $readH = max(1, ($pixelCount === $winW * $winH) ? $winH : $fbH);
+        $img = imagecreatetruecolor($readW, $readH);
+        $len = strlen($pixels);
+        for ($y = 0; $y < $readH; $y++) {
+            for ($x = 0; $x < $readW; $x++) {
+                $idx = ($y * $readW + $x) * 4;
+                if ($idx + 2 >= $len) break 2;
+                $color = imagecolorallocate($img, ord($pixels[$idx]), ord($pixels[$idx + 1]), ord($pixels[$idx + 2]));
+                if ($color !== false) {
+                    imagesetpixel($img, $x, $y, $color);
+                }
+            }
+        }
+        return $img;
+    }
+
+    /**
+     * Capture framebuffer via OpenGL glReadPixels.
+     * @param positive-int $fbW
+     * @param positive-int $fbH
+     */
+    private static function captureGL(int $fbW, int $fbH): \GdImage
+    {
+        $size = $fbW * $fbH * 4;
+        $buf = new \GL\Buffer\UByteBuffer(array_fill(0, $size, 0));
+        glReadPixels(0, 0, $fbW, $fbH, GL_RGBA, GL_UNSIGNED_BYTE, $buf);
+        $img = imagecreatetruecolor($fbW, $fbH);
+        for ($y = 0; $y < $fbH; $y++) {
+            for ($x = 0; $x < $fbW; $x++) {
+                $idx = ((($fbH - 1 - $y) * $fbW) + $x) * 4;
+                /** @var int $r */
+                $r = $buf[$idx];
+                /** @var int $g */
+                $g = $buf[$idx + 1];
+                /** @var int $b */
+                $b = $buf[$idx + 2];
+                $color = imagecolorallocate($img, min(255, $r), min(255, $g), min(255, $b));
+                if ($color !== false) {
+                    imagesetpixel($img, $x, $y, $color);
+                }
+            }
+        }
+        return $img;
     }
 
     public function onInit(callable $callback): self

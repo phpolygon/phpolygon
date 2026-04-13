@@ -259,3 +259,28 @@ function vio_audio_stop(VioSound $sound): void {}
 function vio_audio_volume(VioSound $sound, float $volume): void {}
 
 function vio_audio_playing(VioSound $sound): bool {}
+
+// ----------------------------------------------------------------
+// Framebuffer readback
+// ----------------------------------------------------------------
+
+/**
+ * Read all pixels from the current framebuffer as RGBA bytes.
+ * @return string Raw RGBA pixel data (4 bytes per pixel)
+ */
+function vio_read_pixels(VioContext $ctx): string {}
+
+// ----------------------------------------------------------------
+// Async texture loading
+// ----------------------------------------------------------------
+
+/**
+ * @param array<string, mixed> $options
+ * @return int Thread handle
+ */
+function vio_texture_load_async(VioContext $ctx, string $path, array $options = []): int {}
+
+/**
+ * @return VioTexture|null Returns texture when loaded, null while still loading
+ */
+function vio_texture_load_poll(VioContext $ctx, int $handle): ?VioTexture {}
