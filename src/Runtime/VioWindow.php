@@ -25,7 +25,7 @@ class VioWindow extends Window
 
     public function initialize(InputInterface $input): void
     {
-        $ctx = vio_create('opengl', [
+        $ctx = vio_create('auto', [
             'width' => $this->width,
             'height' => $this->height,
             'title' => $this->title,
