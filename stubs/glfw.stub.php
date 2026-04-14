@@ -16,7 +16,7 @@ namespace GL\Buffer {
      * @implements \ArrayAccess<int, int>
      */
     class UByteBuffer implements \ArrayAccess, \Countable, BufferInterface {
-        /** @param array<int, int> $data */
+        /** @param array<int> $data */
         public function __construct(array $data) {}
         public function offsetExists(mixed $offset): bool {}
         public function offsetGet(mixed $offset): int {}
