@@ -12,6 +12,7 @@ class VioWindow extends Window
     private bool $initialized = false;
     private bool $vioFullscreen = false;
     private bool $vioBorderless = false;
+    private string $backend;
 
     public function __construct(
         int $width,
@@ -19,13 +20,15 @@ class VioWindow extends Window
         string $title,
         bool $vsync = true,
         bool $resizable = true,
+        string $backend = 'auto',
     ) {
         parent::__construct($width, $height, $title, $vsync, $resizable);
+        $this->backend = $backend;
     }
 
     public function initialize(InputInterface $input): void
     {
-        $ctx = vio_create('auto', [
+        $ctx = vio_create($this->backend, [
             'width' => $this->width,
             'height' => $this->height,
             'title' => $this->title,

@@ -29,5 +29,6 @@ class EngineConfig
         public readonly string $meshCachePath = '',
         public readonly bool $skipSplash = false,
         public readonly float $splashDuration = 2.5,
+        public readonly string $vioBackend = 'auto',
     ) {}
 }
