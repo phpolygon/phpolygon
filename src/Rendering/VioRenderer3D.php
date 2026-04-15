@@ -1005,13 +1005,19 @@ void main() {
     vec4 worldPos = model * vec4(pos, 1.0);
     v_worldPos = worldPos.xyz;
 
-    bool isZero = (u_normal_matrix[0] == vec3(0.0) &&
-                   u_normal_matrix[1] == vec3(0.0) &&
-                   u_normal_matrix[2] == vec3(0.0));
-    if (isZero) {
+    if (u_use_instancing == 1) {
+        // Per-instance model: always compute normal matrix from instance transform
         v_normal = mat3(transpose(inverse(model))) * a_normal;
     } else {
-        v_normal = u_normal_matrix * a_normal;
+        // Per-object: use precomputed normal matrix, fall back to model if zero
+        bool isZero = (u_normal_matrix[0] == vec3(0.0) &&
+                       u_normal_matrix[1] == vec3(0.0) &&
+                       u_normal_matrix[2] == vec3(0.0));
+        if (isZero) {
+            v_normal = mat3(transpose(inverse(model))) * a_normal;
+        } else {
+            v_normal = u_normal_matrix * a_normal;
+        }
     }
 
     v_uv = a_uv;
@@ -1356,7 +1362,8 @@ vec3 computeCloud(vec3 N, vec3 V, vec3 L, vec3 baseAlbedo, out float alphaOut) {
 
 void main() {
     vec3 N = normalize(v_normal);
-    if (!gl_FrontFacing) N = -N;
+    // View-facing normal for specular/fresnel (flipped for back faces)
+    vec3 Nv = gl_FrontFacing ? N : -N;
 
     vec3 V = normalize(u_camera_pos - v_worldPos);
     vec3 L = normalize(-u_dir_light_direction);
@@ -1432,7 +1439,7 @@ void main() {
 
         color += albedo * u_dir_lights[dl].color * u_dir_lights[dl].intensity * diffNdotL * dShadow * (1.0 - u_metallic);
         if (dNdotL > 0.0) {
-            float spec = pow(max(dot(N, dH), 0.0), shininess) * (shininess + 2.0) / 8.0;
+            float spec = pow(max(dot(Nv, dH), 0.0), shininess) * (shininess + 2.0) / 8.0;
             color += fresnelSchlick(max(dot(dH, V), 0.0), F0) * u_dir_lights[dl].color * u_dir_lights[dl].intensity * spec * dNdotL * dShadow;
         }
     }
@@ -1449,7 +1456,7 @@ void main() {
             vec3 lc = u_point_lights[i].color * u_point_lights[i].intensity * atten;
             color += albedo * lc * NdotPL * (1.0 - u_metallic);
             vec3 Hp = normalize(V + Lp);
-            color += fresnelSchlick(max(dot(Hp, V), 0.0), F0) * lc * pow(max(dot(N, Hp), 0.0), shininess) * (shininess + 2.0) / 8.0 * NdotPL;
+            color += fresnelSchlick(max(dot(Hp, V), 0.0), F0) * lc * pow(max(dot(Nv, Hp), 0.0), shininess) * (shininess + 2.0) / 8.0 * NdotPL;
         }
     }
 
