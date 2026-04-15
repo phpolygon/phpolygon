@@ -453,7 +453,20 @@ class VioRenderer3D implements Renderer3DInterface
             $shadowTex = vio_render_target_texture($this->shadowTarget);
             vio_bind_texture($this->ctx, $shadowTex, 6);
             vio_set_uniform($this->ctx, 'u_shadow_map', 6);
-            vio_set_uniform($this->ctx, 'u_light_space_matrix', $this->currentLightSpaceMatrix->toArray());
+
+            $lsm = $this->currentLightSpaceMatrix->toArray();
+
+            // D3D11/D3D12: render target Y is flipped vs OpenGL.
+            // Negate the Y row of the light-space matrix so shadow map UVs match.
+            $backend = vio_backend_name($this->ctx);
+            if ($backend === 'd3d11' || $backend === 'd3d12') {
+                $lsm[1]  = -$lsm[1];   // col0.y
+                $lsm[5]  = -$lsm[5];   // col1.y
+                $lsm[9]  = -$lsm[9];   // col2.y
+                $lsm[13] = -$lsm[13];  // col3.y
+            }
+
+            vio_set_uniform($this->ctx, 'u_light_space_matrix', $lsm);
         }
     }
 
@@ -467,8 +480,10 @@ class VioRenderer3D implements Renderer3DInterface
             $pipeline = vio_pipeline($this->ctx, [
                 'shader' => $shader,
                 'depth_test' => true,
-                'cull_mode' => VIO_CULL_BACK,
+                'cull_mode' => VIO_CULL_FRONT, // front-face culling eliminates Peter Pan gap
                 'blend' => VIO_BLEND_NONE,
+                'depth_bias' => 1.0,
+                'slope_scaled_depth_bias' => 1.0,
             ]);
 
             if ($pipeline === false) {
@@ -945,6 +960,10 @@ class VioRenderer3D implements Renderer3DInterface
 layout(location = 0) in vec3 a_position;
 layout(location = 1) in vec3 a_normal;
 layout(location = 2) in vec2 a_uv;
+layout(location = 3) in vec4 a_instance_col0;
+layout(location = 4) in vec4 a_instance_col1;
+layout(location = 5) in vec4 a_instance_col2;
+layout(location = 6) in vec4 a_instance_col3;
 
 uniform mat4 u_model;
 uniform mat4 u_view;
@@ -967,6 +986,9 @@ out vec4 v_lightSpacePos;
 
 void main() {
     mat4 model = u_model;
+    if (u_use_instancing == 1) {
+        model = mat4(a_instance_col0, a_instance_col1, a_instance_col2, a_instance_col3);
+    }
     vec3 pos = a_position;
 
     if (u_vertex_anim == 1) {
@@ -1499,6 +1521,10 @@ GLSL;
 layout(location = 0) in vec3 a_position;
 layout(location = 1) in vec3 a_normal;
 layout(location = 2) in vec2 a_uv;
+layout(location = 3) in vec4 a_instance_col0;
+layout(location = 4) in vec4 a_instance_col1;
+layout(location = 5) in vec4 a_instance_col2;
+layout(location = 6) in vec4 a_instance_col3;
 
 uniform mat4 u_model;
 uniform mat4 u_view;
@@ -1506,7 +1532,11 @@ uniform mat4 u_projection;
 uniform int  u_use_instancing;
 
 void main() {
-    gl_Position = u_projection * u_view * u_model * vec4(a_position, 1.0);
+    mat4 model = u_model;
+    if (u_use_instancing == 1) {
+        model = mat4(a_instance_col0, a_instance_col1, a_instance_col2, a_instance_col3);
+    }
+    gl_Position = u_projection * u_view * model * vec4(a_position, 1.0);
 }
 GLSL;
 
@@ -1526,6 +1556,10 @@ GLSL;
 layout(location = 0) in vec3 a_position;
 layout(location = 1) in vec3 a_normal;
 layout(location = 2) in vec2 a_uv;
+layout(location = 3) in vec4 a_instance_col0;
+layout(location = 4) in vec4 a_instance_col1;
+layout(location = 5) in vec4 a_instance_col2;
+layout(location = 6) in vec4 a_instance_col3;
 
 uniform mat4 u_model;
 uniform mat4 u_view;
@@ -1533,7 +1567,11 @@ uniform mat4 u_projection;
 uniform int  u_use_instancing;
 
 void main() {
-    gl_Position = u_projection * u_view * u_model * vec4(a_position, 1.0);
+    mat4 model = u_model;
+    if (u_use_instancing == 1) {
+        model = mat4(a_instance_col0, a_instance_col1, a_instance_col2, a_instance_col3);
+    }
+    gl_Position = u_projection * u_view * model * vec4(a_position, 1.0);
 }
 GLSL;
 
