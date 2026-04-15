@@ -726,10 +726,11 @@ class VioRenderer3D implements Renderer3DInterface
     }
 
     /**
-     * Resolve instance matrix data, using the static cache when possible.
+     * Resolve instance matrix data as a packed binary string (fast path).
+     * Static instances are cached as packed strings for zero-copy reuse.
      *
      * @param Mat4[] $matrices
-     * @return array{float[], int}
+     * @return array{string, int}
      */
     private function resolveInstanceData(string $meshId, Material $material, array $matrices, bool $isStatic): array
     {
@@ -739,20 +740,22 @@ class VioRenderer3D implements Renderer3DInterface
             return [$this->staticMatrixCache[$cacheKey], $this->staticInstanceCountCache[$cacheKey]];
         }
 
-        $flat = [];
+        // Pack all matrices into a binary float string (zero-copy to C)
+        $floats = [];
         foreach ($matrices as $matrix) {
             foreach ($matrix->toArray() as $v) {
-                $flat[] = $v;
+                $floats[] = $v;
             }
         }
+        $packed = pack('f*', ...$floats);
         $count = count($matrices);
 
         if ($isStatic) {
-            $this->staticMatrixCache[$cacheKey] = $flat;
+            $this->staticMatrixCache[$cacheKey] = $packed;
             $this->staticInstanceCountCache[$cacheKey] = $count;
         }
 
-        return [$flat, $count];
+        return [$packed, $count];
     }
 
     private function applyMaterial(Material $material, string $materialId = ''): void
