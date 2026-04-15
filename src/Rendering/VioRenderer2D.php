@@ -28,6 +28,11 @@ class VioRenderer2D implements Renderer2DInterface
     /** @var array<string, VioFont> Cache key "name:size" -> VioFont */
     private array $fontCache = [];
 
+    public function clearFontCache(): void
+    {
+        $this->fontCache = [];
+    }
+
     /** @var array<int, VioTexture> Texture glId/objectId -> VioTexture */
     private array $vioTextures = [];
 
