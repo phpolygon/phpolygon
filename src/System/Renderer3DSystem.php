@@ -15,6 +15,7 @@ use PHPolygon\ECS\World;
 use PHPolygon\Rendering\Command\AddPointLight;
 use PHPolygon\Rendering\Command\DrawMesh;
 use PHPolygon\Rendering\Command\SetDirectionalLight;
+use PHPolygon\Rendering\Command\SetSnowCover;
 use PHPolygon\Rendering\Command\SetWaveAnimation;
 use PHPolygon\Rendering\RenderCommandList;
 use PHPolygon\Rendering\Renderer3DInterface;
@@ -22,6 +23,7 @@ use PHPolygon\Rendering\Renderer3DInterface;
 class Renderer3DSystem extends AbstractSystem
 {
     private float $wavePhase = 0.0;
+    private float $snowCover = 0.0;
 
     public function __construct(
         private readonly Renderer3DInterface $renderer,
@@ -31,6 +33,18 @@ class Renderer3DSystem extends AbstractSystem
     public function update(World $world, float $dt): void
     {
         $this->wavePhase += $dt;
+
+        // Gradual snow accumulation / melting
+        foreach ($world->query(Weather::class) as $entity) {
+            $weather = $entity->get(Weather::class);
+            if ($weather->snowIntensity > 0.1 && $weather->temperature < 2.0) {
+                $this->snowCover = min(1.0, $this->snowCover + $weather->snowIntensity * 0.008 * $dt);
+            } else {
+                $meltRate = $weather->temperature > 5.0 ? 0.006 : 0.003;
+                $this->snowCover = max(0.0, $this->snowCover - $meltRate * $dt);
+            }
+            break;
+        }
     }
 
     public function render(World $world): void
@@ -67,8 +81,11 @@ class Renderer3DSystem extends AbstractSystem
             $stormIntensity = $entity->get(Weather::class)->stormIntensity;
             break;
         }
-        $waveAmp = 0.15 + $windIntensity * 0.4 + $stormIntensity * 0.6;
-        $waveFreq = 0.3 + $windIntensity * 0.2 + $stormIntensity * 0.3;
+        $waveAmp = 0.1 + $windIntensity * 0.25 + $stormIntensity * 0.35;
+        $waveFreq = 0.4 + $windIntensity * 0.15 + $stormIntensity * 0.15;
+        // Snow cover
+        $this->commandList->add(new SetSnowCover($this->snowCover));
+
         $this->commandList->add(new SetWaveAnimation(
             enabled: true,
             amplitude: $waveAmp,

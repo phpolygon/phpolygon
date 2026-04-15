@@ -9,6 +9,7 @@ use PHPolygon\Component\Transform3D;
 use PHPolygon\Component\Weather;
 use PHPolygon\ECS\AbstractSystem;
 use PHPolygon\ECS\World;
+use PHPolygon\Math\Quaternion;
 use PHPolygon\Math\Vec3;
 use PHPolygon\Rendering\Color;
 use PHPolygon\Rendering\Material;
@@ -22,7 +23,6 @@ use PHPolygon\Rendering\MaterialRegistry;
 class PrecipitationSystem extends AbstractSystem
 {
     private float $time = 0.0;
-
     public function update(World $world, float $dt): void
     {
         $this->time += $dt;
@@ -107,15 +107,23 @@ class PrecipitationSystem extends AbstractSystem
                 $transform->position = new Vec3($x, $playerPos->y + $y, $z);
                 $transform->scale = new Vec3(0.01, 0.15 + $weather->rainIntensity * 0.1, 0.01);
             } elseif ($weather->snowIntensity > 0.05) {
-                // Snow: slow falling, tumbling sideways
-                $speed = 1.5 + sin($seed * 2.3) * 0.5;
+                // Snow: slow falling, tumbling flat flakes
+                $speed = 1.2 + sin($seed * 2.3) * 0.4;
                 $y = 10.0 - fmod(($this->time * $speed + sin($seed) * 8.0), 14.0);
-                $wobbleX = sin($this->time * 1.5 + $seed) * 0.5;
-                $wobbleZ = cos($this->time * 1.2 + $seed * 0.7) * 0.5;
+                $wobbleX = sin($this->time * 1.5 + $seed) * 0.8;
+                $wobbleZ = cos($this->time * 1.2 + $seed * 0.7) * 0.8;
                 $x = $playerPos->x + $rx + $wobbleX;
                 $z = $playerPos->z + $rz + $wobbleZ;
                 $transform->position = new Vec3($x, $playerPos->y + $y, $z);
-                $transform->scale = new Vec3(0.04, 0.04, 0.04);
+                // Flat flake: wide XZ, thin Y — varied sizes
+                $flakeSize = 0.03 + sin($seed * 4.7) * 0.015;
+                $transform->scale = new Vec3($flakeSize, 0.003, $flakeSize);
+                // Tumble rotation
+                $transform->rotation = Quaternion::fromEuler(
+                    sin($this->time * 2.0 + $seed) * 0.8,
+                    $this->time * 1.5 + $seed,
+                    cos($this->time * 1.7 + $seed * 0.6) * 0.5,
+                );
             } elseif ($weather->sandstormIntensity > 0.05) {
                 // Sand: horizontal near ground
                 $y = sin($seed * 0.5) * 1.0 + 0.3;

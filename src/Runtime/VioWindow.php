@@ -203,12 +203,12 @@ class VioWindow extends Window
 
     public function setCursorDisabled(): void
     {
-        // No cursor API in vio yet — no-op
+        vio_set_cursor_mode($this->ctx, VIO_CURSOR_DISABLED);
     }
 
     public function setCursorNormal(): void
     {
-        // No cursor API in vio yet — no-op
+        vio_set_cursor_mode($this->ctx, VIO_CURSOR_NORMAL);
     }
 
     public function destroy(): void

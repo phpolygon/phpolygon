@@ -81,12 +81,31 @@ class DayNightCycle extends AbstractComponent
     }
 
     /**
-     * Sun elevation in degrees (-80 to +80).
+     * Sun elevation in degrees (~-80 to +80).
      * Positive = above horizon, negative = below.
+     *
+     * Axial tilt affects BOTH peak elevation AND day length:
+     * - Summer (tilt > 0): sun rises earlier, sets later, peaks higher
+     * - Winter (tilt < 0): sun rises later, sets earlier, peaks lower
      */
     public function getSunElevation(): float
     {
-        return sin($this->timeOfDay * 2.0 * M_PI - M_PI * 0.5) * 80.0 + $this->axialTilt;
+        // Day length shift: axial tilt compresses/expands the night portion.
+        // At tilt=+10°, sunrise shifts ~0.03 earlier, sunset ~0.03 later (≈+12% day).
+        // At tilt=-10°, opposite (≈-12% day, longer nights).
+        $tiltNorm = $this->axialTilt / 23.5; // -1..+1
+        $dayShift = $tiltNorm * 0.04; // max ±4% of day cycle
+
+        // Shift the time to stretch/compress daytime portion
+        $t = $this->timeOfDay;
+        // Remap: noon (t=0.5) stays fixed, sunrise/sunset shift symmetrically
+        $centeredT = $t - 0.5; // -0.5..+0.5
+        // Compress night (negative elevation) and expand day (positive) or vice versa
+        $adjustedT = 0.5 + $centeredT * (1.0 - $dayShift * 2.0 * ($centeredT > 0 ? -1 : 1));
+        // Keep in 0..1
+        $adjustedT = $adjustedT - floor($adjustedT);
+
+        return sin($adjustedT * 2.0 * M_PI - M_PI * 0.5) * 80.0 + $this->axialTilt;
     }
 
     /**

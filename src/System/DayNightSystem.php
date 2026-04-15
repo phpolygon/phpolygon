@@ -29,62 +29,91 @@ use PHPolygon\Rendering\RenderCommandList;
  */
 class DayNightSystem extends AbstractSystem
 {
+    // ── Sun light color/intensity ramp ──────────────────────────────
+    // Refined with proper astronomical/nautical/civil twilight phases.
+    // Sunrise sequence: astronomical (0.17) → nautical (0.19) → civil (0.22) → golden (0.25) → day (0.32)
+    // Sunset mirrors: golden (0.72) → civil (0.77) → nautical (0.82) → astronomical (0.85) → night (0.88)
     /** @var array<int, array{time: float, r: float, g: float, b: float, intensity: float}> */
     private const SUN_KEYS = [
         ['time' => 0.0,  'r' => 0.0,  'g' => 0.0,  'b' => 0.0,  'intensity' => 0.0],   // midnight
-        ['time' => 0.15, 'r' => 0.0,  'g' => 0.0,  'b' => 0.0,  'intensity' => 0.0],   // late night
-        ['time' => 0.20, 'r' => 0.6,  'g' => 0.25, 'b' => 0.12, 'intensity' => 0.1],   // first light
-        ['time' => 0.25, 'r' => 1.0,  'g' => 0.53, 'b' => 0.27, 'intensity' => 0.4],   // dawn
-        ['time' => 0.30, 'r' => 1.0,  'g' => 0.67, 'b' => 0.33, 'intensity' => 0.8],   // sunrise
-        ['time' => 0.40, 'r' => 1.0,  'g' => 0.98, 'b' => 0.94, 'intensity' => 1.3],   // morning
-        ['time' => 0.50, 'r' => 1.0,  'g' => 0.98, 'b' => 0.94, 'intensity' => 1.5],   // noon
-        ['time' => 0.60, 'r' => 1.0,  'g' => 0.96, 'b' => 0.88, 'intensity' => 1.3],   // afternoon
-        ['time' => 0.70, 'r' => 1.0,  'g' => 0.65, 'b' => 0.40, 'intensity' => 1.0],   // golden hour
-        ['time' => 0.75, 'r' => 1.0,  'g' => 0.40, 'b' => 0.20, 'intensity' => 0.7],   // sunset
-        ['time' => 0.80, 'r' => 0.8,  'g' => 0.27, 'b' => 0.13, 'intensity' => 0.3],   // dusk
-        ['time' => 0.85, 'r' => 0.4,  'g' => 0.12, 'b' => 0.06, 'intensity' => 0.1],   // twilight
-        ['time' => 0.90, 'r' => 0.0,  'g' => 0.0,  'b' => 0.0,  'intensity' => 0.0],   // night
+        ['time' => 0.15, 'r' => 0.0,  'g' => 0.0,  'b' => 0.0,  'intensity' => 0.0],   // deep night
+        ['time' => 0.17, 'r' => 0.15, 'g' => 0.05, 'b' => 0.03, 'intensity' => 0.02],  // astronomical twilight
+        ['time' => 0.19, 'r' => 0.35, 'g' => 0.12, 'b' => 0.08, 'intensity' => 0.06],  // nautical twilight
+        ['time' => 0.22, 'r' => 0.65, 'g' => 0.28, 'b' => 0.12, 'intensity' => 0.15],  // civil twilight
+        ['time' => 0.25, 'r' => 1.0,  'g' => 0.50, 'b' => 0.22, 'intensity' => 0.45],  // sunrise — golden
+        ['time' => 0.28, 'r' => 1.0,  'g' => 0.65, 'b' => 0.35, 'intensity' => 0.70],  // post-sunrise
+        ['time' => 0.32, 'r' => 1.0,  'g' => 0.85, 'b' => 0.70, 'intensity' => 1.0],   // early morning
+        ['time' => 0.40, 'r' => 1.0,  'g' => 0.97, 'b' => 0.92, 'intensity' => 1.3],   // morning
+        ['time' => 0.50, 'r' => 1.0,  'g' => 0.98, 'b' => 0.94, 'intensity' => 1.5],   // noon — white
+        ['time' => 0.60, 'r' => 1.0,  'g' => 0.97, 'b' => 0.90, 'intensity' => 1.35],  // afternoon
+        ['time' => 0.68, 'r' => 1.0,  'g' => 0.85, 'b' => 0.65, 'intensity' => 1.1],   // late afternoon
+        ['time' => 0.72, 'r' => 1.0,  'g' => 0.60, 'b' => 0.35, 'intensity' => 0.90],  // golden hour
+        ['time' => 0.75, 'r' => 1.0,  'g' => 0.42, 'b' => 0.18, 'intensity' => 0.65],  // sunset — deep gold
+        ['time' => 0.77, 'r' => 0.90, 'g' => 0.30, 'b' => 0.12, 'intensity' => 0.35],  // civil dusk
+        ['time' => 0.82, 'r' => 0.50, 'g' => 0.15, 'b' => 0.08, 'intensity' => 0.10],  // nautical dusk
+        ['time' => 0.85, 'r' => 0.20, 'g' => 0.06, 'b' => 0.04, 'intensity' => 0.03],  // astronomical dusk
+        ['time' => 0.88, 'r' => 0.0,  'g' => 0.0,  'b' => 0.0,  'intensity' => 0.0],   // night
         ['time' => 1.0,  'r' => 0.0,  'g' => 0.0,  'b' => 0.0,  'intensity' => 0.0],   // wrap
     ];
 
+    // ── Ambient light ramp ───────────────────────────────────────────
     /** @var array<int, array{time: float, r: float, g: float, b: float, intensity: float}> */
     private const AMBIENT_KEYS = [
-        ['time' => 0.0,  'r' => 0.04, 'g' => 0.09, 'b' => 0.16, 'intensity' => 0.05],  // night
-        ['time' => 0.2,  'r' => 0.29, 'g' => 0.19, 'b' => 0.31, 'intensity' => 0.10],  // dawn
-        ['time' => 0.25, 'r' => 0.75, 'g' => 0.56, 'b' => 0.44, 'intensity' => 0.15],  // sunrise
-        ['time' => 0.35, 'r' => 0.72, 'g' => 0.82, 'b' => 0.91, 'intensity' => 0.25],  // morning
-        ['time' => 0.5,  'r' => 0.78, 'g' => 0.86, 'b' => 0.94, 'intensity' => 0.28],  // noon
-        ['time' => 0.65, 'r' => 0.78, 'g' => 0.86, 'b' => 0.94, 'intensity' => 0.25],  // afternoon
-        ['time' => 0.75, 'r' => 0.63, 'g' => 0.38, 'b' => 0.25, 'intensity' => 0.15],  // sunset
-        ['time' => 0.8,  'r' => 0.16, 'g' => 0.09, 'b' => 0.22, 'intensity' => 0.10],  // dusk
-        ['time' => 0.9,  'r' => 0.04, 'g' => 0.09, 'b' => 0.16, 'intensity' => 0.05],  // night
-        ['time' => 1.0,  'r' => 0.04, 'g' => 0.09, 'b' => 0.16, 'intensity' => 0.05],  // wrap
+        ['time' => 0.0,  'r' => 0.03, 'g' => 0.06, 'b' => 0.14, 'intensity' => 0.04],  // midnight — deep blue
+        ['time' => 0.15, 'r' => 0.03, 'g' => 0.06, 'b' => 0.14, 'intensity' => 0.04],  // late night
+        ['time' => 0.17, 'r' => 0.06, 'g' => 0.07, 'b' => 0.18, 'intensity' => 0.05],  // astro. twilight
+        ['time' => 0.19, 'r' => 0.15, 'g' => 0.12, 'b' => 0.25, 'intensity' => 0.07],  // nautical twi.
+        ['time' => 0.22, 'r' => 0.35, 'g' => 0.22, 'b' => 0.32, 'intensity' => 0.10],  // civil twilight
+        ['time' => 0.25, 'r' => 0.70, 'g' => 0.50, 'b' => 0.38, 'intensity' => 0.14],  // sunrise
+        ['time' => 0.32, 'r' => 0.72, 'g' => 0.78, 'b' => 0.88, 'intensity' => 0.22],  // morning
+        ['time' => 0.50, 'r' => 0.78, 'g' => 0.86, 'b' => 0.94, 'intensity' => 0.28],  // noon
+        ['time' => 0.68, 'r' => 0.78, 'g' => 0.86, 'b' => 0.94, 'intensity' => 0.25],  // afternoon
+        ['time' => 0.75, 'r' => 0.60, 'g' => 0.35, 'b' => 0.22, 'intensity' => 0.14],  // sunset
+        ['time' => 0.77, 'r' => 0.30, 'g' => 0.15, 'b' => 0.25, 'intensity' => 0.09],  // civil dusk
+        ['time' => 0.82, 'r' => 0.12, 'g' => 0.08, 'b' => 0.20, 'intensity' => 0.06],  // nautical dusk
+        ['time' => 0.85, 'r' => 0.05, 'g' => 0.06, 'b' => 0.16, 'intensity' => 0.04],  // astro. dusk
+        ['time' => 0.88, 'r' => 0.03, 'g' => 0.06, 'b' => 0.14, 'intensity' => 0.04],  // night
+        ['time' => 1.0,  'r' => 0.03, 'g' => 0.06, 'b' => 0.14, 'intensity' => 0.04],  // wrap
     ];
 
-    // Sky zenith emission colors (matched to original #1E5FAA at noon)
+    // ── Sky zenith emission ──────────────────────────────────────────
     private const SKY_ZENITH_KEYS = [
-        ['time' => 0.0,  'r' => 0.01, 'g' => 0.02, 'b' => 0.06],  // very dark navy
-        ['time' => 0.2,  'r' => 0.25, 'g' => 0.15, 'b' => 0.40],  // purple dawn
-        ['time' => 0.3,  'r' => 0.12, 'g' => 0.37, 'b' => 0.67],  // #1E5FAA blue
-        ['time' => 0.5,  'r' => 0.12, 'g' => 0.37, 'b' => 0.67],  // noon
-        ['time' => 0.7,  'r' => 0.12, 'g' => 0.37, 'b' => 0.67],  // afternoon
-        ['time' => 0.8,  'r' => 0.20, 'g' => 0.10, 'b' => 0.30],  // dusk purple
-        ['time' => 0.9,  'r' => 0.01, 'g' => 0.02, 'b' => 0.06],  // night
-        ['time' => 1.0,  'r' => 0.01, 'g' => 0.02, 'b' => 0.06],
+        ['time' => 0.0,  'r' => 0.01, 'g' => 0.01, 'b' => 0.04],  // near-black
+        ['time' => 0.15, 'r' => 0.01, 'g' => 0.01, 'b' => 0.04],  // deep night
+        ['time' => 0.17, 'r' => 0.03, 'g' => 0.03, 'b' => 0.10],  // astro. — first hint of blue
+        ['time' => 0.19, 'r' => 0.08, 'g' => 0.08, 'b' => 0.22],  // nautical — deep blue
+        ['time' => 0.22, 'r' => 0.18, 'g' => 0.15, 'b' => 0.40],  // civil — purple-blue
+        ['time' => 0.28, 'r' => 0.12, 'g' => 0.35, 'b' => 0.65],  // transition to day blue
+        ['time' => 0.35, 'r' => 0.12, 'g' => 0.37, 'b' => 0.67],  // #1E5FAA day blue
+        ['time' => 0.50, 'r' => 0.12, 'g' => 0.37, 'b' => 0.67],  // noon
+        ['time' => 0.68, 'r' => 0.12, 'g' => 0.37, 'b' => 0.67],  // afternoon
+        ['time' => 0.75, 'r' => 0.15, 'g' => 0.20, 'b' => 0.50],  // sunset — fading blue
+        ['time' => 0.77, 'r' => 0.18, 'g' => 0.12, 'b' => 0.35],  // civil dusk — purple
+        ['time' => 0.82, 'r' => 0.08, 'g' => 0.06, 'b' => 0.20],  // nautical dusk — deep
+        ['time' => 0.85, 'r' => 0.03, 'g' => 0.03, 'b' => 0.10],  // astro. dusk
+        ['time' => 0.88, 'r' => 0.01, 'g' => 0.01, 'b' => 0.04],  // night
+        ['time' => 1.0,  'r' => 0.01, 'g' => 0.01, 'b' => 0.04],
     ];
 
-    // Sky horizon emission colors (matched to original #87AECC at noon)
+    // ── Sky horizon emission ─────────────────────────────────────────
     private const SKY_HORIZON_KEYS = [
-        ['time' => 0.0,  'r' => 0.02, 'g' => 0.03, 'b' => 0.08],
-        ['time' => 0.2,  'r' => 0.80, 'g' => 0.45, 'b' => 0.30],  // orange dawn
-        ['time' => 0.25, 'r' => 0.90, 'g' => 0.70, 'b' => 0.50],  // warm sunrise
-        ['time' => 0.35, 'r' => 0.53, 'g' => 0.68, 'b' => 0.80],  // #87AECC haze
-        ['time' => 0.5,  'r' => 0.53, 'g' => 0.68, 'b' => 0.80],  // noon
-        ['time' => 0.65, 'r' => 0.70, 'g' => 0.60, 'b' => 0.50],  // warm afternoon
-        ['time' => 0.75, 'r' => 0.95, 'g' => 0.40, 'b' => 0.15],  // red sunset
-        ['time' => 0.8,  'r' => 0.50, 'g' => 0.20, 'b' => 0.25],  // dusk
-        ['time' => 0.9,  'r' => 0.02, 'g' => 0.03, 'b' => 0.08],
-        ['time' => 1.0,  'r' => 0.02, 'g' => 0.03, 'b' => 0.08],
+        ['time' => 0.0,  'r' => 0.02, 'g' => 0.02, 'b' => 0.06],
+        ['time' => 0.15, 'r' => 0.02, 'g' => 0.02, 'b' => 0.06],  // deep night
+        ['time' => 0.17, 'r' => 0.05, 'g' => 0.04, 'b' => 0.10],  // astro. — barely visible
+        ['time' => 0.19, 'r' => 0.20, 'g' => 0.12, 'b' => 0.18],  // nautical — dark orange hint
+        ['time' => 0.22, 'r' => 0.55, 'g' => 0.28, 'b' => 0.20],  // civil — warm orange band
+        ['time' => 0.25, 'r' => 0.90, 'g' => 0.55, 'b' => 0.30],  // sunrise — vivid orange
+        ['time' => 0.28, 'r' => 0.85, 'g' => 0.65, 'b' => 0.45],  // post-sunrise — fading warm
+        ['time' => 0.35, 'r' => 0.53, 'g' => 0.68, 'b' => 0.80],  // #87AECC day haze
+        ['time' => 0.50, 'r' => 0.53, 'g' => 0.68, 'b' => 0.80],  // noon
+        ['time' => 0.68, 'r' => 0.60, 'g' => 0.60, 'b' => 0.55],  // late afternoon — warming
+        ['time' => 0.72, 'r' => 0.85, 'g' => 0.50, 'b' => 0.25],  // golden hour
+        ['time' => 0.75, 'r' => 0.95, 'g' => 0.38, 'b' => 0.12],  // sunset — intense red-orange
+        ['time' => 0.77, 'r' => 0.70, 'g' => 0.25, 'b' => 0.15],  // civil dusk — deep red
+        ['time' => 0.82, 'r' => 0.30, 'g' => 0.12, 'b' => 0.18],  // nautical dusk — purple-red
+        ['time' => 0.85, 'r' => 0.10, 'g' => 0.06, 'b' => 0.12],  // astro. dusk — fading
+        ['time' => 0.88, 'r' => 0.02, 'g' => 0.02, 'b' => 0.06],  // night
+        ['time' => 1.0,  'r' => 0.02, 'g' => 0.02, 'b' => 0.06],
     ];
 
     public function __construct(
@@ -135,6 +164,20 @@ class DayNightSystem extends AbstractSystem
 
         // Update DirectionalLight components
         $sunColor = self::interpolateKeys(self::SUN_KEYS, $t);
+
+        // Atmospheric path length correction (Mie/Rayleigh approximation):
+        // Low sun = long atmospheric path = blue scattered away, red/orange remains.
+        // High sun = short path = full spectrum = white.
+        $elevation = max(0.0, $cycle->getSunElevation());
+        if ($elevation > 0.0 && $elevation < 25.0 && $sunColor['intensity'] > 0.0) {
+            // Normalized path factor: 1.0 at horizon, 0.0 at 25°+
+            $pathFactor = 1.0 - min(1.0, $elevation / 25.0);
+            $pathFactor *= $pathFactor; // quadratic falloff — most reddening near horizon
+            // Shift toward warm: boost R, reduce B, slightly reduce G
+            $sunColor['r'] = min(1.0, $sunColor['r'] + $pathFactor * 0.12);
+            $sunColor['g'] = $sunColor['g'] * (1.0 - $pathFactor * 0.15);
+            $sunColor['b'] = $sunColor['b'] * (1.0 - $pathFactor * 0.35);
+        }
 
         // At night, the moon acts as a weak directional light (reflected sunlight).
         $sunIntensityFinal = $sunColor['intensity'] * (1.0 - $cycle->cloudDarkening);
@@ -255,10 +298,31 @@ class DayNightSystem extends AbstractSystem
             intensity: $ambientIntensity,
         ));
 
-        // --- Fog (matches horizon color) ---
+        // --- Fog (matches horizon color, with morning mist) ---
         $horizon = self::interpolateKeysRGB(self::SKY_HORIZON_KEYS, $t);
-        $fogNear = 60.0 + (1.0 - $cycle->getSunHeight()) * 20.0; // Fog creeps closer at night
-        $fogFar = 280.0 - (1.0 - $cycle->getSunHeight()) * 80.0;  // Fog closer at night
+        $sunH = $cycle->getSunHeight();
+
+        // Base fog: closer at night, further at midday
+        $fogNear = 60.0 + (1.0 - $sunH) * 20.0;
+        $fogFar = 280.0 - (1.0 - $sunH) * 80.0;
+
+        // Morning mist: dense fog around sunrise (t=0.20-0.35) that burns off
+        // Peaks at civil twilight (t≈0.22), dissolves by mid-morning (t≈0.35)
+        if ($t > 0.18 && $t < 0.38) {
+            $mistStrength = 0.0;
+            if ($t < 0.22) {
+                $mistStrength = ($t - 0.18) / 0.04; // ramp in
+            } elseif ($t < 0.28) {
+                $mistStrength = 1.0; // peak
+            } else {
+                $mistStrength = 1.0 - ($t - 0.28) / 0.10; // burn off
+            }
+            // Humidity amplifies morning mist
+            $humidityFactor = min(1.0, $cycle->cloudDarkening * 2.0); // cloudDarkening ≈ humidity proxy
+            $mistStrength *= 0.6 + $humidityFactor * 0.4;
+            $fogNear = $fogNear * (1.0 - $mistStrength * 0.7); // mist pulls fog very close
+            $fogFar = $fogFar * (1.0 - $mistStrength * 0.5);
+        }
         $this->commandList->add(new SetFog(
             color: new Color($horizon['r'], $horizon['g'], $horizon['b']),
             near: $fogNear,

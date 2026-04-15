@@ -66,6 +66,7 @@ class VioRenderer3D implements Renderer3DInterface
     private ?Vec3 $cameraPosition = null;
 
     private float $globalTime = 0.0;
+    private float $snowCover = 0.0;
 
     // Shadow map
     private ?VioRenderTarget $shadowTarget = null;
@@ -172,6 +173,8 @@ class VioRenderer3D implements Renderer3DInterface
                 $this->pendingSkyboxId = $cmd->cubemapId;
             } elseif ($cmd instanceof SetShader) {
                 $this->shaderOverride = $cmd->shaderId;
+            } elseif ($cmd instanceof Command\SetSnowCover) {
+                $this->snowCover = $cmd->cover;
             } elseif ($cmd instanceof SetWaveAnimation) {
                 $waveEnabled = $cmd->enabled;
                 $waveAmplitude = $cmd->amplitude;
@@ -917,6 +920,7 @@ class VioRenderer3D implements Renderer3DInterface
         vio_set_uniform($this->ctx, 'u_time', $this->globalTime);
         vio_set_uniform($this->ctx, 'u_sky_color', [0.55, 0.70, 0.85]);
         vio_set_uniform($this->ctx, 'u_horizon_color', [0.85, 0.88, 0.92]);
+        vio_set_uniform($this->ctx, 'u_snow_cover', $this->snowCover);
         vio_set_uniform($this->ctx, 'u_vertex_anim', 0); // enabled per-material in applyMaterial
         vio_set_uniform($this->ctx, 'u_wave_amplitude', $state['waveAmplitude']);
         vio_set_uniform($this->ctx, 'u_wave_frequency', $state['waveFrequency']);
@@ -999,9 +1003,16 @@ void main() {
 
     if (u_vertex_anim == 1) {
         vec4 worldPosRaw = model * vec4(pos, 1.0);
-        float wave = sin(worldPosRaw.x * u_wave_frequency + u_time + u_wave_phase)
-                   * cos(worldPosRaw.z * u_wave_frequency * 0.7 + u_time * 0.8)
-                   * u_wave_amplitude;
+        float t = u_time + u_wave_phase;
+        float f = u_wave_frequency;
+        float a = u_wave_amplitude;
+        // Long rolling swell (dominant wave direction)
+        float wave = sin(worldPosRaw.x * f * 0.15 + worldPosRaw.z * f * 0.08 + t * 0.7) * a * 0.6;
+        // Secondary cross-swell
+        wave += sin(worldPosRaw.x * f * 0.1 - worldPosRaw.z * f * 0.12 + t * 0.5 + 1.3) * a * 0.3;
+        // Short choppy waves on top (smaller amplitude, higher frequency)
+        wave += sin(worldPosRaw.x * f * 0.5 + worldPosRaw.z * f * 0.3 + t * 1.4) * a * 0.08;
+        wave += sin(worldPosRaw.x * f * 0.7 - worldPosRaw.z * f * 0.6 + t * 1.8 + 2.7) * a * 0.04;
         pos.y += wave;
     }
 
@@ -1066,6 +1077,7 @@ uniform vec3 u_emission;
 uniform float u_roughness;
 uniform float u_metallic;
 uniform float u_alpha;
+uniform float u_snow_cover; // 0.0 = no snow, 1.0 = full blanket
 uniform vec3 u_fog_color;
 uniform float u_fog_near;
 uniform float u_fog_far;
@@ -1223,13 +1235,28 @@ vec3 computeWater(vec3 N, vec3 V, vec3 L, out float alphaOut, out float roughOut
     float specWater = pow(max(dot(N, normalize(V + L)), 0.0), 512.0);
     finalColor += u_dir_light_color * u_dir_light_intensity * specWater * 2.0;
 
-    float foamLine = smoothstep(0.02, 0.0, depth);
-    float foam = foamLine * smoothstep(0.35, 0.65, noise(v_worldPos.xz * 6.0 + u_time * 0.5));
-    finalColor = mix(finalColor, vec3(0.9, 0.95, 1.0), foam * 0.7);
+    // Shore foam — multi-layered, animated, finer grain
+    float shoreDepth = clamp(max(0.0, -5.0 - v_worldPos.z) / 6.0, 0.0, 1.0);
+    float foamLine = smoothstep(0.15, 0.0, shoreDepth);
+    float foamNoise = noise(v_worldPos.xz * 15.0 + u_time * 0.3) * 0.5
+                    + noise(v_worldPos.xz * 30.0 - u_time * 0.5) * 0.3
+                    + noise(v_worldPos.xz * 60.0 + u_time * 0.8) * 0.2;
+    float foam = foamLine * smoothstep(0.25, 0.55, foamNoise);
+    // Breaking wave foam band
+    float waveFoam = smoothstep(0.08, 0.0, shoreDepth) * smoothstep(0.4, 0.7,
+        noise(vec2(v_worldPos.x * 3.0, u_time * 0.6)));
+    foam = max(foam, waveFoam);
+    finalColor = mix(finalColor, vec3(0.92, 0.96, 1.0), foam * 0.8);
 
-    alphaOut = mix(0.5, 0.92, depth);
-    alphaOut = mix(alphaOut, 1.0, foam * 0.8);
-    roughOut = 0.05;
+    // Alpha: transparent at shore (sand visible), opaque in deep water
+    alphaOut = mix(0.15, 0.95, smoothstep(0.0, 0.4, depth));
+    alphaOut = mix(alphaOut, 1.0, foam * 0.6);
+
+    // Fade out at shore edge (where water meets sand) based on world Z
+    float shoreEdge = smoothstep(-5.0, -7.0, v_worldPos.z);
+    alphaOut *= shoreEdge;
+
+    roughOut = mix(0.02, 0.08, foam);
 
     return finalColor;
 }
@@ -1419,6 +1446,18 @@ void main() {
         float nse = noise(v_worldPos.xz * 0.4);
         float noiseMask = smoothstep(0.3, 0.9, roughness);
         albedo = texAlbedo * (1.0 + (nse - 0.5) * 0.12 * noiseMask);
+    }
+
+    // ---- Snow cover: upward-facing surfaces turn white ----
+    if (u_snow_cover > 0.01 && u_proc_mode != 2 && u_proc_mode != 6) {
+        float upFacing = max(dot(N, vec3(0.0, 1.0, 0.0)), 0.0);
+        // Snow sticks more on flat/upward surfaces, less on steep sides
+        float snowMask = smoothstep(0.3, 0.7, upFacing) * u_snow_cover;
+        // Add noise for natural patchy edges
+        snowMask *= 0.7 + noise(v_worldPos.xz * 2.0) * 0.3;
+        snowMask = clamp(snowMask, 0.0, 1.0);
+        albedo = mix(albedo, vec3(0.92, 0.93, 0.97), snowMask);
+        roughness = mix(roughness, 0.8, snowMask); // snow is matte
     }
 
     // ---- PBR Lighting ----
