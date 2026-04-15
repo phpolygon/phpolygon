@@ -770,6 +770,9 @@ class VioRenderer3D implements Renderer3DInterface
         $procMode = self::$procModeCache[$materialId] ?? $this->resolveProcMode($materialId);
         vio_set_uniform($this->ctx, 'u_proc_mode', $procMode);
 
+        // Water (proc_mode 2): enable GPU vertex wave animation
+        vio_set_uniform($this->ctx, 'u_vertex_anim', $procMode === 2 ? 1 : 0);
+
         if ($procMode === 9) {
             vio_set_uniform($this->ctx, 'u_moon_phase', $material->roughness);
         }
@@ -914,7 +917,7 @@ class VioRenderer3D implements Renderer3DInterface
         vio_set_uniform($this->ctx, 'u_time', $this->globalTime);
         vio_set_uniform($this->ctx, 'u_sky_color', [0.55, 0.70, 0.85]);
         vio_set_uniform($this->ctx, 'u_horizon_color', [0.85, 0.88, 0.92]);
-        vio_set_uniform($this->ctx, 'u_vertex_anim', $state['waveEnabled'] ? 1 : 0);
+        vio_set_uniform($this->ctx, 'u_vertex_anim', 0); // enabled per-material in applyMaterial
         vio_set_uniform($this->ctx, 'u_wave_amplitude', $state['waveAmplitude']);
         vio_set_uniform($this->ctx, 'u_wave_frequency', $state['waveFrequency']);
         vio_set_uniform($this->ctx, 'u_wave_phase', $state['wavePhase']);
