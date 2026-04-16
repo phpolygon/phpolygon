@@ -74,9 +74,9 @@ class VioRenderer3D implements Renderer3DInterface
     private $bloomPingTarget = null;
     private $bloomPongTarget = null;
     private $screenQuad = null;
-    private float $bloomIntensity = 0.3;
-    private float $bloomThreshold = 0.8;
-    private float $exposure = 1.2;
+    private float $bloomIntensity = 0.35;
+    private float $bloomThreshold = 1.0;
+    private float $exposure = 2.0;
 
     // Shadow map
     private ?VioRenderTarget $shadowTarget = null;
@@ -99,7 +99,6 @@ class VioRenderer3D implements Renderer3DInterface
         $this->width = $width;
         $this->height = $height;
         $this->initShaders();
-        $this->initPostProcess();
         $this->initShadowMap();
         $this->initSkyboxMesh();
         $this->initPostProcess();
@@ -218,12 +217,7 @@ class VioRenderer3D implements Renderer3DInterface
 
         // Render scene to HDR target
         $useHdr = ($this->hdrTarget !== null && $this->hdrTarget !== false);
-        if ($useHdr) {
-            vio_bind_render_target($this->ctx, $this->hdrTarget);
-            vio_viewport($this->ctx, 0, 0, $this->width, $this->height);
-        }
 
-        // Restore main viewport
         vio_viewport($this->ctx, 0, 0, $this->width, $this->height);
 
         // --- Pass 2: Opaque geometry ---
@@ -274,15 +268,68 @@ class VioRenderer3D implements Renderer3DInterface
             $this->pendingSkyboxId = null;
         }
 
-        // --- Post-processing: HDR → Tonemap → Backbuffer ---
+        // --- Post-processing: HDR → Bloom → Tonemap → Backbuffer ---
         if ($useHdr) {
             vio_unbind_render_target($this->ctx);
-
-            vio_viewport($this->ctx, 0, 0, $this->width, $this->height);
             $sceneTex = vio_render_target_texture($this->hdrTarget);
+
+            $hasBloom = ($this->bloomExtractTarget && $this->bloomPingTarget && $this->bloomPongTarget);
+            $bloomTex = null;
+
+            if ($hasBloom) {
+                $bw = max(1, (int)($this->width / 2));
+                $bh = max(1, (int)($this->height / 2));
+
+                // Extract bright pixels
+                vio_bind_render_target($this->ctx, $this->bloomExtractTarget);
+                vio_viewport($this->ctx, 0, 0, $bw, $bh);
+                vio_clear($this->ctx, 0, 0, 0, 1);
+                $this->bindPostProcessPipeline('bloom_extract');
+                vio_bind_texture($this->ctx, $sceneTex, 0);
+                vio_set_uniform($this->ctx, 'u_scene', 0);
+                vio_set_uniform($this->ctx, 'u_threshold', $this->bloomThreshold);
+                vio_draw($this->ctx, $this->screenQuad);
+                vio_unbind_render_target($this->ctx);
+
+                // Horizontal blur: extract → ping
+                $extractTex = vio_render_target_texture($this->bloomExtractTarget);
+                vio_bind_render_target($this->ctx, $this->bloomPingTarget);
+                vio_viewport($this->ctx, 0, 0, $bw, $bh);
+                vio_clear($this->ctx, 0, 0, 0, 1);
+                $this->bindPostProcessPipeline('bloom_blur');
+                vio_bind_texture($this->ctx, $extractTex, 0);
+                vio_set_uniform($this->ctx, 'u_source', 0);
+                vio_set_uniform($this->ctx, 'u_direction', [1.0 / $bw, 0.0]);
+                vio_draw($this->ctx, $this->screenQuad);
+                vio_unbind_render_target($this->ctx);
+
+                // Vertical blur: ping → pong
+                $pingTex = vio_render_target_texture($this->bloomPingTarget);
+                vio_bind_render_target($this->ctx, $this->bloomPongTarget);
+                vio_viewport($this->ctx, 0, 0, $bw, $bh);
+                vio_clear($this->ctx, 0, 0, 0, 1);
+                $this->bindPostProcessPipeline('bloom_blur');
+                vio_bind_texture($this->ctx, $pingTex, 0);
+                vio_set_uniform($this->ctx, 'u_source', 0);
+                vio_set_uniform($this->ctx, 'u_direction', [0.0, 1.0 / $bh]);
+                vio_draw($this->ctx, $this->screenQuad);
+                vio_unbind_render_target($this->ctx);
+
+                $bloomTex = vio_render_target_texture($this->bloomPongTarget);
+            }
+
+            // Tonemap + composite
+            vio_viewport($this->ctx, 0, 0, $this->width, $this->height);
             $this->bindPostProcessPipeline('tonemap');
             vio_bind_texture($this->ctx, $sceneTex, 0);
-            vio_set_uniform($this->ctx, 'u_bloom_intensity', 0.0);
+            vio_set_uniform($this->ctx, 'u_scene', 0);
+            if ($bloomTex) {
+                vio_bind_texture($this->ctx, $bloomTex, 1);
+                vio_set_uniform($this->ctx, 'u_bloom', 1);
+                vio_set_uniform($this->ctx, 'u_bloom_intensity', $this->bloomIntensity);
+            } else {
+                vio_set_uniform($this->ctx, 'u_bloom_intensity', 0.0);
+            }
             vio_set_uniform($this->ctx, 'u_exposure', $this->exposure);
             vio_draw($this->ctx, $this->screenQuad);
         }
@@ -304,22 +351,22 @@ class VioRenderer3D implements Renderer3DInterface
 
     private function initPostProcess(): void
     {
-        // HDR scene render target — disabled until RT color sampling bug is resolved
-        $this->hdrTarget = null; // TODO: re-enable
-        return;
+        $this->hdrTarget = vio_render_target($this->ctx, [
+            'width' => $this->width,
+            'height' => $this->height,
+            'hdr' => true,
+        ]);
+        if ($this->hdrTarget === false) {
+            $this->hdrTarget = null;
+            return;
+        }
 
-        // Bloom targets at half resolution
         $bw = max(1, (int)($this->width / 2));
         $bh = max(1, (int)($this->height / 2));
         $this->bloomExtractTarget = vio_render_target($this->ctx, ['width' => $bw, 'height' => $bh]);
         $this->bloomPingTarget = vio_render_target($this->ctx, ['width' => $bw, 'height' => $bh]);
         $this->bloomPongTarget = vio_render_target($this->ctx, ['width' => $bw, 'height' => $bh]);
 
-        // Fullscreen quad mesh (2 triangles covering clip space)
-        if (!MeshRegistry::has('_screen_quad')) {
-            MeshRegistry::register('_screen_quad',
-                \PHPolygon\Geometry\PlaneMesh::generate(2.0, 2.0, 1));
-        }
         $this->screenQuad = vio_mesh($this->ctx, [
             'vertices' => [
                 -1, -1, 0,  0, 0,
@@ -332,10 +379,10 @@ class VioRenderer3D implements Renderer3DInterface
             'layout' => [VIO_FLOAT3, VIO_FLOAT2],
         ]);
 
-        // Compile post-process shaders
         $this->compileShader('bloom_extract', self::POSTPROCESS_VERT, self::BLOOM_EXTRACT_FRAG);
         $this->compileShader('bloom_blur', self::POSTPROCESS_VERT, self::BLOOM_BLUR_FRAG);
         $this->compileShader('tonemap', self::POSTPROCESS_VERT, self::TONEMAP_FRAG);
+
     }
 
     private function compileShader(string $id, string $vertSrc, string $fragSrc): void
@@ -779,9 +826,8 @@ class VioRenderer3D implements Renderer3DInterface
         vio_set_uniform($this->ctx, 'u_model', $modelMatrix->toArray());
         vio_set_uniform($this->ctx, 'u_use_instancing', 0);
 
-        // Normal matrix: let shader compute from model matrix (avoids mat3 cbuffer packing issues on D3D)
-        // The shader's isZero fallback computes mat3(transpose(inverse(model))) * a_normal
-        vio_set_uniform($this->ctx, 'u_normal_matrix', [0.0,0.0,0.0, 0.0,0.0,0.0, 0.0,0.0,0.0]);
+        $nm = $this->computeNormalMatrix($modelMatrix);
+        vio_set_uniform($this->ctx, 'u_normal_matrix', $nm);
 
         $this->applyMaterial($material, $materialId);
 
@@ -964,6 +1010,7 @@ class VioRenderer3D implements Renderer3DInterface
         }
         vio_set_uniform($this->ctx, 'u_view', $this->currentViewMatrix->toArray());
         vio_set_uniform($this->ctx, 'u_projection', $this->currentProjectionMatrix->toArray());
+        vio_set_uniform($this->ctx, 'u_linear_output', ($this->hdrTarget !== null && $this->hdrTarget !== false) ? 1 : 0);
 
         if ($this->cameraPosition !== null) {
             vio_set_uniform($this->ctx, 'u_camera_pos', [
@@ -1022,10 +1069,14 @@ class VioRenderer3D implements Renderer3DInterface
     {
         $inv = $model->inverse();
         $m = $inv->toArray();
+        // Column-major storage: columns of transpose(inverse(model))
+        // = rows of inverse(model)
+        // OpenGL reads as column-major, HLSL row_major reads as rows.
+        // Both need the same data order: column 0 of inv, column 1 of inv, column 2 of inv
         return [
-            $m[0], $m[4], $m[8],
-            $m[1], $m[5], $m[9],
-            $m[2], $m[6], $m[10],
+            $m[0], $m[1], $m[2],
+            $m[4], $m[5], $m[6],
+            $m[8], $m[9], $m[10],
         ];
     }
 
@@ -1174,6 +1225,9 @@ uniform vec3 u_horizon_color;
 uniform float u_moon_phase;
 uniform vec3 u_season_tint;
 
+// HDR pipeline
+uniform int u_linear_output;
+
 // Shadow
 uniform int u_has_shadow_map;
 uniform sampler2DShadow u_shadow_map;
@@ -1216,13 +1270,16 @@ float fbm3(vec2 p) {
 //  Shadow
 // ================================================================
 
-float calcShadow(vec4 lsp) {
+float calcShadow(vec4 lsp, vec3 N) {
     vec3 pc = lsp.xyz / lsp.w * 0.5 + 0.5;
     if (pc.x < 0.0 || pc.x > 1.0 || pc.y < 0.0 || pc.y > 1.0 || pc.z > 1.0) return 1.0;
     if (u_has_shadow_map == 0) return 1.0;
+    vec3 lightDir = normalize(-u_dir_light_direction);
+    float NdotL = max(dot(N, lightDir), 0.0);
+    float bias = mix(0.005, 0.001, NdotL);
     float s = 0.0;
     float ts = 1.0 / 2048.0;
-    float rd = pc.z - 0.002;
+    float rd = pc.z - bias;
     for (int x = -1; x <= 1; x++)
         for (int y = -1; y <= 1; y++)
             s += texture(u_shadow_map, vec3(pc.xy + vec2(x,y) * ts, rd));
@@ -1235,6 +1292,14 @@ float calcShadow(vec4 lsp) {
 
 vec3 fresnelSchlick(float cosTheta, vec3 F0) {
     return F0 + (1.0 - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
+}
+
+vec4 outputColor(vec3 color, float alpha) {
+    color = max(color, vec3(0.0));
+    if (u_linear_output == 0) {
+        color = pow(color, vec3(1.0 / 2.2));
+    }
+    return vec4(color, alpha);
 }
 
 // ================================================================
@@ -1352,20 +1417,15 @@ vec3 computeRock(vec3 N, vec3 worldPos, vec3 baseAlbedo, out float roughOut) {
     vec3 p = worldPos * 2.5;
     float n1 = fbm2(p.xz);
 
-    vec3 rockColor = mix(baseAlbedo * 0.6, baseAlbedo * 1.3, n1);
+    vec3 rockColor = baseAlbedo * (0.85 + n1 * 0.3);
 
     float crack = noise(p.xz * 8.0 + vec2(p.y * 2.0));
-    rockColor = mix(rockColor, rockColor * 0.5, smoothstep(0.48, 0.52, crack) * 0.4);
+    rockColor *= 1.0 - smoothstep(0.48, 0.52, crack) * 0.15;
 
     float strata = sin(worldPos.y * 15.0 + n1 * 3.0) * 0.5 + 0.5;
-    rockColor *= 0.9 + smoothstep(0.4, 0.6, strata) * 0.2;
-
-    float upFacing = max(dot(N, vec3(0.0, 1.0, 0.0)), 0.0);
-    float moss = upFacing * smoothstep(0.4, 0.7, noise(worldPos.xz * 4.0)) * smoothstep(0.5, 0.9, upFacing);
-    rockColor = mix(rockColor, vec3(0.15, 0.25, 0.08), moss * 0.6);
+    rockColor *= 0.95 + smoothstep(0.4, 0.6, strata) * 0.1;
 
     roughOut = 0.75 + noise(p.xz * 3.0) * 0.2;
-    roughOut = mix(roughOut, 0.6, moss * 0.5);
 
     return rockColor;
 }
@@ -1495,7 +1555,7 @@ void main() {
         albedo = computeWater(N, V, L, alpha, roughness);
         float fd = length(v_worldPos - u_camera_pos);
         float ff = clamp((fd - u_fog_near) / (u_fog_far - u_fog_near), 0.0, 1.0);
-        frag_color = vec4(pow(max(mix(albedo, u_fog_color, 1.0 - exp(-ff*ff*3.0)), vec3(0.0)), vec3(1.0/2.2)), alpha);
+        frag_color = outputColor(mix(albedo, u_fog_color, 1.0 - exp(-ff*ff*3.0)), alpha);
         return;
     } else if (u_proc_mode == 1) {
         albedo = computeSand(N, V, L, roughness);
@@ -1513,7 +1573,7 @@ void main() {
         albedo = computeCloud(N, V, L, u_albedo, alpha);
         float fd = length(v_worldPos - u_camera_pos);
         float ff = clamp((fd - u_fog_near) / (u_fog_far - u_fog_near), 0.0, 1.0);
-        frag_color = vec4(pow(max(mix(albedo, u_fog_color, 1.0 - exp(-ff*ff*3.0)), vec3(0.0)), vec3(1.0/2.2)), alpha);
+        frag_color = outputColor(mix(albedo, u_fog_color, 1.0 - exp(-ff*ff*3.0)), alpha);
         return;
     } else if (u_proc_mode == 9) {
         vec3 moonN = normalize(N);
@@ -1523,7 +1583,7 @@ void main() {
         float illum = smoothstep(tp - 0.12, tp + 0.12, localX);
         float crater = noise(moonN.xz * 4.0 + moonN.y * 2.0);
         vec3 mc = vec3(0.85, 0.87, 0.92) * (1.0 - smoothstep(0.42, 0.55, crater) * 0.25);
-        frag_color = vec4(pow(max(mc * illum + vec3(0.02, 0.025, 0.04) * (1.0 - illum), vec3(0.0)), vec3(1.0/2.2)), 1.0);
+        frag_color = outputColor(mc * illum + vec3(0.02, 0.025, 0.04) * (1.0 - illum), 1.0);
         return;
     } else {
         float nse = noise(v_worldPos.xz * 0.4);
@@ -1546,7 +1606,7 @@ void main() {
     // ---- PBR Lighting ----
     float shininess = exp2(10.0 * (1.0 - roughness) + 1.0);
     vec3 F0 = mix(vec3(0.04), albedo, u_metallic);
-    float shadow = calcShadow(v_lightSpacePos);
+    float shadow = calcShadow(v_lightSpacePos, N);
 
     float primaryIntensity = u_dir_light_count > 0 ? u_dir_lights[0].intensity : 0.0;
     float ambientShadow = mix(1.0, mix(0.5, 1.0, shadow), clamp(primaryIntensity, 0.0, 1.0));
@@ -1591,7 +1651,7 @@ void main() {
     float fogFactor = clamp((fogDist - u_fog_near) / (u_fog_far - u_fog_near), 0.0, 1.0);
     color = mix(color, u_fog_color, 1.0 - exp(-fogFactor * fogFactor * 3.0));
 
-    frag_color = vec4(pow(max(color, vec3(0.0)), vec3(1.0/2.2)), alpha);
+    frag_color = outputColor(color, alpha);
 }
 GLSL;
 
@@ -1840,7 +1900,7 @@ void main() {
     vec3 color = scene + bloom * u_bloom_intensity;
     color *= u_exposure;
     color = ACESFilm(color);
-    color = pow(color, vec3(1.0 / 2.2)); // gamma
+    color = pow(color, vec3(1.0 / 2.2));
     frag_color = vec4(color, 1.0);
 }
 GLSL;
