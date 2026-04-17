@@ -241,7 +241,7 @@ $__engineLog("Autoloader ready.");
 // Log every class autoload to catch segfaults during class loading
 spl_autoload_register(function(string $class) use ($__engineLog) {
     $__engineLog("Autoloading: $class");
-}, throw: false, prepend: true);
+}, prepend: true);
 
 STUB_START
         . $additionalRequires
