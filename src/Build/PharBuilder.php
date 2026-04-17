@@ -238,6 +238,11 @@ $__engineLog("Loading autoloader...");
 require $pharBase . '/vendor/autoload.php';
 $__engineLog("Autoloader ready.");
 
+// Log every class autoload to catch segfaults during class loading
+spl_autoload_register(function(string $class) use ($__engineLog) {
+    $__engineLog("Autoloading: $class");
+}, prepend: false);
+
 STUB_START
         . $additionalRequires
         . "\n\$__engineLog('Running game...');"
