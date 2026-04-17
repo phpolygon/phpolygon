@@ -27,6 +27,25 @@ const VIO_BLEND_NONE = 0;
 const VIO_BLEND_ALPHA = 1;
 const VIO_DEPTH_LEQUAL = 1;
 const VIO_DEPTH_LESS = 0;
+const VIO_FLOAT2 = 2;
+const VIO_FLOAT3 = 3;
+const VIO_CURSOR_NORMAL = 0;
+const VIO_CURSOR_DISABLED = 1;
+
+// ----------------------------------------------------------------
+// Backend info
+// ----------------------------------------------------------------
+
+function vio_backend_name(VioContext $ctx): string {}
+
+/** @return list<string> */
+function vio_backends(): array {}
+
+// ----------------------------------------------------------------
+// Cursor
+// ----------------------------------------------------------------
+
+function vio_set_cursor_mode(VioContext $ctx, int $mode): void {}
 
 // ----------------------------------------------------------------
 // Context lifecycle
