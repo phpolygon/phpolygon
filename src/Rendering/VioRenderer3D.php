@@ -50,7 +50,7 @@ class VioRenderer3D implements Renderer3DInterface
     /** @var array<string, VioTexture> Texture ID -> VioTexture */
     private array $textureCache = [];
 
-    /** @var array<string, float[]> Cache key -> pre-flattened instance matrices */
+    /** @var array<string, string> Cache key -> packed binary instance matrices */
     private array $staticMatrixCache = [];
 
     /** @var array<string, int> Cache key -> instance count */
@@ -69,11 +69,12 @@ class VioRenderer3D implements Renderer3DInterface
     private float $snowCover = 0.0;
 
     // Post-processing
-    private $hdrTarget = null;
-    private $bloomExtractTarget = null;
-    private $bloomPingTarget = null;
-    private $bloomPongTarget = null;
-    private $screenQuad = null;
+    private ?VioRenderTarget $hdrTarget = null;
+    private ?VioRenderTarget $bloomExtractTarget = null;
+    private ?VioRenderTarget $bloomPingTarget = null;
+    private ?VioRenderTarget $bloomPongTarget = null;
+    private ?VioMesh $screenQuad = null;
+    private bool $enableHdr = false;
     private float $bloomIntensity = 0.35;
     private float $bloomThreshold = 1.0;
     private float $exposure = 1.8;
@@ -216,10 +217,10 @@ class VioRenderer3D implements Renderer3DInterface
         $hasShadowMap = $this->renderShadowPass($commandList, $dirLights);
 
         // HDR/Bloom disabled — D3D11 fullscreen quad draw produces no pixels (needs investigation)
-        $useHdr = false;
+        $hdrTarget = $this->enableHdr ? $this->hdrTarget : null;
 
-        if ($useHdr) {
-            vio_bind_render_target($this->ctx, $this->hdrTarget);
+        if ($hdrTarget !== null) {
+            vio_bind_render_target($this->ctx, $hdrTarget);
             vio_clear($this->ctx, 0, 0, 0, 1);
         }
 
@@ -274,52 +275,55 @@ class VioRenderer3D implements Renderer3DInterface
         }
 
         // --- Post-processing: HDR → Bloom → Tonemap → Backbuffer ---
-        if ($useHdr) {
+        $quad = $this->screenQuad;
+        if ($hdrTarget !== null && $quad !== null) {
             vio_unbind_render_target($this->ctx);
-            $sceneTex = vio_render_target_texture($this->hdrTarget);
-            $hasBloom = ($this->bloomExtractTarget && $this->bloomPingTarget && $this->bloomPongTarget);
+            $sceneTex = vio_render_target_texture($hdrTarget);
+            $bloomExtract = $this->bloomExtractTarget;
+            $bloomPing = $this->bloomPingTarget;
+            $bloomPong = $this->bloomPongTarget;
             $bloomTex = null;
 
-            if ($hasBloom) {
+            if ($bloomExtract !== null && $bloomPing !== null && $bloomPong !== null) {
                 $bw = max(1, (int)($this->width / 2));
                 $bh = max(1, (int)($this->height / 2));
 
                 // Extract bright pixels
-                vio_bind_render_target($this->ctx, $this->bloomExtractTarget);
+                vio_bind_render_target($this->ctx, $bloomExtract);
                 vio_viewport($this->ctx, 0, 0, $bw, $bh);
                 vio_clear($this->ctx, 0, 0, 0, 1);
                 $this->bindPostProcessPipeline('bloom_extract');
                 vio_bind_texture($this->ctx, $sceneTex, 0);
                 vio_set_uniform($this->ctx, 'u_scene', 0);
                 vio_set_uniform($this->ctx, 'u_threshold', $this->bloomThreshold);
-                vio_draw($this->ctx, $this->screenQuad);
+                vio_draw($this->ctx, $quad);
                 vio_unbind_render_target($this->ctx);
 
                 // Horizontal blur: extract → ping
-                $extractTex = vio_render_target_texture($this->bloomExtractTarget);
-                vio_bind_render_target($this->ctx, $this->bloomPingTarget);
+                $extractTex = vio_render_target_texture($bloomExtract);
+                vio_bind_render_target($this->ctx, $bloomPing);
                 vio_viewport($this->ctx, 0, 0, $bw, $bh);
                 vio_clear($this->ctx, 0, 0, 0, 1);
                 $this->bindPostProcessPipeline('bloom_blur');
                 vio_bind_texture($this->ctx, $extractTex, 0);
                 vio_set_uniform($this->ctx, 'u_source', 0);
                 vio_set_uniform($this->ctx, 'u_direction', [1.0 / $bw, 0.0]);
-                vio_draw($this->ctx, $this->screenQuad);
+                vio_draw($this->ctx, $quad);
                 vio_unbind_render_target($this->ctx);
 
                 // Vertical blur: ping → pong
-                $pingTex = vio_render_target_texture($this->bloomPingTarget);
-                vio_bind_render_target($this->ctx, $this->bloomPongTarget);
+                $pingTex = vio_render_target_texture($bloomPing);
+                vio_bind_render_target($this->ctx, $bloomPong);
                 vio_viewport($this->ctx, 0, 0, $bw, $bh);
                 vio_clear($this->ctx, 0, 0, 0, 1);
                 $this->bindPostProcessPipeline('bloom_blur');
                 vio_bind_texture($this->ctx, $pingTex, 0);
                 vio_set_uniform($this->ctx, 'u_source', 0);
                 vio_set_uniform($this->ctx, 'u_direction', [0.0, 1.0 / $bh]);
-                vio_draw($this->ctx, $this->screenQuad);
+                vio_draw($this->ctx, $quad);
                 vio_unbind_render_target($this->ctx);
 
-                $bloomTex = vio_render_target_texture($this->bloomPongTarget);
+                $bloomTex = vio_render_target_texture($bloomPong);
             }
 
             // Tonemap + composite
@@ -336,7 +340,7 @@ class VioRenderer3D implements Renderer3DInterface
                 vio_set_uniform($this->ctx, 'u_bloom_intensity', 0.0);
             }
             vio_set_uniform($this->ctx, 'u_exposure', $this->exposure);
-            vio_draw($this->ctx, $this->screenQuad);
+            vio_draw($this->ctx, $quad);
         }
     }
 
@@ -360,17 +364,16 @@ class VioRenderer3D implements Renderer3DInterface
             'width' => $this->width,
             'height' => $this->height,
             'hdr' => true,
-        ]);
-        if ($this->hdrTarget === false) {
-            $this->hdrTarget = null;
+        ]) ?: null;
+        if ($this->hdrTarget === null) {
             return;
         }
 
         $bw = max(1, (int)($this->width / 2));
         $bh = max(1, (int)($this->height / 2));
-        $this->bloomExtractTarget = vio_render_target($this->ctx, ['width' => $bw, 'height' => $bh]);
-        $this->bloomPingTarget = vio_render_target($this->ctx, ['width' => $bw, 'height' => $bh]);
-        $this->bloomPongTarget = vio_render_target($this->ctx, ['width' => $bw, 'height' => $bh]);
+        $this->bloomExtractTarget = vio_render_target($this->ctx, ['width' => $bw, 'height' => $bh]) ?: null;
+        $this->bloomPingTarget = vio_render_target($this->ctx, ['width' => $bw, 'height' => $bh]) ?: null;
+        $this->bloomPongTarget = vio_render_target($this->ctx, ['width' => $bw, 'height' => $bh]) ?: null;
 
         $this->screenQuad = vio_mesh($this->ctx, [
             'vertices' => [
@@ -381,7 +384,7 @@ class VioRenderer3D implements Renderer3DInterface
             ],
             'indices' => [0, 1, 2, 0, 2, 3],
             'layout' => [VIO_FLOAT3, VIO_FLOAT2],
-        ]);
+        ]) ?: null;
 
         $this->compileShader('bloom_extract', self::POSTPROCESS_VERT, self::BLOOM_EXTRACT_FRAG);
         $this->compileShader('bloom_blur', self::POSTPROCESS_VERT, self::BLOOM_BLUR_FRAG);
@@ -437,12 +440,16 @@ class VioRenderer3D implements Renderer3DInterface
     {
         $key = 'postprocess:' . $shaderId;
         if (!isset($this->pipelineCache[$key])) {
-            $this->pipelineCache[$key] = vio_pipeline($this->ctx, [
+            $pipeline = vio_pipeline($this->ctx, [
                 'shader' => $this->shaderCache[$shaderId],
                 'depth_test' => false,
                 'cull_mode' => VIO_CULL_NONE,
                 'blend' => VIO_BLEND_NONE,
             ]);
+            if ($pipeline === false) {
+                return;
+            }
+            $this->pipelineCache[$key] = $pipeline;
         }
         vio_bind_pipeline($this->ctx, $this->pipelineCache[$key]);
     }
@@ -877,7 +884,7 @@ class VioRenderer3D implements Renderer3DInterface
      * Static instances are cached as packed strings for zero-copy reuse.
      *
      * @param Mat4[] $matrices
-     * @return array{string, int}
+     * @return array{0: string, 1: int}
      */
     private function resolveInstanceData(string $meshId, Material $material, array $matrices, bool $isStatic): array
     {
@@ -1025,7 +1032,7 @@ class VioRenderer3D implements Renderer3DInterface
         }
         vio_set_uniform($this->ctx, 'u_view', $this->currentViewMatrix->toArray());
         vio_set_uniform($this->ctx, 'u_projection', $this->currentProjectionMatrix->toArray());
-        vio_set_uniform($this->ctx, 'u_linear_output', ($this->hdrTarget !== null && $this->hdrTarget !== false) ? 1 : 0);
+        vio_set_uniform($this->ctx, 'u_linear_output', $this->hdrTarget !== null ? 1 : 0);
 
         if ($this->cameraPosition !== null) {
             vio_set_uniform($this->ctx, 'u_camera_pos', [

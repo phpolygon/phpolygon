@@ -133,9 +133,9 @@ function vio_draw(VioContext $ctx, VioMesh $mesh): void {}
 
 /**
  * Draw a mesh multiple times using GPU instancing.
- * @param float[] $matrices Flat array of 4x4 model matrices (16 floats per instance)
+ * @param float[]|string $matrices Flat array of 4x4 model matrices (16 floats per instance) or packed binary string
  */
-function vio_draw_instanced(VioContext $ctx, VioMesh $mesh, array $matrices, int $instanceCount): void {}
+function vio_draw_instanced(VioContext $ctx, VioMesh $mesh, array|string $matrices, int $instanceCount): void {}
 
 // ----------------------------------------------------------------
 // Textures

@@ -168,6 +168,14 @@ XML;
             $dst = $targetDir . '/' . $resourcePath;
             $this->copyDirectory($src, $dst);
         }
+
+        // Copy engine branding assets (splash screen logo) so the engine
+        // can find them at runtime via PHPOLYGON_PATH_RESOURCES/branding/.
+        $engineBranding = __DIR__ . '/../../resources/branding';
+        if (is_dir($engineBranding)) {
+            $dst = $targetDir . '/resources/branding';
+            $this->copyDirectory($engineBranding, $dst);
+        }
     }
 
     private function copyDirectory(string $src, string $dst): void
