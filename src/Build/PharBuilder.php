@@ -150,7 +150,7 @@ if (str_contains($binaryDir, '.app/Contents/MacOS')) {
 $pharBase = 'phar://' . __FILE__;
 
 // Engine log
-$engineLogPath = $resourceBase . '/engine.log';
+$engineLogPath = $resourceBase . '/game.log';
 file_put_contents($engineLogPath, '[' . date('Y-m-d H:i:s') . "] PHPolygon starting...\n");
 $__engineLog = function(string $msg) use ($engineLogPath) {
     file_put_contents($engineLogPath, '[' . date('Y-m-d H:i:s') . '] ' . $msg . "\n", FILE_APPEND);

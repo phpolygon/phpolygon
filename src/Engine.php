@@ -82,8 +82,15 @@ class Engine
     public function __construct(
         private readonly EngineConfig $config = new EngineConfig(),
     ) {
+        self::log('Engine init - PHP ' . PHP_VERSION . ', OS: ' . PHP_OS . ' (' . php_uname('r') . ')');
+        self::log('Config: ' . $config->width . 'x' . $config->height . ', vsync=' . ($config->vsync ? 'on' : 'off') . ', 3D=' . ($config->is3D ? $config->renderBackend3D : 'off'));
+
         $this->headless = $config->headless;
         $this->useVio = !$config->headless && extension_loaded('vio');
+
+        self::log('Mode: ' . ($this->headless ? 'headless' : ($this->useVio ? 'vio' : 'glfw')));
+        self::log('Extensions: vio=' . (extension_loaded('vio') ? 'yes' : 'no') . ', glfw=' . (extension_loaded('glfw') ? 'yes' : 'no') . ', opengl=' . (extension_loaded('opengl') ? 'yes' : 'no'));
+
         $this->world = new World();
         $this->input = $config->input ?? ($this->useVio ? new VioInput() : new Input());
         $this->events = new EventDispatcher();
@@ -99,6 +106,8 @@ class Engine
             $this->textures = new TextureManager($config->assetsPath);
         }
 
+        self::log('TextureManager: ' . get_class($this->textures));
+
         $this->gameLoop = new GameLoop($config->targetTickRate);
         $this->scenes = new SceneManager($this);
         $audioBackend = null;
@@ -106,9 +115,12 @@ class Engine
             $audioBackend = $this->useVio ? new VioAudioBackend() : new GLFWAudioBackend();
         }
         $this->audio = new AudioManager($audioBackend);
+        self::log('Audio: ' . ($audioBackend !== null ? get_class($audioBackend) : 'none'));
+
         $this->locale = new LocaleManager($config->defaultLocale, $config->fallbackLocale);
         $this->saves = new SaveManager($config->savePath, $config->maxSaveSlots);
         $this->scheduler = ThreadSchedulerFactory::create($config);
+        self::log('Threading: ' . get_class($this->scheduler));
 
         if ($config->meshCachePath !== '') {
             MeshCache::configure($config->meshCachePath);
@@ -121,6 +133,7 @@ class Engine
             } else {
                 $this->renderer3D = null;
             }
+            self::log('3D renderer: ' . $config->renderBackend3D);
         } else {
             $this->commandList3D = null;
             $this->renderer3D = null;
@@ -152,7 +165,11 @@ class Engine
             );
         }
 
+        self::log('Window: ' . get_class($this->window));
+
         Facade::setEngine($this);
+
+        self::log('Engine init complete');
     }
 
     /**
@@ -297,7 +314,9 @@ class Engine
 
     public function run(): void
     {
+        self::log('Window initializing...');
         $this->window->initialize($this->input);
+        self::log('Window initialized, framebuffer: ' . $this->window->getFramebufferWidth() . 'x' . $this->window->getFramebufferHeight());
 
         $nativeBackend = $this->config->is3D && in_array($this->config->renderBackend3D, ['vulkan', 'metal'], true);
 
@@ -334,6 +353,10 @@ class Engine
                     ),
                 };
             }
+        }
+
+        if (!$this->headless && $this->config->is3D && $this->renderer3D !== null) {
+            self::log('Renderer3D: ' . get_class($this->renderer3D));
         }
 
         // Create Renderer2D after window is initialized (needs GL/vio context)
@@ -392,15 +415,26 @@ class Engine
             $this->renderer2D = new NullRenderer2D($this->config->width, $this->config->height);
         }
 
+        self::log('Renderer2D: ' . get_class($this->renderer2D));
+
+        $fontDir = $this->resolveEngineFontDir();
+        self::log('Font dir: ' . ($fontDir ?? 'not found'));
+
         if (!$this->headless && !$this->config->skipSplash) {
+            self::log('Showing splash screen...');
             $this->showSplashScreen();
+            self::log('Splash screen done');
         }
 
-        if ($this->onInit !== null) {
-            ($this->onInit)($this);
+        $initFn = $this->onInit;
+        if ($initFn !== null) {
+            self::log('Running onInit callback...');
+            $initFn($this);
+            self::log('onInit callback done');
         }
 
         $this->scheduler->boot();
+        self::log('Scheduler booted, entering game loop');
         $this->running = true;
 
         $isPipelined = $this->scheduler instanceof ThreadScheduler
@@ -748,11 +782,62 @@ class Engine
 
     private function shutdown(): void
     {
+        self::log('Shutting down...');
         $this->scheduler->shutdown();
         $this->audio->dispose();
         $this->textures->clear();
         $this->world->clear();
         $this->window->destroy();
         Facade::clearEngine();
+        self::log('Shutdown complete');
+    }
+
+    private static ?string $logPath = null;
+
+    /**
+     * Write a line to game.log. The log file is placed next to the binary
+     * (PHAR/micro-SAPI) or in the project root (development).
+     */
+    public static function log(string $message): void
+    {
+        if (self::$logPath === null) {
+            self::$logPath = self::resolveLogPath();
+            // Truncate on first write per process
+            @file_put_contents(self::$logPath, '');
+        }
+
+        $line = '[' . date('Y-m-d H:i:s') . '] ' . $message . "\n";
+        @file_put_contents(self::$logPath, $line, FILE_APPEND);
+    }
+
+    /**
+     * Write an error to game.log with ERROR prefix.
+     */
+    public static function logError(string $message): void
+    {
+        self::log('ERROR: ' . $message);
+    }
+
+    private static function resolveLogPath(): string
+    {
+        // PHAR / micro-SAPI: place next to binary
+        if (str_starts_with(__DIR__, 'phar://')) {
+            $binaryPath = PHP_BINARY;
+            $binaryDir = dirname($binaryPath);
+            // macOS .app bundle
+            if (str_contains($binaryDir, '.app/Contents/MacOS')) {
+                return dirname($binaryDir) . '/Resources/game.log';
+            }
+            return $binaryDir . '/game.log';
+        }
+
+        // Development: project root via PHPOLYGON_PATH_RESOURCES or relative to src/
+        if (defined('PHPOLYGON_PATH_RESOURCES')) {
+            /** @var string $resDir */
+            $resDir = PHPOLYGON_PATH_RESOURCES;
+            return dirname($resDir) . '/game.log';
+        }
+
+        return dirname(__DIR__) . '/game.log';
     }
 }
