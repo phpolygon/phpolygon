@@ -191,14 +191,14 @@ class Engine
         // Load engine fonts
         $fontDir = $engine->resolveEngineFontDir();
         if ($fontDir !== null && is_dir($fontDir)) {
-            $engine->renderer2D->loadFont('regular', $fontDir . '/Inter-Regular.ttf');
-            $engine->renderer2D->loadFont('semibold', $fontDir . '/Inter-SemiBold.ttf');
+            $engine->renderer2D->loadFont('regular', $fontDir . DIRECTORY_SEPARATOR . 'Inter-Regular.ttf');
+            $engine->renderer2D->loadFont('semibold', $fontDir . DIRECTORY_SEPARATOR . 'Inter-SemiBold.ttf');
             $engine->renderer2D->setFont('regular');
 
-            $cjkDir = $fontDir . '/noto-sans-cjk';
+            $cjkDir = $fontDir . DIRECTORY_SEPARATOR . 'noto-sans-cjk';
             if (is_dir($cjkDir)) {
-                $engine->renderer2D->loadFont('noto-sans-sc', $cjkDir . '/NotoSansSC-Regular.otf');
-                $engine->renderer2D->loadFont('noto-sans-kr', $cjkDir . '/NotoSansKR-Regular.otf');
+                $engine->renderer2D->loadFont('noto-sans-sc', $cjkDir . DIRECTORY_SEPARATOR . 'NotoSansSC-Regular.otf');
+                $engine->renderer2D->loadFont('noto-sans-kr', $cjkDir . DIRECTORY_SEPARATOR . 'NotoSansKR-Regular.otf');
                 $engine->renderer2D->addFallbackFont('regular', 'noto-sans-sc');
                 $engine->renderer2D->addFallbackFont('regular', 'noto-sans-kr');
                 $engine->renderer2D->addFallbackFont('semibold', 'noto-sans-sc');
@@ -376,15 +376,15 @@ class Engine
 
             $fontDir = $this->resolveEngineFontDir();
             if ($fontDir !== null && is_dir($fontDir)) {
-                $this->renderer2D->loadFont('regular',  $fontDir . '/Inter-Regular.ttf');
-                $this->renderer2D->loadFont('semibold', $fontDir . '/Inter-SemiBold.ttf');
+                $this->renderer2D->loadFont('regular',  $fontDir . DIRECTORY_SEPARATOR . 'Inter-Regular.ttf');
+                $this->renderer2D->loadFont('semibold', $fontDir . DIRECTORY_SEPARATOR . 'Inter-SemiBold.ttf');
                 $this->renderer2D->setFont('regular');
 
                 // CJK fallback fonts
-                $cjkDir = $fontDir . '/noto-sans-cjk';
+                $cjkDir = $fontDir . DIRECTORY_SEPARATOR . 'noto-sans-cjk';
                 if (is_dir($cjkDir)) {
-                    $this->renderer2D->loadFont('noto-sans-sc', $cjkDir . '/NotoSansSC-Regular.otf');
-                    $this->renderer2D->loadFont('noto-sans-kr', $cjkDir . '/NotoSansKR-Regular.otf');
+                    $this->renderer2D->loadFont('noto-sans-sc', $cjkDir . DIRECTORY_SEPARATOR . 'NotoSansSC-Regular.otf');
+                    $this->renderer2D->loadFont('noto-sans-kr', $cjkDir . DIRECTORY_SEPARATOR . 'NotoSansKR-Regular.otf');
                     $this->renderer2D->addFallbackFont('regular', 'noto-sans-sc');
                     $this->renderer2D->addFallbackFont('regular', 'noto-sans-kr');
                     $this->renderer2D->addFallbackFont('semibold', 'noto-sans-sc');
@@ -396,15 +396,15 @@ class Engine
 
             $fontDir = $this->resolveEngineFontDir();
             if ($fontDir !== null && is_dir($fontDir)) {
-                $this->renderer2D->loadFont('regular',  $fontDir . '/Inter-Regular.ttf');
-                $this->renderer2D->loadFont('semibold', $fontDir . '/Inter-SemiBold.ttf');
+                $this->renderer2D->loadFont('regular',  $fontDir . DIRECTORY_SEPARATOR . 'Inter-Regular.ttf');
+                $this->renderer2D->loadFont('semibold', $fontDir . DIRECTORY_SEPARATOR . 'Inter-SemiBold.ttf');
                 $this->renderer2D->setFont('regular');
 
                 // CJK fallback fonts
-                $cjkDir = $fontDir . '/noto-sans-cjk';
+                $cjkDir = $fontDir . DIRECTORY_SEPARATOR . 'noto-sans-cjk';
                 if (is_dir($cjkDir)) {
-                    $this->renderer2D->loadFont('noto-sans-sc', $cjkDir . '/NotoSansSC-Regular.otf');
-                    $this->renderer2D->loadFont('noto-sans-kr', $cjkDir . '/NotoSansKR-Regular.otf');
+                    $this->renderer2D->loadFont('noto-sans-sc', $cjkDir . DIRECTORY_SEPARATOR . 'NotoSansSC-Regular.otf');
+                    $this->renderer2D->loadFont('noto-sans-kr', $cjkDir . DIRECTORY_SEPARATOR . 'NotoSansKR-Regular.otf');
                     $this->renderer2D->addFallbackFont('regular', 'noto-sans-sc');
                     $this->renderer2D->addFallbackFont('regular', 'noto-sans-kr');
                     $this->renderer2D->addFallbackFont('semibold', 'noto-sans-sc');
@@ -581,10 +581,10 @@ class Engine
         /** @var string $resourcesDir */
         $resourcesDir = PHPOLYGON_PATH_RESOURCES;
 
-        $targetDir = $resourcesDir .  '/fonts';
+        $targetDir = $resourcesDir . DIRECTORY_SEPARATOR . 'fonts';
 
         // Extract engine fonts if not already present
-        if (!is_dir($targetDir . '/noto-sans-cjk') && is_dir($pharDir)) {
+        if (!is_dir($targetDir . DIRECTORY_SEPARATOR . 'noto-sans-cjk') && is_dir($pharDir)) {
             @mkdir($targetDir, 0755, true);
             $iterator = new \RecursiveIteratorIterator(
                 new \RecursiveDirectoryIterator($pharDir, \FilesystemIterator::SKIP_DOTS),
@@ -594,7 +594,7 @@ class Engine
             /** @var \SplFileInfo $item */
             foreach ($iterator as $item) {
                 $relPath = substr($item->getPathname(), $pharDirLen + 1);
-                $targetPath = $targetDir . '/' . $relPath;
+                $targetPath = $targetDir . DIRECTORY_SEPARATOR . $relPath;
                 if ($item->isDir()) {
                     @mkdir($targetPath, 0755, true);
                 } elseif (!file_exists($targetPath)) {
@@ -664,7 +664,7 @@ class Engine
         } elseif (defined('PHPOLYGON_PATH_RESOURCES')) {
             /** @var string $resDir */
             $resDir = PHPOLYGON_PATH_RESOURCES;
-            $pharLogo = $resDir . '/branding/logo.png';
+            $pharLogo = $resDir . DIRECTORY_SEPARATOR . 'branding' . DIRECTORY_SEPARATOR . 'logo.png';
             if (file_exists($pharLogo)) {
                 $logo = $this->textures->load('_engine_splash_logo', $pharLogo);
             }
@@ -826,6 +826,6 @@ class Engine
         }
 
         // Development: project root relative to src/
-        return dirname(__DIR__) . '/game.log';
+        return dirname(__DIR__) . DIRECTORY_SEPARATOR . 'game.log';
     }
 }
