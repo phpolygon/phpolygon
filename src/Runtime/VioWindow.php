@@ -42,6 +42,7 @@ class VioWindow extends Window
 
         $this->ctx = $ctx;
         $this->initialized = true;
+        \PHPolygon\Engine::log('VioWindow: created with backend=' . $this->backend . ', actual=' . vio_backend_name($ctx));
 
         if ($input instanceof VioInput) {
             $input->setContext($ctx);

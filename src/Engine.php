@@ -317,6 +317,9 @@ class Engine
         self::log('Window initializing...');
         $this->window->initialize($this->input);
         self::log('Window initialized, framebuffer: ' . $this->window->getFramebufferWidth() . 'x' . $this->window->getFramebufferHeight());
+        if ($this->window instanceof VioWindow) {
+            self::log('VIO backend active: ' . vio_backend_name($this->window->getContext()));
+        }
 
         $nativeBackend = $this->config->is3D && in_array($this->config->renderBackend3D, ['vulkan', 'metal'], true);
 
