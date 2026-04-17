@@ -802,8 +802,6 @@ class Engine
     {
         if (self::$logPath === null) {
             self::$logPath = self::resolveLogPath();
-            // Truncate on first write per process
-            @file_put_contents(self::$logPath, '');
         }
 
         $line = '[' . date('Y-m-d H:i:s') . '] ' . $message . "\n";

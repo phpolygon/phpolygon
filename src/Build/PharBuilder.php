@@ -128,6 +128,7 @@ class PharBuilder
     {
         $additionalRequires = '';
         foreach ($this->config->additionalRequires as $require) {
+            $additionalRequires .= "\n\$__engineLog('Requiring: {$require}');";
             $additionalRequires .= "\nrequire_once \$pharBase . '/{$require}';";
         }
 
@@ -240,7 +241,15 @@ $__engineLog("Autoloader ready.");
 STUB_START
         . $additionalRequires
         . "\n\$__engineLog('Running game...');"
-        . $runCode . <<<'STUB_END'
+        . "\ntry {"
+        . $runCode
+        . "\n} catch (\\Throwable \$__e) {"
+        . "\n    \$__engineLog('FATAL: ' . get_class(\$__e) . ': ' . \$__e->getMessage());"
+        . "\n    \$__engineLog('  in ' . \$__e->getFile() . ':' . \$__e->getLine());"
+        . "\n    \$__engineLog('  Stack trace: ' . \$__e->getTraceAsString());"
+        . "\n}"
+        . "\n\$__engineLog('Game exited.');"
+        . <<<'STUB_END'
 
 __HALT_COMPILER();
 STUB_END;
