@@ -423,14 +423,12 @@ class Engine
         $fontDir = $this->resolveEngineFontDir();
         self::log('Font dir: ' . ($fontDir ?? 'not found'));
 
+        $initFn = $this->onInit;
         if (!$this->headless && !$this->config->skipSplash) {
             self::log('Showing splash screen...');
-            $this->showSplashScreen();
+            $this->showSplashScreen($initFn);
             self::log('Splash screen done');
-        }
-
-        $initFn = $this->onInit;
-        if ($initFn !== null) {
+        } elseif ($initFn !== null) {
             self::log('Running onInit callback...');
             $initFn($this);
             self::log('onInit callback done');
@@ -651,7 +649,12 @@ class Engine
         }
     }
 
-    private function showSplashScreen(): void
+    /**
+     * @param callable|null $initFn  Game init callback to run during the splash screen.
+     *                               Executed after the first frame is visible, so the
+     *                               splash stays on screen while the game loads.
+     */
+    private function showSplashScreen(?callable $initFn = null): void
     {
         $w = $this->renderer2D->getWidth();
         $h = $this->renderer2D->getHeight();
@@ -680,9 +683,20 @@ class Engine
         // so initialization delays (font loading, first drawable acquisition)
         // don't eat into the visible splash duration.
         $startTime = null;
+        $initDone = ($initFn === null);
 
         while (!$this->window->shouldClose()) {
             if ($startTime !== null) {
+                // Run game init after the first splash frame is visible
+                if (!$initDone) {
+                    self::log('Running onInit during splash...');
+                    $initFn($this);
+                    self::log('onInit done');
+                    $initDone = true;
+                    // Reset timer so the full splash duration plays after init
+                    $startTime = microtime(true);
+                }
+
                 $elapsed = microtime(true) - $startTime;
                 if ($elapsed >= $duration) {
                     break;
