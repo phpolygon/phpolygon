@@ -452,8 +452,11 @@ class Engine
             self::log('onInit callback done');
         }
 
-        $this->scheduler->boot();
-        self::log('Scheduler booted, entering game loop');
+        if (!$this->scheduler->isBooted()) {
+            $this->scheduler->boot();
+            self::log('Scheduler booted');
+        }
+        self::log('Entering game loop');
         $this->running = true;
 
         $isPipelined = $this->scheduler instanceof ThreadScheduler
@@ -719,6 +722,14 @@ class Engine
             self::log('Running onInit during splash...');
             $initFn($this);
             self::log('onInit done');
+
+            $this->splashProgress = 0.98;
+            $this->splashLabel = 'Starting...';
+            $this->renderSplashFrame();
+
+            $this->scheduler->boot();
+            self::log('Scheduler booted during splash');
+
             $this->splashProgress = 1.0;
             $this->splashLabel = '';
         }
