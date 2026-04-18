@@ -695,55 +695,50 @@ class Engine
         $this->splashProgress = 0.5;
         $this->splashLabel = 'Init Engine';
 
-        // Start the timer after the first frame is actually presented,
-        // so initialization delays (font loading, first drawable acquisition)
-        // don't eat into the visible splash duration.
-        $startTime = null;
-        $initDone = ($initFn === null);
         $this->splashFadeAlpha = 1.0;
 
+        // Phase 1: Fade in
+        $fadeIn = 0.4;
+        $fadeInStart = microtime(true);
         while (!$this->window->shouldClose()) {
-            if ($startTime !== null) {
-                // Run game init after the first splash frame is visible
-                if (!$initDone && $initFn !== null) {
-                    self::log('Running onInit during splash...');
-                    $this->splashProgress = 0.5;
-                    $this->splashLabel = 'Init Game';
-                    $this->renderSplashFrame();
-                    $initFn($this);
-                    $this->splashProgress = 1.0;
-                    $this->splashLabel = '';
-                    self::log('onInit done');
-                    $initDone = true;
-                    // Reset timer so the full splash duration plays after init
-                    $startTime = microtime(true);
-                }
-
-                $elapsed = microtime(true) - $startTime;
-                if ($elapsed >= $duration) {
-                    break;
-                }
-            } else {
-                $elapsed = 0.0;
+            $elapsed = microtime(true) - $fadeInStart;
+            $this->splashFadeAlpha = min(1.0, (float) ($elapsed / $fadeIn));
+            $this->renderSplashFrame();
+            if ($elapsed >= $fadeIn) {
+                break;
             }
+        }
 
-            // Fade: in for first 0.4s, out for last 0.5s, full in between
-            $alpha = 1.0;
-            $fadeIn = 0.4;
-            $fadeOut = 0.5;
-            if ($elapsed < $fadeIn) {
-                $alpha = $elapsed / $fadeIn;
-            } elseif ($elapsed > $duration - $fadeOut) {
-                $alpha = ($duration - $elapsed) / $fadeOut;
-            }
-            $this->splashFadeAlpha = max(0.0, min(1.0, $alpha));
-
+        // Phase 2: Run game init with splash fully visible
+        if (!$this->window->shouldClose() && $initFn !== null) {
+            $this->splashFadeAlpha = 1.0;
+            $this->splashProgress = 0.5;
+            $this->splashLabel = 'Init Game';
             $this->renderSplashFrame();
 
-            // Start timer after first frame is visible on screen
-            if ($startTime === null) {
-                $startTime = microtime(true);
+            self::log('Running onInit during splash...');
+            $initFn($this);
+            self::log('onInit done');
+            $this->splashProgress = 1.0;
+            $this->splashLabel = '';
+        }
+
+        // Phase 2: Hold + fade out
+        $fadeOut = 0.5;
+        $holdStart = microtime(true);
+        while (!$this->window->shouldClose()) {
+            $elapsed = microtime(true) - $holdStart;
+            if ($elapsed >= $duration) {
+                break;
             }
+
+            if ($elapsed > $duration - $fadeOut) {
+                $this->splashFadeAlpha = max(0.0, (float) (($duration - $elapsed) / $fadeOut));
+            } else {
+                $this->splashFadeAlpha = 1.0;
+            }
+
+            $this->renderSplashFrame();
         }
 
         // Clean up
