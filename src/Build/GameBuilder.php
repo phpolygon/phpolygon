@@ -94,7 +94,7 @@ class GameBuilder
             $this->log('success', 'Found micro.sfx: ' . $sfxPath);
 
             // Phase 4b: Resolve platform-specific runtime libs (vulkan-1.dll on Windows)
-            $runtimeLibs = $this->staticPhpResolver->resolveRuntimeLibs($platform, $arch, $variant);
+            $runtimeLibs = $this->staticPhpResolver->resolveRuntimeLibs($platform, $arch, $variant, $phpVersion);
             foreach ($runtimeLibs as $lib) {
                 $this->log('success', 'Found runtime lib: ' . $lib);
             }

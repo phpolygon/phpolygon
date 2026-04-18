@@ -78,16 +78,18 @@ class StaticPhpResolver
      *
      * @return list<string> Absolute paths to runtime libs, empty if none needed
      */
-    public function resolveRuntimeLibs(string $platform, string $arch, string $variant = 'base'): array
+    public function resolveRuntimeLibs(string $platform, string $arch, string $variant = 'base', string $phpVersion = '8.5'): array
     {
         if ($platform !== 'windows') {
             return [];
         }
 
-        $cacheKey = $variant !== 'base' ? "{$platform}-{$arch}-{$variant}" : "{$platform}-{$arch}";
+        $cacheKey = $variant !== 'base'
+            ? "{$platform}-{$arch}-{$variant}-php{$phpVersion}"
+            : "{$platform}-{$arch}-php{$phpVersion}";
         $cachedPath = $this->cacheDir . "/{$cacheKey}/vulkan-1.dll";
 
-        $downloaded = $this->downloadVulkanDllIfNewer($platform, $arch, $variant, $cachedPath);
+        $downloaded = $this->downloadVulkanDllIfNewer($platform, $arch, $variant, $phpVersion, $cachedPath);
         if ($downloaded !== null) {
             return [$downloaded];
         }
@@ -102,7 +104,7 @@ class StaticPhpResolver
         return [];
     }
 
-    private function downloadVulkanDllIfNewer(string $platform, string $arch, string $variant, string $cachedPath): ?string
+    private function downloadVulkanDllIfNewer(string $platform, string $arch, string $variant, string $phpVersion, string $cachedPath): ?string
     {
         $releaseUrl = $this->findLatestRuntimeRelease();
         if ($releaseUrl === null) {
@@ -131,7 +133,7 @@ class StaticPhpResolver
             default                 => "{$platform}-{$arch}",
         };
 
-        $prefix = "vulkan-1-dll-{$variant}-";
+        $prefix = "vulkan-1-dll-{$variant}-{$phpVersion}-";
         $suffix = "-{$osName}.zip";
 
         $downloadUrl = null;
@@ -192,8 +194,7 @@ class StaticPhpResolver
             return null;
         }
 
-        $cacheKey = $variant !== 'base' ? "{$platform}-{$arch}-{$variant}" : "{$platform}-{$arch}";
-        $cachedDir = $this->cacheDir . "/{$cacheKey}";
+        $cachedDir = dirname($cachedPath);
         if (!is_dir($cachedDir)) {
             mkdir($cachedDir, 0755, true);
         }
