@@ -106,7 +106,7 @@ class StaticPhpResolver
 
     private function downloadVulkanDllIfNewer(string $platform, string $arch, string $variant, string $phpVersion, string $cachedPath): ?string
     {
-        $releaseUrl = $this->findLatestRuntimeRelease();
+        $releaseUrl = $this->findRuntimeRelease($phpVersion);
         if ($releaseUrl === null) {
             return null;
         }
