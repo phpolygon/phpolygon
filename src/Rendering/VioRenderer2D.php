@@ -69,16 +69,20 @@ class VioRenderer2D implements Renderer2DInterface
 
     public function beginFrame(): void
     {
-        // Sync dimensions and set viewport BEFORE vio_begin to avoid
-        // D3D11/D3D12 render target state issues that cause frame flashing
+        // Sync dimensions from vio context (handles window resize/maximize)
         $size = vio_window_size($this->ctx);
         $this->width = $size[0];
         $this->height = $size[1];
 
         $fb = vio_framebuffer_size($this->ctx);
-        vio_viewport($this->ctx, 0, 0, $fb[0], $fb[1]);
 
+        // Set viewport before AND after vio_begin:
+        // - D3D11 needs it before begin (render target binding)
+        // - D3D12 needs it after begin (part of command list recording)
+        // - OpenGL/Metal/Vulkan: harmless duplicate
+        vio_viewport($this->ctx, 0, 0, $fb[0], $fb[1]);
         vio_begin($this->ctx);
+        vio_viewport($this->ctx, 0, 0, $fb[0], $fb[1]);
 
         $this->zCounter = 0.0;
 
