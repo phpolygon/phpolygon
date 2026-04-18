@@ -420,7 +420,9 @@ class VioRenderer2D implements Renderer2DInterface
 
     public function addFallbackFont(string $baseFont, string $fallbackFont): void
     {
-        $this->fallbackFonts[$baseFont][] = $fallbackFont;
+        if (!isset($this->fallbackFonts[$baseFont]) || !in_array($fallbackFont, $this->fallbackFonts[$baseFont], true)) {
+            $this->fallbackFonts[$baseFont][] = $fallbackFont;
+        }
     }
 
     public function setGlobalAlpha(float $alpha): void
