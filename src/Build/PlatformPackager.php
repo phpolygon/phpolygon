@@ -16,19 +16,24 @@ class PlatformPackager
     /**
      * Package the combined binary for the target platform
      *
+     * @param list<string> $runtimeLibs Extra platform-specific libs resolved by
+     *                                  StaticPhpResolver (e.g. vulkan-1.dll on Windows)
      * @return string Path to the output directory/bundle
      */
-    public function package(string $binaryPath, string $outputDir, string $platform, string $variant = 'base'): string
+    public function package(string $binaryPath, string $outputDir, string $platform, string $variant = 'base', array $runtimeLibs = []): string
     {
         return match ($platform) {
-            'macos' => $this->packageMacOS($binaryPath, $outputDir, $variant),
-            'windows' => $this->packageFlat($binaryPath, $outputDir, '.exe', 'windows', $variant),
-            'linux' => $this->packageFlat($binaryPath, $outputDir, '', 'linux', $variant),
+            'macos' => $this->packageMacOS($binaryPath, $outputDir, $variant, $runtimeLibs),
+            'windows' => $this->packageFlat($binaryPath, $outputDir, '.exe', 'windows', $variant, $runtimeLibs),
+            'linux' => $this->packageFlat($binaryPath, $outputDir, '', 'linux', $variant, $runtimeLibs),
             default => throw new \RuntimeException("Unsupported platform: {$platform}"),
         };
     }
 
-    private function packageMacOS(string $binaryPath, string $outputDir, string $variant = 'base'): string
+    /**
+     * @param list<string> $runtimeLibs
+     */
+    private function packageMacOS(string $binaryPath, string $outputDir, string $variant = 'base', array $runtimeLibs = []): string
     {
         $name = $this->config->name;
         $appDir = $outputDir . "/{$name}.app";
@@ -49,6 +54,9 @@ class PlatformPackager
         // Copy bundle libs (e.g. native .dylib files) next to binary
         $this->copyBundleLibs($macosDir, 'macos');
 
+        // Copy resolver-provided runtime libs
+        $this->copyRuntimeLibs($macosDir, $runtimeLibs);
+
         // Generate Info.plist
         $this->writeInfoPlist($contentsDir);
 
@@ -67,7 +75,10 @@ class PlatformPackager
         return $appDir;
     }
 
-    private function packageFlat(string $binaryPath, string $outputDir, string $extension, string $platform, string $variant = 'base'): string
+    /**
+     * @param list<string> $runtimeLibs
+     */
+    private function packageFlat(string $binaryPath, string $outputDir, string $extension, string $platform, string $variant = 'base', array $runtimeLibs = []): string
     {
         $name = $this->config->name;
         $dir = $outputDir . '/' . $name;
@@ -83,10 +94,28 @@ class PlatformPackager
         // Copy bundle libs next to binary
         $this->copyBundleLibs($dir, $platform);
 
+        // Copy resolver-provided runtime libs (vulkan-1.dll etc.)
+        $this->copyRuntimeLibs($dir, $runtimeLibs);
+
         // Copy external resources alongside binary
         $this->copyExternalResources($dir);
 
         return $dir;
+    }
+
+    /**
+     * Copy runtime libraries resolved by StaticPhpResolver (e.g. vulkan-1.dll
+     * on Windows) to sit next to the binary.
+     *
+     * @param list<string> $runtimeLibs
+     */
+    private function copyRuntimeLibs(string $targetDir, array $runtimeLibs): void
+    {
+        foreach ($runtimeLibs as $lib) {
+            if (file_exists($lib)) {
+                copy($lib, $targetDir . '/' . basename($lib));
+            }
+        }
     }
 
     private function writeInfoPlist(string $contentsDir): void

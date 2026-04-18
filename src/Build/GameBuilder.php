@@ -93,6 +93,12 @@ class GameBuilder
             $sfxPath = $this->staticPhpResolver->resolve($microSfxPath, $platform, $arch, $variant, $phpVersion);
             $this->log('success', 'Found micro.sfx: ' . $sfxPath);
 
+            // Phase 4b: Resolve platform-specific runtime libs (vulkan-1.dll on Windows)
+            $runtimeLibs = $this->staticPhpResolver->resolveRuntimeLibs($platform, $arch, $variant);
+            foreach ($runtimeLibs as $lib) {
+                $this->log('success', 'Found runtime lib: ' . $lib);
+            }
+
             // Phase 5: Combine executable
             $combinedPath = $tempDir . '/' . $this->config->name;
             $this->log('info', 'Combining executable...');
@@ -102,7 +108,7 @@ class GameBuilder
 
             // Phase 6: Package for platform
             $this->log('info', "Packaging for {$platform}...");
-            $outputPath = $this->platformPackager->package($combinedPath, $platformOutputDir, $platform, $variant);
+            $outputPath = $this->platformPackager->package($combinedPath, $platformOutputDir, $platform, $variant, $runtimeLibs);
             $this->log('success', 'Output: ' . $outputPath);
 
             // Phase 7: Report

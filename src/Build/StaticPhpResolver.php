@@ -71,6 +71,146 @@ class StaticPhpResolver
     }
 
     /**
+     * Resolve platform-specific runtime support libraries that must be shipped
+     * alongside the final binary. Currently: vulkan-1.dll on Windows — php-vio
+     * links against vulkan-loader as a dynamic library, so the DLL has to sit
+     * next to the executable. Other platforms return an empty array.
+     *
+     * @return list<string> Absolute paths to runtime libs, empty if none needed
+     */
+    public function resolveRuntimeLibs(string $platform, string $arch, string $variant = 'base'): array
+    {
+        if ($platform !== 'windows') {
+            return [];
+        }
+
+        $cacheKey = $variant !== 'base' ? "{$platform}-{$arch}-{$variant}" : "{$platform}-{$arch}";
+        $cachedPath = $this->cacheDir . "/{$cacheKey}/vulkan-1.dll";
+
+        $downloaded = $this->downloadVulkanDllIfNewer($platform, $arch, $variant, $cachedPath);
+        if ($downloaded !== null) {
+            return [$downloaded];
+        }
+
+        if (file_exists($cachedPath)) {
+            return [$cachedPath];
+        }
+
+        // vulkan-1.dll is optional — Vulkan backend just won't be available if
+        // absent. Log once so the user knows.
+        $this->log("No vulkan-1.dll found for {$cacheKey} — Vulkan backend will be unavailable in the shipped binary.");
+        return [];
+    }
+
+    private function downloadVulkanDllIfNewer(string $platform, string $arch, string $variant, string $cachedPath): ?string
+    {
+        $releaseUrl = $this->findLatestRuntimeRelease();
+        if ($releaseUrl === null) {
+            return null;
+        }
+
+        $json = $this->httpGet($releaseUrl);
+        $release = $json !== null ? json_decode($json, true) : null;
+        if (!is_array($release)) {
+            return null;
+        }
+
+        $publishedAt = isset($release['published_at']) && is_string($release['published_at'])
+            ? strtotime($release['published_at'])
+            : null;
+
+        if ($publishedAt !== false && $publishedAt !== null && file_exists($cachedPath)) {
+            $cachedMtime = filemtime($cachedPath);
+            if ($cachedMtime !== false && $cachedMtime >= $publishedAt) {
+                return null;
+            }
+        }
+
+        $osName = match (true) {
+            $platform === 'windows' => 'windows-x86_64',
+            default                 => "{$platform}-{$arch}",
+        };
+
+        $prefix = "vulkan-1-dll-{$variant}-";
+        $suffix = "-{$osName}.zip";
+
+        $downloadUrl = null;
+        $matchedAsset = null;
+        if (isset($release['assets']) && is_array($release['assets'])) {
+            foreach ($release['assets'] as $asset) {
+                if (!is_array($asset)) {
+                    continue;
+                }
+                $name = isset($asset['name']) && is_string($asset['name']) ? $asset['name'] : '';
+                if (str_starts_with($name, $prefix) && str_ends_with($name, $suffix)) {
+                    $downloadUrl = isset($asset['browser_download_url']) && is_string($asset['browser_download_url'])
+                        ? $asset['browser_download_url']
+                        : null;
+                    $matchedAsset = $name;
+                    break;
+                }
+            }
+        }
+
+        if ($downloadUrl === null) {
+            return null;
+        }
+
+        $this->log("Downloading {$matchedAsset}...");
+        /** @var string $downloadUrl */
+
+        $tempFile = tempnam(sys_get_temp_dir(), 'phpolygon-vkdll-');
+        if ($tempFile === false) {
+            return null;
+        }
+
+        $content = $this->httpGet($downloadUrl);
+        if ($content === null) {
+            @unlink($tempFile);
+            return null;
+        }
+        file_put_contents($tempFile, $content);
+
+        $actualFile = null;
+        if (class_exists(\ZipArchive::class)) {
+            $zip = new \ZipArchive();
+            if ($zip->open($tempFile) === true) {
+                $extractDir = sys_get_temp_dir() . '/phpolygon-vkdll-extract-' . getmypid();
+                $zip->extractTo($extractDir);
+                $zip->close();
+                foreach (['vulkan-1.dll', 'buildroot/bin/vulkan-1.dll'] as $candidate) {
+                    if (file_exists($extractDir . '/' . $candidate)) {
+                        $actualFile = $extractDir . '/' . $candidate;
+                        break;
+                    }
+                }
+            }
+        }
+
+        if ($actualFile === null) {
+            @unlink($tempFile);
+            return null;
+        }
+
+        $cacheKey = $variant !== 'base' ? "{$platform}-{$arch}-{$variant}" : "{$platform}-{$arch}";
+        $cachedDir = $this->cacheDir . "/{$cacheKey}";
+        if (!is_dir($cachedDir)) {
+            mkdir($cachedDir, 0755, true);
+        }
+        copy($actualFile, $cachedPath);
+
+        @unlink($tempFile);
+        if (isset($extractDir) && is_dir($extractDir)) {
+            $this->removeDir($extractDir);
+        }
+
+        $size = filesize($cachedPath);
+        $this->log(sprintf("Downloaded and cached: %s (%.1f KB)", $cachedPath, $size / 1024));
+
+        return $cachedPath;
+    }
+
+    /**
      * Check if a newer release exists on GitHub than the cached binary.
      * Downloads and caches if newer; returns null if cache is up-to-date or offline.
      */
