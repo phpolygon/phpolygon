@@ -86,7 +86,14 @@ class VioRenderer3D implements Renderer3DInterface
 
     // Skybox / cubemaps
     private ?VioMesh $skyboxMesh = null;
-    /** @var array<string, VioCubemap> */
+    /**
+     * Cached GPU cubemaps, paired with the registry source object they were
+     * uploaded from. When DayNightSystem regenerates the procedural sky,
+     * CubemapRegistry hands out a new CubemapData instance and loadCubemap()
+     * re-uploads instead of returning the stale GPU texture.
+     *
+     * @var array<string, array{cubemap: VioCubemap, source: object|null}>
+     */
     private array $cubemapCache = [];
     private ?string $pendingSkyboxId = null;
 
@@ -680,35 +687,46 @@ class VioRenderer3D implements Renderer3DInterface
 
     private function loadCubemap(string $cubemapId): ?VioCubemap
     {
+        // Resolve the current source first so cache freshness can be checked
+        // by object identity — CubemapRegistry hands out the same instance
+        // until someone calls registerProcedural again with new data.
+        $source = CubemapRegistry::isProcedural($cubemapId)
+            ? CubemapRegistry::getProcedural($cubemapId)
+            : CubemapRegistry::get($cubemapId);
+
         if (isset($this->cubemapCache[$cubemapId])) {
-            return $this->cubemapCache[$cubemapId];
+            $cached = $this->cubemapCache[$cubemapId];
+            if ($cached['source'] === $source) {
+                return $cached['cubemap'];
+            }
+            // Source was replaced (e.g. DayNightSystem regenerated the sky).
+            // Drop the cache entry so we re-upload below; the old VioCubemap
+            // is released by PHP's GC once the last reference goes out of scope.
+            unset($this->cubemapCache[$cubemapId]);
+        }
+
+        if ($source === null) {
+            return null;
         }
 
         $cubemap = false;
-
-        if (CubemapRegistry::isProcedural($cubemapId)) {
-            $data = CubemapRegistry::getProcedural($cubemapId);
-            if ($data !== null) {
-                $cubemap = vio_cubemap($this->ctx, [
-                    'pixels' => $data->faces,
-                    'width' => $data->resolution,
-                    'height' => $data->resolution,
-                ]);
-            }
-        } else {
-            $faces = CubemapRegistry::get($cubemapId);
-            if ($faces !== null) {
-                $cubemap = vio_cubemap($this->ctx, [
-                    'faces' => $faces->toArray(),
-                ]);
-            }
+        if ($source instanceof CubemapData) {
+            $cubemap = vio_cubemap($this->ctx, [
+                'pixels' => $source->faces,
+                'width' => $source->resolution,
+                'height' => $source->resolution,
+            ]);
+        } elseif ($source instanceof CubemapFaces) {
+            $cubemap = vio_cubemap($this->ctx, [
+                'faces' => $source->toArray(),
+            ]);
         }
 
         if ($cubemap === false) {
             return null;
         }
 
-        $this->cubemapCache[$cubemapId] = $cubemap;
+        $this->cubemapCache[$cubemapId] = ['cubemap' => $cubemap, 'source' => $source];
         return $cubemap;
     }
 
