@@ -4,11 +4,14 @@ declare(strict_types=1);
 
 namespace PHPolygon\System;
 
+use PHPolygon\Component\Atmosphere;
 use PHPolygon\Component\Camera3DComponent;
 use PHPolygon\Component\DayNightCycle;
 use PHPolygon\Component\DirectionalLight;
 use PHPolygon\Component\MeshRenderer;
 use PHPolygon\Component\Transform3D;
+use PHPolygon\Component\Weather;
+use PHPolygon\Component\Wind;
 use PHPolygon\ECS\AbstractSystem;
 use PHPolygon\ECS\World;
 use PHPolygon\Math\Vec3;
@@ -127,8 +130,12 @@ class DayNightSystem extends AbstractSystem
     // Sky is now evaluated per-pixel by the atmospheric fragment shader
     // each frame — no caching or regeneration threshold needed.
 
+    /** Accumulated real time for cloud drift animation. */
+    private float $skyTime = 0.0;
+
     public function update(World $world, float $dt): void
     {
+        $this->skyTime += $dt;
         foreach ($world->query(DayNightCycle::class) as $entity) {
             $this->cachedCycle = $entity->get(DayNightCycle::class);
             break;
@@ -389,6 +396,35 @@ class DayNightSystem extends AbstractSystem
             ? (new Vec3($moonX, $moonY, $moonZ))->normalize()
             : new Vec3(0.0, -1.0, 0.0);
 
+        // Pull atmosphere state from Weather + Atmosphere + Wind components
+        // if present, otherwise fall back to the DayNightCycle's cached
+        // cloudDarkening value so the system still works in minimal scenes.
+        $cloudCover = $cycle->cloudDarkening;
+        $fogDensity = 0.0;
+        foreach ($world->query(Weather::class) as $entity) {
+            $w = $entity->get(Weather::class);
+            $cloudCover = max($cloudCover, $w->cloudCoverage);
+            // fogDensity is already a storm/humidity derived value in [0,1].
+            $fogDensity = max($fogDensity, $w->fogDensity);
+            break;
+        }
+
+        $cloudAltitude = 45.0;
+        foreach ($world->query(Atmosphere::class) as $entity) {
+            $cloudAltitude = $entity->get(Atmosphere::class)->cloudBaseAltitude;
+            break;
+        }
+
+        // Cloud wind: default drift direction; speed scales with Wind intensity.
+        $windSpeed = 1.5;
+        foreach ($world->query(Wind::class) as $entity) {
+            $windSpeed = 1.0 + $entity->get(Wind::class)->intensity * 6.0;
+            break;
+        }
+
+        // Clouds grow fuller + shift toward the horizon near dusk/dawn.
+        $cloudDensity = 0.55 + $fogDensity * 0.25 + $cloudCover * 0.25;
+
         $this->commandList->add(new SetSky(
             sunDirection: $skySunDir,
             sunColor: new Color(
@@ -406,8 +442,14 @@ class DayNightSystem extends AbstractSystem
             moonDirection: $skyMoonDir,
             moonColor: new Color(0.85, 0.87, 0.95),
             moonIntensity: $moonVisible ? $moonBright : 0.0,
-            cloudCover: $cycle->cloudDarkening,
+            cloudCover: $cloudCover,
+            cloudAltitude: $cloudAltitude,
+            cloudDensity: $cloudDensity,
+            cloudWindSpeed: $windSpeed,
+            cloudWindDirection: new Vec3(1.0, 0.0, 0.2),
+            fogDensity: $fogDensity,
             starBrightness: $cycle->isDaytime() ? 0.0 : 0.9 * $moonBright,
+            time: $this->skyTime,
         ));
 
         // --- Sun sphere material ---

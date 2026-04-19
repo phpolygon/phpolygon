@@ -35,9 +35,21 @@ final class SetSky
         public readonly ?Vec3 $moonDirection = null,
         public readonly Color $moonColor = new Color(0.85, 0.87, 0.95),
         public readonly float $moonIntensity = 0.0,
-        /** 0..1, fraction of sky filled with cloud tone at dusk. */
+        /** 0..1, fraction of sky filled with cloud cover. */
         public readonly float $cloudCover = 0.0,
+        /** Cloud layer altitude (world units above the camera). */
+        public readonly float $cloudAltitude = 45.0,
+        /** 0..1 — contrast / opacity of clouds (low humidity = wispy). */
+        public readonly float $cloudDensity = 0.7,
+        /** Horizontal drift speed of the cloud noise (world units / sec). */
+        public readonly float $cloudWindSpeed = 1.5,
+        /** Wind direction in the XZ plane (normalized in-shader). */
+        public readonly Vec3 $cloudWindDirection = new Vec3(1.0, 0.0, 0.2),
+        /** 0..1 — horizon haze density (more = thicker, lower visibility). */
+        public readonly float $fogDensity = 0.0,
         /** 0..1 — brightness of the starfield. 0 = no stars. */
         public readonly float $starBrightness = 0.0,
+        /** Game-world time accumulator for cloud drift animation. */
+        public readonly float $time = 0.0,
     ) {}
 }
