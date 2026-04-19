@@ -1546,9 +1546,12 @@ vec3 computeSand(vec3 N, vec3 V, vec3 L, out float roughOut) {
     ripple = smoothstep(0.3, 0.7, ripple);
     sandColor *= 1.0 - ripple * 0.09 * smoothstep(0.35, 0.9, zone);
 
-    // Shore wetness: geometry-driven from the terrain UV zone. Close to the
-    // waterline the mesh encodes a low zone value → permanently damp sand.
-    float shoreWet = 1.0 - smoothstep(0.0, 0.35, zone);
+    // Shore wetness: world-Y driven so ONLY sand at/below the water
+    // surface is permanently damp. Intertidal zone (-0.1..+0.1) fades,
+    // above +0.1 is bone dry (until rain). Using world Y means dune tops
+    // and elevated back-beach stay dry, and only actual water-touching
+    // surfaces look wet — regardless of the mesh's UV zone encoding.
+    float shoreWet = 1.0 - smoothstep(-0.1, 0.15, v_worldPos.y);
     float wetness = max(shoreWet, u_rain_wetness);
 
     // Wet sand is darker + warmer-brown. Keep blue channel low.
