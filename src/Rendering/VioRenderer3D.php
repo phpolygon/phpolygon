@@ -165,6 +165,15 @@ class VioRenderer3D implements Renderer3DInterface
     {
         $commands = $commandList->getCommands();
 
+        if (getenv('VIO_DEBUG') === '1') {
+            $cmdTypes = [];
+            foreach ($commands as $c) {
+                $cls = (new \ReflectionClass($c))->getShortName();
+                $cmdTypes[$cls] = ($cmdTypes[$cls] ?? 0) + 1;
+            }
+            fprintf(STDERR, "[VioRenderer3D] render() called with %d commands: %s\n", count($commands), json_encode($cmdTypes));
+        }
+
         // --- Pass 1: Collect state ---
         $ambientColor = new Color(0.1, 0.1, 0.1);
         $ambientIntensity = 1.0;
@@ -213,6 +222,11 @@ class VioRenderer3D implements Renderer3DInterface
         }
 
         if ($this->currentViewMatrix === null || $this->currentProjectionMatrix === null) {
+            if (getenv('VIO_DEBUG') === '1') {
+                fprintf(STDERR, "[VioRenderer3D] EARLY RETURN — no camera! viewMatrix=%s projMatrix=%s\n",
+                    $this->currentViewMatrix === null ? 'null' : 'set',
+                    $this->currentProjectionMatrix === null ? 'null' : 'set');
+            }
             return;
         }
 
@@ -243,19 +257,23 @@ class VioRenderer3D implements Renderer3DInterface
 
         vio_viewport($this->ctx, 0, 0, $this->width, $this->height);
 
+        static $vpDbg = false;
+        if (!$vpDbg && getenv('VIO_DEBUG') === '1') {
+            fprintf(STDERR, "[VioRenderer3D] viewport: %dx%d\n", $this->width, $this->height);
+            $vpDbg = true;
+        }
+
         // --- Atmospheric sky (fullscreen, depth test off, rendered first).
         // The fragment shader reconstructs a world-space view ray per pixel
         // from u_sky_inv_vp and evaluates the gradient + sun/moon analytically
         // — no skybox geometry. Opaque geometry overwrites wherever it draws.
-        if ($this->pendingSky !== null && $this->currentViewMatrix !== null && $this->currentProjectionMatrix !== null) {
+        if ($this->pendingSky !== null) {
             $this->renderAtmosphericSky($this->pendingSky);
         }
         // Legacy cubemap skybox still supported; rendered only if no SetSky
         // command was issued this frame.
         if ($this->pendingSky === null
-            && $this->pendingSkyboxId !== null
-            && $this->currentViewMatrix !== null
-            && $this->currentProjectionMatrix !== null) {
+            && $this->pendingSkyboxId !== null) {
             $this->renderSkybox($this->pendingSkyboxId);
         }
         $this->pendingSky = null;
