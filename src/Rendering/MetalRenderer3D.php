@@ -25,6 +25,7 @@ use PHPolygon\Rendering\Command\SetAmbientLight;
 use PHPolygon\Rendering\Command\SetCamera;
 use PHPolygon\Rendering\Command\SetDirectionalLight;
 use PHPolygon\Rendering\Command\SetFog;
+use PHPolygon\Rendering\Command\SetSky;
 use PHPolygon\Rendering\Command\SetSkybox;
 use PHPolygon\Rendering\Command\SetSkyColors;
 
@@ -58,15 +59,23 @@ class MetalRenderer3D implements Renderer3DInterface
     private RenderPipelineState $pipeline;
     private DepthStencilState $depthStencilState;
 
-    private const FRAME_UBO_SIZE    = 128;  // mat4 view + mat4 projection
-    private const LIGHTING_UBO_SIZE = 384;  // mirrors VulkanRenderer3D
+    private const FRAME_UBO_SIZE = 128;  // mat4 view + mat4 projection
 
-    /** Per-frame uniform buffers (StorageModeShared → CPU writes, GPU reads) */
+    /** Per-frame view/projection buffer (uploaded once per render(), shared across draws). */
     private Buffer $frameUbo;
-    private Buffer $lightingUbo;
 
-    /** Pre-compiled .metallib (xcrun metal at build time) */
-    private const METALLIB_PATH = __DIR__ . '/../../resources/shaders/compiled/mesh3d.metallib';
+    /** MSL shader source — compiled at runtime via Device::createLibraryWithSource. */
+    private const SHADER_PATH = __DIR__ . '/../../resources/shaders/source/mesh3d.metal';
+    private const SKY_SHADER_PATH = __DIR__ . '/../../resources/shaders/source/sky.metal';
+
+    /** Atmospheric sky pipeline (depth test off, no vertex buffer — fullscreen triangle). */
+    private ?RenderPipelineState $skyPipeline = null;
+    private ?DepthStencilState $skyDepthState = null;
+    private ?SetSky $pendingSky = null;
+
+    /** Material/proc_mode prefix → proc_mode int cache (mirrors VioRenderer3D::resolveProcMode). */
+    /** @var array<string, int> */
+    private static array $procModeCache = [];
 
     /** @var float[] */
     private array $viewMatrix = [];
@@ -78,8 +87,13 @@ class MetalRenderer3D implements Renderer3DInterface
     private array $dirLight = [0.0, -1.0, 0.0, 0.0, 1.0, 1.0, 1.0];
     /** @var float[] [r, g, b] */
     private array $albedo = [0.8, 0.8, 0.8];
+    /** @var float[] [r, g, b] */
+    private array $emission = [0.0, 0.0, 0.0];
     private float $roughness = 0.5;
     private float $metallic  = 0.0;
+    private float $alpha     = 1.0;
+    private int   $procMode  = 0;
+    private float $moonPhase = 0.0;
     /** @var float[] [r, g, b, near, far] */
     private array $fog = [0.5, 0.5, 0.5, 50.0, 200.0];
     /** @var float[] [x, y, z] */
@@ -91,14 +105,25 @@ class MetalRenderer3D implements Renderer3DInterface
     private float $clearG = 0.0;
     private float $clearB = 0.0;
 
+    /** @var float[] [r, g, b] — sampled from horizon for water reflections */
+    private array $skyColor     = [0.55, 0.70, 0.85];
+    /** @var float[] [r, g, b] */
+    private array $horizonColor = [0.85, 0.88, 0.92];
+    /** @var float[] [r, g, b] — global terrain/vegetation tint, default no-op */
+    private array $seasonTint   = [1.0, 1.0, 1.0];
+
+    private readonly float $bootTime;
+    private float $globalTime = 0.0;
+
     /** @var array<string, array{vb: Buffer, ib: Buffer, count: int}> */
     private array $meshCache = [];
 
-    public function __construct(int $width, int $height, object $windowHandle)
+    public function __construct(int $width, int $height, int $nativeWindowHandle)
     {
-        $this->width  = $width;
-        $this->height = $height;
-        $this->initMetal($windowHandle);
+        $this->width    = $width;
+        $this->height   = $height;
+        $this->bootTime = microtime(true);
+        $this->initMetal($nativeWindowHandle);
     }
 
     public function beginFrame(): void
@@ -131,14 +156,20 @@ class MetalRenderer3D implements Renderer3DInterface
 
     public function render(RenderCommandList $commandList): void
     {
+        $this->globalTime = microtime(true) - $this->bootTime;
+
         $identity         = Mat4::identity()->toArray();
         $this->viewMatrix = $identity;
         $this->projMatrix = $identity;
         $this->ambient    = [1.0, 1.0, 1.0, 0.1];
         $this->dirLight   = [0.0, -1.0, 0.0, 0.0, 1.0, 1.0, 1.0];
         $this->albedo     = [0.8, 0.8, 0.8];
+        $this->emission   = [0.0, 0.0, 0.0];
         $this->roughness  = 0.5;
         $this->metallic   = 0.0;
+        $this->alpha      = 1.0;
+        $this->procMode   = 0;
+        $this->moonPhase  = 0.0;
         $this->fog        = [0.5, 0.5, 0.5, 50.0, 200.0];
         $this->cameraPos  = [0.0, 0.0, 0.0];
 
@@ -169,13 +200,22 @@ class MetalRenderer3D implements Renderer3DInterface
                 $this->clearR = $command->skyColor->r;
                 $this->clearG = $command->skyColor->g;
                 $this->clearB = $command->skyColor->b;
+                $this->skyColor = [$command->skyColor->r, $command->skyColor->g, $command->skyColor->b];
+                if (property_exists($command, 'horizonColor') && $command->horizonColor !== null) {
+                    $this->horizonColor = [
+                        $command->horizonColor->r,
+                        $command->horizonColor->g,
+                        $command->horizonColor->b,
+                    ];
+                }
+            } elseif ($command instanceof SetSky) {
+                $this->pendingSky = $command;
             } elseif ($command instanceof SetSkybox) {
                 // TODO Phase 7: Skybox pipeline
             }
         }
 
         $this->uploadFrameUbo();
-        $this->uploadLightingUbo();
 
         // ── Acquire drawable + build render pass ───────────────────────────
         $drawable     = $this->layer->nextDrawable();
@@ -204,25 +244,41 @@ class MetalRenderer3D implements Renderer3DInterface
         $commandBuffer = $this->commandQueue->createCommandBuffer();
         $encoder       = $commandBuffer->createRenderCommandEncoder($renderPass);
 
-        $encoder->setRenderPipelineState($this->pipeline);
-        $encoder->setDepthStencilState($this->depthStencilState);
-        $encoder->setCullMode(\Metal\CullModeBack);
-        $encoder->setFrontFacingWinding(\Metal\WindingCounterClockwise);
         $encoder->setViewport(0.0, 0.0, (float) $this->width, (float) $this->height, 0.0, 1.0);
         $encoder->setScissorRect(0, 0, $this->width, $this->height);
 
-        // Bind UBOs — indices match [[buffer(N)]] in mesh3d.metal
-        $encoder->setVertexBuffer($this->frameUbo,   0, 1); // slot 1: FrameUBO
-        $encoder->setFragmentBuffer($this->lightingUbo, 0, 2); // slot 2: LightingUBO
+        // ── Atmospheric sky pass (before opaque, depth test off, fullscreen) ──
+        if ($this->pendingSky !== null && $this->skyPipeline !== null) {
+            $this->encodeSkyPass($encoder, $this->pendingSky);
+        }
+        $this->pendingSky = null;
 
+        $encoder->setRenderPipelineState($this->pipeline);
+        $encoder->setDepthStencilState($this->depthStencilState);
+        // Match OpenGLRenderer3D / VioRenderer3D: culling disabled. Many
+        // procedural meshes (TerrainMesh, PalmFrondMesh, RoofBuilder gables)
+        // mix winding orders or have geometric normals pointing opposite to
+        // their vertex normals; back-face culling makes them disappear.
+        $encoder->setCullMode(\Metal\CullModeNone);
+        $encoder->setFrontFacingWinding(\Metal\WindingCounterClockwise);
+
+        // FrameUBO is constant for the whole frame — bind once.
+        $encoder->setVertexBuffer($this->frameUbo, 0, 1); // slot 1: FrameUBO
+
+        // LightingUBO changes per material, so it must be uploaded per draw.
+        // setFragmentBytes copies the data into the command stream (≤4 KB),
+        // giving each draw its own snapshot — using a single shared MTLBuffer
+        // and rewriting it would race with in-flight draws and cause every
+        // mesh to render with the LAST draw's material colour (the bug we
+        // had before this rewrite).
         foreach ($commandList->getCommands() as $command) {
             if ($command instanceof DrawMesh) {
                 $this->resolveMaterial($command->materialId);
-                $this->uploadLightingUbo();
+                $encoder->setFragmentBytes($this->buildLightingUboBytes(), 2);
                 $this->drawMeshCommand($encoder, $command->meshId, $command->modelMatrix);
             } elseif ($command instanceof DrawMeshInstanced) {
                 $this->resolveMaterial($command->materialId);
-                $this->uploadLightingUbo();
+                $encoder->setFragmentBytes($this->buildLightingUboBytes(), 2);
                 foreach ($command->matrices as $matrix) {
                     $this->drawMeshCommand($encoder, $command->meshId, $matrix);
                 }
@@ -245,13 +301,58 @@ class MetalRenderer3D implements Renderer3DInterface
         $material = MaterialRegistry::get($materialId);
         if ($material !== null) {
             $this->albedo    = [$material->albedo->r, $material->albedo->g, $material->albedo->b];
+            $this->emission  = [$material->emission->r, $material->emission->g, $material->emission->b];
             $this->roughness = $material->roughness;
             $this->metallic  = $material->metallic;
+            $this->alpha     = $material->alpha;
         } else {
             $this->albedo    = [0.8, 0.8, 0.8];
+            $this->emission  = [0.0, 0.0, 0.0];
             $this->roughness = 0.5;
             $this->metallic  = 0.0;
+            $this->alpha     = 1.0;
         }
+
+        $this->procMode = self::$procModeCache[$materialId] ?? $this->resolveProcMode($materialId);
+
+        // Moon material encodes its current phase in the roughness slot
+        // (mirrors VioRenderer3D — the dedicated moon shader reads it as
+        // u_moon_phase). Reset to 0 for everything else so we never bleed
+        // a leftover phase value into other procedural modes.
+        $this->moonPhase = $this->procMode === 9 && $material !== null
+            ? $material->roughness
+            : 0.0;
+    }
+
+    private function resolveProcMode(string $materialId): int
+    {
+        $prefixRaw = strtok($materialId, '0123456789');
+        $prefix    = $prefixRaw === false ? $materialId : $prefixRaw;
+
+        $mode = match (true) {
+            str_starts_with($prefix, 'sand_terrain')   => 1,
+            str_starts_with($prefix, 'water_')         => 2,
+            str_starts_with($prefix, 'rock')           => 3,
+            str_starts_with($prefix, 'palm_trunk')     => 4,
+            str_starts_with($prefix, 'palm_branch'),
+            str_starts_with($prefix, 'palm_leaves'),
+            str_starts_with($prefix, 'palm_leaf'),
+            str_starts_with($prefix, 'palm_canopy'),
+            str_starts_with($prefix, 'palm_frond')     => 5,
+            str_starts_with($prefix, 'cloud_')         => 6,
+            str_starts_with($prefix, 'hut_wood'),
+            str_starts_with($prefix, 'hut_door'),
+            str_starts_with($prefix, 'hut_table'),
+            str_starts_with($prefix, 'hut_chair'),
+            str_starts_with($prefix, 'hut_floor'),
+            str_starts_with($prefix, 'hut_window')     => 7,
+            str_starts_with($prefix, 'hut_thatch')     => 8,
+            str_starts_with($prefix, 'moon_disc')      => 9,
+            default                                    => 0,
+        };
+
+        self::$procModeCache[$materialId] = $mode;
+        return $mode;
     }
 
     private function drawMeshCommand(\Metal\RenderCommandEncoder $encoder, string $meshId, Mat4 $modelMatrix): void
@@ -324,18 +425,35 @@ class MetalRenderer3D implements Renderer3DInterface
         $this->frameUbo->writeRawContents($data, 0);
     }
 
-    private function uploadLightingUbo(): void
+    /**
+     * Pack the LightingUBO into a binary string matching the MSL `LightingUBO`
+     * struct layout in mesh3d.metal. Caller hands this directly to
+     * `RenderCommandEncoder::setFragmentBytes` — Metal copies the contents
+     * into the command stream so each draw owns its own snapshot, even
+     * though we mutate $this->* between draws.
+     *
+     * Field order, byte offsets, and packing must match the MSL struct
+     * exactly. `packed_float3` is 12 bytes; the trailing scalar fills the
+     * remaining 4 bytes of each 16-byte slot.
+     */
+    private function buildLightingUboBytes(): string
     {
-        // Identical layout to VulkanRenderer3D — same LightingUBO struct in the shader.
         $data  = pack('f4', $this->ambient[0],   $this->ambient[1],   $this->ambient[2],   $this->ambient[3]);
         $data .= pack('f4', $this->dirLight[0],  $this->dirLight[1],  $this->dirLight[2],  $this->dirLight[3]);
         $data .= pack('f4', $this->dirLight[4],  $this->dirLight[5],  $this->dirLight[6],  0.0);
-        $data .= pack('f4', $this->albedo[0], $this->albedo[1], $this->albedo[2], $this->roughness);
-        $data .= pack('f4', 0.0, 0.0, 0.0, $this->metallic);
+        $data .= pack('f4', $this->albedo[0],    $this->albedo[1],    $this->albedo[2],    $this->roughness);
+        $data .= pack('f4', $this->emission[0],  $this->emission[1],  $this->emission[2],  $this->metallic);
         $data .= pack('f4', $this->fog[0],       $this->fog[1],       $this->fog[2],       $this->fog[3]);
         $data .= pack('f4', $this->cameraPos[0], $this->cameraPos[1], $this->cameraPos[2], $this->fog[4]);
         $plCount = count($this->pointLights);
         $data .= pack('l1f3', $plCount, 0.0, 0.0, 0.0);
+
+        // Procedural-mode environment block (added 2026-04-28).
+        $data .= pack('f3f1', $this->skyColor[0],     $this->skyColor[1],     $this->skyColor[2],     $this->globalTime);
+        $data .= pack('f3f1', $this->horizonColor[0], $this->horizonColor[1], $this->horizonColor[2], $this->moonPhase);
+        $data .= pack('f3l1', $this->seasonTint[0],   $this->seasonTint[1],   $this->seasonTint[2],   $this->procMode);
+        $data .= pack('f4',   $this->alpha, 0.0, 0.0, 0.0);
+
         for ($i = 0; $i < 8; $i++) {
             if ($i < $plCount) {
                 $pl    = $this->pointLights[$i];
@@ -345,29 +463,47 @@ class MetalRenderer3D implements Renderer3DInterface
                 $data .= pack('f8', 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
             }
         }
-        $this->lightingUbo->writeRawContents($data, 0);
+        return $data;
     }
 
-    private function initMetal(object $windowHandle): void
+    private function initMetal(int $nativeWindowHandle): void
     {
+        if ($nativeWindowHandle === 0) {
+            throw new \RuntimeException(
+                'MetalRenderer3D: native window handle is 0 — vio_native_window_handle() returned no NSWindow. '
+                . 'Ensure the engine runs on macOS with vio + GLFW windowing.'
+            );
+        }
+
         $this->device       = \Metal\createSystemDefaultDevice();
         $this->commandQueue = $this->device->createCommandQueue();
 
-        // Attach CAMetalLayer to the GLFW window's NSView.
-        // glfwGetCocoaWindow() returns the NSWindow pointer as an integer (macOS only).
-        // Must happen before any nextDrawable() calls.
-        $nsWindowPtr  = glfwGetCocoaWindow($windowHandle);
-        $this->layer  = new Layer($nsWindowPtr, $this->device, \Metal\PixelFormatBGRA8Unorm);
+        // Attach CAMetalLayer to the GLFW window's NSView. The handle is the
+        // raw NSWindow pointer (uintptr_t cast to int), which Metal\Layer's
+        // constructor bridges back to an Objective-C NSWindow before
+        // installing the CAMetalLayer on its content view.
+        $this->layer = new Layer($nativeWindowHandle, $this->device, \Metal\PixelFormatBGRA8Unorm);
         $this->layer->setDrawableSize($this->width, $this->height);
 
         $this->createPipeline();
         $this->createDepthStencilState();
         $this->createUBOs();
+        $this->createSkyPipeline();
     }
 
     private function createPipeline(): void
     {
-        $library = $this->device->createLibraryWithFile(self::METALLIB_PATH);
+        // Compile MSL at runtime via createLibraryWithSource. This avoids the
+        // dependency on full Xcode (the `metal` driver shipped with CLT only
+        // is missing) and lets us iterate the shader without a build step.
+        $mslSource = @file_get_contents(self::SHADER_PATH);
+        if ($mslSource === false) {
+            throw new \RuntimeException(
+                'MetalRenderer3D: failed to read MSL source at ' . self::SHADER_PATH
+            );
+        }
+
+        $library = $this->device->createLibraryWithSource($mslSource);
         $vertFn  = $library->getFunction('vertex_mesh3d');
         $fragFn  = $library->getFunction('fragment_mesh3d');
 
@@ -395,12 +531,115 @@ class MetalRenderer3D implements Renderer3DInterface
         $desc->setDepthCompareFunction(\Metal\CompareFunctionLess);
         $desc->setDepthWriteEnabled(true);
         $this->depthStencilState = $this->device->createDepthStencilState($desc);
+
+        // Sky pass uses an "always pass, never write" depth state — atmospheric
+        // sky is drawn first as a fullscreen pass, then opaque geometry overwrites
+        // wherever it draws.
+        $skyDesc = new DepthStencilDescriptor();
+        $skyDesc->setDepthCompareFunction(\Metal\CompareFunctionAlways);
+        $skyDesc->setDepthWriteEnabled(false);
+        $this->skyDepthState = $this->device->createDepthStencilState($skyDesc);
     }
 
     private function createUBOs(): void
     {
-        // StorageModeShared: accessible by both CPU and GPU — ideal for UBOs written each frame
-        $this->frameUbo    = $this->device->createBuffer(self::FRAME_UBO_SIZE,    \Metal\StorageModeShared);
-        $this->lightingUbo = $this->device->createBuffer(self::LIGHTING_UBO_SIZE, \Metal\StorageModeShared);
+        // FrameUBO is rebound once per render() and read by every draw, so it
+        // stays a managed Buffer. LightingUBO is per-draw and goes through
+        // setFragmentBytes (see buildLightingUboBytes), so no Buffer is
+        // allocated for it.
+        $this->frameUbo = $this->device->createBuffer(self::FRAME_UBO_SIZE, \Metal\StorageModeShared);
+    }
+
+    private function createSkyPipeline(): void
+    {
+        $mslSource = @file_get_contents(self::SKY_SHADER_PATH);
+        if ($mslSource === false) {
+            // Sky is optional — log and skip. Renderer falls back to clear color.
+            return;
+        }
+
+        try {
+            $library = $this->device->createLibraryWithSource($mslSource);
+            $vertFn  = $library->getFunction('vertex_sky');
+            $fragFn  = $library->getFunction('fragment_sky');
+
+            $desc = new RenderPipelineDescriptor();
+            $desc->setVertexFunction($vertFn);
+            $desc->setFragmentFunction($fragFn);
+            $desc->getColorAttachment(0)->setPixelFormat(\Metal\PixelFormatBGRA8Unorm);
+            $desc->setDepthAttachmentPixelFormat(\Metal\PixelFormatDepth32Float);
+            // No vertex descriptor — fullscreen triangle uses [[vertex_id]].
+
+            $this->skyPipeline = $this->device->createRenderPipelineState($desc);
+        } catch (\Throwable $e) {
+            $this->skyPipeline = null;
+        }
+    }
+
+    /**
+     * Encode the atmospheric sky pass. Runs INSIDE the same render encoder as
+     * the opaque pass — depth state is "always pass, never write" so the
+     * sky is rendered first and opaque geometry overdraws it.
+     */
+    private function encodeSkyPass(\Metal\RenderCommandEncoder $encoder, SetSky $sky): void
+    {
+        if ($this->skyPipeline === null || $this->skyDepthState === null) {
+            return;
+        }
+
+        // Build inverse(projection * rotation_view) so the fragment shader can
+        // unproject NDC back to a world-space view direction. Translation is
+        // stripped — sky depends only on look direction, not position.
+        $vm = $this->viewMatrix;
+        $rotView = new Mat4([
+            $vm[0],  $vm[1],  $vm[2],  0.0,
+            $vm[4],  $vm[5],  $vm[6],  0.0,
+            $vm[8],  $vm[9],  $vm[10], 0.0,
+            0.0,     0.0,     0.0,     1.0,
+        ]);
+        // Match the Z-corrected projection used for opaque draws (uploadFrameUbo).
+        $metalClip = new Mat4([
+            1.0, 0.0, 0.0, 0.0,
+            0.0, 1.0, 0.0, 0.0,
+            0.0, 0.0, 0.5, 0.0,
+            0.0, 0.0, 0.5, 1.0,
+        ]);
+        $proj  = $metalClip->multiply(new Mat4($this->projMatrix));
+        $vp    = $proj->multiply($rotView);
+        $invVp = $vp->inverse();
+
+        $encoder->setRenderPipelineState($this->skyPipeline);
+        $encoder->setDepthStencilState($this->skyDepthState);
+        $encoder->setCullMode(\Metal\CullModeNone);
+
+        // Pack SkyUBO matching the MSL struct layout (see sky.metal).
+        // float4x4 (64) + 14 × (vec3 + scalar) blocks (16 bytes each) + 8 trailing bytes.
+        // Easiest: build via pack() in the same field order as the struct.
+        $sd = $sky->sunDirection;
+        $sc = $sky->sunColor;
+        $zc = $sky->zenithColor;
+        $hc = $sky->horizonColor;
+        $gc = $sky->groundColor;
+        $md = $sky->moonDirection ?? new \PHPolygon\Math\Vec3(0.0, -1.0, 0.0);
+        $mc = $sky->moonColor;
+        $cwd = $sky->cloudWindDirection;
+        $cwl = sqrt($cwd->x * $cwd->x + $cwd->z * $cwd->z);
+        $wx  = $cwl > 1e-6 ? $cwd->x / $cwl : 1.0;
+        $wz  = $cwl > 1e-6 ? $cwd->z / $cwl : 0.0;
+
+        $bytes = pack('f16', ...$invVp->toArray())
+               . pack('f3f',  $this->cameraPos[0], $this->cameraPos[1], $this->cameraPos[2], $sky->time)
+               . pack('f3f',  $sd->x, $sd->y, $sd->z, $sky->sunIntensity)
+               . pack('f3f',  $sc->r, $sc->g, $sc->b, $sky->sunSize)
+               . pack('f3f',  $zc->r, $zc->g, $zc->b, $sky->sunGlowSize)
+               . pack('f3f',  $hc->r, $hc->g, $hc->b, $sky->sunGlowIntensity)
+               . pack('f3f',  $gc->r, $gc->g, $gc->b, $sky->starBrightness)
+               . pack('f3f',  $md->x, $md->y, $md->z, $sky->moonIntensity)
+               . pack('f3f',  $mc->r, $mc->g, $mc->b, $sky->cloudCover)
+               . pack('ffff', $sky->cloudAltitude, $sky->cloudDensity, $sky->cloudWindSpeed, $sky->fogDensity)
+               . pack('ffff', $wx, $wz, 0.0, 0.0);
+
+        $encoder->setFragmentBytes($bytes, 0);
+        $encoder->drawPrimitives(\Metal\PrimitiveTypeTriangle, 0, 3);
     }
 }

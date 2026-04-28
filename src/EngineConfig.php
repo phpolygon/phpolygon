@@ -30,5 +30,13 @@ class EngineConfig
         public readonly bool $skipSplash = false,
         public readonly float $splashDuration = 2.5,
         public readonly string $vioBackend = 'auto',
+        /**
+         * When true and ext-vio is loaded, the 3D pipeline still runs through
+         * a native renderer (MetalRenderer3D / VulkanRenderer3D / OpenGLRenderer3D)
+         * keyed by $renderBackend3D, while vio continues to own the window and
+         * 2D pipeline. Useful on macOS where vio's Metal 3D pipeline isn't
+         * complete yet but php-metal's native renderer is.
+         */
+        public readonly bool $useNative3D = false,
     ) {}
 }

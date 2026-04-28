@@ -442,14 +442,22 @@ class VioRenderer3D implements Renderer3DInterface
 
     private function compileShader(string $id, string $vertSrc, string $fragSrc): void
     {
+        // VIO_SHADER_GLSL_RAW = OpenGL passthrough only. On Metal/Vulkan, vio
+        // must transpile GLSL → SPIR-V → MSL, which is what VIO_SHADER_GLSL
+        // selects. Without this branch, pipeline creation silently fails on
+        // Metal and the screen stays at the layer's default (white).
+        $format = vio_backend_name($this->ctx) === 'opengl'
+            ? VIO_SHADER_GLSL_RAW
+            : VIO_SHADER_GLSL;
+
         $shader = vio_shader($this->ctx, [
             'vertex' => $vertSrc,
             'fragment' => $fragSrc,
-            'format' => VIO_SHADER_GLSL_RAW,
+            'format' => $format,
         ]);
 
         if ($shader === false) {
-            throw new \RuntimeException("VioRenderer3D: Failed to compile shader '{$id}'");
+            throw new \RuntimeException("VioRenderer3D: Failed to compile shader '{$id}' (format={$format})");
         }
 
         $this->shaderCache[$id] = $shader;

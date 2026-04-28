@@ -350,23 +350,36 @@ class Engine
 
         // Create GPU-backed renderers after window is initialized (need graphics context)
         if (!$this->headless && $this->config->is3D) {
-            if ($this->useVio && $this->window instanceof VioWindow) {
+            $useVioRenderer3D = $this->useVio
+                && $this->window instanceof VioWindow
+                && !$this->config->useNative3D;
+
+            if ($useVioRenderer3D) {
                 $this->renderer3D = new VioRenderer3D(
                     $this->window->getContext(),
                     $this->window->getFramebufferWidth(),
                     $this->window->getFramebufferHeight(),
                 );
             } else {
+                // Native renderer path. When running on top of a VioWindow,
+                // pull the platform-native window handle from vio so the
+                // native renderer (e.g. MetalRenderer3D using php-metal's
+                // CAMetalLayer::createFromWindow) can attach to the same
+                // OS-level window.
+                $nativeHandle = $this->window instanceof VioWindow
+                    ? vio_native_window_handle($this->window->getContext())
+                    : $this->window->getHandle();
+
                 $this->renderer3D = match ($this->config->renderBackend3D) {
                     'vulkan' => new VulkanRenderer3D(
                         $this->window->getFramebufferWidth(),
                         $this->window->getFramebufferHeight(),
-                        $this->window->getHandle(),
+                        $nativeHandle,
                     ),
                     'metal' => new MetalRenderer3D(
                         $this->window->getFramebufferWidth(),
                         $this->window->getFramebufferHeight(),
-                        $this->window->getHandle(),
+                        $nativeHandle,
                     ),
                     default => new OpenGLRenderer3D(
                         $this->window->getFramebufferWidth(),
