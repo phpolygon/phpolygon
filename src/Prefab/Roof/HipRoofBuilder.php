@@ -63,12 +63,20 @@ class HipRoofBuilder extends AbstractRoofBuilder
         $sidePanelWidth = $halfSpan; // depth direction
         $yawQ = $this->extractYawQuaternion($baseRotation);
 
-        // Left panel: slope toward -X
-        $leftRot = $yawQ->multiply(Quaternion::fromAxisAngle(new Vec3(0.0, 1.0, 0.0), M_PI * 0.5));
+        // Left and right hip panels — Y rotations were swapped previously
+        // (left used +90°, right used -90°), which placed each panel's mesh
+        // +Z axis pointing toward the *opposite* eave and left their +Y
+        // normals pointing INTO the building. With backface culling
+        // disabled the exterior side of each panel ended up unlit, reading
+        // as if the roof were "verkehrt herum". Correct mapping: rotation
+        // around +Y by -90° brings mesh +Z to world -X (toward the LEFT
+        // eave) and the +Y normal stays pointing up-and-outward; +90° does
+        // the mirrored job for the right panel.
         $sideSlope = sqrt($sideSpan * $sideSpan + $this->roofHeight * $this->roofHeight);
         $sideAngle = atan2($this->roofHeight, $sideSpan);
         $sideTilt = Quaternion::fromAxisAngle(new Vec3(1.0, 0.0, 0.0), $sideAngle);
 
+        $leftRot = $yawQ->multiply(Quaternion::fromAxisAngle(new Vec3(0.0, 1.0, 0.0), -M_PI * 0.5));
         $leftPos = $this->transformPoint($basePosition, $baseRotation,
             new Vec3(-$sideSpan * 0.5, $this->roofHeight * 0.5, 0.0));
         $builder->entity($this->prefix . '_RoofLeft')
@@ -79,8 +87,7 @@ class HipRoofBuilder extends AbstractRoofBuilder
             ))
             ->with(new \PHPolygon\Component\MeshRenderer(meshId: 'box', materialId: $materials->panel));
 
-        // Right panel: slope toward +X
-        $rightRot = $yawQ->multiply(Quaternion::fromAxisAngle(new Vec3(0.0, 1.0, 0.0), -M_PI * 0.5));
+        $rightRot = $yawQ->multiply(Quaternion::fromAxisAngle(new Vec3(0.0, 1.0, 0.0), M_PI * 0.5));
         $rightPos = $this->transformPoint($basePosition, $baseRotation,
             new Vec3($sideSpan * 0.5, $this->roofHeight * 0.5, 0.0));
         $builder->entity($this->prefix . '_RoofRight')
