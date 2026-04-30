@@ -279,22 +279,36 @@ class Physics3DSystem extends AbstractSystem
                 $isRotated = false;
             }
 
+            // Cache BVH / AABB on the collider keyed by world-matrix snapshot.
+            // Without this every box rebuilds geometry every frame (8 corner
+            // transforms for AABB, 12 triangles + BVH build for rotated). At
+            // 400+ box colliders that dominates CPU in PHP.
+            $worldMatrixArr = $worldMatrix->toArray();
+            $matrixChanged = $collider->lastWorldMatrixArr === null
+                || !self::matrixArrayEquals($worldMatrixArr, $collider->lastWorldMatrixArr);
+
             if ($isRotated) {
-                $triangles = self::boxToWorldTriangles($collider, $worldMatrix);
-                $bvh = BVH::build($triangles);
+                if ($matrixChanged || $collider->bvh === null) {
+                    $triangles = self::boxToWorldTriangles($collider, $worldMatrix);
+                    $collider->bvh = BVH::build($triangles);
+                    $collider->cachedWorldAabb = $collider->getWorldAABB($worldMatrix);
+                    $collider->lastWorldMatrixArr = $worldMatrixArr;
+                }
+
                 $meshColliders[] = [
                     'entityId' => $entity->id,
-                    'bvh' => $bvh,
+                    'bvh' => $collider->bvh,
                 ];
-                // Store the AABB top Y for step-climbing
-                $aabb = $collider->getWorldAABB($worldMatrix);
-                $boxTopY[$entity->id] = $aabb['max']->y;
+                $boxTopY[$entity->id] = $collider->cachedWorldAabb['max']->y;
             } else {
-                $aabb = $collider->getWorldAABB($worldMatrix);
+                if ($matrixChanged || $collider->cachedWorldAabb === null) {
+                    $collider->cachedWorldAabb = $collider->getWorldAABB($worldMatrix);
+                    $collider->lastWorldMatrixArr = $worldMatrixArr;
+                }
                 $aabbs[] = [
                     'entityId' => $entity->id,
-                    'min' => $aabb['min'],
-                    'max' => $aabb['max'],
+                    'min' => $collider->cachedWorldAabb['min'],
+                    'max' => $collider->cachedWorldAabb['max'],
                 ];
             }
         }

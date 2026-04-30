@@ -6,9 +6,11 @@ namespace PHPolygon\Component;
 
 use PHPolygon\ECS\AbstractComponent;
 use PHPolygon\ECS\Attribute\Category;
+use PHPolygon\ECS\Attribute\Hidden;
 use PHPolygon\ECS\Attribute\Property;
 use PHPolygon\ECS\Attribute\Serializable;
 use PHPolygon\Math\Vec3;
+use PHPolygon\Physics\BVH;
 
 /**
  * Axis-aligned 3D box collider.
@@ -29,6 +31,31 @@ class BoxCollider3D extends AbstractComponent
 
     #[Property]
     public bool $isStatic;
+
+    /**
+     * Cached BVH for rotated boxes (Physics3DSystem turns the 12 face
+     * triangles into a BVH for surface-normal collision resolution).
+     * Mirrors the {@see MeshCollider3D::$bvh} pattern so we don't rebuild
+     * the BVH every frame for static rotated colliders — at 100+ rotated
+     * boxes that's the dominant CPU cost in PHP.
+     */
+    #[Hidden]
+    public ?BVH $bvh = null;
+
+    /**
+     * Cached world AABB for non-rotated boxes. getWorldAABB transforms
+     * 8 corners through the world matrix; with hundreds of static box
+     * colliders that's thousands of Mat4 multiplies per frame. The cache
+     * is keyed on the world-matrix snapshot below.
+     *
+     * @var array{min:Vec3, max:Vec3}|null
+     */
+    #[Hidden]
+    public ?array $cachedWorldAabb = null;
+
+    /** @var float[]|null */
+    #[Hidden]
+    public ?array $lastWorldMatrixArr = null;
 
     public function __construct(
         ?Vec3 $size = null,
