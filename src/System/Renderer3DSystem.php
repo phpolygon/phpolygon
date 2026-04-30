@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace PHPolygon\System;
 
+use PHPolygon\Component\Camera3DComponent;
 use PHPolygon\Component\DirectionalLight;
 use PHPolygon\Component\MeshRenderer;
 use PHPolygon\Component\PointLight;
@@ -41,8 +42,33 @@ use PHPolygon\Rendering\Renderer3DInterface;
  */
 class Renderer3DSystem extends AbstractSystem
 {
+    /**
+     * Hard cap on the number of PointLight commands emitted per frame.
+     * Backend shaders only honour the first 4-8 anyway, so trimming here
+     * avoids wasted command-list allocations and keeps the closest lights.
+     */
+    public const MAX_POINT_LIGHTS = 8;
+
     /** @var array<string, array{cx:float, cy:float, cz:float, radius:float}> */
     private static array $sphereCache = [];
+
+    /**
+     * Spatial bins keyed by "x,z" cell index in BIN_SIZE units. Each bin
+     * holds the AABB of all entities whose translation falls inside it.
+     * Rebuilt every BIN_REBUILD_INTERVAL frames so animated entities and
+     * newly-spawned ones get picked up; cheap (one extra full iteration).
+     *
+     * @var array<string, array{0:float, 1:float, 2:float, 3:float, 4:float, 5:float}>
+     */
+    private array $binAabbs = [];
+
+    /** @var array<int, string> */
+    private array $entityBin = [];
+
+    private const BIN_SIZE = 256.0;
+    private const BIN_REBUILD_INTERVAL = 30;
+
+    private int $frameCount = 0;
 
     private float $wavePhase = 0.0;
     private float $snowCover = 0.0;
@@ -80,11 +106,45 @@ class Renderer3DSystem extends AbstractSystem
                 $light->intensity,
             ));
         }
+        // Pick the closest MAX_POINT_LIGHTS to the active camera. Backend
+        // shaders cap at 4-8 active lights and pick whichever they receive
+        // first, so without sorting a faraway torch can outrank the sun
+        // beacon next to the player. Distance is squared to skip the sqrt.
+        $cameraPos = null;
+        foreach ($world->query(Camera3DComponent::class, Transform3D::class) as $entity) {
+            $cameraPos = $entity->get(Transform3D::class)->getWorldPosition();
+            break;
+        }
+
+        $candidates = [];
         foreach ($world->query(PointLight::class, Transform3D::class) as $entity) {
             $light = $entity->get(PointLight::class);
-            $transform = $entity->get(Transform3D::class);
+            $pos = $entity->get(Transform3D::class)->getWorldPosition();
+            if ($cameraPos !== null) {
+                $dx = $pos->x - $cameraPos->x;
+                $dy = $pos->y - $cameraPos->y;
+                $dz = $pos->z - $cameraPos->z;
+                $distSq = $dx * $dx + $dy * $dy + $dz * $dz;
+                // Cull lights whose influence sphere can't reach the camera.
+                // Generous cushion (×4) so lights remain visible just out of
+                // immediate range when the player turns toward them.
+                if ($distSq > $light->radius * $light->radius * 4.0) {
+                    continue;
+                }
+            } else {
+                $distSq = 0.0;
+            }
+            $candidates[] = [$distSq, $pos, $light];
+        }
+
+        if (count($candidates) > self::MAX_POINT_LIGHTS) {
+            usort($candidates, static fn(array $a, array $b): int => $a[0] <=> $b[0]);
+            $candidates = array_slice($candidates, 0, self::MAX_POINT_LIGHTS);
+        }
+
+        foreach ($candidates as [$distSq, $pos, $light]) {
             $this->commandList->add(new AddPointLight(
-                $transform->getWorldPosition(),
+                $pos,
                 $light->color,
                 $light->intensity,
                 $light->radius,
@@ -122,6 +182,21 @@ class Renderer3DSystem extends AbstractSystem
         // projection matrices. Pull the most recent one and derive 6 planes.
         $planes = $this->extractFrustumPlanes();
 
+        // Coarse spatial bin culling. We bin entities into a 2D X-Z grid and
+        // test each bin's AABB against the frustum once per frame; entities
+        // in a rejected bin skip the per-entity sphere test entirely. Bins
+        // are rebuilt every BIN_REBUILD_INTERVAL frames so animation /
+        // spawning still gets picked up.
+        if ($planes !== null) {
+            $this->frameCount++;
+            if ($this->binAabbs === [] || $this->frameCount % self::BIN_REBUILD_INTERVAL === 0) {
+                $this->rebuildBins($world);
+            }
+            $visibleBins = $this->cullBins($planes);
+        } else {
+            $visibleBins = null;
+        }
+
         foreach ($world->query(MeshRenderer::class, Transform3D::class) as $entity) {
             $mesh = $entity->get(MeshRenderer::class);
             $transform = $entity->get(Transform3D::class);
@@ -131,6 +206,17 @@ class Renderer3DSystem extends AbstractSystem
             // entity per frame — the dominant CPU win at scenes with
             // thousands of static entities.
             $matrix = $transform->worldMatrix;
+
+            // Coarse pre-cull: if the entity's bin lies fully outside the
+            // frustum, skip it without ever doing the per-entity sphere
+            // test. Falls through when no bin is known yet (first frame
+            // after a new entity is spawned).
+            if ($visibleBins !== null) {
+                $binKey = $this->entityBin[$entity->id] ?? null;
+                if ($binKey !== null && !isset($visibleBins[$binKey])) {
+                    continue;
+                }
+            }
 
             if ($planes !== null) {
                 $sphere = self::getMeshSphere($mesh->meshId);
@@ -182,6 +268,72 @@ class Renderer3DSystem extends AbstractSystem
 
         $this->renderer->render($this->commandList);
         $this->commandList->clear();
+    }
+
+    /**
+     * Re-bin every renderable entity into a 2D X-Z spatial grid and refresh
+     * the per-bin AABBs. Called periodically rather than every frame because
+     * almost all renderables in a typical scene are static.
+     */
+    private function rebuildBins(World $world): void
+    {
+        $this->binAabbs = [];
+        $this->entityBin = [];
+
+        foreach ($world->query(MeshRenderer::class, Transform3D::class) as $entity) {
+            $tr = $entity->get(Transform3D::class)->worldMatrix->getTranslation();
+            $bx = (int) floor($tr->x / self::BIN_SIZE);
+            $bz = (int) floor($tr->z / self::BIN_SIZE);
+            $key = $bx . ',' . $bz;
+            $this->entityBin[$entity->id] = $key;
+
+            if (!isset($this->binAabbs[$key])) {
+                $this->binAabbs[$key] = [$tr->x, $tr->y, $tr->z, $tr->x, $tr->y, $tr->z];
+            } else {
+                $a = &$this->binAabbs[$key];
+                if ($tr->x < $a[0]) { $a[0] = $tr->x; } elseif ($tr->x > $a[3]) { $a[3] = $tr->x; }
+                if ($tr->y < $a[1]) { $a[1] = $tr->y; } elseif ($tr->y > $a[4]) { $a[4] = $tr->y; }
+                if ($tr->z < $a[2]) { $a[2] = $tr->z; } elseif ($tr->z > $a[5]) { $a[5] = $tr->z; }
+                unset($a);
+            }
+        }
+
+        // Pad each bin AABB by half a bin to absorb mesh extents we don't
+        // know about at this stage (the entity's translation is the centre,
+        // but a tall building extends well beyond it).
+        $pad = self::BIN_SIZE * 0.5;
+        foreach ($this->binAabbs as $key => $a) {
+            $this->binAabbs[$key] = [$a[0] - $pad, $a[1] - $pad, $a[2] - $pad, $a[3] + $pad, $a[4] + $pad, $a[5] + $pad];
+        }
+    }
+
+    /**
+     * @param array<int, array{0:float,1:float,2:float,3:float}> $planes
+     * @return array<string, true> Set of bin keys that intersect the frustum.
+     */
+    private function cullBins(array $planes): array
+    {
+        $visible = [];
+        foreach ($this->binAabbs as $key => $a) {
+            $outside = false;
+            foreach ($planes as $p) {
+                // For an AABB, the corner most-positive against the plane
+                // normal gives the maximum distance from the plane. If that
+                // corner is still on the negative side, the entire box is
+                // outside — standard AABB-vs-plane Lengyel test.
+                $px = $p[0] >= 0.0 ? $a[3] : $a[0];
+                $py = $p[1] >= 0.0 ? $a[4] : $a[1];
+                $pz = $p[2] >= 0.0 ? $a[5] : $a[2];
+                if ($p[0] * $px + $p[1] * $py + $p[2] * $pz + $p[3] < 0.0) {
+                    $outside = true;
+                    break;
+                }
+            }
+            if (!$outside) {
+                $visible[$key] = true;
+            }
+        }
+        return $visible;
     }
 
     /**
