@@ -8,4 +8,10 @@
 | ID | Time | T | Title | Read |
 |----|------|---|-------|------|
 | #10340 | 9:55 PM | 🔵 | PHPolygon uses fixed timestep game loop with interpolation | ~377 |
+
+### Mar 24, 2026
+
+| ID | Time | T | Title | Read |
+|----|------|---|-------|------|
+| #10386 | 7:14 AM | 🟣 | Created NullWindow for headless testing without GPU or display server | ~407 |
 </claude-mem-context>
