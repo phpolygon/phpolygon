@@ -281,29 +281,48 @@ class Renderer3DSystem extends AbstractSystem
         $this->entityBin = [];
 
         foreach ($world->query(MeshRenderer::class, Transform3D::class) as $entity) {
-            $tr = $entity->get(Transform3D::class)->worldMatrix->getTranslation();
+            $mesh = $entity->get(MeshRenderer::class);
+            $transform = $entity->get(Transform3D::class);
+            $tr = $transform->worldMatrix->getTranslation();
             $bx = (int) floor($tr->x / self::BIN_SIZE);
             $bz = (int) floor($tr->z / self::BIN_SIZE);
             $key = $bx . ',' . $bz;
             $this->entityBin[$entity->id] = $key;
 
+            // Expand the bin AABB by the entity's actual world-space extent.
+            // A 3 km water plane sitting at one bin centre would otherwise
+            // make the whole bin look ~256 m wide, and the bin would get
+            // culled the moment the camera looked at the far end of the
+            // plane — making the water "pop out" mid-screen.
+            $sphere = self::getMeshSphere($mesh->meshId);
+            if ($sphere !== null) {
+                $sx = abs($transform->scale->x);
+                $sy = abs($transform->scale->y);
+                $sz = abs($transform->scale->z);
+                $maxScale = $sx > $sy ? ($sx > $sz ? $sx : $sz) : ($sy > $sz ? $sy : $sz);
+                $r = $sphere['radius'] * $maxScale;
+            } else {
+                // Unknown mesh size — fall back to a half-bin pad so we
+                // never under-estimate the extent.
+                $r = self::BIN_SIZE * 0.5;
+            }
+
+            $loX = $tr->x - $r; $hiX = $tr->x + $r;
+            $loY = $tr->y - $r; $hiY = $tr->y + $r;
+            $loZ = $tr->z - $r; $hiZ = $tr->z + $r;
+
             if (!isset($this->binAabbs[$key])) {
-                $this->binAabbs[$key] = [$tr->x, $tr->y, $tr->z, $tr->x, $tr->y, $tr->z];
+                $this->binAabbs[$key] = [$loX, $loY, $loZ, $hiX, $hiY, $hiZ];
             } else {
                 $a = &$this->binAabbs[$key];
-                if ($tr->x < $a[0]) { $a[0] = $tr->x; } elseif ($tr->x > $a[3]) { $a[3] = $tr->x; }
-                if ($tr->y < $a[1]) { $a[1] = $tr->y; } elseif ($tr->y > $a[4]) { $a[4] = $tr->y; }
-                if ($tr->z < $a[2]) { $a[2] = $tr->z; } elseif ($tr->z > $a[5]) { $a[5] = $tr->z; }
+                if ($loX < $a[0]) { $a[0] = $loX; }
+                if ($loY < $a[1]) { $a[1] = $loY; }
+                if ($loZ < $a[2]) { $a[2] = $loZ; }
+                if ($hiX > $a[3]) { $a[3] = $hiX; }
+                if ($hiY > $a[4]) { $a[4] = $hiY; }
+                if ($hiZ > $a[5]) { $a[5] = $hiZ; }
                 unset($a);
             }
-        }
-
-        // Pad each bin AABB by half a bin to absorb mesh extents we don't
-        // know about at this stage (the entity's translation is the centre,
-        // but a tall building extends well beyond it).
-        $pad = self::BIN_SIZE * 0.5;
-        foreach ($this->binAabbs as $key => $a) {
-            $this->binAabbs[$key] = [$a[0] - $pad, $a[1] - $pad, $a[2] - $pad, $a[3] + $pad, $a[4] + $pad, $a[5] + $pad];
         }
     }
 
