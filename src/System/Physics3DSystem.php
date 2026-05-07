@@ -288,7 +288,7 @@ class Physics3DSystem extends AbstractSystem
                 || !self::matrixArrayEquals($worldMatrixArr, $collider->lastWorldMatrixArr);
 
             if ($isRotated) {
-                if ($matrixChanged || $collider->bvh === null) {
+                if ($matrixChanged || $collider->bvh === null || $collider->cachedWorldAabb === null) {
                     $triangles = self::boxToWorldTriangles($collider, $worldMatrix);
                     $collider->bvh = BVH::build($triangles);
                     $collider->cachedWorldAabb = $collider->getWorldAABB($worldMatrix);

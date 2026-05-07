@@ -201,13 +201,11 @@ class MetalRenderer3D implements Renderer3DInterface
                 $this->clearG = $command->skyColor->g;
                 $this->clearB = $command->skyColor->b;
                 $this->skyColor = [$command->skyColor->r, $command->skyColor->g, $command->skyColor->b];
-                if (property_exists($command, 'horizonColor') && $command->horizonColor !== null) {
-                    $this->horizonColor = [
-                        $command->horizonColor->r,
-                        $command->horizonColor->g,
-                        $command->horizonColor->b,
-                    ];
-                }
+                $this->horizonColor = [
+                    $command->horizonColor->r,
+                    $command->horizonColor->g,
+                    $command->horizonColor->b,
+                ];
             } elseif ($command instanceof SetSky) {
                 $this->pendingSky = $command;
             } elseif ($command instanceof SetSkybox) {

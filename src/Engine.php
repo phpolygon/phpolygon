@@ -361,26 +361,26 @@ class Engine
                     $this->window->getFramebufferHeight(),
                 );
             } else {
-                // Native renderer path. When running on top of a VioWindow,
-                // pull the platform-native window handle from vio so the
-                // native renderer (e.g. MetalRenderer3D using php-metal's
-                // CAMetalLayer::createFromWindow) can attach to the same
-                // OS-level window.
-                $nativeHandle = $this->window instanceof VioWindow
-                    ? vio_native_window_handle($this->window->getContext())
-                    : $this->window->getHandle();
-
+                // Native renderer path. Each backend takes a different
+                // shape of native handle — VulkanRenderer3D wraps an opaque
+                // object (php-vulkan SurfaceKHR), MetalRenderer3D needs an
+                // integer pointer to attach a CAMetalLayer. Compute the
+                // handle in the matching arm so the type is narrow.
                 $this->renderer3D = match ($this->config->renderBackend3D) {
                     'vulkan' => new VulkanRenderer3D(
                         $this->window->getFramebufferWidth(),
                         $this->window->getFramebufferHeight(),
-                        $nativeHandle,
+                        $this->window->getHandle(),
                     ),
-                    'metal' => new MetalRenderer3D(
-                        $this->window->getFramebufferWidth(),
-                        $this->window->getFramebufferHeight(),
-                        $nativeHandle,
-                    ),
+                    'metal' => $this->window instanceof VioWindow
+                        ? new MetalRenderer3D(
+                            $this->window->getFramebufferWidth(),
+                            $this->window->getFramebufferHeight(),
+                            vio_native_window_handle($this->window->getContext()),
+                        )
+                        : throw new \RuntimeException(
+                            'MetalRenderer3D requires a VioWindow to obtain the native NSWindow* handle'
+                        ),
                     default => new OpenGLRenderer3D(
                         $this->window->getFramebufferWidth(),
                         $this->window->getFramebufferHeight(),
