@@ -19,7 +19,11 @@ class VioCubemap {}
 // Constants
 // ----------------------------------------------------------------
 
+const VIO_SHADER_AUTO     = -1;
+const VIO_SHADER_SPIRV    = 1;
+const VIO_SHADER_GLSL     = 2;
 const VIO_SHADER_GLSL_RAW = 0;
+const VIO_SHADER_MSL      = 3;
 const VIO_CULL_BACK = 1;
 const VIO_CULL_FRONT = 2;
 const VIO_CULL_NONE = 0;
@@ -74,6 +78,11 @@ function vio_draw_3d(VioContext $ctx): void {}
 // ----------------------------------------------------------------
 
 /** @return array{int, int} */
+/** Returns the native window handle as an integer pointer (HWND on Windows,
+ *  NSWindow* on macOS, X11 Window XID on Linux). Used by Vulkan / Metal / D3D
+ *  surface creation paths that need the OS-level handle. */
+function vio_native_window_handle(VioContext $ctx): int {}
+
 function vio_window_size(VioContext $ctx): array {}
 
 /** @return array{int, int} */

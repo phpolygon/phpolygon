@@ -14,6 +14,7 @@ class Device
     public function createBuffer(int $length, int $options = 0): Buffer {}
     public function createTexture(TextureDescriptor $descriptor): Texture {}
     public function createLibraryWithFile(string $path): Library {}
+    public function createLibraryWithSource(string $source): Library {}
     public function createRenderPipelineState(RenderPipelineDescriptor $descriptor): RenderPipelineState {}
     public function createDepthStencilState(DepthStencilDescriptor $descriptor): DepthStencilState {}
 }
@@ -57,6 +58,7 @@ class RenderCommandEncoder
     public function setVertexBytes(string $bytes, int $index): void {}
     public function setFragmentBytes(string $bytes, int $index): void {}
     public function drawIndexedPrimitives(int $primitiveType, int $indexCount, int $indexType, Buffer $indexBuffer, int $indexBufferOffset = 0, int $instanceCount = 1): void {}
+    public function drawPrimitives(int $primitiveType, int $vertexStart, int $vertexCount, int $instanceCount = 1): void {}
     public function endEncoding(): void {}
 }
 
@@ -151,6 +153,8 @@ const TextureUsageRenderTarget = 4;
 const LoadActionClear  = 2;
 const StoreActionStore = 1;
 
+const CullModeNone            = 0;
+const CullModeFront           = 1;
 const CullModeBack            = 2;
 const WindingCounterClockwise = 1;
 
@@ -161,4 +165,11 @@ const IndexTypeUInt32 = 1;
 const VertexFormatFloat2 = 29;
 const VertexFormatFloat3 = 30;
 
-const CompareFunctionLess = 1;
+const CompareFunctionNever        = 0;
+const CompareFunctionLess         = 1;
+const CompareFunctionEqual        = 2;
+const CompareFunctionLessEqual    = 3;
+const CompareFunctionGreater      = 4;
+const CompareFunctionNotEqual     = 5;
+const CompareFunctionGreaterEqual = 6;
+const CompareFunctionAlways       = 7;

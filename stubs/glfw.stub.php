@@ -24,6 +24,24 @@ namespace GL\Buffer {
         public function offsetUnset(mixed $offset): void {}
         public function count(): int {}
     }
+
+    /**
+     * @implements \ArrayAccess<int, float>
+     */
+    class FloatBuffer implements \ArrayAccess, \Countable, BufferInterface {
+        /** @param array<float|int> $data */
+        public function __construct(array $data = []) {}
+        public function offsetExists(mixed $offset): bool {}
+        public function offsetGet(mixed $offset): float {}
+        public function offsetSet(mixed $offset, mixed $value): void {}
+        public function offsetUnset(mixed $offset): void {}
+        public function count(): int {}
+        public function size(): int {}
+        /** @param array<float|int> $data */
+        public function push(array $data): void {}
+        public function clear(): void {}
+        public function reserve(int $count): void {}
+    }
 }
 
 namespace {
