@@ -13,17 +13,34 @@ use PHPolygon\Math\Mat4;
 use PHPolygon\Math\Vec3;
 use PHPolygon\Rendering\Command\SetCamera;
 use PHPolygon\Rendering\RenderCommandList;
+use PHPolygon\Runtime\Window;
 
 class Camera3DSystem extends AbstractSystem
 {
     public function __construct(
         private readonly RenderCommandList $commandList,
-        private readonly int $viewportWidth,
-        private readonly int $viewportHeight,
+        private int $viewportWidth,
+        private int $viewportHeight,
+        private readonly ?Window $window = null,
     ) {}
+
+    public function setViewport(int $width, int $height): void
+    {
+        $this->viewportWidth = $width;
+        $this->viewportHeight = $height;
+    }
 
     public function render(World $world): void
     {
+        if ($this->window !== null) {
+            $w = $this->window->getFramebufferWidth();
+            $h = $this->window->getFramebufferHeight();
+            if ($w > 0 && $h > 0) {
+                $this->viewportWidth = $w;
+                $this->viewportHeight = $h;
+            }
+        }
+
         foreach ($world->query(Camera3DComponent::class, Transform3D::class) as $entity) {
             $cam = $entity->get(Camera3DComponent::class);
             if (!$cam->active) {
