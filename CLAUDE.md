@@ -760,3 +760,90 @@ and sprite placeholders (grey rectangles with outlines for textures).
 It does **not** produce pixel-identical output to the OpenGL `Renderer2D` — it is
 a structural approximation for layout and regression testing, not a reference
 renderer.
+
+---
+
+## Performance profiling
+
+PHPolygon has dev-only profiling support. Full guide: `docs/profiling.md`.
+
+### Tools
+
+| Tool | Purpose | Activation |
+|---|---|---|
+| **SPX** (C-ext) | Deep-dive flamegraphs during a dev session | `SPX_ENABLED=1` |
+| **Excimer** (C-ext) | Low-overhead sampling for CI regression | `PHPOLYGON_EXCIMER=1` |
+| **PHPBench** (Composer) | Micro-benchmarks for hot leaf functions (Mat4, Quaternion, MeshGen) | `vendor/bin/phpbench` |
+| **Custom benchmark runner** | Frame-loop scenarios over the full Engine | `php benchmarks/run.php <scenario>` |
+
+SPX and Excimer are PHP C-extensions and cannot be installed via Composer.
+Use `scripts/install-profilers.sh`. PHPBench is a regular dev dependency.
+
+### `PerfProfiler` - section markers
+
+`src/Runtime/PerfProfiler.php` is the engine-wide profiling facade. When no
+profiler extension is active, every call collapses to a single bool check.
+
+```php
+use PHPolygon\Runtime\PerfProfiler;
+
+PerfProfiler::section('mesh.generate.box', fn() => BoxMesh::generate(1, 1, 1));
+
+PerfProfiler::begin('render3d.flush');
+$this->renderer3d->endFrame();
+PerfProfiler::end();
+```
+
+Standard section names: `engine.update`, `engine.render`, `ecs.update`,
+`ecs.system.<class>`, `render3d.build_commands`, `render3d.flush`,
+`render2d.frame`, `mesh.generate.<id>`, `texture.upload`, `physics.tick`.
+`engine.update` may fire multiple times per frame (fixed-timestep loop);
+`engine.render` fires once per visible frame. Use the same naming when you
+add new markers.
+
+### When to add markers
+
+- Around any cross-system or per-frame work expected to be hot
+- Around procedural mesh generation (typically one-shot but can spike)
+- Around expensive per-frame asset I/O
+
+### When NOT to add markers
+
+- **Inside tight inner loops** (per-vertex, per-pixel, per-component-in-system).
+  The marker overhead distorts measurements and pollutes flamegraphs.
+- **In Components or game-side logic** unless explicitly profiling that path -
+  prefer instrumenting the calling System.
+
+### `EngineConfig::$devMode`
+
+`devMode: true` enables developer-only features such as the F3 performance
+overlay (Phase 2 work). It is independent from the SPX/Excimer extensions,
+which are activated via env vars and need no flag.
+
+### Benchmarks
+
+Frame-loop scenarios live in `benchmarks/scenarios/` and run via
+`php benchmarks/run.php <scenario>`. Results are JSON in
+`benchmarks/results/<git-sha>.json` with p50/p95/p99 frame time per
+`PerfProfiler` section, plus a per-scenario GC histogram (`gc_status()`
+delta sampled per frame).
+
+Baselines in `benchmarks/baselines/` are checked in. CI fails on > 15% p95
+regression. Update baselines deliberately via
+`php benchmarks/run.php <scenario> --accept` in the same PR.
+
+PHPBench micro-benchmarks live in `benchmarks/micro/` and target hot leaf
+code that benefits from rev/iteration statistics (`Mat4::multiply`,
+`Quaternion::slerp`, `BoxMesh::generate`).
+
+### Anti-patterns
+
+- **Do not** ship a build with SPX or Excimer enabled - they are dev-only.
+- **Do not** add `PerfProfiler` markers inside per-vertex / per-pixel loops.
+- **Do not** compare benchmarks across mesh count / scene complexity changes
+  without updating the baseline scenario.
+- **Do not** profile on battery or under thermal throttle - pin macOS to
+  High Performance, otherwise numbers are meaningless.
+- **Do not** run benchmarks without warm-up frames - the first 30-60 frames
+  are always slower (JIT, class loading, texture upload). The runner discards
+  them by default; do not turn that off.

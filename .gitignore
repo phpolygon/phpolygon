@@ -7,3 +7,6 @@ composer.lock
 .ppm
 *.mov
 .phpolygon/
+/benchmarks/results/
+/game.log
+/.phpbench/

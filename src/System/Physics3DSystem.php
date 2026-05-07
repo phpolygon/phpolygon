@@ -18,6 +18,7 @@ use PHPolygon\Math\Vec3;
 use PHPolygon\Physics\BVH;
 use PHPolygon\Physics\CollisionMath;
 use PHPolygon\Physics\Triangle;
+use PHPolygon\Runtime\PerfProfiler;
 
 class Physics3DSystem extends AbstractSystem
 {
@@ -44,6 +45,16 @@ class Physics3DSystem extends AbstractSystem
     }
 
     public function update(World $world, float $dt): void
+    {
+        PerfProfiler::begin('physics.tick');
+        try {
+            $this->step($world, $dt);
+        } finally {
+            PerfProfiler::end();
+        }
+    }
+
+    private function step(World $world, float $dt): void
     {
         // Collect all box colliders once per frame (static + dynamic)
         $boxData = $this->collectBoxColliders($world);

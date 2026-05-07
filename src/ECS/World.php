@@ -6,6 +6,7 @@ namespace PHPolygon\ECS;
 
 use PHPolygon\Component\Transform2D;
 use PHPolygon\Component\Transform3D;
+use PHPolygon\Runtime\PerfProfiler;
 use RuntimeException;
 
 class World
@@ -32,6 +33,14 @@ class World
 
     /** @var array<int, Entity> */
     private array $entityCache = [];
+
+    /**
+     * Cached PerfProfiler section name per system, indexed by spl_object_id.
+     * Avoids per-frame Reflection while keeping system-specific labels.
+     *
+     * @var array<int, string>
+     */
+    private array $systemPerfNames = [];
 
     public function createEntity(): Entity
     {
@@ -220,6 +229,8 @@ class World
     {
         $this->systems[] = $system;
         $this->systemPhases[count($this->systems) - 1] = $phase;
+        $shortName = (new \ReflectionClass($system))->getShortName();
+        $this->systemPerfNames[\spl_object_id($system)] = 'ecs.system.' . $shortName;
         $system->register($this);
     }
 
@@ -230,6 +241,7 @@ class World
             $system->unregister($this);
             array_splice($this->systems, $index, 1);
             unset($this->systemPhases[$index]);
+            unset($this->systemPerfNames[\spl_object_id($system)]);
             // Re-index phases
             $this->systemPhases = array_values($this->systemPhases);
         }
@@ -240,9 +252,13 @@ class World
      */
     public function update(float $dt): void
     {
+        PerfProfiler::begin('ecs.update');
         foreach ($this->systems as $system) {
+            PerfProfiler::begin($this->systemPerfNames[\spl_object_id($system)] ?? 'ecs.system.unknown');
             $system->update($this, $dt);
+            PerfProfiler::end();
         }
+        PerfProfiler::end();
     }
 
     /**
@@ -250,11 +266,15 @@ class World
      */
     public function updateMainThread(float $dt): void
     {
+        PerfProfiler::begin('ecs.update');
         foreach ($this->systems as $i => $system) {
             if (($this->systemPhases[$i] ?? SystemPhase::MainThread) === SystemPhase::MainThread) {
+                PerfProfiler::begin($this->systemPerfNames[\spl_object_id($system)] ?? 'ecs.system.unknown');
                 $system->update($this, $dt);
+                PerfProfiler::end();
             }
         }
+        PerfProfiler::end();
     }
 
     /**
@@ -262,18 +282,26 @@ class World
      */
     public function updatePostThread(float $dt): void
     {
+        PerfProfiler::begin('ecs.update.post');
         foreach ($this->systems as $i => $system) {
             if (($this->systemPhases[$i] ?? SystemPhase::MainThread) === SystemPhase::PostThread) {
+                PerfProfiler::begin($this->systemPerfNames[\spl_object_id($system)] ?? 'ecs.system.unknown');
                 $system->update($this, $dt);
+                PerfProfiler::end();
             }
         }
+        PerfProfiler::end();
     }
 
     public function render(): void
     {
+        PerfProfiler::begin('ecs.render');
         foreach ($this->systems as $system) {
+            PerfProfiler::begin(($this->systemPerfNames[\spl_object_id($system)] ?? 'ecs.system.unknown') . '.render');
             $system->render($this);
+            PerfProfiler::end();
         }
+        PerfProfiler::end();
     }
 
     /** @return list<SystemInterface> */

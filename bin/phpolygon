@@ -104,6 +104,12 @@ if ($command === 'editor') {
     exit(0);
 }
 
+if ($command === 'perf:report') {
+    $rest = array_values(array_filter($args, fn(string $a): bool => $a !== 'perf:report'));
+    perfReport($rest);
+    exit(0);
+}
+
 if ($command !== 'build') {
     fwrite(STDERR, "Unknown command: {$command}\n");
     printUsage();
@@ -359,10 +365,12 @@ PHPolygon CLI
 Usage:
   phpolygon build [platform] [options]
   phpolygon editor
+  phpolygon perf:report <scenario> [<sha-a> <sha-b>]
 
 Commands:
-  build    Build game for distribution
-  editor   Launch the PHPolygon scene editor
+  build         Build game for distribution
+  editor        Launch the PHPolygon scene editor
+  perf:report   Diff two benchmark JSON results in benchmarks/results/
 
 Platforms:
   macos-arm64        macOS Apple Silicon
@@ -392,6 +400,175 @@ Examples:
   phpolygon build --php-version 8.4              Build with PHP 8.4 runtime
   phpolygon build --dry-run                      Show config without building
   phpolygon editor                       Launch the scene editor
+  phpolygon perf:report boxes-1000       Compare last two boxes-1000 results
+  phpolygon perf:report boxes-1000 abc123 def456   Compare two specific shas
+  phpolygon perf:report boxes-1000 --baseline      Compare latest result vs committed baseline (CI mode)
+  phpolygon perf:report boxes-1000 --baseline --threshold 25   Use a custom regression threshold
 
 USAGE;
+}
+
+/**
+ * @param list<string> $args
+ */
+function perfReport(array $args): void
+{
+    $useBaseline = false;
+    $threshold = 15.0;
+    $positional = [];
+    for ($i = 0; $i < count($args); $i++) {
+        if ($args[$i] === '--baseline') {
+            $useBaseline = true;
+        } elseif ($args[$i] === '--threshold' && isset($args[$i + 1])) {
+            $threshold = (float) $args[++$i];
+        } else {
+            $positional[] = $args[$i];
+        }
+    }
+
+    $scenario = $positional[0] ?? null;
+    if ($scenario === null) {
+        fwrite(STDERR, "Usage: phpolygon perf:report <scenario> [<sha-a> <sha-b>] [--baseline] [--threshold N]\n");
+        exit(1);
+    }
+
+    $cwd = getcwd();
+    $resultsDir = $cwd . '/benchmarks/results';
+    $baselinesDir = $cwd . '/benchmarks/baselines';
+
+    if ($useBaseline) {
+        $baselineFile = "{$baselinesDir}/{$scenario}.json";
+        if (!file_exists($baselineFile)) {
+            fwrite(STDERR, "No baseline for {$scenario}: {$baselineFile}\n");
+            fwrite(STDERR, "Generate one with: php benchmarks/run.php {$scenario} --accept\n");
+            exit(1);
+        }
+
+        $candidates = glob("{$resultsDir}/{$scenario}-*.json") ?: [];
+        $matches = array_values(array_filter(
+            $candidates,
+            fn(string $f): bool => (bool) preg_match(
+                '/^' . preg_quote($scenario, '/') . '-[0-9a-f]+\.json$/',
+                basename($f)
+            ),
+        ));
+        if ($matches === []) {
+            fwrite(STDERR, "No fresh result for {$scenario} in {$resultsDir}\n");
+            fwrite(STDERR, "Run: php benchmarks/run.php {$scenario}\n");
+            exit(1);
+        }
+        usort($matches, fn(string $x, string $y): int => filemtime($y) <=> filemtime($x));
+        $a = $baselineFile;
+        $b = $matches[0];
+        runDiff($a, $b, $scenario, $threshold);
+        return;
+    }
+
+    if (!is_dir($resultsDir)) {
+        fwrite(STDERR, "No benchmarks/results directory in {$resultsDir}\n");
+        exit(1);
+    }
+
+    if (isset($positional[1], $positional[2])) {
+        $shaA = $positional[1];
+        $shaB = $positional[2];
+        $a = "{$resultsDir}/{$scenario}-{$shaA}.json";
+        $b = "{$resultsDir}/{$scenario}-{$shaB}.json";
+    } else {
+        // glob is greedy: "boxes-1000-*.json" also matches "boxes-1000-instanced-*.json".
+        // Filter for {scenario}-{sha}.json where sha is the short hex hash.
+        $candidates = glob("{$resultsDir}/{$scenario}-*.json") ?: [];
+        $files = array_values(array_filter(
+            $candidates,
+            fn(string $f): bool => (bool) preg_match(
+                '/^' . preg_quote($scenario, '/') . '-[0-9a-f]+\.json$/',
+                basename($f)
+            ),
+        ));
+        if (count($files) < 2) {
+            fwrite(STDERR, "Need at least 2 result files for {$scenario} (found " . count($files) . ")\n");
+            exit(1);
+        }
+        usort($files, fn(string $x, string $y): int => filemtime($y) <=> filemtime($x));
+        $b = $files[0];
+        $a = $files[1];
+    }
+
+    runDiff($a, $b, $scenario, $threshold);
+}
+
+function runDiff(string $a, string $b, string $scenario, float $threshold): void
+{
+    if (!file_exists($a)) {
+        fwrite(STDERR, "Missing: {$a}\n");
+        exit(1);
+    }
+    if (!file_exists($b)) {
+        fwrite(STDERR, "Missing: {$b}\n");
+        exit(1);
+    }
+
+    $resultA = json_decode((string) file_get_contents($a), true);
+    $resultB = json_decode((string) file_get_contents($b), true);
+    if (!is_array($resultA) || !is_array($resultB)) {
+        fwrite(STDERR, "Could not parse benchmark JSON\n");
+        exit(1);
+    }
+
+    $shaA = $resultA['gitSha'] ?? '?';
+    $shaB = $resultB['gitSha'] ?? '?';
+
+    echo "\n";
+    echo "\033[1mPerf report: {$scenario}\033[0m\n";
+    echo "  base: {$shaA} (" . basename($a) . ")\n";
+    echo "  head: {$shaB} (" . basename($b) . ")\n";
+    echo str_repeat('-', 60) . "\n";
+
+    $worstRegression = 0.0;
+    foreach (['p50Ms', 'p95Ms', 'p99Ms', 'meanMs', 'minMs', 'maxMs'] as $key) {
+        $av = (float) ($resultA['frame'][$key] ?? 0.0);
+        $bv = (float) ($resultB['frame'][$key] ?? 0.0);
+        $delta = $av > 0.0 ? (($bv - $av) / $av) * 100.0 : 0.0;
+        if ($delta > $worstRegression) {
+            $worstRegression = $delta;
+        }
+        $sign = $delta >= 0.0 ? '+' : '';
+        $color = match (true) {
+            $delta > 5.0 => "\033[31m",
+            $delta < -5.0 => "\033[32m",
+            default => '',
+        };
+        $reset = $color !== '' ? "\033[0m" : '';
+        printf("  %-7s  %7.3fms -> %7.3fms  %s%s%.1f%%%s\n", $key, $av, $bv, $color, $sign, $delta, $reset);
+    }
+
+    $aFps = $resultA['frame']['fps'] ?? 0.0;
+    $bFps = $resultB['frame']['fps'] ?? 0.0;
+    $fpsDelta = $aFps > 0.0 ? (($bFps - $aFps) / $aFps) * 100.0 : 0.0;
+    $fpsSign = $fpsDelta >= 0.0 ? '+' : '';
+    printf("  fps      %7.1f    -> %7.1f      %s%.1f%%\n", $aFps, $bFps, $fpsSign, $fpsDelta);
+
+    $sectionsA = is_array($resultA['sections'] ?? null) ? $resultA['sections'] : [];
+    $sectionsB = is_array($resultB['sections'] ?? null) ? $resultB['sections'] : [];
+    $allSections = array_unique(array_merge(array_keys($sectionsA), array_keys($sectionsB)));
+
+    if ($allSections !== []) {
+        echo "\n  Section avg ms:\n";
+        foreach ($allSections as $name) {
+            $av = (float) ($sectionsA[$name]['avgMs'] ?? 0.0);
+            $bv = (float) ($sectionsB[$name]['avgMs'] ?? 0.0);
+            if ($av < 0.001 && $bv < 0.001) continue;
+            $delta = $av > 0.0 ? (($bv - $av) / $av) * 100.0 : 0.0;
+            $sign = $delta >= 0.0 ? '+' : '';
+            printf("    %-32s  %7.4f -> %7.4f  %s%.1f%%\n", $name, $av, $bv, $sign, $delta);
+        }
+    }
+
+    echo "\n";
+
+    if ($worstRegression > $threshold) {
+        printf("\033[31mREGRESSION: worst metric is %.1f%% slower (threshold %.0f%%)\033[0m\n", $worstRegression, $threshold);
+        exit(2);
+    }
+    echo "OK\n";
 }

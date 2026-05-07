@@ -34,6 +34,7 @@ use PHPolygon\Runtime\GameLoop;
 use PHPolygon\Runtime\Input;
 use PHPolygon\Runtime\InputInterface;
 use PHPolygon\Runtime\NullWindow;
+use PHPolygon\Runtime\PerfProfiler;
 use PHPolygon\Runtime\VioInput;
 use PHPolygon\Runtime\VioWindow;
 use PHPolygon\Runtime\Window;
@@ -44,6 +45,7 @@ use PHPolygon\Support\Facades\Facade;
 use PHPolygon\Thread\NullThreadScheduler;
 use PHPolygon\Thread\ThreadScheduler;
 use PHPolygon\Thread\ThreadSchedulerFactory;
+use PHPolygon\UI\PerfOverlay;
 
 class Engine
 {
@@ -66,9 +68,29 @@ class Engine
     public readonly ShaderManager $shaders;
     public readonly ThreadScheduler|NullThreadScheduler $scheduler;
 
+    public readonly ?PerfOverlay $perfOverlay;
+
     private bool $running = false;
     private bool $headless;
     private bool $useVio;
+
+    /**
+     * Per-frame stats consumed by the F3 dev overlay and benchmark runner.
+     * Updated once per render frame; safe to read from PerfOverlay or game code.
+     *
+     * frameTimesMs is a ring buffer (newest at the end) of the last
+     * self::FRAME_HISTORY render frames in milliseconds. lastGcDelta is the
+     * delta of `gc_status()` runs / collected since the previous frame.
+     *
+     * @var list<float>
+     */
+    public array $frameTimesMs = [];
+
+    /** @var array{runs:int, collected:int} */
+    public array $lastGcDelta = ['runs' => 0, 'collected' => 0];
+
+    private const FRAME_HISTORY = 120;
+    private int $lastFrameStartNs = 0;
 
     /** @var callable|null */
     private $onUpdate = null;
@@ -170,6 +192,11 @@ class Engine
         }
 
         self::log('Window: ' . get_class($this->window));
+
+        $this->perfOverlay = $config->devMode ? new PerfOverlay($this) : null;
+        if ($this->perfOverlay !== null) {
+            self::log('PerfOverlay enabled (F3 to toggle)');
+        }
 
         Facade::setEngine($this);
 
@@ -482,13 +509,18 @@ class Engine
                     $this->scheduler->sendAll($this->world, $fixedDt);
                 },
                 update: function (float $dt) {
+                    PerfProfiler::begin('engine.update');
                     $this->world->updateMainThread($dt);
 
                     if ($this->onUpdate !== null) {
                         ($this->onUpdate)($this, $dt);
                     }
+                    PerfProfiler::end();
                 },
                 render: function (float $interpolation) use ($nativeBackend) {
+                    PerfProfiler::begin('engine.render');
+                    $this->beginFrameStats();
+
                     // Sync viewport to framebuffer every frame — handles Retina HiDPI and window resize
                     if ($this->renderer3D !== null && !$nativeBackend) {
                         $fbW = $this->window->getFramebufferWidth();
@@ -513,8 +545,16 @@ class Engine
                     }
 
                     if ($this->renderer3D !== null) {
+                        PerfProfiler::begin('render3d.flush');
                         $this->renderer3D->endFrame();
+                        PerfProfiler::end();
                     }
+
+                    if ($this->perfOverlay !== null) {
+                        $this->perfOverlay->tickInput($this->input);
+                        $this->perfOverlay->render($this->renderer2D);
+                    }
+
                     $this->renderer2D->endFrame();
                     if (!$nativeBackend) {
                         $this->window->swapBuffers();
@@ -522,6 +562,8 @@ class Engine
 
                     $this->input->endFrame();
                     $this->window->pollEvents();
+                    $this->endFrameStats();
+                    PerfProfiler::end();
                 },
                 recvAndApply: function () {
                     $this->scheduler->recvAll($this->world);
@@ -534,13 +576,18 @@ class Engine
         } else {
             $this->gameLoop->run(
                 update: function (float $dt) {
+                    PerfProfiler::begin('engine.update');
                     $this->world->update($dt);
 
                     if ($this->onUpdate !== null) {
                         ($this->onUpdate)($this, $dt);
                     }
+                    PerfProfiler::end();
                 },
                 render: function (float $interpolation) use ($nativeBackend) {
+                    PerfProfiler::begin('engine.render');
+                    $this->beginFrameStats();
+
                     // Sync viewport to framebuffer every frame — handles Retina HiDPI and window resize
                     if ($this->renderer3D !== null && !$nativeBackend) {
                         $fbW = $this->window->getFramebufferWidth();
@@ -565,8 +612,16 @@ class Engine
                     }
 
                     if ($this->renderer3D !== null) {
+                        PerfProfiler::begin('render3d.flush');
                         $this->renderer3D->endFrame();
+                        PerfProfiler::end();
                     }
+
+                    if ($this->perfOverlay !== null) {
+                        $this->perfOverlay->tickInput($this->input);
+                        $this->perfOverlay->render($this->renderer2D);
+                    }
+
                     $this->renderer2D->endFrame();
                     if (!$nativeBackend) {
                         $this->window->swapBuffers();
@@ -574,6 +629,8 @@ class Engine
 
                     $this->input->endFrame();
                     $this->window->pollEvents();
+                    $this->endFrameStats();
+                    PerfProfiler::end();
                 },
                 shouldStop: function (): bool {
                     return !$this->running || $this->window->shouldClose();
@@ -587,6 +644,26 @@ class Engine
     public function stop(): void
     {
         $this->running = false;
+    }
+
+    private function beginFrameStats(): void
+    {
+        $this->lastFrameStartNs = (int) hrtime(true);
+    }
+
+    private function endFrameStats(): void
+    {
+        if ($this->lastFrameStartNs === 0) {
+            return;
+        }
+
+        $elapsedMs = ((int) hrtime(true) - $this->lastFrameStartNs) / 1_000_000.0;
+        $this->frameTimesMs[] = $elapsedMs;
+        if (count($this->frameTimesMs) > self::FRAME_HISTORY) {
+            \array_shift($this->frameTimesMs);
+        }
+
+        $this->lastGcDelta = PerfProfiler::gcDelta();
     }
 
     public function getConfig(): EngineConfig

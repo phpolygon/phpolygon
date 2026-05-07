@@ -1,0 +1,21 @@
+{
+    "scenario": "boxes-1000-instanced",
+    "gitSha": "be050d5",
+    "warmupFrames": 60,
+    "measureFrames": 300,
+    "dt": 0.016666666666666666,
+    "frame": {
+        "p50Ms": 0.084776,
+        "p95Ms": 0.195565,
+        "p99Ms": 10.124353,
+        "meanMs": 0.23321799666666668,
+        "minMs": 0.061743,
+        "maxMs": 10.389987,
+        "fps": 4287.833761942814
+    },
+    "gc": {
+        "runs": 0,
+        "collected": 0
+    },
+    "sections": []
+}

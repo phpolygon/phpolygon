@@ -1,0 +1,99 @@
+name: Perf bench
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'benchmarks/**'
+      - 'composer.json'
+      - 'composer.lock'
+      - '.github/workflows/perf-bench.yml'
+  workflow_dispatch:
+
+# Run all six scenarios twice (PR HEAD vs main) and diff. Local baselines in
+# benchmarks/baselines/ are NOT used as the comparison reference here -
+# different hardware between local and the runner makes absolute numbers
+# unreliable. The dual-run approach gets stable relative deltas on the
+# same machine.
+jobs:
+  bench:
+    name: Headless benchmarks
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout PR HEAD
+        uses: actions/checkout@v4
+        with:
+          path: pr
+          fetch-depth: 0
+
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          path: base
+          fetch-depth: 0
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: gd, mbstring, dom, xml
+          coverage: none
+
+      - name: Install dependencies (PR)
+        working-directory: pr
+        run: composer install --no-interaction --ignore-platform-reqs
+
+      - name: Install dependencies (base)
+        working-directory: base
+        run: composer install --no-interaction --ignore-platform-reqs
+
+      - name: Run benchmarks on PR HEAD
+        working-directory: pr
+        run: |
+          for s in empty-scene boxes-1000 boxes-1000-instanced mixed-scene mesh-gen-stress physics-stack; do
+            php benchmarks/run.php "$s" --warmup 60 --frames 300
+          done
+
+      - name: Run benchmarks on main
+        working-directory: base
+        run: |
+          for s in empty-scene boxes-1000 boxes-1000-instanced mixed-scene mesh-gen-stress physics-stack; do
+            php benchmarks/run.php "$s" --warmup 60 --frames 300
+          done
+
+      - name: Diff results
+        run: |
+          # Bring main's results into PR's results/ folder so perf:report can
+          # find both files. They have different short-shas so they don't clash.
+          mkdir -p pr/benchmarks/results
+          cp -n base/benchmarks/results/*.json pr/benchmarks/results/
+
+          PR_SHA=$(cd pr && git rev-parse --short HEAD)
+          BASE_SHA=$(cd base && git rev-parse --short HEAD)
+
+          echo "Comparing PR ${PR_SHA} against main ${BASE_SHA}"
+          echo
+
+          fail=0
+          cd pr
+          for s in empty-scene boxes-1000 boxes-1000-instanced mixed-scene mesh-gen-stress physics-stack; do
+            echo "==> $s"
+            if ! php bin/phpolygon perf:report "$s" "$BASE_SHA" "$PR_SHA"; then
+              fail=1
+            fi
+            echo
+          done
+          exit $fail
+
+      - name: Upload result JSON
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: perf-results
+          path: |
+            pr/benchmarks/results/*.json
+            base/benchmarks/results/*.json

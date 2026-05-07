@@ -38,5 +38,12 @@ class EngineConfig
          * complete yet but php-metal's native renderer is.
          */
         public readonly bool $useNative3D = false,
+        /**
+         * Enables developer-only features such as the F3 performance overlay
+         * and PerfProfiler hook points. Must be false for shipping builds.
+         * Independent from the SPX/Excimer extensions, which are activated
+         * via env vars and do not require this flag.
+         */
+        public readonly bool $devMode = false,
     ) {}
 }

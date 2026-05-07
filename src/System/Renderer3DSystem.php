@@ -24,6 +24,7 @@ use PHPolygon\Rendering\Command\SetSnowCover;
 use PHPolygon\Rendering\Command\SetWaveAnimation;
 use PHPolygon\Rendering\RenderCommandList;
 use PHPolygon\Rendering\Renderer3DInterface;
+use PHPolygon\Runtime\PerfProfiler;
 
 /**
  * Default 3D renderer system.
@@ -96,6 +97,16 @@ class Renderer3DSystem extends AbstractSystem
     }
 
     public function render(World $world): void
+    {
+        PerfProfiler::begin('render3d.build_commands');
+        try {
+            $this->renderCommands($world);
+        } finally {
+            PerfProfiler::end();
+        }
+    }
+
+    private function renderCommands(World $world): void
     {
         // Lights — directional + point, in sync with draws each frame.
         foreach ($world->query(DirectionalLight::class, Transform3D::class) as $entity) {
