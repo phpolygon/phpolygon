@@ -16,12 +16,40 @@ class GameLoop
     private int $sampleIndex = 0;
     private int $sampleCount = 60;
 
+    /**
+     * Frame-time cap in nanoseconds. 0 = uncapped. Set via setFpsCap() from
+     * the GraphicsSettingsManager when the player picks a fixed FPS limit.
+     * The cap is applied as a busy-wait of at most one frame at the end of
+     * each render iteration, after vsync has had its chance to throttle.
+     */
+    private int $minFrameTimeNs = 0;
+
     public function __construct(
         private float $targetTickRate = 60.0,
         int $maxUpdatesPerFrame = 10,
     ) {
         $this->timestepNs = (int)(1_000_000_000.0 / $targetTickRate);
         $this->maxUpdatesPerFrame = $maxUpdatesPerFrame;
+    }
+
+    /**
+     * Set the FPS cap. 0 disables the cap; valid values are 30, 60, 120, 144.
+     */
+    public function setFpsCap(int $fps): void
+    {
+        if ($fps <= 0) {
+            $this->minFrameTimeNs = 0;
+            return;
+        }
+        $this->minFrameTimeNs = (int)(1_000_000_000.0 / max(1.0, (float)$fps));
+    }
+
+    public function getFpsCap(): int
+    {
+        if ($this->minFrameTimeNs <= 0) {
+            return 0;
+        }
+        return (int)round(1_000_000_000.0 / $this->minFrameTimeNs);
     }
 
     /**
@@ -36,7 +64,8 @@ class GameLoop
         $previousTime = Clock::now();
 
         while (!$shouldStop()) {
-            $currentTime = Clock::now();
+            $frameStart = Clock::now();
+            $currentTime = $frameStart;
             $elapsed = $currentTime - $previousTime;
             $previousTime = $currentTime;
             $lag += $elapsed;
@@ -59,6 +88,29 @@ class GameLoop
 
             // Update average FPS
             $this->updateAverages();
+
+            // Apply FPS cap (set via GraphicsSettings::$fpsCap). 0 = uncapped.
+            $this->throttleToFpsCap($frameStart);
+        }
+    }
+
+    /**
+     * Sleep until at least minFrameTimeNs has elapsed since the supplied
+     * frame start. Uses usleep for the bulk of the wait (sub-ns precision is
+     * irrelevant) and is a no-op when no cap is active.
+     */
+    private function throttleToFpsCap(int $frameStartNs): void
+    {
+        if ($this->minFrameTimeNs <= 0) {
+            return;
+        }
+        $remaining = $this->minFrameTimeNs - (Clock::now() - $frameStartNs);
+        if ($remaining > 0) {
+            // Convert ns to us, leaving 200us headroom for usleep wake-up jitter.
+            $us = (int)max(0, ($remaining / 1000) - 200);
+            if ($us > 0) {
+                usleep($us);
+            }
         }
     }
 
@@ -106,7 +158,8 @@ class GameLoop
         $previousTime = Clock::now();
 
         while (!$shouldStop()) {
-            $currentTime = Clock::now();
+            $frameStart = Clock::now();
+            $currentTime = $frameStart;
             $elapsed = $currentTime - $previousTime;
             $previousTime = $currentTime;
             $lag += $elapsed;
@@ -136,6 +189,7 @@ class GameLoop
             $render((float) $interpolation);
 
             $this->updateAverages();
+            $this->throttleToFpsCap($frameStart);
         }
     }
 

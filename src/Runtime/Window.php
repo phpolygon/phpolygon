@@ -369,6 +369,26 @@ class Window
         }
     }
 
+    /**
+     * Enable or disable vsync (swap interval).
+     *
+     * Has no effect when the window was created with no GL context
+     * (Vulkan / Metal native backends) - those expose their own present
+     * mode toggles through their respective renderer3D implementations.
+     */
+    public function setVsync(bool $vsync): void
+    {
+        $this->vsync = $vsync;
+        if (!$this->noApi) {
+            glfwSwapInterval($vsync ? 1 : 0);
+        }
+    }
+
+    public function isVsync(): bool
+    {
+        return $this->vsync;
+    }
+
     public function setCursorDisabled(): void
     {
         glfwSetInputMode($this->handle, GLFW_CURSOR, GLFW_CURSOR_DISABLED);

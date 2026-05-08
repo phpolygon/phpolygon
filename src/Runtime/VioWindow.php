@@ -207,6 +207,23 @@ class VioWindow extends Window
         return $this->ctx;
     }
 
+    /**
+     * Toggle vsync. Vio exposes vio_set_vsync(); when not present we fall
+     * through to the GLFW-based parent implementation, which is a no-op
+     * for vio-managed windows.
+     */
+    public function setVsync(bool $vsync): void
+    {
+        $this->vsync = $vsync;
+        if ($this->initialized && function_exists('vio_set_vsync')) {
+            try {
+                @vio_set_vsync($this->ctx, $vsync);
+            } catch (\Throwable $e) {
+                // Older vio builds may lack the helper.
+            }
+        }
+    }
+
     public function setCursorDisabled(): void
     {
         vio_set_cursor_mode($this->ctx, VIO_CURSOR_DISABLED);

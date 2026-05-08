@@ -17,6 +17,7 @@ class Device
     public function createLibraryWithSource(string $source): Library {}
     public function createRenderPipelineState(RenderPipelineDescriptor $descriptor): RenderPipelineState {}
     public function createDepthStencilState(DepthStencilDescriptor $descriptor): DepthStencilState {}
+    public function createSamplerState(SamplerDescriptor $descriptor): SamplerState {}
 }
 
 class Layer
@@ -57,6 +58,10 @@ class RenderCommandEncoder
     public function setFragmentBuffer(Buffer $buffer, int $offset, int $index): void {}
     public function setVertexBytes(string $bytes, int $index): void {}
     public function setFragmentBytes(string $bytes, int $index): void {}
+    public function setFragmentTexture(Texture $texture, int $index): void {}
+    public function setFragmentSamplerState(SamplerState $sampler, int $index): void {}
+    public function setVertexTexture(Texture $texture, int $index): void {}
+    public function setVertexSamplerState(SamplerState $sampler, int $index): void {}
     public function drawIndexedPrimitives(int $primitiveType, int $indexCount, int $indexType, Buffer $indexBuffer, int $indexBufferOffset = 0, int $instanceCount = 1): void {}
     public function drawPrimitives(int $primitiveType, int $vertexStart, int $vertexCount, int $instanceCount = 1): void {}
     public function endEncoding(): void {}
@@ -77,11 +82,13 @@ class Texture
 class TextureDescriptor
 {
     public function __construct() {}
+    public static function texture2DDescriptor(int $pixelFormat, int $width, int $height, bool $mipmapped): TextureDescriptor {}
     public function setPixelFormat(int $pixelFormat): void {}
     public function setWidth(int $width): void {}
     public function setHeight(int $height): void {}
     public function setUsage(int $usage): void {}
     public function setStorageMode(int $storageMode): void {}
+    public function setTextureType(int $textureType): void {}
 }
 
 class RenderPassDescriptor
@@ -91,10 +98,12 @@ class RenderPassDescriptor
     public function setColorAttachmentLoadAction(int $index, int $loadAction): void {}
     public function setColorAttachmentStoreAction(int $index, int $storeAction): void {}
     public function setColorAttachmentClearColor(int $index, float $r, float $g, float $b, float $a): void {}
+    public function setColorAttachmentResolveTexture(int $index, Texture $texture): void {}
     public function setDepthAttachmentTexture(Texture $texture): void {}
     public function setDepthAttachmentLoadAction(int $loadAction): void {}
     public function setDepthAttachmentStoreAction(int $storeAction): void {}
     public function setDepthAttachmentClearDepth(float $depth): void {}
+    public function setDepthAttachmentResolveTexture(Texture $texture): void {}
 }
 
 class RenderPipelineDescriptor
@@ -105,6 +114,7 @@ class RenderPipelineDescriptor
     public function getColorAttachment(int $index): ColorAttachment {}
     public function setDepthAttachmentPixelFormat(int $pixelFormat): void {}
     public function setVertexDescriptor(VertexDescriptor $descriptor): void {}
+    public function setRasterSampleCount(int $value): void {}
 }
 
 class ColorAttachment
@@ -136,6 +146,17 @@ class Library
 
 class ShaderFunction {}
 
+class SamplerDescriptor
+{
+    public function __construct() {}
+    public function setMinFilter(int $filter): void {}
+    public function setMagFilter(int $filter): void {}
+    public function setSAddressMode(int $mode): void {}
+    public function setTAddressMode(int $mode): void {}
+}
+
+class SamplerState {}
+
 // ── Namespace-level function ──────────────────────────────────────────────
 
 function createSystemDefaultDevice(): Device {}
@@ -146,12 +167,35 @@ const PixelFormatBGRA8Unorm   = 80;
 const PixelFormatDepth32Float = 252;
 
 const StorageModeShared  = 0;
-const StorageModePrivate = 16;
+const StorageModeManaged = 1;
+const StorageModePrivate = 2;
 
+const TextureType1D                = 0;
+const TextureType2D                = 2;
+const TextureType2DMultisample     = 4;
+const TextureTypeCube              = 5;
+const TextureType3D                = 7;
+
+const TextureUsageUnknown      = 0;
+const TextureUsageShaderRead   = 1;
+const TextureUsageShaderWrite  = 2;
 const TextureUsageRenderTarget = 4;
 
-const LoadActionClear  = 2;
-const StoreActionStore = 1;
+const LoadActionDontCare = 0;
+const LoadActionLoad     = 1;
+const LoadActionClear    = 2;
+
+const StoreActionDontCare                  = 0;
+const StoreActionStore                     = 1;
+const StoreActionMultisampleResolve        = 2;
+const StoreActionStoreAndMultisampleResolve = 3;
+
+const SamplerMinMagFilterNearest      = 0;
+const SamplerMinMagFilterLinear       = 1;
+const SamplerAddressModeClampToEdge   = 0;
+const SamplerAddressModeRepeat        = 2;
+const SamplerAddressModeMirrorRepeat  = 3;
+const SamplerAddressModeClampToZero   = 4;
 
 const CullModeNone            = 0;
 const CullModeFront           = 1;

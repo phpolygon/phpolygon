@@ -19,6 +19,8 @@ use PHPolygon\Rendering\Command\SetFog;
 use PHPolygon\Rendering\Command\SetShader;
 use PHPolygon\Rendering\Command\SetSkybox;
 use PHPolygon\Rendering\Command\SetWaveAnimation;
+use PHPolygon\Rendering\PostProcess\OpenGLFxaaPass;
+use PHPolygon\Rendering\Quality\AntiAliasing;
 
 /**
  * OpenGL 4.1 3D renderer. Translates a RenderCommandList into GL draw calls.
@@ -100,10 +102,40 @@ class OpenGLRenderer3D implements Renderer3DInterface
     private ?ShadowMapRenderer $shadowMap = null;
     private ?CloudShadowRenderer $cloudShadow = null;
 
-    public function __construct(int $width = 1280, int $height = 720)
+    /**
+     * Off-screen target backing the Phase 1.5 render-scale + MSAA pipeline.
+     * Allocated lazily on the first frame after the target size is known.
+     * Stays null while the engine is running at native resolution with no AA
+     * - that path skips the off-screen blit entirely (zero overhead).
+     */
+    private ?OpenGLOffscreenTarget $offscreenTarget = null;
+
+    /** Lazy FXAA post-process pass. Null when AntiAliasing != Fxaa. */
+    private ?OpenGLFxaaPass $fxaaPass = null;
+
+    /**
+     * True when the current frame is being rendered into the offscreen target
+     * rather than directly into the backbuffer. Set by beginFrame()/render(),
+     * read by endFrame() to know whether to resolve+blit.
+     */
+    private bool $offscreenActive = false;
+
+    /** Backbuffer resolution captured at frame start (for blit destination). */
+    private int $backbufferWidth = 0;
+    private int $backbufferHeight = 0;
+
+    /**
+     * Live graphics settings driving shadow-map size, view-distance clamp,
+     * cloud-shadow toggle, fog toggle, anisotropy and shader-quality choice.
+     * applySettings() may be called at any time after construction.
+     */
+    private GraphicsSettings $settings;
+
+    public function __construct(int $width = 1280, int $height = 720, ?GraphicsSettings $settings = null)
     {
         $this->width  = $width;
         $this->height = $height;
+        $this->settings = $settings ?? new GraphicsSettings();
 
         // Register all built-in shaders (games can override by registering before construction)
         $builtins = [
@@ -134,9 +166,39 @@ class OpenGLRenderer3D implements Renderer3DInterface
         glFrontFace(GL_CCW);
         $this->pointLightCount = 0;
         $this->pointLights     = [];
+
+        // Capture the backbuffer size on entry; setViewport() may have already
+        // updated $width/$height to the framebuffer dimensions for this frame.
+        $this->backbufferWidth  = $this->width;
+        $this->backbufferHeight = $this->height;
+
+        $this->beginOffscreenIfRequired();
     }
 
-    public function endFrame(): void {}
+    public function endFrame(): void
+    {
+        if (!$this->offscreenActive || $this->offscreenTarget === null) {
+            return;
+        }
+
+        $target = $this->offscreenTarget;
+        $target->resolve();
+
+        if ($this->settings->antiAliasing === AntiAliasing::Fxaa && $this->fxaaPass !== null) {
+            // FXAA reads the resolved color texture and writes directly to the
+            // backbuffer at backbuffer resolution. The pass also performs the
+            // up/down-sample implicitly via the sampler's bilinear filter.
+            glBindFramebuffer(0x8D40 /* GL_FRAMEBUFFER */, 0);
+            glViewport(0, 0, $this->backbufferWidth, $this->backbufferHeight);
+            glDisable(GL_DEPTH_TEST);
+            $this->fxaaPass->apply($target->colorTextureId(), $target->width(), $target->height());
+            glEnable(GL_DEPTH_TEST);
+        } else {
+            $target->presentToBackbuffer($this->backbufferWidth, $this->backbufferHeight);
+        }
+
+        $this->offscreenActive = false;
+    }
 
     public function clear(Color $color): void
     {
@@ -162,6 +224,16 @@ class OpenGLRenderer3D implements Renderer3DInterface
         glEnable(GL_MULTISAMPLE);
         glDisable(GL_CULL_FACE);
         glFrontFace(GL_CCW);
+
+        // If beginFrame() was skipped (legacy entry path), make sure the
+        // offscreen target is set up before we issue glClear into whichever
+        // framebuffer happens to be bound.
+        if (!$this->offscreenActive && $this->offscreenIsActive()) {
+            $this->backbufferWidth  = $this->backbufferWidth  > 0 ? $this->backbufferWidth  : $this->width;
+            $this->backbufferHeight = $this->backbufferHeight > 0 ? $this->backbufferHeight : $this->height;
+            $this->beginOffscreenIfRequired();
+        }
+
         glClear(GL_DEPTH_BUFFER_BIT);
         $this->pointLightCount = 0;
         $this->pointLights     = [];
@@ -247,9 +319,17 @@ class OpenGLRenderer3D implements Renderer3DInterface
                 $this->pointLightCount++;
 
             } elseif ($command instanceof SetFog) {
-                $this->setUniformVec3('u_fog_color', [$command->color->r, $command->color->g, $command->color->b]);
-                $this->setUniformFloat('u_fog_near', $command->near);
-                $this->setUniformFloat('u_fog_far', $command->far);
+                if ($this->settings->fog) {
+                    $this->setUniformVec3('u_fog_color', [$command->color->r, $command->color->g, $command->color->b]);
+                    $clampedFar = min($command->far, $this->settings->viewDistance);
+                    $clampedNear = min($command->near, $clampedFar - 1.0);
+                    $this->setUniformFloat('u_fog_near', $clampedNear);
+                    $this->setUniformFloat('u_fog_far', $clampedFar);
+                } else {
+                    // Push fog beyond any reasonable view distance to neutralise it.
+                    $this->setUniformFloat('u_fog_near', 99998.0);
+                    $this->setUniformFloat('u_fog_far', 99999.0);
+                }
 
             } elseif ($command instanceof SetSkybox) {
                 $this->pendingSkyboxId = $command->cubemapId;
@@ -288,8 +368,16 @@ class OpenGLRenderer3D implements Renderer3DInterface
         // Shadow map pass: render scene depth from sun's perspective
         $this->renderShadowMap($commandList);
 
-        // Restore main viewport, camera, and lights after shadow pass
-        glViewport(0, 0, $this->width, $this->height);
+        // Restore main viewport + framebuffer. When the offscreen pipeline is
+        // active we have to re-bind the offscreen draw target *and* match its
+        // (potentially scaled) viewport. Otherwise the shadow pass has left us
+        // bound to the shadow FBO and at the shadow-map viewport.
+        if ($this->offscreenActive && $this->offscreenTarget !== null) {
+            $this->offscreenTarget->bindForDraw();
+        } else {
+            glBindFramebuffer(0x8D40 /* GL_FRAMEBUFFER */, 0);
+            glViewport(0, 0, $this->width, $this->height);
+        }
         foreach ($commandList->getCommands() as $command) {
             if ($command instanceof SetCamera) {
                 $this->setUniformMat4('u_view', $command->viewMatrix);
@@ -502,7 +590,7 @@ class OpenGLRenderer3D implements Renderer3DInterface
     {
         $vao = 0;
         glGenVertexArrays(1, $vao);
-        if (!is_int($vao) || $vao === 0) {
+        if ($vao === 0) {
             throw new \RuntimeException('glGenVertexArrays failed (instanced)');
         }
         glBindVertexArray($vao);
@@ -684,7 +772,7 @@ class OpenGLRenderer3D implements Renderer3DInterface
     {
         $vao = 0;
         glGenVertexArrays(1, $vao);
-        if (!is_int($vao) || $vao === 0) {
+        if ($vao === 0) {
             throw new \RuntimeException('glGenVertexArrays failed');
         }
         glBindVertexArray($vao);
@@ -944,7 +1032,7 @@ class OpenGLRenderer3D implements Renderer3DInterface
 
         $vao = 0;
         glGenVertexArrays(1, $vao);
-        if (!is_int($vao) || $vao === 0) {
+        if ($vao === 0) {
             throw new \RuntimeException('Failed to create skybox VAO');
         }
         glBindVertexArray($vao);
@@ -1028,9 +1116,20 @@ class OpenGLRenderer3D implements Renderer3DInterface
      */
     private function renderShadowMap(RenderCommandList $commandList): void
     {
-        // Lazy-init shadow map
+        // ShadowQuality::Off forces u_has_shadow_map = 0 and skips the pass entirely.
+        if ($this->settings->shadowQuality === \PHPolygon\Rendering\Quality\ShadowQuality::Off) {
+            $this->setUniformInt('u_has_shadow_map', 0);
+            $this->setUniformInt('u_has_cloud_shadow', 0);
+            return;
+        }
+
+        // Lazy-init shadow map at the resolution dictated by current settings
         if ($this->shadowMap === null) {
-            $this->shadowMap = new ShadowMapRenderer(resolution: 2048);
+            $resolution = $this->settings->shadowQuality->resolution();
+            if ($resolution <= 0) {
+                $resolution = 2048;
+            }
+            $this->shadowMap = new ShadowMapRenderer(resolution: $resolution);
             $this->shadowMap->initialize();
         }
         $shadowMap = $this->shadowMap;
@@ -1099,6 +1198,20 @@ class OpenGLRenderer3D implements Renderer3DInterface
         }
 
         $shadowMap->endShadowPass();
+
+        // Cloud shadows are an opt-in volumetric effect.
+        if (!$this->settings->cloudShadows) {
+            $this->setUniformInt('u_has_cloud_shadow', 0);
+            // Drain GL errors and bind shadow map only - skip cloud pass.
+            while (glGetError() !== 0) {}
+            $this->useShaderProgram($this->shaderProgramCache['default']);
+            $shadowMap->bind(6);
+            $this->setUniformInt('u_shadow_map', 6);
+            $this->setUniformMat4('u_light_space_matrix', $shadowMap->getLightSpaceMatrix());
+            $this->setUniformInt('u_has_shadow_map', 1);
+            glClear(GL_DEPTH_BUFFER_BIT);
+            return;
+        }
 
         // --- Cloud shadow pass: render cloud opacity from sun's perspective ---
         if ($this->cloudShadow === null) {
@@ -1214,5 +1327,103 @@ class OpenGLRenderer3D implements Renderer3DInterface
             $hadError = true;
         }
         return $hadError;
+    }
+
+    /**
+     * Apply live graphics settings.
+     *
+     * Hot-swappable: shadow-map size, shadow disable, anisotropy, fog toggle,
+     * cloud-shadow toggle, view-distance clamp, shader override (handled via
+     * ShaderManager + SetShader command, not here), render scale and AA mode
+     * (Phase 1.5: off-screen FBO + FXAA + MSAA renderbuffer).
+     */
+    public function applySettings(GraphicsSettings $settings): void
+    {
+        $previousShadow = $this->settings->shadowQuality;
+        $this->settings = $settings;
+
+        // Rebuild shadow map if the resolution tier changed
+        if ($previousShadow !== $settings->shadowQuality) {
+            $this->shadowMap = null;
+        }
+
+        // Anisotropy is applied per-texture-upload by the TextureManager.
+        // No direct GL state to flush here - subsequent loads use the new value.
+
+        // Render-scale and AA changes take effect on the next beginFrame().
+        // We could rebuild the offscreen target here proactively, but the
+        // backbuffer dimensions may not be authoritative until the frame
+        // starts; delaying keeps the code simpler and the visible result
+        // identical (one frame of latency on the user's quality slider).
+        $this->resizeOffscreenIfNeeded();
+    }
+
+    public function getSettings(): GraphicsSettings
+    {
+        return $this->settings;
+    }
+
+    /**
+     * Decide whether the offscreen pipeline is needed, allocate or resize the
+     * target, and bind it. Called from beginFrame() so the 3D pass renders
+     * into the offscreen FBO. Returns silently when the fast path applies.
+     *
+     * Fast path: renderScale == 1.0 AND antiAliasing == Off. The 3D pass
+     * draws directly into the backbuffer like before this phase.
+     */
+    private function beginOffscreenIfRequired(): void
+    {
+        $needsOffscreen = $this->offscreenIsActive();
+        if (!$needsOffscreen) {
+            $this->offscreenActive = false;
+            return;
+        }
+
+        $targetW = max(1, (int)round($this->backbufferWidth  * $this->settings->renderScale));
+        $targetH = max(1, (int)round($this->backbufferHeight * $this->settings->renderScale));
+        $samples = max(1, $this->settings->antiAliasing->sampleCount());
+
+        if ($this->offscreenTarget === null) {
+            $this->offscreenTarget = new OpenGLOffscreenTarget();
+        }
+        $this->offscreenTarget->resize($targetW, $targetH, $samples);
+
+        if ($this->settings->antiAliasing === AntiAliasing::Fxaa && $this->fxaaPass === null) {
+            $this->fxaaPass = new OpenGLFxaaPass(__DIR__ . '/../../resources/shaders/source');
+        }
+
+        $this->offscreenTarget->bindForDraw();
+        $this->offscreenActive = true;
+    }
+
+    /**
+     * Recompute target size when applySettings() flips render scale or AA mode
+     * mid-flight. Avoids waiting a full frame before the change is reflected
+     * in the FBO allocation.
+     */
+    private function resizeOffscreenIfNeeded(): void
+    {
+        if ($this->offscreenTarget === null || $this->backbufferWidth <= 0 || $this->backbufferHeight <= 0) {
+            return;
+        }
+
+        if (!$this->offscreenIsActive()) {
+            $this->offscreenTarget->release();
+            return;
+        }
+
+        $targetW = max(1, (int)round($this->backbufferWidth  * $this->settings->renderScale));
+        $targetH = max(1, (int)round($this->backbufferHeight * $this->settings->renderScale));
+        $samples = max(1, $this->settings->antiAliasing->sampleCount());
+        $this->offscreenTarget->resize($targetW, $targetH, $samples);
+    }
+
+    private function offscreenIsActive(): bool
+    {
+        if ($this->settings->renderScale !== 1.0) {
+            return true;
+        }
+
+        return $this->settings->antiAliasing !== AntiAliasing::Off;
     }
 }

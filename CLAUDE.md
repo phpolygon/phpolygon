@@ -101,7 +101,7 @@ Games control shaders via the `Shader` facade or `$engine->shaders`:
 ```php
 use PHPolygon\Support\Facades\Shader;
 
-Shader::available();           // ['default', 'unlit', 'normals', 'depth', 'shadow', 'skybox']
+Shader::available();           // ['default', 'unlit', 'normals', 'depth', 'shadow', 'skybox', 'fxaa']
 Shader::use('unlit');          // global override — all draws use 'unlit'
 Shader::active();              // 'unlit'
 Shader::isOverridden();        // true
@@ -141,6 +141,7 @@ Built-in shaders (registered automatically by the renderer):
 | `depth` | Debug: visualize depth buffer (white=near, black=far) | `depth.vert/frag.glsl` |
 | `shadow` | Depth-only pass for shadow maps (used internally by renderer) | `shadow.vert/frag.glsl` |
 | `skybox` | Cubemap skybox (used internally by SetSkybox command) | `skybox.vert/frag.glsl` |
+| `fxaa` | Fullscreen post-process AA (used internally when AntiAliasing::FXAA is selected; fullscreen-triangle vertex stage, no VBO) | `fxaa.vert/frag.glsl` |
 
 All built-in shaders can be overridden by registering a shader with the same ID
 before the renderer is constructed. Custom shaders are compiled lazily on first
@@ -154,15 +155,24 @@ shader does not declare are silently ignored — a minimal shader only needs
 ### GPU backends
 | Backend | Status | Target |
 |---|---|---|
-| php-vio (2D + 3D unified) | **Primary** | All platforms when php-vio is loaded |
+| php-vio (2D + 3D unified) | **Primary** | All platforms when php-vio is loaded. vio internally dispatches to Metal (macOS), D3D11/D3D12 (Windows), Vulkan, or OpenGL via `vio_create('auto', ...)` |
 | OpenGL 4.1 via php-glfw (2D/NanoVG) | Fallback | 2D games when php-vio unavailable |
 | OpenGL 4.1 via php-glfw (3D) | Fallback | 3D games when php-vio unavailable |
-| Vulkan via php-vulkan | Active | 3D native Vulkan backend |
-| Metal via MoltenVK | Active | 3D on macOS via MoltenVK |
-| D3D11 / D3D12 | Cancelled | — |
+| Vulkan via php-vulkan | Standalone | 3D native Vulkan backend, used when vio is not loaded |
+| Metal via php-metal | Standalone | 3D native Metal backend on macOS, used when vio is not loaded |
 
-**D3D is permanently out of scope.** Do not add D3D stubs, interfaces, or comments.
-Vulkan covers Windows natively; MoltenVK covers macOS.
+vio is the production path on every platform. The standalone Metal / Vulkan / OpenGL
+backends exist for environments where vio is unavailable (older PHP builds, CI
+without GPU, headless tooling) or when a game explicitly opts into a native
+backend via `EngineConfig::$useNative3D`. When extending the renderer (new
+features, post-effects, render-target work), prioritise VioRenderer3D first
+because it reaches all GPUs including D3D11 / D3D12.
+
+D3D11 and D3D12 are reached exclusively through vio - there is no standalone
+D3D backend class. vio's runtime backend can be inspected via `vio_backend_name($ctx)`,
+which returns `'metal'`, `'d3d11'`, `'d3d12'`, `'vulkan'`, or `'opengl'`. Backend-specific
+quirks (like the Y-flipped render-target convention on D3D) live in VioRenderer3D
+behind a `vio_backend_name()` switch.
 
 The engine selects the backend automatically at startup:
 1. If `extension_loaded('vio')` → Vio backends for window, input, audio, 2D, 3D, textures
@@ -399,6 +409,182 @@ class PhpDistrictScene extends Scene
     }
 }
 ```
+
+---
+
+## Graphics Quality Settings
+
+PHPolygon ships with a player-facing graphics-quality system. Games expose it
+through a settings panel; the engine handles persistence, hardware
+fingerprinting, first-launch calibration, and (optionally) live adaptation
+of individual settings to hit a target FPS.
+
+### Quality modes
+
+| Mode       | Behaviour |
+|------------|-----------|
+| `Manual`   | Player owns every value. Engine applies on change, never reverts. |
+| `Adaptive` | `AdaptiveQualityController` watches frame times and tunes settings up or down to keep FPS within a dead-band around the target. |
+| `Off`      | No automatic adjustments, no first-launch calibration. Whatever sits in `GraphicsSettings` is rendered. |
+
+### `GraphicsSettings` (`src/Rendering/GraphicsSettings.php`)
+
+Immutable value object. All updates produce a new instance via `with(...)`.
+Defaults reproduce pre-existing engine behaviour 1:1, so games without a
+`graphics.json` on disk render unchanged.
+
+| Field             | Type                | Default          |
+|-------------------|---------------------|------------------|
+| `mode`            | `QualityMode`       | `Manual`         |
+| `targetFps`       | `float`             | 60.0             |
+| `renderScale`     | `float` (0.5-2.0)   | 1.0              |
+| `shadowQuality`   | `ShadowQuality`     | `Medium` (2048)  |
+| `shadowDistance`  | `float`             | 50.0             |
+| `viewDistance`    | `float`             | 200.0            |
+| `antiAliasing`    | `AntiAliasing`      | `Fxaa`           |
+| `anisotropy`      | `int` (1/2/4/8/16)  | 4                |
+| `vsync`           | `bool`              | true             |
+| `fpsCap`          | `int` (0/30/60/120/144) | 0 = unlimited |
+| `textureQuality`  | `TextureQuality`    | `Full`           |
+| `shaderQuality`   | `ShaderQuality`     | `Full`           |
+| `cloudShadows`    | `bool`              | true             |
+| `bloom`           | `bool`              | true             |
+| `fog`             | `bool`              | true             |
+| `meshLod`         | `MeshLodTier`       | `High`           |
+
+JSON is hand-serialised on this class (the only exception to the
+"no manual `toJson()`" rule). It is a player settings record, not a Component.
+
+### `GraphicsSettingsManager` (`$engine->graphics`)
+
+```php
+use PHPolygon\Rendering\GraphicsSettings;
+use PHPolygon\Rendering\Quality\QualityMode;
+use PHPolygon\Rendering\Quality\ShadowQuality;
+
+$engine->graphics->setMode(QualityMode::Adaptive);
+$engine->graphics->setTargetFps(120.0);
+$engine->graphics->update(fn(GraphicsSettings $s) => $s->with(
+    shadowQuality: ShadowQuality::Low,
+    bloom: false,
+));
+
+$current = $engine->graphics->settings();
+$result  = $engine->graphics->recalibrate(); // BenchmarkResult
+```
+
+Every change is persisted (default `saves/graphics.json`) and applied to the
+active 3D renderer, the window (vsync) and the GameLoop (fpsCap).
+
+### Events
+
+| Event                              | Fired when |
+|------------------------------------|------------|
+| `GraphicsSettingsChanged`          | After every applied change. Carries `previous` + `current`. |
+| `GraphicsCalibrationStarted`       | Auto-tuner began a benchmark sweep. |
+| `GraphicsCalibrationProgress`      | Progress ratio + tier label per step. |
+| `GraphicsCalibrationCompleted`     | Auto-tuner returned a `BenchmarkResult`. |
+| `QualityChangeRequest`             | Adaptive controller wants to change a setting. Listeners may call `$event->veto()` to defer (e.g. during combat or cutscenes). |
+
+### First-launch calibration
+
+When `EngineConfig::$firstLaunchCalibration === true` (default) and no
+`graphics.json` exists at `$graphicsSettingsPath`, the engine runs the
+auto-tuner against `EngineConfig::$benchmarkScene` (or the built-in
+`BenchmarkScene`) directly after `onInit`. A simple progress overlay is drawn
+during the sweep. The chosen settings are written before the main game loop
+starts.
+
+Skip with `EngineConfig(firstLaunchCalibration: false)` for tests / dev.
+
+### Adaptive cost-impact stack (cheapest swaps first)
+
+1. `RenderScale`     1.0 -> 0.5
+2. `ShadowQuality`   High -> Off
+3. `ViewDistance`    200 -> 75
+4. `AntiAliasing`    MSAA4x -> Off
+5. `CloudShadows`    on -> off
+6. `Bloom`           on -> off
+7. `ShaderQuality`   Full -> Unlit (last - highly visible)
+8. `Anisotropy`      16 -> 1
+
+`TextureQuality` and `MeshLodTier` are deliberately excluded - hot-swapping
+them requires re-uploading textures or regenerating meshes, which is far more
+expensive than a single frame's saving. Those stay where the player put them.
+
+### `GraphicsOptionsPanel` (`src/UI/GraphicsOptionsPanel.php`)
+
+Drop-in widget that draws a "Graphics" panel through `UIContext`. Builds once,
+called from the game's settings screen:
+
+```php
+$panel = new GraphicsOptionsPanel($engine, $ui);
+$panel->draw(x: 40, y: 40, width: 360);
+```
+
+Manual sliders are visually disabled while `QualityMode::Adaptive` is active
+(the controller owns those values in that mode).
+
+### Backend wiring
+
+Every 3D backend (`OpenGLRenderer3D`, `VioRenderer3D`, `MetalRenderer3D`,
+`VulkanRenderer3D`, `NullRenderer3D`) implements `applySettings()`:
+
+- Hot-swappable today: shadow tier (rebuild ShadowMapRenderer), shader
+  quality (forwarded through `ShaderManager::use('unlit')`),
+  fog toggle, view-distance clamp on `SetCamera` / `SetFog`, cloud-shadow
+  pass skipped when off, anisotropy + LOD bias at `TextureManager::load()`,
+  render-scale and AA mode (OpenGL backend; see Phase 1.5 below).
+- Phase 1.5 (off-screen FBO + render-scale + AA):
+  - **OpenGL backend (`OpenGLRenderer3D`)**: full implementation. Helpers
+    `OpenGLOffscreenTarget` (color FBO + optional MSAA renderbuffer pair +
+    `glBlitFramebuffer` resolve) and `PostProcess\OpenGLFxaaPass` (fullscreen-
+    triangle FXAA shader).
+  - **Vio backend (`VioRenderer3D`)**: full implementation via
+    `VioOffscreenTarget` (probes `'samples'` config-key on first allocation,
+    falls back to single-sample if vio rejects it) and `PostProcess\VioFxaaPass`
+    (uses `vio_mesh()` screen-quad + custom shader, mirrors the existing HDR /
+    Bloom render-target pattern). This is the production path on every platform
+    because vio dispatches to Metal / D3D11 / D3D12 / Vulkan / OpenGL.
+  - **Standalone Metal backend (`MetalRenderer3D`)**: full implementation via
+    `MetalOffscreenTarget` (Color + Depth + optional MSAA Resolve Texture using
+    `setRasterSampleCount` + `setColorAttachmentResolveTexture`) and
+    `PostProcess\MetalFxaaPass` (Metal Shading Language shader at
+    `resources/shaders/source/fxaa.metal`).
+  - **Standalone Vulkan backend (`VulkanRenderer3D`)**: full implementation.
+    Render-scale via `VulkanOffscreenTarget` (off-screen colour + depth at
+    scaled resolution, blitted onto the swapchain via `vkCmdBlitImage` with
+    linear filter so up- / down-scaling looks correct). MSAA is best-effort:
+    the helper builds a multisample colour image + a render pass that
+    resolves into the single-sample image at end-of-pass; if the ext-vulkan
+    build rejects the resolve-attachment subpass key (older bindings) the
+    helper coerces samples to 1 once and remembers the rejection so the
+    renderer still produces output, just without MSAA. FXAA via
+    `PostProcess\VulkanFxaaPass` runs the compiled SPIR-V binaries
+    (`fxaa_vk.vert/frag.spv`, committed alongside the GLSL sources) through
+    a combined-image-sampler descriptor set; the pass writes into a
+    swapchain-resolution single-sample image which is then blitted to the
+    swapchain. Sampler / descriptor-set creation is wrapped in a try/catch
+    so older ext-vulkan builds without `Vk\Sampler` /
+    `DescriptorSet::writeImage` fall back to a plain blit instead of crashing.
+    Standalone Vulkan remains a fallback path only - production Vulkan
+    goes through vio.
+
+  Fast path: when `renderScale == 1.0` AND `AntiAliasing::Off`, the off-screen
+  pipeline is skipped and the renderer draws straight into the backbuffer, so
+  existing games render identically.
+
+### Anti-patterns
+
+- **Do not** mutate `GraphicsSettings` fields directly. Use `with(...)` and
+  `$engine->graphics->update(...)`.
+- **Do not** call `$renderer3D->applySettings()` from game code. Always go
+  through `$engine->graphics` so events, persistence, and texture-manager
+  updates stay in sync.
+- **Do not** put `TextureQuality` or `MeshLodTier` into the adaptive stack -
+  hot-swap cost dominates any frame-time gain.
+- **Do not** add new `applySettings()` paths that bypass `GraphicsSettings::with()`
+  - the immutable round-trip is what makes change events deterministic.
 
 ---
 

@@ -16,6 +16,8 @@ use PHPolygon\Rendering\Command\SetDirectionalLight;
 use PHPolygon\Rendering\Command\SetFog;
 use PHPolygon\Rendering\Command\SetSkybox;
 use PHPolygon\Rendering\Command\SetSkyColors;
+use PHPolygon\Rendering\PostProcess\VulkanFxaaPass;
+use PHPolygon\Rendering\Quality\AntiAliasing;
 use Vk\Buffer;
 use Vk\CommandPool;
 use Vk\DescriptorPool;
@@ -135,6 +137,7 @@ class VulkanRenderer3D implements Renderer3DInterface
     private const VK_IMAGE_USAGE_DEPTH         = 32;   // DEPTH_STENCIL_ATTACHMENT
     private const VK_IMAGE_USAGE_TRANSFER_SRC  = 1;
     private const VK_IMAGE_USAGE_TRANSFER_DST  = 2;
+    private const VK_IMAGE_USAGE_SAMPLED       = 4;
     private const VK_SHARING_EXCLUSIVE         = 0;
     private const VK_SAMPLE_COUNT_1            = 1;
     private const VK_LOAD_OP_CLEAR             = 1;
@@ -145,6 +148,7 @@ class VulkanRenderer3D implements Renderer3DInterface
     private const VK_LAYOUT_PRESENT_SRC        = 1000001002;
     private const VK_LAYOUT_COLOR_ATTACHMENT   = 2;
     private const VK_LAYOUT_DEPTH_ATTACHMENT   = 3;
+    private const VK_LAYOUT_SHADER_READ_ONLY   = 5;
     private const VK_LAYOUT_TRANSFER_SRC       = 6;
     private const VK_LAYOUT_TRANSFER_DST       = 7;
     private const VK_ASPECT_COLOR              = 1;
@@ -162,8 +166,10 @@ class VulkanRenderer3D implements Renderer3DInterface
     private const VK_CMD_POOL_RESET_CMD_BUFFER = 2;
     private const VK_PRESENT_MODE_FIFO         = 2;
     private const VK_CMD_ONE_TIME_SUBMIT        = 1;
+    private const VK_FILTER_LINEAR              = 1;
     // Access masks
     private const VK_ACCESS_NONE               = 0;
+    private const VK_ACCESS_SHADER_READ        = 0x20;     // 32
     private const VK_ACCESS_COLOR_WRITE        = 0x100;    // 256
     private const VK_ACCESS_DEPTH_WRITE        = 0x400;    // 1024
     private const VK_ACCESS_TRANSFER_READ      = 0x800;    // 2048
@@ -171,15 +177,122 @@ class VulkanRenderer3D implements Renderer3DInterface
     // Pipeline stages
     private const VK_STAGE_TOP                 = 0x1;      // TOP_OF_PIPE
     private const VK_STAGE_EARLY_FRAG_TESTS    = 0x100;    // EARLY_FRAGMENT_TESTS
+    private const VK_STAGE_FRAGMENT            = 0x80;     // FRAGMENT_SHADER
     private const VK_STAGE_COLOR_OUTPUT        = 0x400;    // COLOR_ATTACHMENT_OUTPUT
     private const VK_STAGE_TRANSFER            = 0x1000;   // TRANSFER
     private const VK_STAGE_BOTTOM              = 0x2000;   // BOTTOM_OF_PIPE
 
-    public function __construct(int $width, int $height, object $windowHandle)
-    {
+    /**
+     * Live graphics settings. Honours fog toggle + view-distance clamp during
+     * SetFog handling, plus Phase 1.5 render-scale and (best-effort) MSAA via
+     * `$scaledTarget`.
+     */
+    private GraphicsSettings $settings;
+
+    /**
+     * Phase 1.5 scaled / multisample off-screen target. Allocated lazily via
+     * `resizeOffscreenIfNeeded()` whenever renderScale != 1.0 or AA != Off.
+     * When null the renderer uses the constructor-allocated single-sample
+     * `$offscreenColor` + `$depthImage` at native swapchain resolution.
+     */
+    private ?VulkanOffscreenTarget $scaledTarget = null;
+
+    /** Render width / height for the active off-screen target this frame. */
+    private int $offscreenWidth = 0;
+    private int $offscreenHeight = 0;
+
+    /** True when this frame draws into `$scaledTarget` instead of the default chain. */
+    private bool $offscreenActive = false;
+
+    /** Lazily-created FXAA post-process pass. */
+    private ?VulkanFxaaPass $fxaaPass = null;
+
+    /** True once the FXAA pass tried to allocate AND failed. Suppresses retry. */
+    private bool $fxaaInitFailed = false;
+
+    /**
+     * Single-sample colour image that receives the FXAA fragment-shader
+     * output at swapchain resolution. Allocated lazily by `ensureFxaaOutput()`
+     * when AntiAliasing::FXAA is selected, released when FXAA is off or the
+     * window resizes.
+     */
+    private ?Image $fxaaOutputImage = null;
+    private ?DeviceMemory $fxaaOutputMem = null;
+    private ?ImageView $fxaaOutputView = null;
+    private ?\Vk\Framebuffer $fxaaFramebuffer = null;
+    private int $fxaaOutputWidth = 0;
+    private int $fxaaOutputHeight = 0;
+
+    public function __construct(
+        int $width,
+        int $height,
+        object $windowHandle,
+        ?GraphicsSettings $settings = null,
+    ) {
         $this->width  = $width;
         $this->height = $height;
+        $this->settings = $settings ?? new GraphicsSettings();
         $this->initVulkan($windowHandle);
+    }
+
+    public function applySettings(GraphicsSettings $settings): void
+    {
+        $this->settings = $settings;
+
+        // Phase 1.5: rebuild the scaled / multisample off-screen target when
+        // the slider moves. Default settings (renderScale 1.0 + AA Off) keep
+        // the constructor-allocated single-sample chain in use, so the fast
+        // path matches pre-Phase-1.5 behaviour byte-for-byte.
+        $this->resizeOffscreenIfNeeded();
+    }
+
+    /**
+     * Decide whether the scaled off-screen pipeline is needed for the current
+     * `$this->settings`, allocate or resize the target, and update the
+     * helper-state used during rendering. Wired from `applySettings()` and
+     * from the start of every frame so window resizes also propagate.
+     */
+    private function resizeOffscreenIfNeeded(): void
+    {
+        $needsScaled = $this->settings->renderScale !== 1.0
+            || $this->settings->antiAliasing->sampleCount() > 1;
+
+        if (!$needsScaled) {
+            // Drop any previously-allocated scaled target; default path is
+            // single-sample at native swapchain resolution.
+            if ($this->scaledTarget !== null) {
+                $this->scaledTarget->release();
+                $this->scaledTarget = null;
+            }
+            $this->offscreenWidth  = 0;
+            $this->offscreenHeight = 0;
+            return;
+        }
+
+        $renderW = max(1, (int) round($this->width  * $this->settings->renderScale));
+        $renderH = max(1, (int) round($this->height * $this->settings->renderScale));
+        $samples = max(1, $this->settings->antiAliasing->sampleCount());
+
+        if ($this->scaledTarget === null) {
+            $this->scaledTarget = new VulkanOffscreenTarget($this->device);
+        }
+
+        $this->scaledTarget->resize(
+            $renderW,
+            $renderH,
+            $samples,
+            $this->surfaceFormat,
+            self::VK_FORMAT_D32_SFLOAT,
+            fn (array $req, bool $hostVisible): int => $this->findMemory($req, $hostVisible),
+        );
+
+        $this->offscreenWidth  = $renderW;
+        $this->offscreenHeight = $renderH;
+    }
+
+    public function getSettings(): GraphicsSettings
+    {
+        return $this->settings;
     }
 
     public function __destruct()
@@ -188,6 +301,19 @@ class VulkanRenderer3D implements Renderer3DInterface
         // Without this, the GPU may still be accessing images/buffers while PHP frees them,
         // causing a MoltenVK segfault in MVKSwapchain::destroy().
         $this->queue->waitIdle();
+
+        // Drop Phase 1.5 helpers before the Device goes out of scope so their
+        // child objects (images, framebuffers, render passes) tear down with
+        // a still-valid parent device.
+        $this->releaseFxaaResources();
+        if ($this->fxaaPass !== null) {
+            $this->fxaaPass->release();
+            $this->fxaaPass = null;
+        }
+        if ($this->scaledTarget !== null) {
+            $this->scaledTarget->release();
+            $this->scaledTarget = null;
+        }
     }
 
     public function beginFrame(): void
@@ -234,8 +360,97 @@ class VulkanRenderer3D implements Renderer3DInterface
 
     public function setViewport(int $x, int $y, int $width, int $height): void
     {
+        $changed = ($this->width !== $width) || ($this->height !== $height);
         $this->width  = $width;
         $this->height = $height;
+        if ($changed) {
+            $this->resizeOffscreenIfNeeded();
+            // FXAA output sits at swapchain resolution, so a resize must
+            // throw away the previous image. ensureFxaaResources() rebuilds
+            // it lazily on the next FXAA frame.
+            $this->releaseFxaaResources();
+        }
+    }
+
+    /**
+     * Allocate (or reuse) the FXAA pipeline + the swapchain-resolution output
+     * image that the FXAA fragment shader writes into. Returns true once the
+     * full chain is ready to record commands. Failures (older ext-vulkan
+     * builds without `Vk\Sampler` / `DescriptorSet::writeImage`) are sticky -
+     * the renderer falls back to a plain blit and never retries this frame.
+     */
+    private function ensureFxaaResources(): bool
+    {
+        if ($this->fxaaInitFailed) {
+            return false;
+        }
+
+        if ($this->fxaaPass === null) {
+            $this->fxaaPass = new VulkanFxaaPass($this->device);
+        }
+
+        if (!$this->fxaaPass->isReady() && !$this->fxaaPass->initialise($this->surfaceFormat)) {
+            $this->fxaaInitFailed = true;
+            return false;
+        }
+
+        if ($this->fxaaOutputImage !== null
+            && $this->fxaaOutputWidth === $this->width
+            && $this->fxaaOutputHeight === $this->height
+        ) {
+            return true;
+        }
+
+        $this->releaseFxaaResources();
+        $renderPass = $this->fxaaPass->renderPass();
+        if ($renderPass === null) {
+            $this->fxaaInitFailed = true;
+            return false;
+        }
+
+        try {
+            $this->fxaaOutputImage = new Image(
+                $this->device,
+                $this->width, $this->height,
+                $this->surfaceFormat,
+                self::VK_IMAGE_USAGE_COLOR | self::VK_IMAGE_USAGE_TRANSFER_SRC,
+                0,
+                self::VK_SAMPLE_COUNT_1,
+            );
+            $req  = $this->fxaaOutputImage->getMemoryRequirements();
+            $size = $req['size'];
+            if (!is_int($size)) {
+                throw new \RuntimeException('Invalid FXAA output image memory requirements');
+            }
+            $this->fxaaOutputMem = new DeviceMemory($this->device, $size, $this->findMemory($req, false));
+            $this->fxaaOutputImage->bindMemory($this->fxaaOutputMem, 0);
+            $this->fxaaOutputView = new ImageView(
+                $this->device, $this->fxaaOutputImage, $this->surfaceFormat, self::VK_ASPECT_COLOR, 1,
+            );
+            $this->fxaaFramebuffer = new \Vk\Framebuffer(
+                $this->device, $renderPass,
+                [$this->fxaaOutputView],
+                $this->width, $this->height, 1,
+            );
+            $this->fxaaOutputWidth  = $this->width;
+            $this->fxaaOutputHeight = $this->height;
+            return true;
+        } catch (\Throwable $e) {
+            fwrite(STDERR, "[VkRenderer] FXAA output allocation failed: " . $e->getMessage() . "\n");
+            $this->releaseFxaaResources();
+            $this->fxaaInitFailed = true;
+            return false;
+        }
+    }
+
+    private function releaseFxaaResources(): void
+    {
+        $this->fxaaFramebuffer  = null;
+        $this->fxaaOutputView   = null;
+        $this->fxaaOutputImage  = null;
+        $this->fxaaOutputMem    = null;
+        $this->fxaaOutputWidth  = 0;
+        $this->fxaaOutputHeight = 0;
     }
 
     public function getWidth(): int { return $this->width; }
@@ -282,10 +497,19 @@ class VulkanRenderer3D implements Renderer3DInterface
                 ];
 
             } elseif ($command instanceof SetFog) {
-                $this->fog = [
-                    $command->color->r, $command->color->g, $command->color->b,
-                    $command->near, $command->far,
-                ];
+                if ($this->settings->fog) {
+                    $clampedFar = min($command->far, $this->settings->viewDistance);
+                    $clampedNear = min($command->near, max(0.0, $clampedFar - 1.0));
+                    $this->fog = [
+                        $command->color->r, $command->color->g, $command->color->b,
+                        $clampedNear, $clampedFar,
+                    ];
+                } else {
+                    $this->fog = [
+                        $command->color->r, $command->color->g, $command->color->b,
+                        99998.0, 99999.0,
+                    ];
+                }
 
             } elseif ($command instanceof SetSkyColors) {
                 $this->clearR = $command->skyColor->r;
@@ -299,15 +523,50 @@ class VulkanRenderer3D implements Renderer3DInterface
         $this->uploadFrameUbo();
         $this->uploadLightingUbo();
 
+        // ── Pick render pass + framebuffer for this frame ────────────────────
+        // Default path: native-resolution single-sample chain (`$this->renderPass`
+        // + `$this->framebuffer`, drawing into `$this->offscreenColor`).
+        //
+        // Phase 1.5 path: scaled / multisample chain owned by `$scaledTarget`
+        // (`renderPass()` + `framebuffer()`). MSAA failures during `resize()`
+        // fall back to single-sample inside the helper, so this branch only
+        // produces multisampled draws when ext-vulkan accepted the chain.
+        $this->offscreenActive = $this->scaledTarget !== null
+            && $this->scaledTarget->isAllocated()
+            && $this->scaledTarget->renderPass() !== null
+            && $this->scaledTarget->framebuffer() !== null;
+
+        if ($this->offscreenActive) {
+            $renderPass  = $this->scaledTarget->renderPass();
+            $framebuffer = $this->scaledTarget->framebuffer();
+            $renderW     = $this->scaledTarget->width();
+            $renderH     = $this->scaledTarget->height();
+
+            // MSAA chain has three attachments (msaa colour, depth, resolve).
+            $clearValues = $this->scaledTarget->samples() > 1
+                ? [
+                    [$this->clearR, $this->clearG, $this->clearB, 1.0],
+                    [1.0, 0],
+                    [$this->clearR, $this->clearG, $this->clearB, 1.0],
+                ]
+                : [[$this->clearR, $this->clearG, $this->clearB, 1.0], [1.0, 0]];
+        } else {
+            $renderPass  = $this->renderPass;
+            $framebuffer = $this->framebuffer;
+            $renderW     = $this->width;
+            $renderH     = $this->height;
+            $clearValues = [[$this->clearR, $this->clearG, $this->clearB, 1.0], [1.0, 0]];
+        }
+
         // ── Render into offscreen image via render pass ──────────────────────
         $this->commandBuffer->beginRenderPass(
-            $this->renderPass,
-            $this->framebuffer,
-            0, 0, $this->width, $this->height,
-            [[$this->clearR, $this->clearG, $this->clearB, 1.0], [1.0, 0]],
+            $renderPass,
+            $framebuffer,
+            0, 0, $renderW, $renderH,
+            $clearValues,
         );
-        $this->commandBuffer->setViewport(0.0, 0.0, (float) $this->width, (float) $this->height, 0.0, 1.0);
-        $this->commandBuffer->setScissor(0, 0, $this->width, $this->height);
+        $this->commandBuffer->setViewport(0.0, 0.0, (float) $renderW, (float) $renderH, 0.0, 1.0);
+        $this->commandBuffer->setScissor(0, 0, $renderW, $renderH);
         $this->commandBuffer->bindPipeline(self::VK_PIPELINE_BIND_GRAPHICS, $this->pipeline);
         $this->commandBuffer->bindDescriptorSets(
             self::VK_PIPELINE_BIND_GRAPHICS, $this->pipelineLayout, 0, [$this->descriptorSet],
@@ -329,11 +588,69 @@ class VulkanRenderer3D implements Renderer3DInterface
 
         $this->commandBuffer->endRenderPass();
 
-        // ── Copy offscreen → swapchain ───────────────────────────────────────
+        // ── Blit offscreen → swapchain (with optional FXAA between) ─────────
 
-        // Offscreen: COLOR_ATTACHMENT_OPTIMAL → TRANSFER_SRC_OPTIMAL
+        // Pick the colour image / view that holds the rendered scene. For the
+        // scaled path that's the resolve image owned by `$scaledTarget`; for
+        // the default path it's the constructor-allocated `$offscreenColor`.
+        if ($this->offscreenActive) {
+            $sourceImage = $this->scaledTarget->presentImage();
+            $sourceView  = $this->scaledTarget->presentImageView();
+            $sourceW     = $this->scaledTarget->width();
+            $sourceH     = $this->scaledTarget->height();
+        } else {
+            $sourceImage = $this->offscreenColor;
+            $sourceView  = $this->offscreenColorView;
+            $sourceW     = $this->width;
+            $sourceH     = $this->height;
+        }
+
+        if ($sourceImage === null) {
+            // Helper failed to allocate; skip the blit so we don't crash on a
+            // missing source image. Visible result is the previous swapchain
+            // image; not great but safer than dereferencing null.
+            return;
+        }
+
+        // FXAA path: scene → offscreen → FXAA fragment shader → fxaaOutput → blit.
+        // Only engages when AntiAliasing::FXAA is selected AND the helper
+        // managed to allocate sampler / descriptor APIs (older ext-vulkan
+        // builds without `Vk\Sampler` flip `$fxaaInitFailed = true` and we
+        // fall through to the plain blit path).
+        $useFxaa = $this->settings->antiAliasing === AntiAliasing::Fxaa
+            && $sourceView !== null
+            && $this->ensureFxaaResources();
+
+        if ($useFxaa) {
+            // Offscreen: COLOR_ATTACHMENT_OPTIMAL → SHADER_READ_ONLY_OPTIMAL
+            $this->commandBuffer->imageMemoryBarrier(
+                $sourceImage,
+                self::VK_LAYOUT_COLOR_ATTACHMENT,
+                self::VK_LAYOUT_SHADER_READ_ONLY,
+                self::VK_ACCESS_COLOR_WRITE,
+                self::VK_ACCESS_SHADER_READ,
+                self::VK_STAGE_COLOR_OUTPUT,
+                self::VK_STAGE_FRAGMENT,
+                self::VK_ASPECT_COLOR,
+            );
+
+            $this->fxaaPass->bindInput($sourceView);
+            $this->fxaaPass->record(
+                $this->commandBuffer,
+                $this->fxaaFramebuffer,
+                $this->width, $this->height,
+                $sourceW, $sourceH,
+            );
+
+            // FXAA output is now the source for the swapchain blit.
+            $sourceImage = $this->fxaaOutputImage;
+            $sourceW = $this->width;
+            $sourceH = $this->height;
+        }
+
+        // Source: COLOR_ATTACHMENT_OPTIMAL → TRANSFER_SRC_OPTIMAL
         $this->commandBuffer->imageMemoryBarrier(
-            $this->offscreenColor,
+            $sourceImage,
             self::VK_LAYOUT_COLOR_ATTACHMENT,
             self::VK_LAYOUT_TRANSFER_SRC,
             self::VK_ACCESS_COLOR_WRITE,
@@ -355,11 +672,16 @@ class VulkanRenderer3D implements Renderer3DInterface
             self::VK_ASPECT_COLOR,
         );
 
-        // Full-image copy
-        $this->commandBuffer->copyImage(
-            $this->offscreenColor, self::VK_LAYOUT_TRANSFER_SRC,
+        // Use blitImage so the linear filter handles up- / down-scaling between
+        // the (possibly scaled) source image and the swapchain. With FXAA on
+        // the source already matches swapchain size so this is a 1:1 blit; with
+        // FXAA off the linear filter performs the render-scale upscale.
+        $this->commandBuffer->blitImage(
+            $sourceImage, self::VK_LAYOUT_TRANSFER_SRC,
             $this->swapImages[$this->currentImageIndex], self::VK_LAYOUT_TRANSFER_DST,
+            $sourceW, $sourceH,
             $this->width, $this->height,
+            self::VK_FILTER_LINEAR,
         );
 
         // Swapchain image: TRANSFER_DST_OPTIMAL → PRESENT_SRC_KHR

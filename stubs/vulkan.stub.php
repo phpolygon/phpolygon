@@ -48,6 +48,7 @@ class Queue
     public function submit(array $commandBuffers, ?Fence $fence = null, array $waitSemaphores = [], array $signalSemaphores = []): void {}
     /** @param list<Swapchain> $swapchains @param list<int> $imageIndices @param list<Semaphore> $waitSemaphores */
     public function present(array $swapchains, array $imageIndices, array $waitSemaphores = []): void {}
+    public function waitIdle(): void {}
 }
 
 class Swapchain
@@ -133,6 +134,13 @@ class DescriptorPool
 class DescriptorSet
 {
     public function writeBuffer(int $dstBinding, Buffer $buffer, int $offset, int $range, int $descriptorType): void {}
+    public function writeImage(int $dstBinding, ImageView $imageView, Sampler $sampler, int $imageLayout, int $descriptorType): void {}
+}
+
+class Sampler
+{
+    /** @param array<string, mixed> $createInfo */
+    public function __construct(Device $device, array $createInfo = []) {}
 }
 
 class CommandPool
@@ -160,6 +168,9 @@ class CommandBuffer
     public function bindVertexBuffers(int $firstBinding, array $buffers, array $offsets): void {}
     public function bindIndexBuffer(Buffer $buffer, int $offset, int $indexType): void {}
     public function drawIndexed(int $indexCount, int $instanceCount = 1, int $firstIndex = 0, int $vertexOffset = 0, int $firstInstance = 0): void {}
+    public function draw(int $vertexCount, int $instanceCount = 1, int $firstVertex = 0, int $firstInstance = 0): void {}
+    public function imageMemoryBarrier(Image $image, int $oldLayout, int $newLayout, int $srcAccessMask, int $dstAccessMask, int $srcStageMask, int $dstStageMask, int $aspectMask): void {}
+    public function blitImage(Image $srcImage, int $srcLayout, Image $dstImage, int $dstLayout, int $srcWidth, int $srcHeight, int $dstWidth, int $dstHeight, int $filter): void {}
 }
 
 class Fence

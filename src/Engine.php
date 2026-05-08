@@ -13,6 +13,8 @@ use PHPolygon\Geometry\MeshCache;
 use PHPolygon\Locale\LocaleManager;
 use PHPolygon\Rendering\Camera2D;
 use PHPolygon\Rendering\Color;
+use PHPolygon\Rendering\GraphicsSettings;
+use PHPolygon\Rendering\GraphicsSettingsManager;
 use PHPolygon\Rendering\NullRenderer2D;
 use PHPolygon\Rendering\MetalRenderer3D;
 use PHPolygon\Rendering\TextAlign;
@@ -22,6 +24,8 @@ use PHPolygon\Rendering\VulkanRenderer3D;
 use PHPolygon\Rendering\VioRenderer2D;
 use PHPolygon\Rendering\VioRenderer3D;
 use PHPolygon\Rendering\VioTextureManager;
+use PHPolygon\Rendering\Quality\AdaptiveQualityController;
+use PHPolygon\Rendering\Quality\QualityMode;
 use PHPolygon\Rendering\Renderer2D;
 use PHPolygon\Rendering\Renderer2DInterface;
 use PHPolygon\Rendering\RenderCommandList;
@@ -66,6 +70,8 @@ class Engine
     public ?Renderer3DInterface $renderer3D;
     public readonly ?RenderCommandList $commandList3D;
     public readonly ShaderManager $shaders;
+    public readonly GraphicsSettingsManager $graphics;
+    public ?AdaptiveQualityController $adaptiveQuality = null;
     public readonly ThreadScheduler|NullThreadScheduler $scheduler;
 
     public readonly ?PerfOverlay $perfOverlay;
@@ -166,6 +172,15 @@ class Engine
         }
 
         $this->shaders = new ShaderManager($this->commandList3D);
+
+        // Graphics settings: load from disk if available, otherwise stay
+        // on the engine defaults (which mirror pre-existing behaviour 1:1
+        // so games without a graphics.json render unchanged).
+        $this->graphics = new GraphicsSettingsManager(
+            path: $config->graphicsSettingsPath,
+        );
+        $this->graphics->bindEngine($this);
+        $this->adaptiveQuality = new AdaptiveQualityController($this);
 
         if ($this->headless) {
             $this->window = new NullWindow($config->width, $config->height, $config->title);
@@ -420,6 +435,30 @@ class Engine
             self::log('Renderer3D: ' . get_class($this->renderer3D));
         }
 
+        // Apply persisted graphics settings to the live renderer + window
+        // before the splash screen draws its first frame, so the first
+        // visible frame already reflects the player's stored preferences.
+        $this->graphics->applyToRenderer();
+        if ($this->graphics->settings()->vsync !== $this->config->vsync) {
+            // GLFW's swap interval was set with the config value; sync to
+            // the persisted preference now that the GL context exists.
+            $this->window->setVsync($this->graphics->settings()->vsync);
+        }
+        $this->gameLoop->setFpsCap($this->graphics->settings()->fpsCap);
+        $this->events->listen(\PHPolygon\Event\GraphicsSettingsChanged::class, function (\PHPolygon\Event\GraphicsSettingsChanged $event): void {
+            $this->window->setVsync($event->current->vsync);
+            $this->gameLoop->setFpsCap($event->current->fpsCap);
+            $this->textures->applySettings($event->current);
+        });
+        $this->textures->applySettings($this->graphics->settings());
+
+        // Reset adaptive controller's warm-up window when a scene loads -
+        // the new scene's frame times should not be compared against the
+        // old scene's history.
+        $this->events->listen(\PHPolygon\Event\SceneLoaded::class, function () {
+            $this->adaptiveQuality?->resetWarmup();
+        });
+
         // Create Renderer2D after window is initialized (needs GL/vio context)
         if (!$this->headless && $this->useVio && $this->window instanceof VioWindow) {
             $vioCtx = $this->window->getContext();
@@ -492,6 +531,19 @@ class Engine
             self::log('onInit callback done');
         }
 
+        // First-launch graphics calibration: runs after onInit so games have
+        // already registered their meshes, materials, and shaders. We only
+        // run when no graphics.json exists - on subsequent launches the
+        // saved settings are simply applied.
+        if (!$this->headless
+            && $this->config->firstLaunchCalibration
+            && !file_exists($this->config->graphicsSettingsPath)
+        ) {
+            self::log('First-launch calibration starting...');
+            $this->runFirstLaunchCalibration();
+            self::log('First-launch calibration done');
+        }
+
         if (!$this->scheduler->isBooted()) {
             $this->scheduler->boot();
             self::log('Scheduler booted');
@@ -536,6 +588,7 @@ class Engine
                     if ($this->input instanceof \PHPolygon\Runtime\VioInput) {
                         $this->input->snapshotScroll();
                     }
+                    PerfProfiler::begin('render2d.frame');
                     $this->renderer2D->beginFrame();
 
                     $this->world->render();
@@ -556,6 +609,7 @@ class Engine
                     }
 
                     $this->renderer2D->endFrame();
+                    PerfProfiler::end();
                     if (!$nativeBackend) {
                         $this->window->swapBuffers();
                     }
@@ -603,6 +657,7 @@ class Engine
                     if ($this->input instanceof \PHPolygon\Runtime\VioInput) {
                         $this->input->snapshotScroll();
                     }
+                    PerfProfiler::begin('render2d.frame');
                     $this->renderer2D->beginFrame();
 
                     $this->world->render();
@@ -623,6 +678,7 @@ class Engine
                     }
 
                     $this->renderer2D->endFrame();
+                    PerfProfiler::end();
                     if (!$nativeBackend) {
                         $this->window->swapBuffers();
                     }
@@ -664,6 +720,10 @@ class Engine
         }
 
         $this->lastGcDelta = PerfProfiler::gcDelta();
+
+        // Drive the adaptive quality controller. It is a no-op unless the
+        // player has switched to QualityMode::Adaptive.
+        $this->adaptiveQuality?->tick($elapsedMs);
     }
 
     public function getConfig(): EngineConfig
@@ -922,6 +982,83 @@ class Engine
         }
 
         $this->renderer2D->setGlobalAlpha(1.0);
+        $this->renderer2D->setTextAlign(TextAlign::LEFT | TextAlign::TOP);
+        $this->renderer2D->endFrame();
+        $this->window->swapBuffers();
+        $this->window->pollEvents();
+    }
+
+    /**
+     * Run first-launch graphics calibration. Renders an overlay with progress
+     * text driven by GraphicsCalibrationProgress events while the auto-tuner
+     * sweeps tiers, then persists the chosen settings.
+     *
+     * Skipped silently if the engine is in 3D-disabled mode (no renderer3D
+     * to measure against) or if the player closes the window mid-flow.
+     */
+    private function runFirstLaunchCalibration(): void
+    {
+        if ($this->renderer3D === null) {
+            // Nothing to calibrate without a 3D renderer; just persist defaults.
+            $this->graphics->save();
+            return;
+        }
+
+        $progressLabel = 'Optimizing for your hardware...';
+        $progressRatio = 0.0;
+
+        $progressListener = function (\PHPolygon\Event\GraphicsCalibrationProgress $e) use (&$progressLabel, &$progressRatio): void {
+            $progressLabel = 'Optimizing for your hardware...';
+            $progressRatio = max($progressRatio, $e->ratio);
+            $this->renderCalibrationOverlay($progressRatio, $progressLabel, $e->stage);
+        };
+        $this->events->listen(\PHPolygon\Event\GraphicsCalibrationProgress::class, $progressListener);
+
+        // Show an initial frame before the tuner begins so the player sees
+        // a stable overlay rather than a flash of the empty back buffer.
+        $this->renderCalibrationOverlay(0.0, $progressLabel, 'Preparing...');
+
+        try {
+            $this->graphics->recalibrate();
+        } catch (\Throwable $e) {
+            self::logError('Graphics calibration failed: ' . $e->getMessage());
+        }
+
+        $this->renderCalibrationOverlay(1.0, 'Done', '');
+        usleep(250_000); // 250ms pause so the "Done" frame is visible
+    }
+
+    private function renderCalibrationOverlay(float $progress, string $label, string $stage): void
+    {
+        if ($this->window->shouldClose()) {
+            return;
+        }
+        $w = $this->renderer2D->getWidth();
+        $h = $this->renderer2D->getHeight();
+        $black = new Color(0.0, 0.0, 0.0);
+        $white = new Color(1.0, 1.0, 1.0);
+        $gray = new Color(0.6, 0.6, 0.6);
+
+        $this->renderer2D->beginFrame();
+        $this->renderer2D->clear($black);
+
+        $this->renderer2D->setFont('regular');
+        $this->renderer2D->setTextAlign(TextAlign::CENTER | TextAlign::MIDDLE);
+        $this->renderer2D->drawText($label, (float)($w / 2), (float)($h / 2 - 30), 22.0, $white);
+
+        if ($stage !== '') {
+            $this->renderer2D->drawText($stage, (float)($w / 2), (float)($h / 2 + 8), 12.0, $gray);
+        }
+
+        $barW = 320.0;
+        $barH = 4.0;
+        $barX = (float)(($w - $barW) / 2);
+        $barY = (float)($h / 2 + 32);
+        $this->renderer2D->drawRect($barX, $barY, $barW, $barH, new Color(0.2, 0.2, 0.2));
+        if ($progress > 0.0) {
+            $this->renderer2D->drawRect($barX, $barY, $barW * max(0.0, min(1.0, $progress)), $barH, $white);
+        }
+
         $this->renderer2D->setTextAlign(TextAlign::LEFT | TextAlign::TOP);
         $this->renderer2D->endFrame();
         $this->window->swapBuffers();

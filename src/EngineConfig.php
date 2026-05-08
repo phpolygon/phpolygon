@@ -45,5 +45,25 @@ class EngineConfig
          * via env vars and do not require this flag.
          */
         public readonly bool $devMode = false,
+        /**
+         * When true and no graphics.json is found at $graphicsSettingsPath
+         * the engine runs the GraphicsAutoTuner against $benchmarkScene before
+         * the first user frame and writes the chosen settings to disk.
+         */
+        public readonly bool $firstLaunchCalibration = true,
+        /**
+         * Filesystem path used by GraphicsSettingsManager to persist player
+         * graphics preferences. Relative paths are resolved against the CWD
+         * at engine startup; absolute paths are honoured verbatim.
+         */
+        public readonly string $graphicsSettingsPath = 'saves/graphics.json',
+        /**
+         * Fully-qualified class name of the Scene used by the auto-tuner for
+         * first-launch calibration and the recalibrate-now button. When null
+         * the engine falls back to its built-in BenchmarkScene.
+         *
+         * @var class-string<\PHPolygon\Scene\Scene>|null
+         */
+        public readonly ?string $benchmarkScene = null,
     ) {}
 }

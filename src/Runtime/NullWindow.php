@@ -58,6 +58,11 @@ class NullWindow extends Window
     public function getHandle(): object { throw new \RuntimeException('No window handle in headless mode'); }
     public function setTitle(string $title): void {}
 
+    public function setVsync(bool $vsync): void
+    {
+        // headless: nothing to toggle.
+    }
+
     public function setFullscreen(): void
     {
         if ($this->nullFullscreen) {

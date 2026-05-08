@@ -19,6 +19,8 @@ use PHPolygon\Rendering\Command\SetShader;
 use PHPolygon\Rendering\Command\SetSky;
 use PHPolygon\Rendering\Command\SetSkybox;
 use PHPolygon\Rendering\Command\SetWaveAnimation;
+use PHPolygon\Rendering\PostProcess\VioFxaaPass;
+use PHPolygon\Rendering\Quality\AntiAliasing;
 use VioContext;
 use VioCubemap;
 use VioMesh;
@@ -105,22 +107,215 @@ class VioRenderer3D implements Renderer3DInterface
 
     private ?VioTextureManager $textureManager = null;
 
+    /**
+     * Live graphics settings. applySettings() may be called at any time to
+     * hot-swap shadow tier, view-distance clamp, fog, cloud-shadows, anisotropy
+     * and the global shader override (the latter is propagated through
+     * ShaderManager + SetShader rather than directly here).
+     */
+    private GraphicsSettings $settings;
+
+    /**
+     * Phase 1.5 off-screen pipeline: render the 3D pass into a scaled vio
+     * render target and present via FXAA or a passthrough blit. Stays null
+     * for the fast path (renderScale == 1.0 AND antiAliasing == Off).
+     */
+    private ?VioOffscreenTarget $offscreenTarget = null;
+
+    /** Lazy FXAA post-process pass. Allocated when AntiAliasing == Fxaa. */
+    private ?VioFxaaPass $fxaaPass = null;
+
+    /**
+     * True when the current frame is being rendered into the offscreen target
+     * rather than directly into the backbuffer. Set by beginFrame(), read by
+     * endFrame() to know whether to run the present pass.
+     */
+    private bool $offscreenActive = false;
+
+    /** Backbuffer resolution captured at frame start (for blit destination). */
+    private int $backbufferWidth = 0;
+    private int $backbufferHeight = 0;
+
     public function __construct(
         private readonly VioContext $ctx,
         int $width = 1280,
         int $height = 720,
+        ?GraphicsSettings $settings = null,
     ) {
         $this->width = $width;
         $this->height = $height;
+        $this->settings = $settings ?? new GraphicsSettings();
         $this->initShaders();
         $this->initShadowMap();
         $this->initSkyboxMesh();
         $this->initPostProcess();
     }
 
+    public function applySettings(GraphicsSettings $settings): void
+    {
+        $previousShadow = $this->settings->shadowQuality;
+        $this->settings = $settings;
+
+        // Shadow-map tier change forces re-init on next frame.
+        if ($previousShadow !== $settings->shadowQuality) {
+            $this->shadowTarget = null;
+        }
+
+        // Bloom toggle is read live from $this->settings during render.
+        $this->enableHdr = $this->enableHdr && $settings->bloom;
+
+        // Phase 1.5: render-scale + AA pipeline.
+        //
+        // Render-scale and FXAA are delivered through a vio_render_target +
+        // screen-quad post-process pass (see beginFrame()/endFrame()).
+        //
+        // MSAA is probed at allocation time. vio's exact key is undocumented
+        // for samples > 1, so VioOffscreenTarget falls back to single-sample
+        // when the backend rejects the request - meaning render-scale and
+        // FXAA stay functional even on backends without MSAA support.
+        //
+        // The size update is applied immediately so the slider reflects on
+        // the next frame; if the backbuffer dimensions are not yet known,
+        // beginFrame() picks up the latest settings on its first invocation.
+        $this->resizeOffscreenIfNeeded();
+    }
+
+    public function getSettings(): GraphicsSettings
+    {
+        return $this->settings;
+    }
+
     public function setTextureManager(VioTextureManager $textureManager): void
     {
         $this->textureManager = $textureManager;
+    }
+
+    /**
+     * Decide whether the offscreen pipeline is needed and bind the target.
+     * Called from beginFrame() so the 3D pass renders into the offscreen
+     * render target. Returns silently when the fast path applies
+     * (renderScale == 1.0 AND AntiAliasing == Off), keeping behaviour
+     * identical to pre-Phase-1.5 frames at default settings.
+     */
+    private function beginOffscreenIfRequired(): void
+    {
+        if (!$this->offscreenIsActive()) {
+            $this->offscreenActive = false;
+            return;
+        }
+
+        $this->ensureOffscreenTarget();
+        if ($this->offscreenTarget === null || !$this->offscreenTarget->isAllocated()) {
+            $this->offscreenActive = false;
+            return;
+        }
+
+        if ($this->settings->antiAliasing === AntiAliasing::Fxaa && $this->fxaaPass === null) {
+            $this->fxaaPass = new VioFxaaPass($this->ctx);
+        }
+
+        $this->offscreenTarget->bindForDraw();
+        vio_viewport($this->ctx, 0, 0, $this->offscreenTarget->width(), $this->offscreenTarget->height());
+        $this->offscreenActive = true;
+    }
+
+    /**
+     * Recompute target size when applySettings() flips render scale or AA mode.
+     * No-op until the backbuffer dimensions are known (typically after the
+     * first beginFrame()).
+     */
+    private function resizeOffscreenIfNeeded(): void
+    {
+        if ($this->backbufferWidth <= 0 || $this->backbufferHeight <= 0) {
+            return;
+        }
+
+        if (!$this->offscreenIsActive()) {
+            $this->offscreenTarget?->release();
+            return;
+        }
+
+        $this->ensureOffscreenTarget();
+    }
+
+    private function ensureOffscreenTarget(): void
+    {
+        if ($this->backbufferWidth <= 0 || $this->backbufferHeight <= 0) {
+            return;
+        }
+
+        if ($this->offscreenTarget === null) {
+            $this->offscreenTarget = new VioOffscreenTarget($this->ctx);
+        }
+
+        $targetW = max(1, (int)round($this->backbufferWidth  * $this->settings->renderScale));
+        $targetH = max(1, (int)round($this->backbufferHeight * $this->settings->renderScale));
+        $samples = max(1, $this->settings->antiAliasing->sampleCount());
+
+        $this->offscreenTarget->resize($targetW, $targetH, $samples);
+    }
+
+    private function offscreenIsActive(): bool
+    {
+        // The HDR/Bloom path owns its own render target and post-process
+        // pipeline. When HDR is active we skip the Phase 1.5 offscreen
+        // pipeline entirely - the bloom passes already manage scaling and
+        // tonemapping. (HDR is currently disabled in production - see the
+        // D3D11 note in render() - so this branch is mostly defensive.)
+        if ($this->enableHdr) {
+            return false;
+        }
+
+        if ($this->settings->renderScale !== 1.0) {
+            return true;
+        }
+
+        return $this->settings->antiAliasing !== AntiAliasing::Off;
+    }
+
+    /**
+     * Present the offscreen target to the swapchain at backbuffer resolution.
+     *
+     * For AntiAliasing::Fxaa we run a fullscreen FXAA pass that samples the
+     * offscreen colour. For other AA modes (or AA::Off with renderScale != 1)
+     * we use a passthrough blit shader; the bilinear sampler handles the
+     * up/downscale implicitly when source and destination dimensions differ.
+     *
+     * Caller (endFrame()) only invokes this when offscreenActive is true.
+     */
+    private function presentOffscreenIfActive(): void
+    {
+        if (!$this->offscreenActive) {
+            return;
+        }
+
+        $target = $this->offscreenTarget;
+        $quad   = $this->screenQuad;
+        if ($target === null || $quad === null) {
+            $this->offscreenActive = false;
+            return;
+        }
+
+        $sceneTex = $target->texture();
+        if ($sceneTex === null) {
+            $this->offscreenActive = false;
+            return;
+        }
+
+        // Unbind the offscreen target so subsequent draws hit the swapchain.
+        $target->unbind();
+        vio_viewport($this->ctx, 0, 0, $this->backbufferWidth, $this->backbufferHeight);
+
+        if ($this->settings->antiAliasing === AntiAliasing::Fxaa && $this->fxaaPass !== null) {
+            $this->fxaaPass->apply($sceneTex, $target->width(), $target->height(), $quad);
+        } else {
+            $this->bindPostProcessPipeline('passthrough_blit');
+            vio_bind_texture($this->ctx, $sceneTex, 0);
+            vio_set_uniform($this->ctx, 'u_source', 0);
+            vio_draw($this->ctx, $quad);
+        }
+
+        $this->offscreenActive = false;
     }
 
     public function beginFrame(): void
@@ -131,12 +326,18 @@ class VioRenderer3D implements Renderer3DInterface
             $this->height = $size[1];
         }
 
+        $this->backbufferWidth  = $this->width;
+        $this->backbufferHeight = $this->height;
+
         $this->shaderOverride = null;
         $this->globalTime += 1.0 / 60.0;
+
+        $this->beginOffscreenIfRequired();
     }
 
     public function endFrame(): void
     {
+        $this->presentOffscreenIfActive();
         vio_draw_3d($this->ctx);
     }
 
@@ -200,9 +401,15 @@ class VioRenderer3D implements Renderer3DInterface
             } elseif ($cmd instanceof AddPointLight) {
                 $pointLights[] = $cmd;
             } elseif ($cmd instanceof SetFog) {
-                $fogColor = $cmd->color;
-                $fogNear = $cmd->near;
-                $fogFar = $cmd->far;
+                if ($this->settings->fog) {
+                    $fogColor = $cmd->color;
+                    $fogFar = min($cmd->far, $this->settings->viewDistance);
+                    $fogNear = min($cmd->near, max(0.0, $fogFar - 1.0));
+                } else {
+                    // Push fog out of range to neutralise it without altering the shader path.
+                    $fogNear = 99998.0;
+                    $fogFar = 99999.0;
+                }
             } elseif ($cmd instanceof SetSkybox) {
                 $this->pendingSkyboxId = $cmd->cubemapId;
             } elseif ($cmd instanceof SetSky) {
@@ -253,13 +460,25 @@ class VioRenderer3D implements Renderer3DInterface
         if ($hdrTarget !== null) {
             vio_bind_render_target($this->ctx, $hdrTarget);
             vio_clear($this->ctx, 0, 0, 0, 1);
+            $sceneViewportW = $this->width;
+            $sceneViewportH = $this->height;
+        } elseif ($this->offscreenActive && $this->offscreenTarget !== null) {
+            // The shadow pass unbinds its own target; restore the Phase 1.5
+            // offscreen target for the main scene draws.
+            $this->offscreenTarget->bindForDraw();
+            $sceneViewportW = $this->offscreenTarget->width();
+            $sceneViewportH = $this->offscreenTarget->height();
+        } else {
+            $sceneViewportW = $this->width;
+            $sceneViewportH = $this->height;
         }
 
-        vio_viewport($this->ctx, 0, 0, $this->width, $this->height);
+        vio_viewport($this->ctx, 0, 0, $sceneViewportW, $sceneViewportH);
 
         static $vpDbg = false;
         if (!$vpDbg && getenv('VIO_DEBUG') === '1') {
-            fprintf(STDERR, "[VioRenderer3D] viewport: %dx%d\n", $this->width, $this->height);
+            fprintf(STDERR, "[VioRenderer3D] viewport: %dx%d (offscreen=%s)\n",
+                $sceneViewportW, $sceneViewportH, $this->offscreenActive ? 'yes' : 'no');
             $vpDbg = true;
         }
 
@@ -437,6 +656,7 @@ class VioRenderer3D implements Renderer3DInterface
         $this->compileShader('bloom_extract', self::POSTPROCESS_VERT, self::BLOOM_EXTRACT_FRAG);
         $this->compileShader('bloom_blur', self::POSTPROCESS_VERT, self::BLOOM_BLUR_FRAG);
         $this->compileShader('tonemap', self::POSTPROCESS_VERT, self::TONEMAP_FRAG);
+        $this->compileShader('passthrough_blit', self::POSTPROCESS_VERT, self::PASSTHROUGH_BLIT_FRAG);
 
     }
 
@@ -516,9 +736,17 @@ class VioRenderer3D implements Renderer3DInterface
 
     private function initShadowMap(): void
     {
+        if ($this->settings->shadowQuality === \PHPolygon\Rendering\Quality\ShadowQuality::Off) {
+            $this->shadowTarget = null;
+            return;
+        }
+        $resolution = $this->settings->shadowQuality->resolution();
+        if ($resolution <= 0) {
+            $resolution = self::SHADOW_MAP_RESOLUTION;
+        }
         $target = vio_render_target($this->ctx, [
-            'width' => self::SHADOW_MAP_RESOLUTION,
-            'height' => self::SHADOW_MAP_RESOLUTION,
+            'width' => $resolution,
+            'height' => $resolution,
             'depth_only' => true,
         ]);
 
@@ -535,6 +763,12 @@ class VioRenderer3D implements Renderer3DInterface
      */
     private function renderShadowPass(RenderCommandList $commandList, array $dirLights): bool
     {
+        if ($this->settings->shadowQuality === \PHPolygon\Rendering\Quality\ShadowQuality::Off) {
+            return false;
+        }
+        if ($this->shadowTarget === null) {
+            $this->initShadowMap();
+        }
         if ($this->shadowTarget === null || empty($dirLights)) {
             return false;
         }
@@ -557,8 +791,12 @@ class VioRenderer3D implements Renderer3DInterface
         $lightSpaceMatrix = $this->computeLightSpaceMatrix($lightDir);
 
         // Bind shadow render target
+        $shadowRes = $this->settings->shadowQuality->resolution();
+        if ($shadowRes <= 0) {
+            $shadowRes = self::SHADOW_MAP_RESOLUTION;
+        }
         vio_bind_render_target($this->ctx, $this->shadowTarget);
-        vio_viewport($this->ctx, 0, 0, self::SHADOW_MAP_RESOLUTION, self::SHADOW_MAP_RESOLUTION);
+        vio_viewport($this->ctx, 0, 0, $shadowRes, $shadowRes);
         vio_clear($this->ctx, 1.0, 1.0, 1.0, 1.0);
 
         // Use shadow pipeline
@@ -2465,6 +2703,21 @@ void main() {
         result += texture(u_source, v_uv - off).rgb * weights[i];
     }
     frag_color = vec4(result, 1.0);
+}
+GLSL;
+
+    /**
+     * Passthrough blit used by the Phase 1.5 offscreen pipeline when AA is off.
+     * Samples the offscreen colour image at the swapchain UV, letting the
+     * sampler's bilinear filter handle render-scale up/downscaling.
+     */
+    private const PASSTHROUGH_BLIT_FRAG = <<<'GLSL'
+#version 410 core
+in vec2 v_uv;
+uniform sampler2D u_source;
+out vec4 frag_color;
+void main() {
+    frag_color = vec4(texture(u_source, v_uv).rgb, 1.0);
 }
 GLSL;
 }
