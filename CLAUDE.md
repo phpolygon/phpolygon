@@ -414,176 +414,37 @@ class PhpDistrictScene extends Scene
 
 ## Graphics Quality Settings
 
-PHPolygon ships with a player-facing graphics-quality system. Games expose it
-through a settings panel; the engine handles persistence, hardware
-fingerprinting, first-launch calibration, and (optionally) live adaptation
-of individual settings to hit a target FPS.
-
-### Quality modes
-
-| Mode       | Behaviour |
-|------------|-----------|
-| `Manual`   | Player owns every value. Engine applies on change, never reverts. |
-| `Adaptive` | `AdaptiveQualityController` watches frame times and tunes settings up or down to keep FPS within a dead-band around the target. |
-| `Off`      | No automatic adjustments, no first-launch calibration. Whatever sits in `GraphicsSettings` is rendered. |
-
-### `GraphicsSettings` (`src/Rendering/GraphicsSettings.php`)
-
-Immutable value object. All updates produce a new instance via `with(...)`.
-Defaults reproduce pre-existing engine behaviour 1:1, so games without a
-`graphics.json` on disk render unchanged.
-
-| Field             | Type                | Default          |
-|-------------------|---------------------|------------------|
-| `mode`            | `QualityMode`       | `Manual`         |
-| `targetFps`       | `float`             | 60.0             |
-| `renderScale`     | `float` (0.5-2.0)   | 1.0              |
-| `shadowQuality`   | `ShadowQuality`     | `Medium` (2048)  |
-| `shadowDistance`  | `float`             | 50.0             |
-| `viewDistance`    | `float`             | 200.0            |
-| `antiAliasing`    | `AntiAliasing`      | `Fxaa`           |
-| `anisotropy`      | `int` (1/2/4/8/16)  | 4                |
-| `vsync`           | `bool`              | true             |
-| `fpsCap`          | `int` (0/30/60/120/144) | 0 = unlimited |
-| `textureQuality`  | `TextureQuality`    | `Full`           |
-| `shaderQuality`   | `ShaderQuality`     | `Full`           |
-| `cloudShadows`    | `bool`              | true             |
-| `bloom`           | `bool`              | true             |
-| `fog`             | `bool`              | true             |
-| `meshLod`         | `MeshLodTier`       | `High`           |
-
-JSON is hand-serialised on this class (the only exception to the
-"no manual `toJson()`" rule). It is a player settings record, not a Component.
-
-### `GraphicsSettingsManager` (`$engine->graphics`)
+Player-facing quality system: immutable `GraphicsSettings` value object,
+persistent `saves/graphics.json`, first-launch calibration, optional adaptive
+controller, and a drop-in `GraphicsOptionsPanel`. Full reference + integration
+guide in **`docs/graphics-settings.md`**.
 
 ```php
-use PHPolygon\Rendering\GraphicsSettings;
-use PHPolygon\Rendering\Quality\QualityMode;
-use PHPolygon\Rendering\Quality\ShadowQuality;
-
 $engine->graphics->setMode(QualityMode::Adaptive);
-$engine->graphics->setTargetFps(120.0);
 $engine->graphics->update(fn(GraphicsSettings $s) => $s->with(
     shadowQuality: ShadowQuality::Low,
     bloom: false,
 ));
-
-$current = $engine->graphics->settings();
-$result  = $engine->graphics->recalibrate(); // BenchmarkResult
 ```
 
-Every change is persisted (default `saves/graphics.json`) and applied to the
-active 3D renderer, the window (vsync) and the GameLoop (fpsCap).
-
-### Events
-
-| Event                              | Fired when |
-|------------------------------------|------------|
-| `GraphicsSettingsChanged`          | After every applied change. Carries `previous` + `current`. |
-| `GraphicsCalibrationStarted`       | Auto-tuner began a benchmark sweep. |
-| `GraphicsCalibrationProgress`      | Progress ratio + tier label per step. |
-| `GraphicsCalibrationCompleted`     | Auto-tuner returned a `BenchmarkResult`. |
-| `QualityChangeRequest`             | Adaptive controller wants to change a setting. Listeners may call `$event->veto()` to defer (e.g. during combat or cutscenes). |
-
-### First-launch calibration
-
-When `EngineConfig::$firstLaunchCalibration === true` (default) and no
-`graphics.json` exists at `$graphicsSettingsPath`, the engine runs the
-auto-tuner against `EngineConfig::$benchmarkScene` (or the built-in
-`BenchmarkScene`) directly after `onInit`. A simple progress overlay is drawn
-during the sweep. The chosen settings are written before the main game loop
-starts.
-
-Skip with `EngineConfig(firstLaunchCalibration: false)` for tests / dev.
-
-### Adaptive cost-impact stack (cheapest swaps first)
-
-1. `RenderScale`     1.0 -> 0.5
-2. `ShadowQuality`   High -> Off
-3. `ViewDistance`    200 -> 75
-4. `AntiAliasing`    MSAA4x -> Off
-5. `CloudShadows`    on -> off
-6. `Bloom`           on -> off
-7. `ShaderQuality`   Full -> Unlit (last - highly visible)
-8. `Anisotropy`      16 -> 1
-
-`TextureQuality` and `MeshLodTier` are deliberately excluded - hot-swapping
-them requires re-uploading textures or regenerating meshes, which is far more
-expensive than a single frame's saving. Those stay where the player put them.
-
-### `GraphicsOptionsPanel` (`src/UI/GraphicsOptionsPanel.php`)
-
-Drop-in widget that draws a "Graphics" panel through `UIContext`. Builds once,
-called from the game's settings screen:
-
-```php
-$panel = new GraphicsOptionsPanel($engine, $ui);
-$panel->draw(x: 40, y: 40, width: 360);
-```
-
-Manual sliders are visually disabled while `QualityMode::Adaptive` is active
-(the controller owns those values in that mode).
-
-### Backend wiring
-
-Every 3D backend (`OpenGLRenderer3D`, `VioRenderer3D`, `MetalRenderer3D`,
-`VulkanRenderer3D`, `NullRenderer3D`) implements `applySettings()`:
-
-- Hot-swappable today: shadow tier (rebuild ShadowMapRenderer), shader
-  quality (forwarded through `ShaderManager::use('unlit')`),
-  fog toggle, view-distance clamp on `SetCamera` / `SetFog`, cloud-shadow
-  pass skipped when off, anisotropy + LOD bias at `TextureManager::load()`,
-  render-scale and AA mode (OpenGL backend; see Phase 1.5 below).
-- Phase 1.5 (off-screen FBO + render-scale + AA):
-  - **OpenGL backend (`OpenGLRenderer3D`)**: full implementation. Helpers
-    `OpenGLOffscreenTarget` (color FBO + optional MSAA renderbuffer pair +
-    `glBlitFramebuffer` resolve) and `PostProcess\OpenGLFxaaPass` (fullscreen-
-    triangle FXAA shader).
-  - **Vio backend (`VioRenderer3D`)**: full implementation via
-    `VioOffscreenTarget` (probes `'samples'` config-key on first allocation,
-    falls back to single-sample if vio rejects it) and `PostProcess\VioFxaaPass`
-    (uses `vio_mesh()` screen-quad + custom shader, mirrors the existing HDR /
-    Bloom render-target pattern). This is the production path on every platform
-    because vio dispatches to Metal / D3D11 / D3D12 / Vulkan / OpenGL.
-  - **Standalone Metal backend (`MetalRenderer3D`)**: full implementation via
-    `MetalOffscreenTarget` (Color + Depth + optional MSAA Resolve Texture using
-    `setRasterSampleCount` + `setColorAttachmentResolveTexture`) and
-    `PostProcess\MetalFxaaPass` (Metal Shading Language shader at
-    `resources/shaders/source/fxaa.metal`).
-  - **Standalone Vulkan backend (`VulkanRenderer3D`)**: full implementation.
-    Render-scale via `VulkanOffscreenTarget` (off-screen colour + depth at
-    scaled resolution, blitted onto the swapchain via `vkCmdBlitImage` with
-    linear filter so up- / down-scaling looks correct). MSAA is best-effort:
-    the helper builds a multisample colour image + a render pass that
-    resolves into the single-sample image at end-of-pass; if the ext-vulkan
-    build rejects the resolve-attachment subpass key (older bindings) the
-    helper coerces samples to 1 once and remembers the rejection so the
-    renderer still produces output, just without MSAA. FXAA via
-    `PostProcess\VulkanFxaaPass` runs the compiled SPIR-V binaries
-    (`fxaa_vk.vert/frag.spv`, committed alongside the GLSL sources) through
-    a combined-image-sampler descriptor set; the pass writes into a
-    swapchain-resolution single-sample image which is then blitted to the
-    swapchain. Sampler / descriptor-set creation is wrapped in a try/catch
-    so older ext-vulkan builds without `Vk\Sampler` /
-    `DescriptorSet::writeImage` fall back to a plain blit instead of crashing.
-    Standalone Vulkan remains a fallback path only - production Vulkan
-    goes through vio.
-
-  Fast path: when `renderScale == 1.0` AND `AntiAliasing::Off`, the off-screen
-  pipeline is skipped and the renderer draws straight into the backbuffer, so
-  existing games render identically.
+All four 3D backends (`OpenGL`, `Vio`, `Metal`, `Vulkan`) implement
+`applySettings()` with off-screen render-scale + MSAA + FXAA. Fast path:
+`renderScale == 1.0 && AA == Off` bypasses the off-screen pipeline so
+default-settings games render byte-identically. Standalone Vulkan FXAA falls
+back to a plain blit on older ext-vulkan builds without `Vk\Sampler`.
 
 ### Anti-patterns
 
-- **Do not** mutate `GraphicsSettings` fields directly. Use `with(...)` and
-  `$engine->graphics->update(...)`.
+- **Do not** mutate `GraphicsSettings` fields directly - use `with(...)` and
+  `$engine->graphics->update(...)` so the immutable round-trip emits events
+  and persists deterministically.
 - **Do not** call `$renderer3D->applySettings()` from game code. Always go
   through `$engine->graphics` so events, persistence, and texture-manager
   updates stay in sync.
 - **Do not** put `TextureQuality` or `MeshLodTier` into the adaptive stack -
-  hot-swap cost dominates any frame-time gain.
-- **Do not** add new `applySettings()` paths that bypass `GraphicsSettings::with()`
+  hot-swap cost (re-upload textures, regenerate meshes) dominates any
+  frame-time gain.
+- **Do not** add `applySettings()` paths that bypass `GraphicsSettings::with()`
   - the immutable round-trip is what makes change events deterministic.
 
 ---
@@ -828,208 +689,77 @@ $engine = new Engine(new EngineConfig(splashDuration: 1.5));
 
 ## Testing and visual regression testing (VRT)
 
-### Test infrastructure (`src/Testing/`)
-
-| Class | Purpose |
-|---|---|
-| `GdRenderer2D` | Software renderer using PHP GD — draws to `GdImage`, no GPU |
-| `ScreenshotComparer` | Pixel-level comparison using YIQ color space (Pixelmatch algorithm) |
-| `ComparisonResult` | Result object with `passes()`, tolerances, diff path |
-| `VisualTestCase` | PHPUnit trait — Playwright-style `assertScreenshot()` |
-| `NullTextureManager` | Headless texture stubs for scene rendering tests |
-
-### Backend-agnostic VRT
-
-```php
-$engine = Engine::initVrt(new EngineConfig(
-    title: 'VRT', width: 1280, height: 720, vsync: false,
-));
-// ... load fonts, render ...
-$img = $engine->captureFramebuffer();  // GdImage, works with VIO and GLFW
-```
-
-`initVrt()` creates a fully initialized Engine with window, renderer, and
-engine fonts. `captureFramebuffer()` returns a `GdImage` using `vio_read_pixels`
-(VIO) or `glReadPixels` (GLFW). Games should use a shared `renderScene()` method
-so VRT tests exercise the exact same code path as the live game.
-
-### 3D scene testing
-
-3D scenes are tested via `NullRenderer3D` — the command list is inspected
-structurally rather than pixel-compared (no GPU available in CI):
-
-```php
-public function testPhpDistrictBuildsCorrectly(): void
-{
-    $engine = $this->create3DTestEngine();
-    $engine->scenes->load(PhpDistrictScene::class);
-    $engine->tick(0.016);
-
-    $commands = $engine->renderer3d->getLastCommandList();
-    $draws = $commands->ofType(DrawMesh::class);
-
-    $this->assertCount(20, $draws); // 20 buildings
-    $this->assertSame('cobblestone', $draws[0]->materialId);
-}
-```
-
-Pixel-level VRT for 3D scenes (OpenGL framebuffer capture) is performed locally,
-not in CI headless mode.
-
-### VRT workflow (Playwright-style, 2D)
+Three layers: PHPUnit unit tests, headless integration tests
+(`Engine(headless: true)` → `Null*` backends), and Playwright-style VRT
+against committed snapshots. Test infrastructure lives in `src/Testing/`
+(`GdRenderer2D`, `ScreenshotComparer`, `VisualTestCase`,
+`NullTextureManager`). Full guide in **`docs/testing.md`**.
 
 ```php
 class MyGameTest extends TestCase {
     use VisualTestCase;
-
     public function testMainMenu(): void {
         $renderer = new GdRenderer2D(800, 600);
-        $renderer->beginFrame();
-        // ... draw scene ...
-        $renderer->endFrame();
-
+        $renderer->beginFrame(); /* ... draw ... */ $renderer->endFrame();
         $this->assertScreenshot($renderer, 'main-menu');
     }
 }
 ```
 
-- **First run:** saves reference screenshot → test passes
-- **Subsequent runs:** compares against reference → fails on visual diff
-- **Update snapshots:** `PHPOLYGON_UPDATE_SNAPSHOTS=1 vendor/bin/phpunit`
+3D scene tests inspect the `RenderCommandList` from `NullRenderer3D` rather
+than pixel-comparing (no GPU in CI). Update snapshots with
+`PHPOLYGON_UPDATE_SNAPSHOTS=1 vendor/bin/phpunit`.
 
-### Snapshot file structure
+### Anti-patterns
 
-```
-tests/MyTest.php
-tests/MyTest.php-snapshots/
-├── main-menu.png                    ← reference (no platform suffix by default)
-├── main-menu.actual.png             ← only on failure
-└── main-menu.diff.png               ← only on failure (red = mismatch)
-```
-
-Default: **no platform suffix**. Override `usePlatformSuffix()` → `true` for
-font-dependent tests, which produces `name-gd-darwin.png` / `name-gd-linux.png`.
-
-### Comparison parameters
-
-```php
-$this->assertScreenshot($renderer, 'name',
-    threshold: 0.1,          // per-pixel YIQ tolerance (0.0–1.0)
-    maxDiffPixels: 50,       // absolute pixel count tolerance
-    maxDiffPixelRatio: 0.01, // ratio tolerance (1% of pixels)
-    mask: [                  // ignore dynamic regions (filled magenta)
-        ['x' => 10, 'y' => 10, 'w' => 100, 'h' => 20],
-    ],
-);
-```
-
-### Fonts
-
-```php
-// Place .ttf files in resources/fonts/
-$renderer->loadFont('inter', 'resources/fonts/Inter-Regular.ttf');
-$renderer->setFont('inter');
-$renderer->drawText('Score: 42,000', 20, 20, 24, Color::white());
-```
-
-Works identically for `Renderer2D` (NanoVG) and `GdRenderer2D` (GD/FreeType).
-Font rendering may differ between platforms — use `usePlatformSuffix() → true`
-for font-dependent VRT tests.
-
-### GdRenderer2D capabilities
-
-The GD software renderer supports: filled/outlined rectangles, rounded rects,
-circles, lines, text (TrueType via `imagettftext`), centered text, word-wrapped
-text, transform stack (`pushTransform`/`popTransform` via Mat3), scissor stack,
-and sprite placeholders (grey rectangles with outlines for textures).
-
-It does **not** produce pixel-identical output to the OpenGL `Renderer2D` — it is
-a structural approximation for layout and regression testing, not a reference
-renderer.
+- **Do not** add VRT tests for legitimately animated content. Mask the
+  dynamic region or freeze the time source.
+- **Do not** commit `*.actual.png` / `*.diff.png` artefacts - they exist
+  only on failure and should be regenerated locally.
+- **Do not** mix 3D pixel VRT into headless CI - inspect the
+  `RenderCommandList` from `NullRenderer3D` instead.
+- **Do not** rely on identical pixel output between `GdRenderer2D` and the
+  GPU `Renderer2D`. GD is a structural approximation for layout regression,
+  not a reference renderer.
 
 ---
 
 ## Performance profiling
 
-PHPolygon has dev-only profiling support. Full guide: `docs/profiling.md`.
+Dev-only profiling: SPX (`SPX_ENABLED=1`), Excimer (`PHPOLYGON_EXCIMER=1`),
+PHPBench micro-benchmarks, and a custom frame-loop runner under `benchmarks/`
+with CI gating on > 15% p95 regression. Full guide in **`docs/profiling.md`**.
 
-### Tools
-
-| Tool | Purpose | Activation |
-|---|---|---|
-| **SPX** (C-ext) | Deep-dive flamegraphs during a dev session | `SPX_ENABLED=1` |
-| **Excimer** (C-ext) | Low-overhead sampling for CI regression | `PHPOLYGON_EXCIMER=1` |
-| **PHPBench** (Composer) | Micro-benchmarks for hot leaf functions (Mat4, Quaternion, MeshGen) | `vendor/bin/phpbench` |
-| **Custom benchmark runner** | Frame-loop scenarios over the full Engine | `php benchmarks/run.php <scenario>` |
-
-SPX and Excimer are PHP C-extensions and cannot be installed via Composer.
-Use `scripts/install-profilers.sh`. PHPBench is a regular dev dependency.
-
-### `PerfProfiler` - section markers
-
-`src/Runtime/PerfProfiler.php` is the engine-wide profiling facade. When no
-profiler extension is active, every call collapses to a single bool check.
+`src/Runtime/PerfProfiler.php` is the engine-wide section facade. With no
+extension active, every call collapses to a single bool check, so markers
+are safe to leave in shipping code.
 
 ```php
-use PHPolygon\Runtime\PerfProfiler;
-
 PerfProfiler::section('mesh.generate.box', fn() => BoxMesh::generate(1, 1, 1));
-
 PerfProfiler::begin('render3d.flush');
 $this->renderer3d->endFrame();
 PerfProfiler::end();
 ```
 
-Standard section names: `engine.update`, `engine.render`, `ecs.update`,
-`ecs.system.<class>`, `render3d.build_commands`, `render3d.flush`,
-`render2d.frame`, `mesh.generate.<id>`, `texture.upload`, `physics.tick`.
-`engine.update` may fire multiple times per frame (fixed-timestep loop);
-`engine.render` fires once per visible frame. Use the same naming when you
-add new markers.
+Standard section names (use the same when adding new markers):
+`engine.update`, `engine.render`, `ecs.update`, `ecs.system.<class>`,
+`render3d.build_commands`, `render3d.flush`, `render2d.frame`,
+`mesh.generate.<id>`, `texture.upload`, `physics.tick`.
 
-### When to add markers
-
-- Around any cross-system or per-frame work expected to be hot
-- Around procedural mesh generation (typically one-shot but can spike)
-- Around expensive per-frame asset I/O
-
-### When NOT to add markers
-
-- **Inside tight inner loops** (per-vertex, per-pixel, per-component-in-system).
-  The marker overhead distorts measurements and pollutes flamegraphs.
-- **In Components or game-side logic** unless explicitly profiling that path -
-  prefer instrumenting the calling System.
-
-### `EngineConfig::$devMode`
-
-`devMode: true` enables developer-only features such as the F3 performance
-overlay (Phase 2 work). It is independent from the SPX/Excimer extensions,
-which are activated via env vars and need no flag.
-
-### Benchmarks
-
-Frame-loop scenarios live in `benchmarks/scenarios/` and run via
-`php benchmarks/run.php <scenario>`. Results are JSON in
-`benchmarks/results/<git-sha>.json` with p50/p95/p99 frame time per
-`PerfProfiler` section, plus a per-scenario GC histogram (`gc_status()`
-delta sampled per frame).
-
-Baselines in `benchmarks/baselines/` are checked in. CI fails on > 15% p95
-regression. Update baselines deliberately via
-`php benchmarks/run.php <scenario> --accept` in the same PR.
-
-PHPBench micro-benchmarks live in `benchmarks/micro/` and target hot leaf
-code that benefits from rev/iteration statistics (`Mat4::multiply`,
-`Quaternion::slerp`, `BoxMesh::generate`).
+`EngineConfig::$devMode` enables the F3 performance overlay
+(`src/UI/PerfOverlay.php`). Independent from SPX/Excimer.
 
 ### Anti-patterns
 
 - **Do not** ship a build with SPX or Excimer enabled - they are dev-only.
-- **Do not** add `PerfProfiler` markers inside per-vertex / per-pixel loops.
+- **Do not** add `PerfProfiler` markers inside per-vertex / per-pixel loops or
+  per-component System inner loops - marker overhead distorts measurements
+  and pollutes flamegraphs. Mark the calling System instead.
+- **Do not** add markers in Components or game-side logic unless explicitly
+  profiling that path - prefer instrumenting the calling System.
 - **Do not** compare benchmarks across mesh count / scene complexity changes
   without updating the baseline scenario.
 - **Do not** profile on battery or under thermal throttle - pin macOS to
   High Performance, otherwise numbers are meaningless.
-- **Do not** run benchmarks without warm-up frames - the first 30-60 frames
-  are always slower (JIT, class loading, texture upload). The runner discards
-  them by default; do not turn that off.
+- **Do not** run benchmarks without warm-up frames - the runner discards
+  the first 30-60 frames by default; do not turn that off.
