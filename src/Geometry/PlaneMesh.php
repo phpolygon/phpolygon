@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace PHPolygon\Geometry;
 
+use PHPolygon\Runtime\PerfProfiler;
+
 /**
  * Generates a quad in the XZ plane, centered at the origin.
  * Normal points upward (0, 1, 0).
@@ -13,6 +15,12 @@ namespace PHPolygon\Geometry;
 class PlaneMesh
 {
     public static function generate(float $width, float $depth, int $subdivisions = 1): MeshData
+    {
+        return PerfProfiler::section('mesh.generate.plane', static fn(): MeshData
+            => self::generateImpl($width, $depth, $subdivisions));
+    }
+
+    private static function generateImpl(float $width, float $depth, int $subdivisions): MeshData
     {
         $hw = $width / 2.0;
         $hd = $depth / 2.0;

@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace PHPolygon\Geometry;
 
+use PHPolygon\Runtime\PerfProfiler;
+
 /**
  * Generates a wedge (triangular prism) mesh for gable wall fills.
  *
@@ -26,6 +28,12 @@ class WedgeMesh
      * @param float $peakZ Z-position of the peak (-1 to +1). 0 = centered (isosceles), -1 or +1 = right triangle.
      */
     public static function generate(float $peakZ = 0.0): MeshData
+    {
+        return PerfProfiler::section('mesh.generate.wedge', static fn(): MeshData
+            => self::generateImpl($peakZ));
+    }
+
+    private static function generateImpl(float $peakZ): MeshData
     {
         $vertices = [];
         $normals = [];
