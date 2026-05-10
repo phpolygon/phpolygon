@@ -82,7 +82,14 @@ jobs:
           cd pr
           for s in empty-scene boxes-1000 boxes-1000-instanced mixed-scene mesh-gen-stress physics-stack; do
             echo "==> $s"
-            if ! php bin/phpolygon perf:report "$s" "$BASE_SHA" "$PR_SHA"; then
+            # CI runners are noisy at the nano-scale; the
+            # boxes-1000-instanced bench measures p95 at ~0.01 ms,
+            # where 15% is one PHP function call worth of jitter. Use
+            # 30% so the workflow only flags actual regressions, not
+            # CI variance. Local runs / dedicated perf machines can
+            # still tighten via `--threshold 15` if they want strict
+            # gating on stable hardware.
+            if ! php bin/phpolygon perf:report "$s" "$BASE_SHA" "$PR_SHA" --threshold 30; then
               fail=1
             fi
             echo
