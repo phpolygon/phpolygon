@@ -1352,7 +1352,10 @@ class VioRenderer3D implements Renderer3DInterface
 
     private function drawMeshInstancedCommand(DrawMeshInstanced $cmd, Material $material): void
     {
-        $instanceCount = $cmd->effectiveInstanceCount();
+        // Hot-path: read public properties directly instead of via the
+        // accessors. The extra method-call dispatch broke the
+        // boxes-1000-instanced perf budget on first CI run.
+        $instanceCount = $cmd->instanceCount >= 0 ? $cmd->instanceCount : count($cmd->matrices);
         if ($instanceCount <= 0) {
             return;
         }
@@ -1389,9 +1392,9 @@ class VioRenderer3D implements Renderer3DInterface
             return [$this->staticMatrixCache[$cacheKey], $this->staticInstanceCountCache[$cacheKey]];
         }
 
-        if ($cmd->hasFlatMatrices()) {
+        if ($cmd->flatMatrices !== []) {
             $packed = pack('f*', ...$cmd->flatMatrices);
-            $count = $cmd->effectiveInstanceCount();
+            $count = $cmd->instanceCount >= 0 ? $cmd->instanceCount : count($cmd->matrices);
         } else {
             $floats = [];
             foreach ($cmd->matrices as $matrix) {

@@ -622,10 +622,19 @@ class OpenGLRenderer3D implements Renderer3DInterface
      */
     private function drawMeshInstancedCommand(DrawMeshInstanced $command): void
     {
-        $instanceCount = $command->effectiveInstanceCount();
+        // Hot path: read the public properties directly rather than via
+        // effectiveInstanceCount() / hasFlatMatrices(). For instanced
+        // building districts at 1000+ instances, the extra method-call
+        // dispatch was a measurable regression vs. the legacy direct
+        // count($matrices) - the boxes-1000-instanced benchmark broke
+        // its 15% guard band on the first run.
+        $instanceCount = $command->instanceCount >= 0
+            ? $command->instanceCount
+            : count($command->matrices);
         if ($instanceCount <= 0) {
             return;
         }
+        $isFlat = $command->flatMatrices !== [];
 
         $meshId    = $command->meshId;
         $materialId = $command->materialId;
@@ -646,7 +655,7 @@ class OpenGLRenderer3D implements Renderer3DInterface
             $buffer = $this->staticFloatBufferCache[$cacheKey];
             $instanceCount = $this->staticInstanceCountCache[$cacheKey];
         } else {
-            if ($command->hasFlatMatrices()) {
+            if ($isFlat) {
                 // Flat path: caller already produced a column-major
                 // float[] of length instanceCount * 16. Skip the
                 // per-instance toArray() flatten loop entirely.

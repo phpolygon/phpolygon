@@ -580,8 +580,8 @@ class VulkanRenderer3D implements Renderer3DInterface
             } elseif ($command instanceof DrawMeshInstanced) {
                 $this->resolveMaterial($command->materialId);
                 $this->uploadLightingUbo();
-                if ($command->hasFlatMatrices()) {
-                    $count = $command->effectiveInstanceCount();
+                if ($command->flatMatrices !== []) {
+                    $count = $command->instanceCount >= 0 ? $command->instanceCount : count($command->matrices);
                     $flat = $command->flatMatrices;
                     for ($i = 0; $i < $count; $i++) {
                         $base = $i * 16;
