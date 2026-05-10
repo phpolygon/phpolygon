@@ -500,10 +500,10 @@ class MetalRenderer3D implements Renderer3DInterface
                 // Cloth animation runs in the vertex shader and reads
                 // from the same struct, so bind it to the vertex stage too.
                 $encoder->setVertexBytes($uboBytes, 2);
-                if ($command->hasFlatMatrices()) {
+                if ($command->flatMatrices !== []) {
                     // Flat path: stream 16 floats per instance straight to
                     // setVertexBytes - no intermediate Mat4 allocation.
-                    $count = $command->effectiveInstanceCount();
+                    $count = $command->instanceCount >= 0 ? $command->instanceCount : count($command->matrices);
                     $flat = $command->flatMatrices;
                     for ($i = 0; $i < $count; $i++) {
                         $base = $i * 16;
