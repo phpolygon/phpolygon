@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace PHPolygon\Rendering\Quality;
 
 use PHPolygon\Rendering\GraphicsSettings;
+use PHPolygon\Rendering\Quality\ScreenSpaceReflections;
 
 /**
  * Cost-impact-ordered tier stack used by both the GraphicsAutoTuner and
@@ -12,19 +13,25 @@ use PHPolygon\Rendering\GraphicsSettings;
  * variant of $current; upgrade() returns the next-richer variant. Both
  * return null when no further step is available.
  *
- * Order (cheapest hot-swaps first):
- *   1. RenderScale     1.0 -> 0.5 in 0.1 increments
- *   2. ShadowQuality   High -> Medium -> Low -> Off
- *   3. ViewDistance    200 -> 150 -> 100 -> 75
- *   4. AntiAliasing    MSAA4x -> MSAA2x -> FXAA -> Off
- *   5. CloudShadows    on -> off
- *   6. Bloom           on -> off
- *   7. ShaderQuality   Full -> Unlit (last because it is highly visible)
- *   8. Anisotropy      16 -> 8 -> 4 -> 2 -> 1
+ * Order (most-expensive-per-pixel first so adaptation buys the largest
+ * frame-time recovery for the smallest perceptual change):
+ *   1. VolumetricFog   on -> off (8-sample raymarch per fragment)
+ *   2. SSR             High -> Low -> Off (24-step world-space raymarch)
+ *   3. RenderScale     1.0 -> 0.5 in 0.1 increments
+ *   4. ScreenSpaceAO   High -> Medium -> Low -> Off (curvature ALU)
+ *   5. ShadowQuality   High -> Medium -> Low -> Off
+ *   6. ViewDistance    200 -> 150 -> 100 -> 75
+ *   7. AntiAliasing    MSAA4x -> MSAA2x -> FXAA -> Off
+ *   8. CloudShadows    on -> off
+ *   9. Bloom           on -> off
+ *  10. Vignette        > 0 -> 0 (cheap effect, last among in-shader items)
+ *  11. ShaderQuality   Full -> Unlit (last because it is highly visible)
+ *  12. Anisotropy      16 -> 8 -> 4 -> 2 -> 1
  *
- * TextureQuality and MeshLodTier are deliberately excluded - their hot-
- * swap cost (texture re-upload, mesh regeneration) far outweighs any one
- * frame's saving.
+ * TextureQuality, MeshLodTier and ColorGradingPreset are deliberately
+ * excluded - the first two have hot-swap cost (texture re-upload, mesh
+ * regeneration) that far outweighs any one frame's saving; ColorGrading
+ * is a stylistic choice, not a perf knob.
  */
 final class AdaptiveTierStack
 {
@@ -37,13 +44,39 @@ final class AdaptiveTierStack
 
     public static function downgrade(GraphicsSettings $current): ?GraphicsSettings
     {
-        // 1. RenderScale
+        // 1. VolumetricFog (8-step raymarch is the most expensive per-fragment cost in the stack)
+        if ($current->volumetricFog) {
+            return $current->with(volumetricFog: false);
+        }
+
+        // 2. SSR (24-step world-space raymarch + composite pass)
+        $ssrNext = match ($current->ssr) {
+            ScreenSpaceReflections::High => ScreenSpaceReflections::Low,
+            ScreenSpaceReflections::Low  => ScreenSpaceReflections::Off,
+            ScreenSpaceReflections::Off  => null,
+        };
+        if ($ssrNext !== null) {
+            return $current->with(ssr: $ssrNext);
+        }
+
+        // 3. RenderScale
         $idx = self::indexFloat(self::RENDER_SCALE_LEVELS, $current->renderScale);
         if ($idx !== null && $idx + 1 < count(self::RENDER_SCALE_LEVELS)) {
             return $current->with(renderScale: self::RENDER_SCALE_LEVELS[$idx + 1]);
         }
 
-        // 2. ShadowQuality
+        // 3. ScreenSpaceAO
+        $aoNext = match ($current->ambientOcclusion) {
+            ScreenSpaceAO::High => ScreenSpaceAO::Medium,
+            ScreenSpaceAO::Medium => ScreenSpaceAO::Low,
+            ScreenSpaceAO::Low => ScreenSpaceAO::Off,
+            ScreenSpaceAO::Off => null,
+        };
+        if ($aoNext !== null) {
+            return $current->with(ambientOcclusion: $aoNext);
+        }
+
+        // 4. ShadowQuality
         $next = match ($current->shadowQuality) {
             ShadowQuality::High => ShadowQuality::Medium,
             ShadowQuality::Medium => ShadowQuality::Low,
@@ -54,39 +87,45 @@ final class AdaptiveTierStack
             return $current->with(shadowQuality: $next);
         }
 
-        // 3. ViewDistance
+        // 5. ViewDistance
         $idx = self::indexFloat(self::VIEW_DISTANCE_LEVELS, $current->viewDistance);
         if ($idx !== null && $idx + 1 < count(self::VIEW_DISTANCE_LEVELS)) {
             return $current->with(viewDistance: self::VIEW_DISTANCE_LEVELS[$idx + 1]);
         }
 
-        // 4. AntiAliasing
+        // 6. AntiAliasing
         $aaNext = match ($current->antiAliasing) {
             AntiAliasing::Msaa4x => AntiAliasing::Msaa2x,
             AntiAliasing::Msaa2x => AntiAliasing::Fxaa,
             AntiAliasing::Fxaa => AntiAliasing::Off,
+            AntiAliasing::Taa  => AntiAliasing::Fxaa,
             AntiAliasing::Off => null,
         };
         if ($aaNext !== null) {
             return $current->with(antiAliasing: $aaNext);
         }
 
-        // 5. CloudShadows
+        // 7. CloudShadows
         if ($current->cloudShadows) {
             return $current->with(cloudShadows: false);
         }
 
-        // 6. Bloom
+        // 8. Bloom
         if ($current->bloom) {
             return $current->with(bloom: false);
         }
 
-        // 7. ShaderQuality
+        // 9. Vignette (cheap, but visible - dropped after the heavy hitters)
+        if ($current->vignetteIntensity > 0.0) {
+            return $current->with(vignetteIntensity: 0.0);
+        }
+
+        // 10. ShaderQuality
         if ($current->shaderQuality === ShaderQuality::Full) {
             return $current->with(shaderQuality: ShaderQuality::Unlit);
         }
 
-        // 8. Anisotropy
+        // 11. Anisotropy
         $idx = self::indexInt(self::ANISOTROPY_LEVELS, $current->anisotropy);
         if ($idx !== null && $idx + 1 < count(self::ANISOTROPY_LEVELS)) {
             return $current->with(anisotropy: self::ANISOTROPY_LEVELS[$idx + 1]);
@@ -108,6 +147,12 @@ final class AdaptiveTierStack
             return $current->with(shaderQuality: ShaderQuality::Full);
         }
 
+        // Vignette is intentionally not auto-restored: the player may have
+        // set it to 0 explicitly, and there is no original-value memory in
+        // GraphicsSettings to honour. Games that want the controller to
+        // raise the vignette back should call $manager->update() with the
+        // preferred value when they detect the upgrade signal.
+
         if (!$current->bloom) {
             return $current->with(bloom: true);
         }
@@ -120,7 +165,7 @@ final class AdaptiveTierStack
             AntiAliasing::Off => AntiAliasing::Fxaa,
             AntiAliasing::Fxaa => AntiAliasing::Msaa2x,
             AntiAliasing::Msaa2x => AntiAliasing::Msaa4x,
-            AntiAliasing::Msaa4x => null,
+            AntiAliasing::Msaa4x, AntiAliasing::Taa => null,
         };
         if ($aaNext !== null) {
             return $current->with(antiAliasing: $aaNext);
@@ -141,9 +186,32 @@ final class AdaptiveTierStack
             return $current->with(shadowQuality: $next);
         }
 
+        $aoUp = match ($current->ambientOcclusion) {
+            ScreenSpaceAO::Off => ScreenSpaceAO::Low,
+            ScreenSpaceAO::Low => ScreenSpaceAO::Medium,
+            ScreenSpaceAO::Medium => ScreenSpaceAO::High,
+            ScreenSpaceAO::High => null,
+        };
+        if ($aoUp !== null) {
+            return $current->with(ambientOcclusion: $aoUp);
+        }
+
         $idx = self::indexFloat(self::RENDER_SCALE_LEVELS, $current->renderScale);
         if ($idx !== null && $idx > 0) {
             return $current->with(renderScale: self::RENDER_SCALE_LEVELS[$idx - 1]);
+        }
+
+        $ssrUp = match ($current->ssr) {
+            ScreenSpaceReflections::Off  => ScreenSpaceReflections::Low,
+            ScreenSpaceReflections::Low  => ScreenSpaceReflections::High,
+            ScreenSpaceReflections::High => null,
+        };
+        if ($ssrUp !== null) {
+            return $current->with(ssr: $ssrUp);
+        }
+
+        if (!$current->volumetricFog) {
+            return $current->with(volumetricFog: true);
         }
 
         return null;

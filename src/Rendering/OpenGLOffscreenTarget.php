@@ -37,7 +37,9 @@ final class OpenGLOffscreenTarget
     private const GL_RENDERBUFFER         = 0x8D41;
     private const GL_COLOR_ATTACHMENT0    = 0x8CE0;
     private const GL_DEPTH_ATTACHMENT     = 0x8D00;
+    private const GL_DEPTH_COMPONENT      = 0x1902;
     private const GL_DEPTH_COMPONENT24    = 0x81A6;
+    private const GL_FLOAT                = 0x1406;
     private const GL_RGBA8                = 0x8058;
     private const GL_FRAMEBUFFER_COMPLETE = 0x8CD5;
     private const GL_TEXTURE_2D           = 0x0DE1;
@@ -45,18 +47,22 @@ final class OpenGLOffscreenTarget
     private const GL_TEXTURE_MAG_FILTER   = 0x2800;
     private const GL_TEXTURE_WRAP_S       = 0x2802;
     private const GL_TEXTURE_WRAP_T       = 0x2803;
+    private const GL_NEAREST              = 0x2600;
     private const GL_LINEAR               = 0x2601;
     private const GL_CLAMP_TO_EDGE        = 0x812F;
     private const GL_COLOR_BUFFER_BIT     = 0x4000;
+    private const GL_DEPTH_BUFFER_BIT     = 0x0100;
 
     private int $width = 0;
     private int $height = 0;
     private int $samples = 1;
 
-    /** Single-sample resolve target. Color attachment is a sampleable GL_TEXTURE_2D. */
+    /** Single-sample resolve target. Color and depth attachments are both
+     * sampleable GL_TEXTURE_2Ds so post-process passes (FXAA, SSR) can read
+     * them directly without an extra blit. */
     private int $resolveFbo = 0;
     private int $resolveColorTex = 0;
-    private int $resolveDepthRbo = 0;
+    private int $resolveDepthTex = 0;
 
     /** Multisample target. Only allocated when $samples > 1. */
     private int $msaaFbo = 0;
@@ -97,18 +103,25 @@ final class OpenGLOffscreenTarget
         glTexParameteri(self::GL_TEXTURE_2D, self::GL_TEXTURE_WRAP_S, self::GL_CLAMP_TO_EDGE);
         glTexParameteri(self::GL_TEXTURE_2D, self::GL_TEXTURE_WRAP_T, self::GL_CLAMP_TO_EDGE);
 
-        $rbo = 0;
-        glGenRenderbuffers(1, $rbo);
-        $this->resolveDepthRbo = $rbo;
-        glBindRenderbuffer(self::GL_RENDERBUFFER, $this->resolveDepthRbo);
-        glRenderbufferStorage(self::GL_RENDERBUFFER, self::GL_DEPTH_COMPONENT24, $width, $height);
+        // Depth as a sampleable texture so SSR / SSAO post passes can
+        // read it. Nearest filter on depth - bilinear interpolation
+        // produces meaningless intermediate depth values.
+        $tex = 0;
+        glGenTextures(1, $tex);
+        $this->resolveDepthTex = $tex;
+        glBindTexture(self::GL_TEXTURE_2D, $this->resolveDepthTex);
+        glTexImage2D(self::GL_TEXTURE_2D, 0, self::GL_DEPTH_COMPONENT24, $width, $height, 0, self::GL_DEPTH_COMPONENT, self::GL_FLOAT, null);
+        glTexParameteri(self::GL_TEXTURE_2D, self::GL_TEXTURE_MIN_FILTER, self::GL_NEAREST);
+        glTexParameteri(self::GL_TEXTURE_2D, self::GL_TEXTURE_MAG_FILTER, self::GL_NEAREST);
+        glTexParameteri(self::GL_TEXTURE_2D, self::GL_TEXTURE_WRAP_S, self::GL_CLAMP_TO_EDGE);
+        glTexParameteri(self::GL_TEXTURE_2D, self::GL_TEXTURE_WRAP_T, self::GL_CLAMP_TO_EDGE);
 
         $fbo = 0;
         glGenFramebuffers(1, $fbo);
         $this->resolveFbo = $fbo;
         glBindFramebuffer(self::GL_FRAMEBUFFER, $this->resolveFbo);
         glFramebufferTexture2D(self::GL_FRAMEBUFFER, self::GL_COLOR_ATTACHMENT0, self::GL_TEXTURE_2D, $this->resolveColorTex, 0);
-        glFramebufferRenderbuffer(self::GL_FRAMEBUFFER, self::GL_DEPTH_ATTACHMENT, self::GL_RENDERBUFFER, $this->resolveDepthRbo);
+        glFramebufferTexture2D(self::GL_FRAMEBUFFER, self::GL_DEPTH_ATTACHMENT, self::GL_TEXTURE_2D, $this->resolveDepthTex, 0);
 
         $status = glCheckFramebufferStatus(self::GL_FRAMEBUFFER);
         if ($status !== self::GL_FRAMEBUFFER_COMPLETE) {
@@ -179,6 +192,15 @@ final class OpenGLOffscreenTarget
             self::GL_COLOR_BUFFER_BIT,
             self::GL_LINEAR,
         );
+        // SSR / SSAO need the resolved depth too. NEAREST is required - the
+        // depth values must round-trip exactly to keep the reconstructed
+        // view position consistent with what the main pass wrote.
+        glBlitFramebuffer(
+            0, 0, $this->width, $this->height,
+            0, 0, $this->width, $this->height,
+            self::GL_DEPTH_BUFFER_BIT,
+            self::GL_NEAREST,
+        );
         glBindFramebuffer(self::GL_FRAMEBUFFER, 0);
     }
 
@@ -210,6 +232,12 @@ final class OpenGLOffscreenTarget
     public function colorTextureId(): int
     {
         return $this->resolveColorTex;
+    }
+
+    /** Texture handle holding the resolved depth image (for SSR / SSAO sampling). */
+    public function depthTextureId(): int
+    {
+        return $this->resolveDepthTex;
     }
 
     public function width(): int
@@ -247,9 +275,9 @@ final class OpenGLOffscreenTarget
             glDeleteTextures(1, $this->resolveColorTex);
             $this->resolveColorTex = 0;
         }
-        if ($this->resolveDepthRbo !== 0) {
-            glDeleteRenderbuffers(1, $this->resolveDepthRbo);
-            $this->resolveDepthRbo = 0;
+        if ($this->resolveDepthTex !== 0) {
+            glDeleteTextures(1, $this->resolveDepthTex);
+            $this->resolveDepthTex = 0;
         }
         if ($this->msaaFbo !== 0) {
             glDeleteFramebuffers(1, $this->msaaFbo);
