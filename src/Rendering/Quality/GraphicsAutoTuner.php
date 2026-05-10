@@ -200,6 +200,9 @@ final class GraphicsAutoTuner
             AntiAliasing::Fxaa => 0.5,
             AntiAliasing::Msaa2x => 2.0,
             AntiAliasing::Msaa4x => 4.0,
+            // TAA: composite + history copy + jitter overhead, sits between
+            // FXAA (single fullscreen sample loop) and MSAA2x (2x render-target).
+            AntiAliasing::Taa => 0.7,
         };
         $base += $s->cloudShadows ? 1.5 : 0.0;
         $base += $s->bloom ? 1.0 : 0.0;

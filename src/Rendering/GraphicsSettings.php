@@ -5,8 +5,11 @@ declare(strict_types=1);
 namespace PHPolygon\Rendering;
 
 use PHPolygon\Rendering\Quality\AntiAliasing;
+use PHPolygon\Rendering\Quality\ColorGradingPreset;
 use PHPolygon\Rendering\Quality\MeshLodTier;
 use PHPolygon\Rendering\Quality\QualityMode;
+use PHPolygon\Rendering\Quality\ScreenSpaceAO;
+use PHPolygon\Rendering\Quality\ScreenSpaceReflections;
 use PHPolygon\Rendering\Quality\ShaderQuality;
 use PHPolygon\Rendering\Quality\ShadowQuality;
 use PHPolygon\Rendering\Quality\TextureQuality;
@@ -42,6 +45,11 @@ final class GraphicsSettings
         public readonly bool $bloom = true,
         public readonly bool $fog = true,
         public readonly MeshLodTier $meshLod = MeshLodTier::High,
+        public readonly ScreenSpaceAO $ambientOcclusion = ScreenSpaceAO::Medium,
+        public readonly ColorGradingPreset $colorGrading = ColorGradingPreset::Neutral,
+        public readonly float $vignetteIntensity = 0.0,
+        public readonly bool $volumetricFog = false,
+        public readonly ScreenSpaceReflections $ssr = ScreenSpaceReflections::Off,
     ) {
     }
 
@@ -66,6 +74,11 @@ final class GraphicsSettings
         ?bool $bloom = null,
         ?bool $fog = null,
         ?MeshLodTier $meshLod = null,
+        ?ScreenSpaceAO $ambientOcclusion = null,
+        ?ColorGradingPreset $colorGrading = null,
+        ?float $vignetteIntensity = null,
+        ?bool $volumetricFog = null,
+        ?ScreenSpaceReflections $ssr = null,
     ): self {
         return new self(
             mode: $mode ?? $this->mode,
@@ -84,6 +97,11 @@ final class GraphicsSettings
             bloom: $bloom ?? $this->bloom,
             fog: $fog ?? $this->fog,
             meshLod: $meshLod ?? $this->meshLod,
+            ambientOcclusion: $ambientOcclusion ?? $this->ambientOcclusion,
+            colorGrading: $colorGrading ?? $this->colorGrading,
+            vignetteIntensity: $vignetteIntensity !== null ? max(0.0, min(1.0, $vignetteIntensity)) : $this->vignetteIntensity,
+            volumetricFog: $volumetricFog ?? $this->volumetricFog,
+            ssr: $ssr ?? $this->ssr,
         );
     }
 
@@ -109,6 +127,11 @@ final class GraphicsSettings
             'bloom' => $this->bloom,
             'fog' => $this->fog,
             'meshLod' => $this->meshLod->value,
+            'ambientOcclusion' => $this->ambientOcclusion->value,
+            'colorGrading' => $this->colorGrading->value,
+            'vignetteIntensity' => $this->vignetteIntensity,
+            'volumetricFog' => $this->volumetricFog,
+            'ssr' => $this->ssr->value,
         ];
     }
 
@@ -135,6 +158,11 @@ final class GraphicsSettings
             bloom: self::asBool($data['bloom'] ?? null) ?? $defaults->bloom,
             fog: self::asBool($data['fog'] ?? null) ?? $defaults->fog,
             meshLod: self::enumFrom(MeshLodTier::class, $data['meshLod'] ?? null) ?? $defaults->meshLod,
+            ambientOcclusion: self::enumFrom(ScreenSpaceAO::class, $data['ambientOcclusion'] ?? null) ?? $defaults->ambientOcclusion,
+            colorGrading: self::enumFrom(ColorGradingPreset::class, $data['colorGrading'] ?? null) ?? $defaults->colorGrading,
+            vignetteIntensity: ($v = self::asFloat($data['vignetteIntensity'] ?? null)) !== null ? max(0.0, min(1.0, $v)) : $defaults->vignetteIntensity,
+            volumetricFog: self::asBool($data['volumetricFog'] ?? null) ?? $defaults->volumetricFog,
+            ssr: self::enumFrom(ScreenSpaceReflections::class, $data['ssr'] ?? null) ?? $defaults->ssr,
         );
     }
 

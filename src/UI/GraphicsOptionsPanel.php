@@ -7,8 +7,11 @@ namespace PHPolygon\UI;
 use PHPolygon\Engine;
 use PHPolygon\Rendering\GraphicsSettings;
 use PHPolygon\Rendering\Quality\AntiAliasing;
+use PHPolygon\Rendering\Quality\ColorGradingPreset;
 use PHPolygon\Rendering\Quality\MeshLodTier;
 use PHPolygon\Rendering\Quality\QualityMode;
+use PHPolygon\Rendering\Quality\ScreenSpaceAO;
+use PHPolygon\Rendering\Quality\ScreenSpaceReflections;
 use PHPolygon\Rendering\Quality\ShaderQuality;
 use PHPolygon\Rendering\Quality\ShadowQuality;
 use PHPolygon\Rendering\Quality\TextureQuality;
@@ -142,7 +145,7 @@ final class GraphicsOptionsPanel
         }
 
         // Anti-aliasing
-        $aas = [AntiAliasing::Off, AntiAliasing::Fxaa, AntiAliasing::Msaa2x, AntiAliasing::Msaa4x];
+        $aas = [AntiAliasing::Off, AntiAliasing::Fxaa, AntiAliasing::Msaa2x, AntiAliasing::Msaa4x, AntiAliasing::Taa];
         $aaLabels = array_map(static fn(AntiAliasing $a): string => $a->label(), $aas);
         $idx = array_search($s->antiAliasing, $aas, true);
         if (!is_int($idx)) {
@@ -220,6 +223,62 @@ final class GraphicsOptionsPanel
         $fog = $this->ui->checkbox('graphics.fog', 'Fog', $s->fog);
         if ($enabled && $fog !== $s->fog) {
             $manager->update(static fn(GraphicsSettings $g): GraphicsSettings => $g->with(fog: $fog));
+        }
+
+        // Volumetric fog (godrays). Independent from the linear distance
+        // fog above - games can run either, both, or neither.
+        $volFog = $this->ui->checkbox('graphics.volumetricFog', 'Volumetric Fog (Godrays)', $s->volumetricFog);
+        if ($enabled && $volFog !== $s->volumetricFog) {
+            $manager->update(static fn(GraphicsSettings $g): GraphicsSettings => $g->with(volumetricFog: $volFog));
+        }
+
+        // Ambient Occlusion tier
+        $aos = [ScreenSpaceAO::Off, ScreenSpaceAO::Low, ScreenSpaceAO::Medium, ScreenSpaceAO::High];
+        $aoLabels = array_map(static fn(ScreenSpaceAO $a) => $a->label(), $aos);
+        $idx = array_search($s->ambientOcclusion, $aos, true);
+        if (!is_int($idx)) {
+            $idx = 2;
+        }
+        $this->ui->label('Ambient Occlusion');
+        $newIdx = $this->ui->dropdown('graphics.ao', $aoLabels, $idx, 0.0, 0);
+        if ($enabled && $newIdx !== $idx) {
+            $manager->update(static fn(GraphicsSettings $g): GraphicsSettings => $g->with(ambientOcclusion: $aos[$newIdx]));
+        }
+
+        // Color grading preset
+        $grades = [
+            ColorGradingPreset::Neutral, ColorGradingPreset::Warm, ColorGradingPreset::Cool,
+            ColorGradingPreset::Cinematic, ColorGradingPreset::Vibrant, ColorGradingPreset::Muted,
+        ];
+        $gradeLabels = array_map(static fn(ColorGradingPreset $g) => $g->label(), $grades);
+        $idx = array_search($s->colorGrading, $grades, true);
+        if (!is_int($idx)) {
+            $idx = 0;
+        }
+        $this->ui->label('Color Grading');
+        $newIdx = $this->ui->dropdown('graphics.colorGrading', $gradeLabels, $idx, 0.0, 0);
+        if ($enabled && $newIdx !== $idx) {
+            $manager->update(static fn(GraphicsSettings $g): GraphicsSettings => $g->with(colorGrading: $grades[$newIdx]));
+        }
+
+        // Vignette intensity
+        $this->ui->label('Vignette');
+        $vig = $this->ui->slider('graphics.vignette', 'Vignette', $s->vignetteIntensity, 0.0, 1.0);
+        if ($enabled && abs($vig - $s->vignetteIntensity) > 1e-4) {
+            $manager->update(static fn(GraphicsSettings $g): GraphicsSettings => $g->with(vignetteIntensity: $vig));
+        }
+
+        // Screen-space reflections quality
+        $ssrs = [ScreenSpaceReflections::Off, ScreenSpaceReflections::Low, ScreenSpaceReflections::High];
+        $ssrLabels = array_map(static fn(ScreenSpaceReflections $r) => $r->label(), $ssrs);
+        $idx = array_search($s->ssr, $ssrs, true);
+        if (!is_int($idx)) {
+            $idx = 0;
+        }
+        $this->ui->label('Reflections');
+        $newIdx = $this->ui->dropdown('graphics.ssr', $ssrLabels, $idx, 0.0, 0);
+        if ($enabled && $newIdx !== $idx) {
+            $manager->update(static fn(GraphicsSettings $g): GraphicsSettings => $g->with(ssr: $ssrs[$newIdx]));
         }
 
         $vsync = $this->ui->checkbox('graphics.vsync', 'V-Sync', $s->vsync);

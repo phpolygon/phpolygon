@@ -433,6 +433,31 @@ All four 3D backends (`OpenGL`, `Vio`, `Metal`, `Vulkan`) implement
 default-settings games render byte-identically. Standalone Vulkan FXAA falls
 back to a plain blit on older ext-vulkan builds without `Vk\Sampler`.
 
+### Visual quality additions
+
+The mesh shader runs a number of analytic visual-quality features beyond
+the original render-scale / shadow / AA tier knobs. All are shader-side
+so they cost only uniforms + a few ALU ops per fragment, no texture
+uploads, no extra passes. All are documented in
+**`docs/graphics-settings.md`**; the engine-side bullet points:
+
+| Feature | Surface area |
+|---|---|
+| `NormalPattern` | `Material::$normalPattern`, 9 procedural patterns (bricks, bumps, orange peel, hammered, hexagons, wood grain, scratches, cracked, fbm noise). Tangent space derived per-fragment via dFdx/dFdy. |
+| `SurfacePattern` | `Material::$surfacePattern`, 4 wear patterns that modulate albedo/roughness/metallic (worn paint, rust, brushed metal, polished rings). |
+| `Material::$wetness` | Forward-renderer SSR surrogate. Up-facing fragments get smoother + darker + brighter-IBL pass. |
+| `Material::$clearcoat` + `$flakes` | Carpaint extras consumed by `proc_mode == 10`. `Material::carpaint()` factory wires them in. |
+| `ScreenSpaceAO` | Curvature-based AO via `dFdx(N)`. Tiers `Off/Low/Medium/High`. Shader uniform `u_ao_strength`. |
+| `ColorGradingPreset` | Lift/Gamma/Gain + saturation. Six presets. Applied in linear space before ACES. |
+| `GraphicsSettings::$vignetteIntensity` | Radial darkening evaluated against `gl_FragCoord / u_viewport_size`. |
+| `GraphicsSettings::$volumetricFog` | 8-step in-shader ray-march with sun-aligned phase function. Independent from `SetFog`. |
+| ACES tone mapping | Every mesh-shader exit path runs `toneMapACES()` before gamma. Vio's HDR tonemap pass uses the same curve. |
+| Camera-following shadow + texel-snap | `ShadowMapRenderer::updateLightMatrix($dir, $cameraTarget)` and the equivalent on Vio centre the shadow frustum on the camera and snap to the shadow-map grid. |
+| `AreaLightHelper` | Forward-pipeline rectangular area light = grid of point-light samples summing to total radiance. |
+| `ParticleEmitter` + `ParticleSystem` | Inline particle storage, single `DrawMeshInstanced` per emitter per frame. Camera-facing billboard rotation in render(). |
+| `ScreenSpaceReflections` | Quality enum (Off/Low/High). On OpenGL the `OpenGLSsrPass` runs a 24-step world-space ray-march from the resolved depth buffer (via `OpenGLOffscreenTarget::depthTextureId()`); on Vio + Metal it scales the wetness IBL lobe via the shared `u_ssr_intensity` uniform. |
+| `AntiAliasing::Taa` | Temporal AA. OpenGL ships a real `OpenGLTaaPass` with per-frame Halton jitter on the projection matrix, neighbourhood-clamped composite, and a private history color target. Vio/Metal still fall back to FXAA via `AntiAliasing::fallback()` until their post-process chains are migrated. |
+
 ### Anti-patterns
 
 - **Do not** mutate `GraphicsSettings` fields directly - use `with(...)` and
@@ -446,6 +471,19 @@ back to a plain blit on older ext-vulkan builds without `Vk\Sampler`.
   frame-time gain.
 - **Do not** add `applySettings()` paths that bypass `GraphicsSettings::with()`
   - the immutable round-trip is what makes change events deterministic.
+- **Do not** add new procedural normal/surface patterns to one shader
+  copy only. mesh3d.frag.glsl, the embedded Vio shader in
+  `VioRenderer3D::DEFAULT_FRAG`, and `mesh3d.metal` must stay in sync.
+  Bump `NormalPattern::codeFor()` / `SurfacePattern::codeFor()` and
+  patch all three shader copies in the same change.
+- **Do not** ship gamma-only output paths in mesh-shader exits. Every
+  exit must call `finalize()` (GLSL) / `outputColor()` (Vio) /
+  `finalizeColor()` (Metal) so colour grading + tone-map + vignette
+  stay consistent across paths.
+- **Do not** sidestep `AreaLightHelper` by emitting many `AddPointLight`
+  commands from game code "to look like an area light". The helper
+  preserves total radiance across sample counts; manually-placed grids
+  do not.
 
 ---
 
@@ -748,6 +786,47 @@ Standard section names (use the same when adding new markers):
 
 `EngineConfig::$devMode` enables the F3 performance overlay
 (`src/UI/PerfOverlay.php`). Independent from SPX/Excimer.
+
+### Performance contract for pull requests
+
+Every PR that touches a hot-path (`src/Math`, `src/Rendering`,
+`src/System`, `src/Component/Particle*`) is benchmarked twice by CI -
+once on `main`, once on the PR HEAD - and the deltas are surfaced in
+the workflow output. Two pipelines run:
+
+1. **Scenario benches** (`.github/workflows/perf-bench.yml::bench`):
+   six end-to-end frame-loop scenarios (`empty-scene`, `boxes-1000`,
+   `boxes-1000-instanced`, `mixed-scene`, `mesh-gen-stress`,
+   `physics-stack`). > 15% p95 regression breaks the build.
+
+2. **Micro benches** (`.github/workflows/perf-bench.yml::micro-bench`):
+   PHPBench suite under `benchmarks/micro/`, scope-filtered against the
+   PR diff. Math changes run `Math/`, Particle changes run `System/`,
+   Rendering changes run `Rendering/`. Soft-fail by default (warnings,
+   not errors) until the runner-side variance is tight enough to gate.
+
+**The contract**:
+
+- **If you change a hot-path file and no micro-bench covers it, write
+  one.** Add a `*Bench.php` under `benchmarks/micro/<area>/` following
+  the pattern in `benchmarks/micro/Math/Mat4Bench.php` and
+  `benchmarks/micro/System/ParticleStorageBench.php`. The latter
+  shows the side-by-side legacy-vs-new pattern for refactor PRs:
+  reproduce the old implementation inline so the comparison is on
+  the same machine in the same run.
+
+- **Don't claim a perf win without a benchmark.** "Should be faster"
+  is wrong as often as it is right - the SoA particle refactor in
+  this repo's history was 5x *slower* than the legacy nested-array
+  path at small N, despite looking like an obvious win on paper. The
+  bench caught it; the PR landed only after the storage was reverted
+  and only the render-buffer optimisation kept.
+
+- **Add the path filter.** When you wire up a new bench area, add a
+  `src_prefix:bench_subdir` line to the `mapping=()` array in the
+  `Detect changed micro-bench scopes` step of `perf-bench.yml`.
+  Otherwise the new bench only runs on workflow-file changes, which
+  is too coarse to be useful.
 
 ### Anti-patterns
 

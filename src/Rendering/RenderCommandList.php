@@ -50,4 +50,27 @@ class RenderCommandList
     {
         return $this->commands === [];
     }
+
+    /**
+     * Return the most recent command of the given type, or null when no
+     * such command has been pushed this frame.
+     *
+     * Use this when a system needs to peek at frame-level state another
+     * system has already published (e.g. ParticleSystem reading the
+     * camera matrix produced by Camera3DSystem) - avoids open-coding a
+     * scan of getCommands() at every call site.
+     *
+     * @template T of object
+     * @param class-string<T> $type
+     * @return T|null
+     */
+    public function lastOfType(string $type): ?object
+    {
+        for ($i = count($this->commands) - 1; $i >= 0; $i--) {
+            if ($this->commands[$i] instanceof $type) {
+                return $this->commands[$i];
+            }
+        }
+        return null;
+    }
 }

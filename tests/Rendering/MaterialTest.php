@@ -98,4 +98,70 @@ class MaterialTest extends TestCase
         $this->assertSame('default', Material::color(Color::white())->shader);
         $this->assertSame('default', Material::emissive(Color::white(), Color::white())->shader);
     }
+
+    public function testCarpaintFactoryDefaults(): void
+    {
+        $m = Material::carpaint(new Color(0.2, 0.5, 0.85));
+        $this->assertEqualsWithDelta(0.6, $m->metallic, 1e-6);
+        $this->assertEqualsWithDelta(0.32, $m->roughness, 1e-6);
+        $this->assertEqualsWithDelta(0.7, $m->clearcoat, 1e-6);
+        $this->assertEqualsWithDelta(0.4, $m->flakes, 1e-6);
+        $this->assertTrue($m->useEnvironmentMap);
+    }
+
+    public function testCarpaintFactoryAcceptsOverrides(): void
+    {
+        $m = Material::carpaint(
+            albedo: new Color(1.0, 0.0, 0.0),
+            metallic: 0.9,
+            roughness: 0.1,
+            clearcoat: 0.5,
+            flakes: 0.8,
+        );
+        $this->assertEqualsWithDelta(0.9, $m->metallic, 1e-6);
+        $this->assertEqualsWithDelta(0.1, $m->roughness, 1e-6);
+        $this->assertEqualsWithDelta(0.5, $m->clearcoat, 1e-6);
+        $this->assertEqualsWithDelta(0.8, $m->flakes, 1e-6);
+    }
+
+    public function testStandardMaterialDoesNotEnableCarpaintFeatures(): void
+    {
+        $m = Material::default();
+        $this->assertEqualsWithDelta(0.0, $m->clearcoat, 1e-6);
+        $this->assertEqualsWithDelta(0.0, $m->flakes, 1e-6);
+        $this->assertEqualsWithDelta(1.0, $m->normalIntensity, 1e-6);
+        $this->assertTrue($m->useEnvironmentMap);
+    }
+
+    public function testEnvironmentMapCanBeDisabledForFlatMaterials(): void
+    {
+        $m = new Material(useEnvironmentMap: false);
+        $this->assertFalse($m->useEnvironmentMap);
+    }
+
+    public function testCarpaintFactoryRoughnessClearcoatRelationship(): void
+    {
+        // Clearcoat lobe should be sharper than the base lobe so the
+        // characteristic "wet paint" highlight reads clearly.
+        $m = Material::carpaint(new Color(0.5, 0.5, 0.5));
+        $this->assertLessThan($m->roughness, $m->clearcoatRoughness);
+    }
+
+    public function testNormalPatternDefaultsToNone(): void
+    {
+        $m = Material::default();
+        $this->assertNull($m->normalPattern);
+        $this->assertEqualsWithDelta(1.0, $m->normalScale, 1e-6);
+    }
+
+    public function testNormalPatternAcceptsId(): void
+    {
+        $m = new Material(
+            albedo: Color::white(),
+            normalPattern: \PHPolygon\Rendering\NormalPattern::BRICKS,
+            normalScale: 4.0,
+        );
+        $this->assertSame('bricks', $m->normalPattern);
+        $this->assertEqualsWithDelta(4.0, $m->normalScale, 1e-6);
+    }
 }

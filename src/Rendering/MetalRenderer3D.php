@@ -103,8 +103,14 @@ class MetalRenderer3D implements Renderer3DInterface
 
     /** Atmospheric sky pipeline (depth test off, no vertex buffer — fullscreen triangle). */
     private ?RenderPipelineState $skyPipeline = null;
+    /** Sky pipeline variant rendering into the RGBA16Float cubemap target. */
+    private ?RenderPipelineState $skyCubemapPipeline = null;
     private ?DepthStencilState $skyDepthState = null;
     private ?SetSky $pendingSky = null;
+    /** Render-target cubemap for IBL. Lazily allocated on first SetSky. */
+    private ?MetalCubemapTarget $cubemapTarget = null;
+    /** True once the cubemap has been rendered at least once this session. */
+    private bool $cubemapReady = false;
 
     /** Material/proc_mode prefix → proc_mode int cache (mirrors VioRenderer3D::resolveProcMode). */
     /** @var array<string, int> */
@@ -127,6 +133,36 @@ class MetalRenderer3D implements Renderer3DInterface
     private float $alpha     = 1.0;
     private int   $procMode  = 0;
     private float $moonPhase = 0.0;
+    /** Carpaint: 0 = no clearcoat, 1 = full clearcoat lobe layered on top of base specular. */
+    private float $clearcoat = 0.0;
+    /** Independent clearcoat lobe roughness (defaults to a near-mirror finish). */
+    private float $clearcoatRoughness = 0.05;
+    /** Carpaint: 0 = none, 1 = dense metallic flake speckling. */
+    private float $flakes = 0.0;
+    /** Multiplier for procedural normal perturbation (1 = engine default). */
+    private float $normalIntensity = 1.0;
+    /**
+     * Carpaint / IBL toggle. When 1, the mesh3d shader samples the
+     * environment cubemap (Phase 4) for reflection. When 0 it falls back
+     * to the sky/horizon-tinted pseudo-IBL (Phase 1).
+     */
+    private int $useEnvironmentMap = 1;
+    /**
+     * Procedural normal-map pattern code (see {@see NormalPattern}).
+     * 0 = none. The Metal shader dispatches on this value the same way the
+     * GLSL paths do.
+     */
+    private int $normalPattern = 0;
+    /** UV tiling for the procedural normal-map pattern. 1 = one tile per UV unit. */
+    private float $normalScale = 1.0;
+    /** Procedural surface-wear pattern code (0 = none, see SurfacePattern). */
+    private int $surfacePattern = 0;
+    /** UV tiling for the surface-wear pattern. */
+    private float $surfaceScale = 1.0;
+    /** 0 = pattern disabled, 1 = full strength, > 1 = exaggerated. */
+    private float $surfaceIntensity = 1.0;
+    /** 0 = dry, 1 = soaked. SSR-surrogate amplifies IBL on up-facing surfaces. */
+    private float $wetness = 0.0;
 
     // Cloth state, mirror of OpenGL/Vio backends.
     private bool  $cloth = false;
@@ -255,6 +291,17 @@ class MetalRenderer3D implements Renderer3DInterface
         $this->alpha      = 1.0;
         $this->procMode   = 0;
         $this->moonPhase  = 0.0;
+        $this->clearcoat  = 0.0;
+        $this->clearcoatRoughness = 0.05;
+        $this->flakes     = 0.0;
+        $this->normalIntensity   = 1.0;
+        $this->useEnvironmentMap = 1;
+        $this->normalPattern     = 0;
+        $this->normalScale       = 1.0;
+        $this->surfacePattern    = 0;
+        $this->surfaceScale      = 1.0;
+        $this->surfaceIntensity  = 1.0;
+        $this->wetness           = 0.0;
         $this->fog        = [0.5, 0.5, 0.5, 50.0, 200.0];
         $this->cameraPos  = [0.0, 0.0, 0.0];
 
@@ -376,6 +423,16 @@ class MetalRenderer3D implements Renderer3DInterface
 
         // ── Encode draw calls ──────────────────────────────────────────────
         $commandBuffer = $this->commandQueue->createCommandBuffer();
+
+        // ── IBL cubemap update (must happen BEFORE main pass binds it) ──
+        // Six render passes + a blit (generateMipmaps), all on the same
+        // command buffer as the main pass so Metal serialises them via
+        // texture-dependency tracking. Skipped when sky hasn't changed
+        // since last frame (hash check inside updateEnvironmentCubemap).
+        if ($this->pendingSky !== null) {
+            $this->updateEnvironmentCubemap($commandBuffer, $this->pendingSky);
+        }
+
         $encoder       = $commandBuffer->createRenderCommandEncoder($renderPass);
 
         $encoder->setViewport(0.0, 0.0, (float)$sceneW, (float)$sceneH, 0.0, 1.0);
@@ -388,7 +445,11 @@ class MetalRenderer3D implements Renderer3DInterface
                 : $this->ensureSkyPipelineForSampleCount($sceneSamples);
             if ($skyPipeline !== null) {
                 $this->encodeSkyPass($encoder, $this->pendingSky, $skyPipeline);
+            } elseif (getenv('PHPOLYGON_DEBUG_METAL') === '1') {
+                fprintf(STDERR, "[MetalRenderer3D] Sky pipeline NULL — sky.metal failed to compile or build for sampleCount={$sceneSamples}\n");
             }
+        } elseif (getenv('PHPOLYGON_DEBUG_METAL') === '1') {
+            fprintf(STDERR, "[MetalRenderer3D] pendingSky NULL — SetSky not received this frame\n");
         }
         $this->pendingSky = null;
 
@@ -403,6 +464,17 @@ class MetalRenderer3D implements Renderer3DInterface
 
         // FrameUBO is constant for the whole frame — bind once.
         $encoder->setVertexBuffer($this->frameUbo, 0, 1); // slot 1: FrameUBO
+
+        // IBL cubemap binding (fragment texture slot 0). Bound for every
+        // mesh in the frame; the shader gates sampling on
+        // light.has_environment_map && light.use_environment_map so
+        // non-reflective materials skip the texture fetch entirely.
+        $cubemap = $this->cubemapTarget?->cubemap();
+        $sampler = $this->cubemapTarget?->sampler();
+        if ($cubemap !== null && $sampler !== null && $this->cubemapReady) {
+            $encoder->setFragmentTexture($cubemap, 0);
+            $encoder->setFragmentSamplerState($sampler, 0);
+        }
 
         // LightingUBO changes per material, so it must be uploaded per draw.
         // setFragmentBytes copies the data into the command stream (≤4 KB),
@@ -425,9 +497,29 @@ class MetalRenderer3D implements Renderer3DInterface
                 $this->bindMeshAabb($command->meshId);
                 $uboBytes = $this->buildLightingUboBytes();
                 $encoder->setFragmentBytes($uboBytes, 2);
+                // Cloth animation runs in the vertex shader and reads
+                // from the same struct, so bind it to the vertex stage too.
                 $encoder->setVertexBytes($uboBytes, 2);
-                foreach ($command->matrices as $matrix) {
-                    $this->drawMeshCommand($encoder, $command->meshId, $matrix);
+                if ($command->hasFlatMatrices()) {
+                    // Flat path: stream 16 floats per instance straight to
+                    // setVertexBytes - no intermediate Mat4 allocation.
+                    $count = $command->effectiveInstanceCount();
+                    $flat = $command->flatMatrices;
+                    for ($i = 0; $i < $count; $i++) {
+                        $base = $i * 16;
+                        $bytes = pack(
+                            'f16',
+                            $flat[$base + 0],  $flat[$base + 1],  $flat[$base + 2],  $flat[$base + 3],
+                            $flat[$base + 4],  $flat[$base + 5],  $flat[$base + 6],  $flat[$base + 7],
+                            $flat[$base + 8],  $flat[$base + 9],  $flat[$base + 10], $flat[$base + 11],
+                            $flat[$base + 12], $flat[$base + 13], $flat[$base + 14], $flat[$base + 15],
+                        );
+                        $this->drawMeshCommandRaw($encoder, $command->meshId, $bytes);
+                    }
+                } else {
+                    foreach ($command->matrices as $matrix) {
+                        $this->drawMeshCommand($encoder, $command->meshId, $matrix);
+                    }
                 }
             }
         }
@@ -508,6 +600,17 @@ class MetalRenderer3D implements Renderer3DInterface
             $this->roughness = $material->roughness;
             $this->metallic  = $material->metallic;
             $this->alpha     = $material->alpha;
+            $this->clearcoat          = $material->clearcoat;
+            $this->clearcoatRoughness = $material->clearcoatRoughness;
+            $this->flakes             = $material->flakes;
+            $this->normalIntensity    = $material->normalIntensity;
+            $this->useEnvironmentMap  = $material->useEnvironmentMap ? 1 : 0;
+            $this->normalPattern      = NormalPattern::codeFor($material->normalPattern);
+            $this->normalScale        = $material->normalScale;
+            $this->surfacePattern     = SurfacePattern::codeFor($material->surfacePattern);
+            $this->surfaceScale       = $material->surfaceScale;
+            $this->surfaceIntensity   = $material->surfaceIntensity;
+            $this->wetness            = $material->wetness;
             $this->cloth          = $material->cloth;
             $this->clothStrength  = $material->clothStrength;
             $this->clothFrequency = $material->clothFrequency;
@@ -519,6 +622,17 @@ class MetalRenderer3D implements Renderer3DInterface
             $this->roughness = 0.5;
             $this->metallic  = 0.0;
             $this->alpha     = 1.0;
+            $this->clearcoat          = 0.0;
+            $this->clearcoatRoughness = 0.05;
+            $this->flakes             = 0.0;
+            $this->normalIntensity    = 1.0;
+            $this->useEnvironmentMap  = 1;
+            $this->normalPattern      = 0;
+            $this->normalScale        = 1.0;
+            $this->surfacePattern     = 0;
+            $this->surfaceScale       = 1.0;
+            $this->surfaceIntensity   = 1.0;
+            $this->wetness            = 0.0;
             $this->cloth          = false;
             $this->clothStrength  = 0.05;
             $this->clothFrequency = 1.0;
@@ -561,6 +675,7 @@ class MetalRenderer3D implements Renderer3DInterface
             str_starts_with($prefix, 'hut_window')     => 7,
             str_starts_with($prefix, 'hut_thatch')     => 8,
             str_starts_with($prefix, 'moon_disc')      => 9,
+            str_starts_with($prefix, 'car_paint')      => 10,
             default                                    => 0,
         };
 
@@ -569,6 +684,17 @@ class MetalRenderer3D implements Renderer3DInterface
     }
 
     private function drawMeshCommand(\Metal\RenderCommandEncoder $encoder, string $meshId, Mat4 $modelMatrix): void
+    {
+        $this->drawMeshCommandRaw($encoder, $meshId, pack('f16', ...$modelMatrix->toArray()));
+    }
+
+    /**
+     * Same as {@see drawMeshCommand()} but accepts a pre-packed 64-byte
+     * model-matrix blob (column-major float[16] packed as 'f16'). Used
+     * by the flat instance path to skip the Mat4 allocation per
+     * particle.
+     */
+    private function drawMeshCommandRaw(\Metal\RenderCommandEncoder $encoder, string $meshId, string $modelBytes): void
     {
         $meshData = MeshRegistry::get($meshId);
         if ($meshData === null) {
@@ -582,7 +708,6 @@ class MetalRenderer3D implements Renderer3DInterface
         // Push model matrix inline via setVertexBytes (slot 0).
         // Metal copies up to 4 KB directly into the command stream — no buffer allocation.
         // Equivalent to Vulkan pushConstants() but simpler: no pipeline layout declaration needed.
-        $modelBytes = pack('f16', ...$modelMatrix->toArray());
         $encoder->setVertexBytes($modelBytes, 0); // slot 0: model matrix (length implicit from string)
 
         $encoder->setVertexBuffer($this->meshCache[$meshId]['vb'], 0, 3); // slot 3: vertex data
@@ -665,7 +790,39 @@ class MetalRenderer3D implements Renderer3DInterface
         $data .= pack('f3f1', $this->skyColor[0],     $this->skyColor[1],     $this->skyColor[2],     $this->globalTime);
         $data .= pack('f3f1', $this->horizonColor[0], $this->horizonColor[1], $this->horizonColor[2], $this->moonPhase);
         $data .= pack('f3l1', $this->seasonTint[0],   $this->seasonTint[1],   $this->seasonTint[2],   $this->procMode);
+        // Carpaint / IBL block (16 bytes alpha-slot, 16 bytes carpaint-slot,
+        // 16 bytes ibl-slot). Order MUST match the MSL LightingUBO layout.
         $data .= pack('f4',   $this->alpha, 0.0, 0.0, 0.0);
+        $data .= pack('f4',   $this->clearcoat, $this->clearcoatRoughness, $this->flakes, $this->normalIntensity);
+        // First int: per-material toggle. Second int: per-frame flag set
+        // by the renderer when an IBL cubemap is bound to fragment texture
+        // slot 0. The shader samples only when both are 1.
+        $hasEnv = $this->cubemapReady ? 1 : 0;
+        $mipMax = (float)(($this->cubemapTarget?->mipLevels() ?? 1) - 1);
+        $data .= pack('l2f2', $this->useEnvironmentMap, $hasEnv, $mipMax, 0.0);
+        // Procedural normal-map + AO block (16 bytes: int pattern, float scale,
+        // float ao_strength, 1 pad float).
+        $aoStrength = $this->settings->ambientOcclusion->strength();
+        $data .= pack('l1f3', $this->normalPattern, $this->normalScale, $aoStrength, 0.0);
+
+        // Procedural surface-wear block (16 bytes: int pattern, float scale,
+        // float intensity, float wetness).
+        $data .= pack('l1f3', $this->surfacePattern, $this->surfaceScale, $this->surfaceIntensity, $this->wetness);
+
+        // Color grading + vignette + viewport size (4 x 16 bytes).
+        $grade = $this->settings->colorGrading->params();
+        $vw = $this->offscreenTarget?->width()  ?? 0;
+        $vh = $this->offscreenTarget?->height() ?? 0;
+        if ($vw <= 0) { $vw = 1; }
+        if ($vh <= 0) { $vh = 1; }
+        $data .= pack('f4', $grade['lift'][0],  $grade['lift'][1],  $grade['lift'][2],  $grade['saturation']);
+        $data .= pack('f4', $grade['gamma'][0], $grade['gamma'][1], $grade['gamma'][2], $this->settings->vignetteIntensity);
+        // Last float of the gain slot doubles as ssr_intensity (mirror of
+        // OpenGL/Vio's u_ssr_intensity, see mesh3d.metal LightingUBO).
+        $data .= pack('f4', $grade['gain'][0],  $grade['gain'][1],  $grade['gain'][2],  $this->settings->ssr->intensity());
+        $volFog = $this->settings->volumetricFog ? 1 : 0;
+        // Layout: float vw, float vh, int volumetric_fog, float pad.
+        $data .= pack('f2l1f1', (float)$vw, (float)$vh, $volFog, 0.0);
 
         // Cloth + wind block (mirrors mesh3d.metal LightingUBO struct).
         $cloth     = $this->cloth ? 1 : 0;
@@ -919,6 +1076,189 @@ class MetalRenderer3D implements Renderer3DInterface
         // requires them. Sky is optional - any failure here leaves the field
         // null and the renderer falls back to clear colour.
         $this->skyPipeline = $this->ensureSkyPipelineForSampleCount(1);
+
+        // Cubemap-target sky pipeline. Same vertex/fragment functions, but
+        // outputs into the RGBA16Float environment cubemap instead of the
+        // BGRA8Unorm drawable. Failure to build leaves the IBL path
+        // disabled - the renderer falls back to sky-tinted pseudo-IBL.
+        $this->skyCubemapPipeline = $this->ensureSkyCubemapPipeline();
+    }
+
+    private function ensureSkyCubemapPipeline(): ?RenderPipelineState
+    {
+        if ($this->skyCubemapPipeline !== null) {
+            return $this->skyCubemapPipeline;
+        }
+
+        $msl = @file_get_contents(self::SKY_SHADER_PATH);
+        if ($msl === false) {
+            return null;
+        }
+
+        try {
+            $library = $this->device->createLibraryWithSource($msl);
+            $vertFn  = $library->getFunction('vertex_sky');
+            $fragFn  = $library->getFunction('fragment_sky');
+
+            $desc = new RenderPipelineDescriptor();
+            $desc->setVertexFunction($vertFn);
+            $desc->setFragmentFunction($fragFn);
+            // Cubemap face texture format — must match MetalCubemapTarget.
+            $desc->getColorAttachment(0)->setPixelFormat(\Metal\PixelFormatRGBA16Float);
+            $desc->setDepthAttachmentPixelFormat($this->offscreenDepthPixelFormat);
+            $desc->setRasterSampleCount(1);
+
+            return $this->device->createRenderPipelineState($desc);
+        } catch (\Throwable) {
+            return null;
+        }
+    }
+
+    /**
+     * Render the atmospheric sky into the IBL cubemap (one face at a time)
+     * and regenerate its mipmap chain for trilinear roughness sampling in
+     * the mesh3d shader.
+     *
+     * Skipped on frames where:
+     *   - no SetSky has arrived yet, OR
+     *   - the cubemap target failed to allocate (Metal OOM, missing API),
+     *   - the cubemap pipeline failed to compile, OR
+     *   - the supplied SetSky parameters hash matches the previously
+     *     rendered cubemap (sky hasn't moved since last update).
+     *
+     * Encodes onto the supplied command buffer; six render passes plus a
+     * blit pass for generateMipmaps.
+     */
+    private function updateEnvironmentCubemap(\Metal\CommandBuffer $commandBuffer, SetSky $sky): bool
+    {
+        $debug = getenv('PHPOLYGON_DEBUG_METAL') === '1';
+        $this->cubemapTarget ??= new MetalCubemapTarget($this->device);
+        if (!$this->cubemapTarget->ensureAllocated()) {
+            if ($debug) fprintf(STDERR, "[MetalRenderer3D] cubemap allocation failed\n");
+            return false;
+        }
+        if ($this->skyCubemapPipeline === null) {
+            $this->skyCubemapPipeline = $this->ensureSkyCubemapPipeline();
+            if ($this->skyCubemapPipeline === null) {
+                if ($debug) fprintf(STDERR, "[MetalRenderer3D] skyCubemapPipeline NULL — IBL disabled\n");
+                return false;
+            }
+        }
+
+        $hash = $this->skyHash($sky);
+        if (!$this->cubemapTarget->needsUpdate($hash)) {
+            return true; // cubemap is already up-to-date
+        }
+        if ($debug) fprintf(STDERR, "[MetalRenderer3D] rendering 6 cubemap faces (skyHash={$hash})\n");
+
+        $cubemap      = $this->cubemapTarget->cubemap();
+        $depthTexture = $this->cubemapTarget->depthTexture();
+        if ($cubemap === null || $depthTexture === null || $this->skyDepthState === null) {
+            return false;
+        }
+
+        $faceSize     = $this->cubemapTarget->faceSize();
+        $faceViews    = MetalCubemapTarget::faceViewMatrices();
+        $faceProj     = MetalCubemapTarget::faceProjectionMatrix();
+
+        for ($face = 0; $face < 6; $face++) {
+            $renderPass = new RenderPassDescriptor();
+            $renderPass->setColorAttachmentTexture(0, $cubemap);
+            $renderPass->setColorAttachmentSlice(0, $face);
+            $renderPass->setColorAttachmentLevel(0, 0);
+            $renderPass->setColorAttachmentLoadAction(0, \Metal\LoadActionClear);
+            $renderPass->setColorAttachmentStoreAction(0, \Metal\StoreActionStore);
+            $renderPass->setColorAttachmentClearColor(0, 0.0, 0.0, 0.0, 1.0);
+
+            $renderPass->setDepthAttachmentTexture($depthTexture);
+            $renderPass->setDepthAttachmentLoadAction(\Metal\LoadActionClear);
+            $renderPass->setDepthAttachmentStoreAction(\Metal\StoreActionDontCare);
+            $renderPass->setDepthAttachmentClearDepth(1.0);
+
+            $encoder = $commandBuffer->createRenderCommandEncoder($renderPass);
+            $encoder->setViewport(0.0, 0.0, (float)$faceSize, (float)$faceSize, 0.0, 1.0);
+            $encoder->setScissorRect(0, 0, $faceSize, $faceSize);
+            $encoder->setRenderPipelineState($this->skyCubemapPipeline);
+            $encoder->setDepthStencilState($this->skyDepthState);
+            $encoder->setCullMode(\Metal\CullModeNone);
+
+            // Compute inv(proj * faceView) so fragment_sky can unproject NDC
+            // back to a world-space view direction for this face.
+            $faceView = new Mat4($faceViews[$face]);
+            $vp       = (new Mat4($faceProj))->multiply($faceView);
+            $invVp    = $vp->inverse()->toArray();
+
+            $encoder->setFragmentBytes($this->packSkyUbo($sky, $invVp), 0);
+            $encoder->drawPrimitives(\Metal\PrimitiveTypeTriangle, 0, 3);
+            $encoder->endEncoding();
+        }
+
+        // Generate the mip chain so fragment shaders can pick a roughness-
+        // appropriate LOD via cubemap.sample(s, R, level(roughness * mipMax)).
+        $blit = $commandBuffer->createBlitCommandEncoder();
+        $blit->generateMipmaps($cubemap);
+        $blit->endEncoding();
+
+        $this->cubemapTarget->markRendered($hash);
+        $this->cubemapReady = true;
+        if ($debug) fprintf(STDERR, "[MetalRenderer3D] cubemap rendered + mipmaps generated; cubemapReady=true\n");
+        return true;
+    }
+
+    /**
+     * Hash of all SetSky inputs that influence the rendered sky look. Used
+     * to skip cubemap re-rendering when nothing has changed (saves six
+     * render passes + mipmap gen per stable frame).
+     */
+    private function skyHash(SetSky $sky): string
+    {
+        $md = $sky->moonDirection ?? new \PHPolygon\Math\Vec3(0.0, -1.0, 0.0);
+        return md5(pack(
+            'f*',
+            $sky->sunDirection->x, $sky->sunDirection->y, $sky->sunDirection->z, $sky->sunIntensity,
+            $sky->sunColor->r, $sky->sunColor->g, $sky->sunColor->b, $sky->sunSize,
+            $sky->zenithColor->r, $sky->zenithColor->g, $sky->zenithColor->b, $sky->sunGlowSize,
+            $sky->horizonColor->r, $sky->horizonColor->g, $sky->horizonColor->b, $sky->sunGlowIntensity,
+            $sky->groundColor->r, $sky->groundColor->g, $sky->groundColor->b, $sky->starBrightness,
+            $md->x, $md->y, $md->z, $sky->moonIntensity,
+            $sky->moonColor->r, $sky->moonColor->g, $sky->moonColor->b, $sky->cloudCover,
+            $sky->cloudAltitude, $sky->cloudDensity, $sky->cloudWindSpeed, $sky->fogDensity,
+            $sky->cloudWindDirection->x, $sky->cloudWindDirection->z,
+        ));
+    }
+
+    /**
+     * Pack the SkyUBO struct as defined in sky.metal. Same layout as
+     * encodeSkyPass uses, factored out so the cubemap face passes can
+     * supply their own face-specific inverse-VP matrix.
+     *
+     * @param float[] $invVp column-major float[16]
+     */
+    private function packSkyUbo(SetSky $sky, array $invVp): string
+    {
+        $sd  = $sky->sunDirection;
+        $sc  = $sky->sunColor;
+        $zc  = $sky->zenithColor;
+        $hc  = $sky->horizonColor;
+        $gc  = $sky->groundColor;
+        $md  = $sky->moonDirection ?? new \PHPolygon\Math\Vec3(0.0, -1.0, 0.0);
+        $mc  = $sky->moonColor;
+        $cwd = $sky->cloudWindDirection;
+        $cwl = sqrt($cwd->x * $cwd->x + $cwd->z * $cwd->z);
+        $wx  = $cwl > 1e-6 ? $cwd->x / $cwl : 1.0;
+        $wz  = $cwl > 1e-6 ? $cwd->z / $cwl : 0.0;
+
+        return pack('f16', ...$invVp)
+             . pack('f3f',  $this->cameraPos[0], $this->cameraPos[1], $this->cameraPos[2], $sky->time)
+             . pack('f3f',  $sd->x, $sd->y, $sd->z, $sky->sunIntensity)
+             . pack('f3f',  $sc->r, $sc->g, $sc->b, $sky->sunSize)
+             . pack('f3f',  $zc->r, $zc->g, $zc->b, $sky->sunGlowSize)
+             . pack('f3f',  $hc->r, $hc->g, $hc->b, $sky->sunGlowIntensity)
+             . pack('f3f',  $gc->r, $gc->g, $gc->b, $sky->starBrightness)
+             . pack('f3f',  $md->x, $md->y, $md->z, $sky->moonIntensity)
+             . pack('f3f',  $mc->r, $mc->g, $mc->b, $sky->cloudCover)
+             . pack('ffff', $sky->cloudAltitude, $sky->cloudDensity, $sky->cloudWindSpeed, $sky->fogDensity)
+             . pack('ffff', $wx, $wz, 0.0, 0.0);
     }
 
     /**
@@ -989,5 +1329,13 @@ class MetalRenderer3D implements Renderer3DInterface
 
         $encoder->setFragmentBytes($bytes, 0);
         $encoder->drawPrimitives(\Metal\PrimitiveTypeTriangle, 0, 3);
+
+        if (getenv('PHPOLYGON_DEBUG_METAL') === '1') {
+            static $logged = false;
+            if (!$logged) {
+                fprintf(STDERR, "[MetalRenderer3D] encodeSkyPass: drawPrimitives(Triangle, 0, 3) issued for drawable\n");
+                $logged = true;
+            }
+        }
     }
 }

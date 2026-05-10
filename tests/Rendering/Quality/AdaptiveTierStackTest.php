@@ -8,22 +8,39 @@ use PHPUnit\Framework\TestCase;
 use PHPolygon\Rendering\GraphicsSettings;
 use PHPolygon\Rendering\Quality\AdaptiveTierStack;
 use PHPolygon\Rendering\Quality\AntiAliasing;
+use PHPolygon\Rendering\Quality\ScreenSpaceAO;
+use PHPolygon\Rendering\Quality\ScreenSpaceReflections;
 use PHPolygon\Rendering\Quality\ShaderQuality;
 use PHPolygon\Rendering\Quality\ShadowQuality;
 
 final class AdaptiveTierStackTest extends TestCase
 {
-    public function testDowngradeStartsWithRenderScale(): void
+    public function testDowngradeStartsWithVolumetricFog(): void
     {
-        $top = new GraphicsSettings(renderScale: 1.0);
+        // VolumetricFog is the most expensive per-fragment effect, so the
+        // adaptive controller drops it first when frame budget slips.
+        $top = (new GraphicsSettings())->with(volumetricFog: true);
         $next = AdaptiveTierStack::downgrade($top);
+        $this->assertNotNull($next);
+        $this->assertFalse($next->volumetricFog);
+    }
+
+    public function testDowngradeMovesToRenderScaleAfterVolumetricFog(): void
+    {
+        $atFloor = (new GraphicsSettings())->with(renderScale: 1.0, volumetricFog: false);
+        $next = AdaptiveTierStack::downgrade($atFloor);
         $this->assertNotNull($next);
         $this->assertSame(0.9, $next->renderScale);
     }
 
     public function testDowngradeMovesToShadowsAfterRenderScale(): void
     {
-        $atFloor = (new GraphicsSettings())->with(renderScale: 0.5, shadowQuality: ShadowQuality::High);
+        $atFloor = (new GraphicsSettings())->with(
+            renderScale: 0.5,
+            shadowQuality: ShadowQuality::High,
+            volumetricFog: false,
+            ambientOcclusion: ScreenSpaceAO::Off,
+        );
         $next = AdaptiveTierStack::downgrade($atFloor);
         $this->assertNotNull($next);
         $this->assertSame(ShadowQuality::Medium, $next->shadowQuality);
@@ -36,6 +53,8 @@ final class AdaptiveTierStackTest extends TestCase
             shadowQuality: ShadowQuality::Off,
             viewDistance: 75.0,
             antiAliasing: AntiAliasing::Msaa4x,
+            ambientOcclusion: ScreenSpaceAO::Off,
+            volumetricFog: false,
         );
         $next = AdaptiveTierStack::downgrade($s);
         $this->assertNotNull($next);
@@ -53,6 +72,9 @@ final class AdaptiveTierStackTest extends TestCase
             cloudShadows: false,
             bloom: false,
             shaderQuality: ShaderQuality::Unlit,
+            ambientOcclusion: ScreenSpaceAO::Off,
+            vignetteIntensity: 0.0,
+            volumetricFog: false,
         );
         $this->assertNull(AdaptiveTierStack::downgrade($floor));
     }
@@ -87,6 +109,9 @@ final class AdaptiveTierStackTest extends TestCase
             cloudShadows: true,
             bloom: true,
             shaderQuality: ShaderQuality::Full,
+            ambientOcclusion: ScreenSpaceAO::High,
+            volumetricFog: true,
+            ssr: ScreenSpaceReflections::High,
         );
         $this->assertNull(AdaptiveTierStack::upgrade($top));
     }

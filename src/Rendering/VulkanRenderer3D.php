@@ -580,8 +580,24 @@ class VulkanRenderer3D implements Renderer3DInterface
             } elseif ($command instanceof DrawMeshInstanced) {
                 $this->resolveMaterial($command->materialId);
                 $this->uploadLightingUbo();
-                foreach ($command->matrices as $matrix) {
-                    $this->drawMeshCommand($command->meshId, $matrix);
+                if ($command->hasFlatMatrices()) {
+                    $count = $command->effectiveInstanceCount();
+                    $flat = $command->flatMatrices;
+                    for ($i = 0; $i < $count; $i++) {
+                        $base = $i * 16;
+                        // Reconstruct one Mat4 per instance for the
+                        // current Vulkan path. The flat layout still
+                        // wins for Mat4-mode upstream callers (no
+                        // per-particle Mat4 alloc on game side); the
+                        // per-instance Mat4 here is a transient cost
+                        // that disappears once Vulkan grows a real
+                        // instance buffer like OpenGL/Vio do.
+                        $this->drawMeshCommand($command->meshId, new \PHPolygon\Math\Mat4(array_slice($flat, $base, 16)));
+                    }
+                } else {
+                    foreach ($command->matrices as $matrix) {
+                        $this->drawMeshCommand($command->meshId, $matrix);
+                    }
                 }
             }
         }
