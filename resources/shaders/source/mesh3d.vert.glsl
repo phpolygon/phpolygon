@@ -24,6 +24,21 @@ uniform float u_wave_amplitude;
 uniform float u_wave_frequency;
 uniform float u_wave_phase;
 
+// Procedural cloth sway. Driven from Material::$cloth and the global
+// SetWind command. Anchor weight is derived from the local Y of the
+// vertex relative to the mesh's local AABB so the static end stays
+// fixed while the loose end swings. No CPU simulation, no GPU compute
+// pass - good enough for background characters / capes / banners.
+uniform int   u_cloth;
+uniform float u_cloth_strength;
+uniform float u_cloth_frequency;
+uniform float u_cloth_phase;
+uniform int   u_cloth_anchor_top; // 1 = anchor at top, 0 = anchor at bottom
+uniform vec3  u_wind_direction;
+uniform float u_wind_intensity;
+uniform vec3  u_mesh_local_aabb_min;
+uniform vec3  u_mesh_local_aabb_max;
+
 out vec3 v_normal;
 out vec3 v_worldPos;
 out vec2 v_uv;
@@ -50,6 +65,32 @@ void main() {
                    * cos(worldPosRaw.z * u_wave_frequency * 0.7 + u_time * 0.8)
                    * u_wave_amplitude;
         pos.y += wave;
+    }
+
+    // Procedural cloth sway. Anchor weight maps the vertex's local-Y
+    // position to [0, 1] across the mesh's AABB; (1 - weight) drives
+    // how much sway the vertex gets, so the anchored end is rigid and
+    // the free end is floppy. Default AABB (0..0) collapses to "no
+    // sway" which is the desired no-op when the renderer hasn't pushed
+    // a real AABB.
+    if (u_cloth == 1) {
+        float aabbHeight = max(u_mesh_local_aabb_max.y - u_mesh_local_aabb_min.y, 1e-4);
+        float yNorm = clamp((pos.y - u_mesh_local_aabb_min.y) / aabbHeight, 0.0, 1.0);
+        float anchorWeight = u_cloth_anchor_top == 1 ? yNorm : (1.0 - yNorm);
+        float swayMask = 1.0 - anchorWeight;
+
+        // Two sin waves at 90° offset give a richer "rippling fabric"
+        // motion than a single one would. The local x/z coordinates
+        // contribute so neighbouring vertices don't sway in lock-step.
+        float t = u_time * u_cloth_frequency + u_cloth_phase;
+        float wave = sin(t + pos.x * 2.0) * 0.7 + cos(t * 1.3 + pos.z * 1.5) * 0.3;
+
+        vec3 windDir = length(u_wind_direction) > 1e-4 ? normalize(u_wind_direction) : vec3(0.0, 0.0, 1.0);
+        vec3 sway = windDir * (wave * u_cloth_strength * u_wind_intensity * swayMask);
+        // Wind is horizontal; vertical drift is tiny but not zero so
+        // the cloth has a subtle "lifting" feel.
+        sway.y *= 0.15;
+        pos += sway;
     }
 
     vec4 worldPos = model * vec4(pos, 1.0);

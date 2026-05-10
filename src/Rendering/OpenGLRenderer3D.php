@@ -19,6 +19,7 @@ use PHPolygon\Rendering\Command\SetFog;
 use PHPolygon\Rendering\Command\SetShader;
 use PHPolygon\Rendering\Command\SetSkybox;
 use PHPolygon\Rendering\Command\SetWaveAnimation;
+use PHPolygon\Rendering\Command\SetWind;
 use PHPolygon\Rendering\PostProcess\OpenGLFxaaPass;
 use PHPolygon\Rendering\Quality\AntiAliasing;
 
@@ -283,6 +284,17 @@ class OpenGLRenderer3D implements Renderer3DInterface
         $this->setUniformFloat('u_wave_frequency', 0.0);
         $this->setUniformFloat('u_wave_phase', 0.0);
 
+        // Cloth defaults: disabled until a Material with cloth=true binds,
+        // wind defaults to "calm air" so cloth-enabled materials still
+        // animate subtly when the game pushes no SetWind command.
+        $this->windDirection = [0.0, 0.0, 1.0];
+        $this->windIntensity = 0.5;
+        $this->setUniformVec3('u_wind_direction', $this->windDirection);
+        $this->setUniformFloat('u_wind_intensity', $this->windIntensity);
+        $this->setUniformInt('u_cloth', 0);
+        $this->setUniformVec3('u_mesh_local_aabb_min', [0.0, 0.0, 0.0]);
+        $this->setUniformVec3('u_mesh_local_aabb_max', [0.0, 0.0, 0.0]);
+
         $this->checkGLError('render() setup');
 
         // Pass 1: collect non-draw commands
@@ -333,6 +345,16 @@ class OpenGLRenderer3D implements Renderer3DInterface
 
             } elseif ($command instanceof SetSkybox) {
                 $this->pendingSkyboxId = $command->cubemapId;
+
+            } elseif ($command instanceof SetWind) {
+                $this->windDirection = [
+                    $command->direction->x,
+                    $command->direction->y,
+                    $command->direction->z,
+                ];
+                $this->windIntensity = $command->intensity;
+                $this->setUniformVec3('u_wind_direction', $this->windDirection);
+                $this->setUniformFloat('u_wind_intensity', $this->windIntensity);
 
             } elseif ($command instanceof Command\SetSkyColors) {
                 $this->setUniformVec3('u_sky_color', [$command->skyColor->r, $command->skyColor->g, $command->skyColor->b]);
@@ -482,6 +504,7 @@ class OpenGLRenderer3D implements Renderer3DInterface
 
         $this->setUniformMat4('u_model', $modelMatrix);
         $this->applyMaterial($materialId);
+        $this->bindMeshAabb($meshId);
 
         glBindVertexArray($this->vaoCache[$meshId]);
         glDrawElements(GL_TRIANGLES, $this->indexCountCache[$meshId], GL_UNSIGNED_INT, 0);
@@ -568,6 +591,7 @@ class OpenGLRenderer3D implements Renderer3DInterface
         $this->setUniformInt('u_use_instancing', 1);
 
         $this->applyMaterial($materialId);
+        $this->bindMeshAabb($meshId);
 
         glDrawArraysInstanced(
             GL_TRIANGLES,
@@ -636,6 +660,19 @@ class OpenGLRenderer3D implements Renderer3DInterface
 
     /** @var array<string, int> Material prefix → proc_mode cache */
     private static array $procModeCache = [];
+
+    /**
+     * @var array<string, array{min: array{0:float,1:float,2:float}, max: array{0:float,1:float,2:float}}>
+     *      Mesh-id → local-space AABB cache. Computed on first access in
+     *      meshAabb(). Drives the cloth-sway anchor weighting; not used
+     *      for culling.
+     */
+    private array $meshAabbCache = [];
+
+    /** Current frame's wind state, fed by SetWind commands. */
+    /** @var array{0:float, 1:float, 2:float} */
+    private array $windDirection = [0.0, 0.0, 1.0];
+    private float $windIntensity = 0.5;
 
     /**
      * Activate the correct shader program for a draw call.
@@ -724,13 +761,74 @@ class OpenGLRenderer3D implements Renderer3DInterface
             $this->setUniformFloat('u_roughness', $material->roughness);
             $this->setUniformFloat('u_metallic', $material->metallic);
             $this->setUniformFloat('u_alpha', $material->alpha);
+            $this->setUniformInt('u_cloth', $material->cloth ? 1 : 0);
+            $this->setUniformFloat('u_cloth_strength', $material->clothStrength);
+            $this->setUniformFloat('u_cloth_frequency', $material->clothFrequency);
+            $this->setUniformFloat('u_cloth_phase', $material->clothPhase);
+            $this->setUniformInt('u_cloth_anchor_top', $material->clothAnchorTop ? 1 : 0);
         } else {
             $this->setUniformVec3('u_albedo', [0.8, 0.8, 0.8]);
             $this->setUniformVec3('u_emission', [0.0, 0.0, 0.0]);
             $this->setUniformFloat('u_roughness', 0.5);
             $this->setUniformFloat('u_metallic', 0.0);
             $this->setUniformFloat('u_alpha', 1.0);
+            $this->setUniformInt('u_cloth', 0);
+            $this->setUniformFloat('u_cloth_strength', 0.05);
+            $this->setUniformFloat('u_cloth_frequency', 1.0);
+            $this->setUniformFloat('u_cloth_phase', 0.0);
+            $this->setUniformInt('u_cloth_anchor_top', 1);
         }
+
+        // Mesh-local AABB drives the cloth anchor weighting. Computed
+        // and cached the first time the mesh is uploaded; this keeps
+        // the binding cheap on every material apply (no PHP-side
+        // recomputation per draw).
+    }
+
+    /**
+     * Push the AABB of the mesh that the next draw will use. Called
+     * by the per-draw site after applyMaterial().
+     */
+    private function bindMeshAabb(string $meshId): void
+    {
+        $aabb = $this->meshAabb($meshId);
+        $this->setUniformVec3('u_mesh_local_aabb_min', $aabb['min']);
+        $this->setUniformVec3('u_mesh_local_aabb_max', $aabb['max']);
+    }
+
+    /**
+     * @return array{min: array{0:float,1:float,2:float}, max: array{0:float,1:float,2:float}}
+     */
+    private function meshAabb(string $meshId): array
+    {
+        if (isset($this->meshAabbCache[$meshId])) {
+            return $this->meshAabbCache[$meshId];
+        }
+        $mesh = MeshRegistry::get($meshId);
+        if ($mesh === null) {
+            $aabb = ['min' => [0.0, 0.0, 0.0], 'max' => [0.0, 0.0, 0.0]];
+            $this->meshAabbCache[$meshId] = $aabb;
+            return $aabb;
+        }
+        $minX = INF; $minY = INF; $minZ = INF;
+        $maxX = -INF; $maxY = -INF; $maxZ = -INF;
+        $verts = $mesh->vertices;
+        $count = count($verts);
+        for ($i = 0; $i < $count; $i += 3) {
+            $x = $verts[$i];     $y = $verts[$i + 1]; $z = $verts[$i + 2];
+            if ($x < $minX) $minX = $x;
+            if ($y < $minY) $minY = $y;
+            if ($z < $minZ) $minZ = $z;
+            if ($x > $maxX) $maxX = $x;
+            if ($y > $maxY) $maxY = $y;
+            if ($z > $maxZ) $maxZ = $z;
+        }
+        $aabb = [
+            'min' => [$minX === INF ? 0.0 : $minX, $minY === INF ? 0.0 : $minY, $minZ === INF ? 0.0 : $minZ],
+            'max' => [$maxX === -INF ? 0.0 : $maxX, $maxY === -INF ? 0.0 : $maxY, $maxZ === -INF ? 0.0 : $maxZ],
+        ];
+        $this->meshAabbCache[$meshId] = $aabb;
+        return $aabb;
     }
 
     /**
