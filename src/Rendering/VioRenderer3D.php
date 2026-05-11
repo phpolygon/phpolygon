@@ -19,6 +19,7 @@ use PHPolygon\Rendering\Command\SetShader;
 use PHPolygon\Rendering\Command\SetSky;
 use PHPolygon\Rendering\Command\SetSkybox;
 use PHPolygon\Rendering\Command\SetWaveAnimation;
+use PHPolygon\Rendering\Command\SetWind;
 use PHPolygon\Rendering\PostProcess\VioFxaaPass;
 use PHPolygon\Rendering\Quality\AntiAliasing;
 use VioContext;
@@ -104,6 +105,18 @@ class VioRenderer3D implements Renderer3DInterface
     private ?string $pendingSkyboxId = null;
     private ?SetSky $pendingSky = null;
     private float $rainWetness = 0.0;
+
+    /** Current wind state, overwritten by SetWind dispatch. */
+    /** @var array{0:float,1:float,2:float} */
+    private array $windDirection = [0.0, 0.0, 1.0];
+    private float $windIntensity = 0.5;
+
+    /**
+     * @var array<string, array{min: array{0:float,1:float,2:float}, max: array{0:float,1:float,2:float}}>
+     *      Per-mesh local AABB cache. Computed on first upload via
+     *      meshAabb(); drives the cloth-sway anchor weighting.
+     */
+    private array $meshAabbCache = [];
 
     private ?VioTextureManager $textureManager = null;
 
@@ -425,6 +438,11 @@ class VioRenderer3D implements Renderer3DInterface
                 $waveAmplitude = $cmd->amplitude;
                 $waveFrequency = $cmd->frequency;
                 $wavePhase = $cmd->phase;
+            } elseif ($cmd instanceof SetWind) {
+                $this->windDirection = [
+                    $cmd->direction->x, $cmd->direction->y, $cmd->direction->z,
+                ];
+                $this->windIntensity = $cmd->intensity;
             }
         }
 
@@ -1264,6 +1282,7 @@ class VioRenderer3D implements Renderer3DInterface
         vio_set_uniform($this->ctx, 'u_normal_matrix', $nm);
 
         $this->applyMaterial($material, $materialId);
+        $this->bindMeshAabb($meshId);
 
         vio_draw($this->ctx, $mesh);
     }
@@ -1283,6 +1302,7 @@ class VioRenderer3D implements Renderer3DInterface
         }
 
         $this->applyMaterial($material, $materialId);
+        $this->bindMeshAabb($meshId);
         vio_set_uniform($this->ctx, 'u_use_instancing', 1);
 
         [$flatMatrices, $instanceCount] = $this->resolveInstanceData($meshId, $material, $matrices, $isStatic);
@@ -1324,6 +1344,54 @@ class VioRenderer3D implements Renderer3DInterface
         return [$packed, $count];
     }
 
+    /**
+     * Push the AABB of the mesh that the next draw will use. Drives
+     * the cloth-sway anchor weighting in mesh3d.vert.glsl. Cached
+     * once per mesh id; called by every drawMeshCommand /
+     * drawMeshInstancedCommand entry.
+     */
+    private function bindMeshAabb(string $meshId): void
+    {
+        $aabb = $this->meshAabb($meshId);
+        vio_set_uniform($this->ctx, 'u_mesh_local_aabb_min', $aabb['min']);
+        vio_set_uniform($this->ctx, 'u_mesh_local_aabb_max', $aabb['max']);
+    }
+
+    /**
+     * @return array{min: array{0:float,1:float,2:float}, max: array{0:float,1:float,2:float}}
+     */
+    private function meshAabb(string $meshId): array
+    {
+        if (isset($this->meshAabbCache[$meshId])) {
+            return $this->meshAabbCache[$meshId];
+        }
+        $mesh = MeshRegistry::get($meshId);
+        if ($mesh === null) {
+            $aabb = ['min' => [0.0, 0.0, 0.0], 'max' => [0.0, 0.0, 0.0]];
+            $this->meshAabbCache[$meshId] = $aabb;
+            return $aabb;
+        }
+        $minX = INF; $minY = INF; $minZ = INF;
+        $maxX = -INF; $maxY = -INF; $maxZ = -INF;
+        $verts = $mesh->vertices;
+        $count = count($verts);
+        for ($i = 0; $i < $count; $i += 3) {
+            $x = $verts[$i];     $y = $verts[$i + 1]; $z = $verts[$i + 2];
+            if ($x < $minX) $minX = $x;
+            if ($y < $minY) $minY = $y;
+            if ($z < $minZ) $minZ = $z;
+            if ($x > $maxX) $maxX = $x;
+            if ($y > $maxY) $maxY = $y;
+            if ($z > $maxZ) $maxZ = $z;
+        }
+        $aabb = [
+            'min' => [$minX === INF ? 0.0 : $minX, $minY === INF ? 0.0 : $minY, $minZ === INF ? 0.0 : $minZ],
+            'max' => [$maxX === -INF ? 0.0 : $maxX, $maxY === -INF ? 0.0 : $maxY, $maxZ === -INF ? 0.0 : $maxZ],
+        ];
+        $this->meshAabbCache[$meshId] = $aabb;
+        return $aabb;
+    }
+
     private function applyMaterial(Material $material, string $materialId = ''): void
     {
         vio_set_uniform($this->ctx, 'u_albedo', [$material->albedo->r, $material->albedo->g, $material->albedo->b]);
@@ -1331,6 +1399,13 @@ class VioRenderer3D implements Renderer3DInterface
         vio_set_uniform($this->ctx, 'u_roughness', $material->roughness);
         vio_set_uniform($this->ctx, 'u_metallic', $material->metallic);
         vio_set_uniform($this->ctx, 'u_alpha', $material->alpha);
+
+        // Cloth (mirrors OpenGL backend - same uniform names).
+        vio_set_uniform($this->ctx, 'u_cloth', $material->cloth ? 1 : 0);
+        vio_set_uniform($this->ctx, 'u_cloth_strength', $material->clothStrength);
+        vio_set_uniform($this->ctx, 'u_cloth_frequency', $material->clothFrequency);
+        vio_set_uniform($this->ctx, 'u_cloth_phase', $material->clothPhase);
+        vio_set_uniform($this->ctx, 'u_cloth_anchor_top', $material->clothAnchorTop ? 1 : 0);
 
         // Procedural material mode
         $procMode = self::$procModeCache[$materialId] ?? $this->resolveProcMode($materialId);
@@ -1491,6 +1566,17 @@ class VioRenderer3D implements Renderer3DInterface
         vio_set_uniform($this->ctx, 'u_wave_amplitude', $state['waveAmplitude']);
         vio_set_uniform($this->ctx, 'u_wave_frequency', $state['waveFrequency']);
         vio_set_uniform($this->ctx, 'u_wave_phase', $state['wavePhase']);
+
+        // Cloth + wind defaults. SetWind during command dispatch
+        // overrides; cloth=0 keeps the per-vertex sway off until a
+        // Material with cloth=true binds via applyMaterial.
+        vio_set_uniform($this->ctx, 'u_cloth', 0);
+        vio_set_uniform($this->ctx, 'u_wind_direction', [
+            $this->windDirection[0], $this->windDirection[1], $this->windDirection[2],
+        ]);
+        vio_set_uniform($this->ctx, 'u_wind_intensity', $this->windIntensity);
+        vio_set_uniform($this->ctx, 'u_mesh_local_aabb_min', [0.0, 0.0, 0.0]);
+        vio_set_uniform($this->ctx, 'u_mesh_local_aabb_max', [0.0, 0.0, 0.0]);
     }
 
     private function extractCameraPosition(Mat4 $viewMatrix): Vec3
@@ -1557,6 +1643,18 @@ uniform float u_wave_amplitude;
 uniform float u_wave_frequency;
 uniform float u_wave_phase;
 
+// Procedural cloth (mirrors mesh3d.vert.glsl). See Material::cloth()
+// and Command\SetWind for the engine-side surface.
+uniform int   u_cloth;
+uniform float u_cloth_strength;
+uniform float u_cloth_frequency;
+uniform float u_cloth_phase;
+uniform int   u_cloth_anchor_top;
+uniform vec3  u_wind_direction;
+uniform float u_wind_intensity;
+uniform vec3  u_mesh_local_aabb_min;
+uniform vec3  u_mesh_local_aabb_max;
+
 uniform mat4 u_light_space_matrix;
 
 out vec3 v_normal;
@@ -1587,6 +1685,20 @@ void main() {
         wave += sin(worldPosRaw.x * f * 0.5 + worldPosRaw.z * f * 0.3 + t * 1.4) * a * 0.08;
         wave += sin(worldPosRaw.x * f * 0.7 - worldPosRaw.z * f * 0.6 + t * 1.8 + 2.7) * a * 0.04;
         pos.y += wave;
+    }
+
+    // Procedural cloth sway (mirrors mesh3d.vert.glsl)
+    if (u_cloth == 1) {
+        float aabbHeight = max(u_mesh_local_aabb_max.y - u_mesh_local_aabb_min.y, 1e-4);
+        float yNorm = clamp((pos.y - u_mesh_local_aabb_min.y) / aabbHeight, 0.0, 1.0);
+        float anchorWeight = u_cloth_anchor_top == 1 ? yNorm : (1.0 - yNorm);
+        float swayMask = 1.0 - anchorWeight;
+        float ct = u_time * u_cloth_frequency + u_cloth_phase;
+        float cwave = sin(ct + pos.x * 2.0) * 0.7 + cos(ct * 1.3 + pos.z * 1.5) * 0.3;
+        vec3 windDir = length(u_wind_direction) > 1e-4 ? normalize(u_wind_direction) : vec3(0.0, 0.0, 1.0);
+        vec3 sway = windDir * (cwave * u_cloth_strength * u_wind_intensity * swayMask);
+        sway.y *= 0.15;
+        pos += sway;
     }
 
     vec4 worldPos = model * vec4(pos, 1.0);

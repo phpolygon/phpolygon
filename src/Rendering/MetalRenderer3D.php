@@ -30,6 +30,7 @@ use PHPolygon\Rendering\Command\SetFog;
 use PHPolygon\Rendering\Command\SetSky;
 use PHPolygon\Rendering\Command\SetSkybox;
 use PHPolygon\Rendering\Command\SetSkyColors;
+use PHPolygon\Rendering\Command\SetWind;
 use PHPolygon\Rendering\PostProcess\MetalFxaaPass;
 use PHPolygon\Rendering\Quality\AntiAliasing;
 
@@ -126,6 +127,27 @@ class MetalRenderer3D implements Renderer3DInterface
     private float $alpha     = 1.0;
     private int   $procMode  = 0;
     private float $moonPhase = 0.0;
+
+    // Cloth state, mirror of OpenGL/Vio backends.
+    private bool  $cloth = false;
+    private float $clothStrength = 0.05;
+    private float $clothFrequency = 1.0;
+    private float $clothPhase = 0.0;
+    private bool  $clothAnchorTop = true;
+
+    /** @var float[] {0,0,1} default = wind heading +Z */
+    private array $windDirection = [0.0, 0.0, 1.0];
+    private float $windIntensity = 0.5;
+
+    /** @var float[] mesh-local AABB min, rebound per draw via meshAabb cache */
+    private array $meshAabbMin = [0.0, 0.0, 0.0];
+    /** @var float[] mesh-local AABB max, rebound per draw via meshAabb cache */
+    private array $meshAabbMax = [0.0, 0.0, 0.0];
+
+    /**
+     * @var array<string, array{min: array{0:float,1:float,2:float}, max: array{0:float,1:float,2:float}}>
+     */
+    private array $meshAabbCache = [];
     /** @var float[] [r, g, b, near, far] */
     private array $fog = [0.5, 0.5, 0.5, 50.0, 200.0];
     /** @var float[] [x, y, z] */
@@ -236,6 +258,15 @@ class MetalRenderer3D implements Renderer3DInterface
         $this->fog        = [0.5, 0.5, 0.5, 50.0, 200.0];
         $this->cameraPos  = [0.0, 0.0, 0.0];
 
+        // Cloth + wind reset every frame; SetWind / Material::cloth re-arm them.
+        $this->cloth          = false;
+        $this->clothStrength  = 0.05;
+        $this->clothFrequency = 1.0;
+        $this->clothPhase     = 0.0;
+        $this->clothAnchorTop = true;
+        $this->windDirection  = [0.0, 0.0, 1.0];
+        $this->windIntensity  = 0.5;
+
         foreach ($commandList->getCommands() as $command) {
             if ($command instanceof SetCamera) {
                 $this->viewMatrix = $command->viewMatrix->toArray();
@@ -279,6 +310,11 @@ class MetalRenderer3D implements Renderer3DInterface
                 $this->pendingSky = $command;
             } elseif ($command instanceof SetSkybox) {
                 // TODO Phase 7: Skybox pipeline
+            } elseif ($command instanceof SetWind) {
+                $this->windDirection = [
+                    $command->direction->x, $command->direction->y, $command->direction->z,
+                ];
+                $this->windIntensity = $command->intensity;
             }
         }
 
@@ -377,11 +413,19 @@ class MetalRenderer3D implements Renderer3DInterface
         foreach ($commandList->getCommands() as $command) {
             if ($command instanceof DrawMesh) {
                 $this->resolveMaterial($command->materialId);
-                $encoder->setFragmentBytes($this->buildLightingUboBytes(), 2);
+                $this->bindMeshAabb($command->meshId);
+                $uboBytes = $this->buildLightingUboBytes();
+                $encoder->setFragmentBytes($uboBytes, 2);
+                // Cloth animation runs in the vertex shader and reads
+                // from the same struct, so bind it to the vertex stage too.
+                $encoder->setVertexBytes($uboBytes, 2);
                 $this->drawMeshCommand($encoder, $command->meshId, $command->modelMatrix);
             } elseif ($command instanceof DrawMeshInstanced) {
                 $this->resolveMaterial($command->materialId);
-                $encoder->setFragmentBytes($this->buildLightingUboBytes(), 2);
+                $this->bindMeshAabb($command->meshId);
+                $uboBytes = $this->buildLightingUboBytes();
+                $encoder->setFragmentBytes($uboBytes, 2);
+                $encoder->setVertexBytes($uboBytes, 2);
                 foreach ($command->matrices as $matrix) {
                     $this->drawMeshCommand($encoder, $command->meshId, $matrix);
                 }
@@ -408,6 +452,53 @@ class MetalRenderer3D implements Renderer3DInterface
 
     // ── Private helpers ────────────────────────────────────────────────────
 
+    /**
+     * Update $meshAabbMin/Max with the cached AABB for $meshId. Drives
+     * the vertex-stage cloth-sway anchor weighting; computed once on
+     * first encounter, reused thereafter.
+     */
+    private function bindMeshAabb(string $meshId): void
+    {
+        $aabb = $this->meshAabb($meshId);
+        $this->meshAabbMin = $aabb['min'];
+        $this->meshAabbMax = $aabb['max'];
+    }
+
+    /**
+     * @return array{min: array{0:float,1:float,2:float}, max: array{0:float,1:float,2:float}}
+     */
+    private function meshAabb(string $meshId): array
+    {
+        if (isset($this->meshAabbCache[$meshId])) {
+            return $this->meshAabbCache[$meshId];
+        }
+        $mesh = MeshRegistry::get($meshId);
+        if ($mesh === null) {
+            $aabb = ['min' => [0.0, 0.0, 0.0], 'max' => [0.0, 0.0, 0.0]];
+            $this->meshAabbCache[$meshId] = $aabb;
+            return $aabb;
+        }
+        $minX = INF; $minY = INF; $minZ = INF;
+        $maxX = -INF; $maxY = -INF; $maxZ = -INF;
+        $verts = $mesh->vertices;
+        $count = count($verts);
+        for ($i = 0; $i < $count; $i += 3) {
+            $x = $verts[$i];     $y = $verts[$i + 1]; $z = $verts[$i + 2];
+            if ($x < $minX) $minX = $x;
+            if ($y < $minY) $minY = $y;
+            if ($z < $minZ) $minZ = $z;
+            if ($x > $maxX) $maxX = $x;
+            if ($y > $maxY) $maxY = $y;
+            if ($z > $maxZ) $maxZ = $z;
+        }
+        $aabb = [
+            'min' => [$minX === INF ? 0.0 : $minX, $minY === INF ? 0.0 : $minY, $minZ === INF ? 0.0 : $minZ],
+            'max' => [$maxX === -INF ? 0.0 : $maxX, $maxY === -INF ? 0.0 : $maxY, $maxZ === -INF ? 0.0 : $maxZ],
+        ];
+        $this->meshAabbCache[$meshId] = $aabb;
+        return $aabb;
+    }
+
     private function resolveMaterial(string $materialId): void
     {
         $material = MaterialRegistry::get($materialId);
@@ -417,12 +508,22 @@ class MetalRenderer3D implements Renderer3DInterface
             $this->roughness = $material->roughness;
             $this->metallic  = $material->metallic;
             $this->alpha     = $material->alpha;
+            $this->cloth          = $material->cloth;
+            $this->clothStrength  = $material->clothStrength;
+            $this->clothFrequency = $material->clothFrequency;
+            $this->clothPhase     = $material->clothPhase;
+            $this->clothAnchorTop = $material->clothAnchorTop;
         } else {
             $this->albedo    = [0.8, 0.8, 0.8];
             $this->emission  = [0.0, 0.0, 0.0];
             $this->roughness = 0.5;
             $this->metallic  = 0.0;
             $this->alpha     = 1.0;
+            $this->cloth          = false;
+            $this->clothStrength  = 0.05;
+            $this->clothFrequency = 1.0;
+            $this->clothPhase     = 0.0;
+            $this->clothAnchorTop = true;
         }
 
         $this->procMode = self::$procModeCache[$materialId] ?? $this->resolveProcMode($materialId);
@@ -565,6 +666,15 @@ class MetalRenderer3D implements Renderer3DInterface
         $data .= pack('f3f1', $this->horizonColor[0], $this->horizonColor[1], $this->horizonColor[2], $this->moonPhase);
         $data .= pack('f3l1', $this->seasonTint[0],   $this->seasonTint[1],   $this->seasonTint[2],   $this->procMode);
         $data .= pack('f4',   $this->alpha, 0.0, 0.0, 0.0);
+
+        // Cloth + wind block (mirrors mesh3d.metal LightingUBO struct).
+        $cloth     = $this->cloth ? 1 : 0;
+        $anchorTop = $this->clothAnchorTop ? 1 : 0;
+        $data .= pack('l1f3', $cloth, $this->clothStrength, $this->clothFrequency, $this->clothPhase);
+        $data .= pack('l1f3', $anchorTop, 0.0, 0.0, 0.0);
+        $data .= pack('f3f1', $this->windDirection[0], $this->windDirection[1], $this->windDirection[2], $this->windIntensity);
+        $data .= pack('f3f1', $this->meshAabbMin[0],   $this->meshAabbMin[1],   $this->meshAabbMin[2],   0.0);
+        $data .= pack('f3f1', $this->meshAabbMax[0],   $this->meshAabbMax[1],   $this->meshAabbMax[2],   0.0);
 
         for ($i = 0; $i < 8; $i++) {
             if ($i < $plCount) {
