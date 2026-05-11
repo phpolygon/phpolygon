@@ -14,6 +14,7 @@ use PHPolygon\Component\Weather;
 use PHPolygon\ECS\AbstractSystem;
 use PHPolygon\ECS\World;
 use PHPolygon\Geometry\MeshRegistry;
+use PHPolygon\Math\Mat4;
 use PHPolygon\Math\Vec3;
 use PHPolygon\Rendering\Command\AddPointLight;
 use PHPolygon\Rendering\Command\DrawMesh;
@@ -22,6 +23,7 @@ use PHPolygon\Rendering\Command\SetDirectionalLight;
 use PHPolygon\Rendering\Command\SetGroundWetness;
 use PHPolygon\Rendering\Command\SetSnowCover;
 use PHPolygon\Rendering\Command\SetWaveAnimation;
+use PHPolygon\Rendering\MaterialRegistry;
 use PHPolygon\Rendering\RenderCommandList;
 use PHPolygon\Rendering\Renderer3DInterface;
 use PHPolygon\Runtime\PerfProfiler;
@@ -208,6 +210,14 @@ class Renderer3DSystem extends AbstractSystem
             $visibleBins = null;
         }
 
+        // Transparent draws are buffered, sorted back-to-front, and emitted
+        // after the opaque set so the backend's alpha-blend pass produces
+        // correct over/under blending. Without this, two overlapping glass
+        // panels render in iteration order, which depending on camera angle
+        // shows nondeterministic edge artefacts.
+        /** @var list<array{0: float, 1: DrawMesh}> $transparentDraws */
+        $transparentDraws = [];
+
         foreach ($world->query(MeshRenderer::class, Transform3D::class) as $entity) {
             $mesh = $entity->get(MeshRenderer::class);
             $transform = $entity->get(Transform3D::class);
@@ -270,15 +280,41 @@ class Renderer3DSystem extends AbstractSystem
                 }
             }
 
-            $this->commandList->add(new DrawMesh(
-                $mesh->meshId,
-                $mesh->materialId,
-                $matrix,
-            ));
+            $material = MaterialRegistry::get($mesh->materialId);
+            $isTransparent = $material !== null && $material->alpha < 1.0;
+            $draw = new DrawMesh($mesh->meshId, $mesh->materialId, $matrix);
+
+            if ($isTransparent) {
+                $distSq = self::distanceSqToCamera($matrix, $cameraPos);
+                $transparentDraws[] = [$distSq, $draw];
+            } else {
+                $this->commandList->add($draw);
+            }
+        }
+
+        if ($transparentDraws !== []) {
+            // Sort descending: farthest first, so back-to-front blending is
+            // applied by the backend's alpha pass.
+            usort($transparentDraws, static fn(array $a, array $b): int => $b[0] <=> $a[0]);
+            foreach ($transparentDraws as [, $draw]) {
+                $this->commandList->add($draw);
+            }
         }
 
         $this->renderer->render($this->commandList);
         $this->commandList->clear();
+    }
+
+    private static function distanceSqToCamera(Mat4 $modelMatrix, ?Vec3 $cameraPos): float
+    {
+        if ($cameraPos === null) {
+            return 0.0;
+        }
+        $tr = $modelMatrix->getTranslation();
+        $dx = $tr->x - $cameraPos->x;
+        $dy = $tr->y - $cameraPos->y;
+        $dz = $tr->z - $cameraPos->z;
+        return $dx * $dx + $dy * $dy + $dz * $dz;
     }
 
     /**

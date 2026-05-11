@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Modern automotive pull-bar door handle.
+
+  Front-view silhouette: long horizontal pull bar with two thicker
+  mounting plates at each end (where the handle meets the door panel).
+  Profile is convex everywhere, so ear-clipping triangulation handles
+  it without holes.
+
+  When extruded along the door surface normal (Z), the resulting mesh
+  is the recognisable shape of an automobile pull-handle. Drop-in
+  replacement for the simple BoxMesh handle in the Car prefab.
+
+  ViewBox is 100×30; svg2mesh normalises to the unit box, so the
+  resulting mesh fits inside [-0.5, +0.5]² with the natural ~3.3:1
+  aspect ratio preserved (≈ 1.0 wide, 0.30 tall).
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 30">
+  <path d="
+    M 4 8
+    Q 4 4 8 4
+    L 22 4
+    Q 26 4 26 8
+    L 26 14
+    L 74 14
+    L 74 8
+    Q 74 4 78 4
+    L 92 4
+    Q 96 4 96 8
+    L 96 22
+    Q 96 26 92 26
+    L 78 26
+    Q 74 26 74 22
+    L 74 16
+    L 26 16
+    L 26 22
+    Q 26 26 22 26
+    L 8 26
+    Q 4 26 4 22
+    Z
+  " />
+</svg>
