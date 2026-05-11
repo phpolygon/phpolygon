@@ -84,12 +84,17 @@ jobs:
             echo "==> $s"
             # CI runners are noisy at the nano-scale; the
             # boxes-1000-instanced bench measures p95 at ~0.01 ms,
-            # where 15% is one PHP function call worth of jitter. Use
-            # 30% so the workflow only flags actual regressions, not
-            # CI variance. Local runs / dedicated perf machines can
-            # still tighten via `--threshold 15` if they want strict
-            # gating on stable hardware.
-            if ! php bin/phpolygon perf:report "$s" "$BASE_SHA" "$PR_SHA" --threshold 30; then
+            # where 15% is one PHP function call worth of jitter. We
+            # combine two filters:
+            #  - `--threshold 30` raises the percentage gate so small
+            #    workloads can wobble within reason
+            #  - `--abs-floor-ms 0.5` ignores any metric whose absolute
+            #    slowdown is under 0.5 ms (one bad GC pause across 300
+            #    measurement frames is enough to swing a sub-ms p95 by
+            #    60-70% even when nothing in the code path moved)
+            # Local / dedicated perf hardware can tighten via
+            # `--threshold 15 --abs-floor-ms 0` for strict gating.
+            if ! php bin/phpolygon perf:report "$s" "$BASE_SHA" "$PR_SHA" --threshold 30 --abs-floor-ms 0.5; then
               fail=1
             fi
             echo
