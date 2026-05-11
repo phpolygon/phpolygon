@@ -21,6 +21,10 @@ use PHPolygon\Rendering\Command\SetSkybox;
 use PHPolygon\Rendering\Command\SetWaveAnimation;
 use PHPolygon\Rendering\Command\SetWind;
 use PHPolygon\Rendering\PostProcess\OpenGLFxaaPass;
+use PHPolygon\Rendering\PostProcess\OpenGLSsrPass;
+use PHPolygon\Rendering\PostProcess\OpenGLTaaPass;
+use PHPolygon\Rendering\Quality\ScreenSpaceReflections;
+use PHPolygon\Rendering\Quality\TaaJitter;
 use PHPolygon\Rendering\Quality\AntiAliasing;
 
 /**
@@ -93,6 +97,8 @@ class OpenGLRenderer3D implements Renderer3DInterface
 
     private ?Mat4 $currentViewMatrix = null;
     private ?Mat4 $currentProjectionMatrix = null;
+    /** Cached world-space camera position, computed once per SetCamera dispatch. */
+    private ?\PHPolygon\Math\Vec3 $currentCameraPos = null;
 
 
     /** Global time for shader animations (seconds since start) */
@@ -113,6 +119,10 @@ class OpenGLRenderer3D implements Renderer3DInterface
 
     /** Lazy FXAA post-process pass. Null when AntiAliasing != Fxaa. */
     private ?OpenGLFxaaPass $fxaaPass = null;
+    private ?OpenGLSsrPass $ssrPass = null;
+    private ?OpenGLTaaPass $taaPass = null;
+    /** Frame counter driving TAA jitter and history reset thresholds. */
+    private int $frameIndex = 0;
 
     /**
      * True when the current frame is being rendered into the offscreen target
@@ -185,7 +195,54 @@ class OpenGLRenderer3D implements Renderer3DInterface
         $target = $this->offscreenTarget;
         $target->resolve();
 
-        if ($this->settings->antiAliasing === AntiAliasing::Fxaa && $this->fxaaPass !== null) {
+        $taaActive = $this->settings->antiAliasing === AntiAliasing::Taa
+            && $this->taaPass !== null;
+
+        $ssrActive = !$taaActive
+            && $this->settings->ssr !== ScreenSpaceReflections::Off
+            && $this->ssrPass !== null
+            && $this->currentViewMatrix !== null
+            && $this->currentProjectionMatrix !== null;
+
+        if ($taaActive) {
+            // TAA composite reads the resolved current frame, blends with
+            // history, writes the composite to the backbuffer AND copies
+            // it into history for the next frame.
+            glBindFramebuffer(0x8D40 /* GL_FRAMEBUFFER */, 0);
+            glViewport(0, 0, $this->backbufferWidth, $this->backbufferHeight);
+            glDisable(GL_DEPTH_TEST);
+            $this->taaPass->apply(
+                $target->colorTextureId(),
+                $target->width(),
+                $target->height(),
+                $this->backbufferWidth,
+                $this->backbufferHeight,
+            );
+            glEnable(GL_DEPTH_TEST);
+        } elseif ($ssrActive) {
+            // SSR composites scene + raymarched reflections directly to the
+            // backbuffer. FXAA is mutually exclusive with SSR for now -
+            // running both would require a temp RT to break the read/write
+            // cycle (the SSR pass cannot sample the same texture it writes
+            // to). Bridge target = follow-up.
+            $vp = $this->currentProjectionMatrix->multiply($this->currentViewMatrix);
+            // Reuse the camera position cached during SetCamera dispatch
+            // - avoids a second 4x4 inverse per frame.
+            $cameraPos = $this->currentCameraPos ?? $this->currentViewMatrix->inverse()->getTranslation();
+            glBindFramebuffer(0x8D40 /* GL_FRAMEBUFFER */, 0);
+            glViewport(0, 0, $this->backbufferWidth, $this->backbufferHeight);
+            glDisable(GL_DEPTH_TEST);
+            $this->ssrPass->apply(
+                $target->colorTextureId(),
+                $target->depthTextureId(),
+                $vp,
+                [$cameraPos->x, $cameraPos->y, $cameraPos->z],
+                $target->width(),
+                $target->height(),
+                $this->settings->ssr->intensity(),
+            );
+            glEnable(GL_DEPTH_TEST);
+        } elseif ($this->settings->antiAliasing === AntiAliasing::Fxaa && $this->fxaaPass !== null) {
             // FXAA reads the resolved color texture and writes directly to the
             // backbuffer at backbuffer resolution. The pass also performs the
             // up/down-sample implicitly via the sampler's bilinear filter.
@@ -199,6 +256,7 @@ class OpenGLRenderer3D implements Renderer3DInterface
         }
 
         $this->offscreenActive = false;
+        $this->frameIndex++;
     }
 
     public function clear(Color $color): void
@@ -253,6 +311,46 @@ class OpenGLRenderer3D implements Renderer3DInterface
         $this->setUniformFloat('u_fog_far', 200.0);
         $this->setUniformVec3('u_fog_color', [0.5, 0.5, 0.5]);
         $this->setUniformVec3('u_albedo', [0.8, 0.8, 0.8]);
+        $this->setUniformFloat('u_clearcoat', 0.0);
+        $this->setUniformFloat('u_clearcoat_roughness', 0.05);
+        $this->setUniformFloat('u_flakes', 0.0);
+        $this->setUniformFloat('u_normal_intensity', 1.0);
+        $this->setUniformInt('u_use_environment_map', 1);
+        $this->setUniformInt('u_normal_pattern', 0);
+        $this->setUniformFloat('u_normal_scale', 1.0);
+        $this->setUniformInt('u_surface_pattern', 0);
+        $this->setUniformFloat('u_surface_scale', 1.0);
+        $this->setUniformFloat('u_surface_intensity', 1.0);
+        $this->setUniformFloat('u_wetness', 0.0);
+
+        // CSM defaults (1 cascade, identity matrices) so the shader never
+        // samples uninitialised uniforms before renderShadowMap() runs.
+        $this->setUniformInt('u_csm_count', 1);
+        $this->setUniformInt('u_csm_map_0', 6);
+        $this->setUniformInt('u_csm_map_1', 6);
+        $this->setUniformInt('u_csm_map_2', 6);
+        $this->setUniformFloat('u_csm_far_0', 60.0);
+        $this->setUniformFloat('u_csm_far_1', 120.0);
+        $this->setUniformFloat('u_csm_far_2', 200.0);
+        $identityMat = \PHPolygon\Math\Mat4::identity();
+        $this->setUniformMat4('u_csm_matrix_0', $identityMat);
+        $this->setUniformMat4('u_csm_matrix_1', $identityMat);
+        $this->setUniformMat4('u_csm_matrix_2', $identityMat);
+        $this->setUniformFloat('u_ao_strength', $this->settings->ambientOcclusion->strength());
+
+        // Color grading + vignette (set every beginFrame so a settings
+        // change between frames takes effect on the very next draw).
+        $grade = $this->settings->colorGrading->params();
+        $this->setUniformVec3('u_grade_lift', $grade['lift']);
+        $this->setUniformVec3('u_grade_gamma', $grade['gamma']);
+        $this->setUniformVec3('u_grade_gain', $grade['gain']);
+        $this->setUniformFloat('u_grade_saturation', $grade['saturation']);
+        $this->setUniformFloat('u_vignette_intensity', $this->settings->vignetteIntensity);
+        $this->setUniformInt('u_volumetric_fog', $this->settings->volumetricFog ? 1 : 0);
+        $this->setUniformFloat('u_ssr_intensity', $this->settings->ssr->intensity());
+        $vw = $this->backbufferWidth  > 0 ? $this->backbufferWidth  : $this->width;
+        $vh = $this->backbufferHeight > 0 ? $this->backbufferHeight : $this->height;
+        $this->setUniformVec2('u_viewport_size', [(float)$vw, (float)$vh]);
 
         // Instancing off by default
         $this->setUniformInt('u_use_instancing', 0);
@@ -303,9 +401,10 @@ class OpenGLRenderer3D implements Renderer3DInterface
                 $this->currentViewMatrix = $command->viewMatrix;
                 $this->currentProjectionMatrix = $command->projectionMatrix;
                 $this->setUniformMat4('u_view', $command->viewMatrix);
-                $this->setUniformMat4('u_projection', $command->projectionMatrix);
+                $this->setUniformMat4('u_projection', $this->jitteredProjection($command->projectionMatrix));
 
                 $cameraPos = $command->viewMatrix->inverse()->getTranslation();
+                $this->currentCameraPos = $cameraPos;
                 $this->setUniformVec3('u_camera_pos', [$cameraPos->x, $cameraPos->y, $cameraPos->z]);
 
             } elseif ($command instanceof SetAmbientLight) {
@@ -405,7 +504,7 @@ class OpenGLRenderer3D implements Renderer3DInterface
                 $this->setUniformMat4('u_view', $command->viewMatrix);
                 // Use already Y-flipped projection stored in pass 1
                 if ($this->currentProjectionMatrix !== null) {
-                    $this->setUniformMat4('u_projection', $this->currentProjectionMatrix);
+                    $this->setUniformMat4('u_projection', $this->jitteredProjection($this->currentProjectionMatrix));
                 }
                 $cameraPos = $command->viewMatrix->inverse()->getTranslation();
                 $this->setUniformVec3('u_camera_pos', [$cameraPos->x, $cameraPos->y, $cameraPos->z]);
@@ -443,7 +542,7 @@ class OpenGLRenderer3D implements Renderer3DInterface
                 $mat = MaterialRegistry::get($command->materialId);
                 if ($mat === null || $mat->alpha >= 1.0) {
                     $this->activateShaderForMaterial($mat);
-                    $this->drawMeshInstancedCommand($command->meshId, $command->materialId, $command->matrices, $command->isStatic);
+                    $this->drawMeshInstancedCommand($command);
                 }
             }
         }
@@ -470,7 +569,7 @@ class OpenGLRenderer3D implements Renderer3DInterface
                 $mat = MaterialRegistry::get($command->materialId);
                 if ($mat !== null && $mat->alpha < 1.0) {
                     $this->activateShaderForMaterial($mat);
-                    $this->drawMeshInstancedCommand($command->meshId, $command->materialId, $command->matrices, $command->isStatic);
+                    $this->drawMeshInstancedCommand($command);
                 }
             }
         }
@@ -520,14 +619,26 @@ class OpenGLRenderer3D implements Renderer3DInterface
      * the pre-built FloatBuffer is reused, skipping the expensive foreach loop.
      * glBufferData is still called each frame (cheap GPU upload) but the PHP
      * overhead of iterating 260k+ floats is eliminated.
-     *
-     * @param Mat4[] $matrices
      */
-    private function drawMeshInstancedCommand(string $meshId, string $materialId, array $matrices, bool $isStatic = false): void
+    private function drawMeshInstancedCommand(DrawMeshInstanced $command): void
     {
-        if (empty($matrices)) {
+        // Hot path: read the public properties directly rather than via
+        // effectiveInstanceCount() / hasFlatMatrices(). For instanced
+        // building districts at 1000+ instances, the extra method-call
+        // dispatch was a measurable regression vs. the legacy direct
+        // count($matrices) - the boxes-1000-instanced benchmark broke
+        // its 15% guard band on the first run.
+        $instanceCount = $command->instanceCount >= 0
+            ? $command->instanceCount
+            : count($command->matrices);
+        if ($instanceCount <= 0) {
             return;
         }
+        $isFlat = $command->flatMatrices !== [];
+
+        $meshId    = $command->meshId;
+        $materialId = $command->materialId;
+        $isStatic  = $command->isStatic;
 
         $meshData = MeshRegistry::get($meshId);
         if ($meshData === null) {
@@ -539,21 +650,25 @@ class OpenGLRenderer3D implements Renderer3DInterface
         }
 
         $cacheKey = $meshId . ':' . $materialId;
-        $fromCache = false;
 
         if ($isStatic && isset($this->staticFloatBufferCache[$cacheKey])) {
             $buffer = $this->staticFloatBufferCache[$cacheKey];
             $instanceCount = $this->staticInstanceCountCache[$cacheKey];
-            $fromCache = true;
         } else {
-            $floats = [];
-            foreach ($matrices as $matrix) {
-                foreach ($matrix->toArray() as $v) {
-                    $floats[] = $v;
+            if ($isFlat) {
+                // Flat path: caller already produced a column-major
+                // float[] of length instanceCount * 16. Skip the
+                // per-instance toArray() flatten loop entirely.
+                $buffer = new FloatBuffer($command->flatMatrices);
+            } else {
+                $floats = [];
+                foreach ($command->matrices as $matrix) {
+                    foreach ($matrix->toArray() as $v) {
+                        $floats[] = $v;
+                    }
                 }
+                $buffer = new FloatBuffer($floats);
             }
-            $buffer = new FloatBuffer($floats);
-            $instanceCount = count($matrices);
 
             if ($isStatic) {
                 $this->staticFloatBufferCache[$cacheKey] = $buffer;
@@ -700,6 +815,9 @@ class OpenGLRenderer3D implements Renderer3DInterface
             $this->setUniformMat4('u_view', $this->currentViewMatrix);
         }
         if ($this->currentProjectionMatrix !== null) {
+            // Skybox can stay un-jittered - the texture is constant across
+            // frames so jittering its sample positions adds noise without
+            // helping the temporal blend converge. Use the base matrix.
             $this->setUniformMat4('u_projection', $this->currentProjectionMatrix);
         }
         if ($this->currentViewMatrix !== null) {
@@ -761,6 +879,17 @@ class OpenGLRenderer3D implements Renderer3DInterface
             $this->setUniformFloat('u_roughness', $material->roughness);
             $this->setUniformFloat('u_metallic', $material->metallic);
             $this->setUniformFloat('u_alpha', $material->alpha);
+            $this->setUniformFloat('u_clearcoat', $material->clearcoat);
+            $this->setUniformFloat('u_clearcoat_roughness', $material->clearcoatRoughness);
+            $this->setUniformFloat('u_flakes', $material->flakes);
+            $this->setUniformFloat('u_normal_intensity', $material->normalIntensity);
+            $this->setUniformInt('u_use_environment_map', $material->useEnvironmentMap ? 1 : 0);
+            $this->setUniformInt('u_normal_pattern', NormalPattern::codeFor($material->normalPattern));
+            $this->setUniformFloat('u_normal_scale', $material->normalScale);
+            $this->setUniformInt('u_surface_pattern', SurfacePattern::codeFor($material->surfacePattern));
+            $this->setUniformFloat('u_surface_scale', $material->surfaceScale);
+            $this->setUniformFloat('u_surface_intensity', $material->surfaceIntensity);
+            $this->setUniformFloat('u_wetness', $material->wetness);
             $this->setUniformInt('u_cloth', $material->cloth ? 1 : 0);
             $this->setUniformFloat('u_cloth_strength', $material->clothStrength);
             $this->setUniformFloat('u_cloth_frequency', $material->clothFrequency);
@@ -772,6 +901,17 @@ class OpenGLRenderer3D implements Renderer3DInterface
             $this->setUniformFloat('u_roughness', 0.5);
             $this->setUniformFloat('u_metallic', 0.0);
             $this->setUniformFloat('u_alpha', 1.0);
+            $this->setUniformFloat('u_clearcoat', 0.0);
+            $this->setUniformFloat('u_clearcoat_roughness', 0.05);
+            $this->setUniformFloat('u_flakes', 0.0);
+            $this->setUniformFloat('u_normal_intensity', 1.0);
+            $this->setUniformInt('u_use_environment_map', 1);
+            $this->setUniformInt('u_normal_pattern', 0);
+            $this->setUniformFloat('u_normal_scale', 1.0);
+            $this->setUniformInt('u_surface_pattern', 0);
+            $this->setUniformFloat('u_surface_scale', 1.0);
+            $this->setUniformFloat('u_surface_intensity', 1.0);
+            $this->setUniformFloat('u_wetness', 0.0);
             $this->setUniformInt('u_cloth', 0);
             $this->setUniformFloat('u_cloth_strength', 0.05);
             $this->setUniformFloat('u_cloth_frequency', 1.0);
@@ -859,6 +999,7 @@ class OpenGLRenderer3D implements Renderer3DInterface
             str_starts_with($prefix, 'hut_window') => 7,
             str_starts_with($prefix, 'hut_thatch') => 8,
             str_starts_with($prefix, 'moon_disc') => 9,
+            str_starts_with($prefix, 'car_paint') => 10,
             default => 0,
         };
 
@@ -1096,6 +1237,70 @@ class OpenGLRenderer3D implements Renderer3DInterface
         }
     }
 
+    /** @param float[] $value */
+    private function setUniformVec2(string $name, array $value): void
+    {
+        $loc = $this->getUniformLocation($name);
+        if ($loc >= 0) {
+            glUniform2f($loc, $value[0], $value[1]);
+        }
+    }
+
+    /**
+     * Apply the per-frame TAA sub-pixel jitter to a base projection matrix
+     * when TAA is active. The jitter is added as a translation in NDC -
+     * matrix entries [8] and [9] are the projection's z-column x/y values
+     * (column-major), which translate post-projection clip-space xy.
+     *
+     * Returns the matrix unchanged when TAA is not active so callers can
+     * use this transparently.
+     */
+    /**
+     * Free GL resources owned by post-process passes + shadow map. Called
+     * automatically when the renderer is garbage-collected; games can also
+     * invoke it explicitly during scene transitions to free GPU memory
+     * before the new scene's allocations land.
+     */
+    public function __destruct()
+    {
+        $this->fxaaPass?->release();
+        $this->fxaaPass = null;
+        $this->ssrPass?->release();
+        $this->ssrPass = null;
+        $this->taaPass?->release();
+        $this->taaPass = null;
+        $this->shadowMap?->release();
+        $this->shadowMap = null;
+    }
+
+    /**
+     * Apply the per-frame TAA sub-pixel jitter to a base projection matrix.
+     *
+     * Mat4 stores its values column-major in toArray(): entries [8] and
+     * [9] are proj[2][0] and proj[2][1] - the z-column x/y entries. Adding
+     * `+ndc` to those shifts the post-perspective-divide vertex by the
+     * offset along x/y in NDC. The temporal blend only requires a
+     * deterministic per-frame offset, not a particular sign; a future
+     * motion-vector / reprojection pass must adopt the same convention.
+     *
+     * Returns the matrix unchanged when TAA is not active so callers can
+     * use this transparently.
+     */
+    private function jitteredProjection(Mat4 $base): Mat4
+    {
+        if ($this->settings->antiAliasing !== AntiAliasing::Taa || $this->offscreenTarget === null) {
+            return $base;
+        }
+        [$jx, $jy] = TaaJitter::offset($this->frameIndex, $this->offscreenTarget->width(), $this->offscreenTarget->height());
+        // Convert texel offset to NDC offset: 1 texel = 2 / dim NDC units.
+        $ndcX = $jx * 2.0;
+        $ndcY = $jy * 2.0;
+        $arr = $base->toArray();
+        $arr[8]  += $ndcX;
+        $arr[9]  += $ndcY;
+        return new Mat4($arr);
+    }
+
     private function setUniformFloat(string $name, float $value): void
     {
         $loc = $this->getUniformLocation($name);
@@ -1221,13 +1426,20 @@ class OpenGLRenderer3D implements Renderer3DInterface
             return;
         }
 
-        // Lazy-init shadow map at the resolution dictated by current settings
+        // Lazy-init shadow map at the resolution dictated by current settings.
+        // Three cascades cover near (15 m), mid (50 m), and far (150 m)
+        // ortho boxes - the shader picks one per fragment based on view-
+        // space distance so close-up shadows stay sharp while distant ones
+        // still resolve.
         if ($this->shadowMap === null) {
             $resolution = $this->settings->shadowQuality->resolution();
             if ($resolution <= 0) {
                 $resolution = 2048;
             }
-            $this->shadowMap = new ShadowMapRenderer(resolution: $resolution);
+            $this->shadowMap = new ShadowMapRenderer(
+                resolution: $resolution,
+                orthoSize:  [15.0, 50.0, 150.0],
+            );
             $this->shadowMap->initialize();
         }
         $shadowMap = $this->shadowMap;
@@ -1248,8 +1460,12 @@ class OpenGLRenderer3D implements Renderer3DInterface
             return;
         }
 
-        // Update light-space matrix
-        $shadowMap->updateLightMatrix($lightDir);
+        // Update light-space matrix. Centre the shadow frustum on the
+        // camera so shadows resolve where the player is looking - prevents
+        // the open-world "matschig at distance" failure mode of an
+        // origin-pinned shadow map.
+        $shadowCenter = $this->currentViewMatrix?->inverse()->getTranslation();
+        $shadowMap->updateLightMatrix($lightDir, $shadowCenter);
 
         // Ensure all sampler units have valid textures during shadow passes
         glActiveTexture(GL_TEXTURE6);
@@ -1258,55 +1474,59 @@ class OpenGLRenderer3D implements Renderer3DInterface
         glBindTexture(GL_TEXTURE_2D, $this->dummyCloudTex);
         glActiveTexture(GL_TEXTURE0);
 
-        // Shadow pass: render depth only using minimal shadow shader
-        $shadowMap->beginShadowPass();
+        // Shadow pass per cascade. Each cascade owns its own FBO + light-
+        // space matrix; geometry is drawn once per cascade with the
+        // matching matrix. The cost is 3x draw count for casters, but the
+        // shadow shader is depth-only and the meshes are tiny GPU work.
         $shadowProgram = $this->resolveShaderProgram('shadow');
-        $this->useShaderProgram($shadowProgram);
+        $cascadeCount  = $shadowMap->cascadeCount();
+        $cascadeMatrices = [];
 
-        // Set light-space matrix as view+projection for shadow pass
-        $lsm = $shadowMap->getLightSpaceMatrix();
-        $this->setUniformMat4('u_view', $lsm);
-        $this->setUniformMat4('u_projection', \PHPolygon\Math\Mat4::identity());
+        for ($cIdx = 0; $cIdx < $cascadeCount; $cIdx++) {
+            $shadowMap->beginShadowPass($cIdx);
+            $this->useShaderProgram($shadowProgram);
 
-        // Draw only opaque geometry
-        foreach ($commandList->getCommands() as $command) {
-            if ($command instanceof DrawMesh) {
-                $mat = MaterialRegistry::get($command->materialId);
-                // Skip sky, clouds, transparent — only solid geometry casts shadows
-                if ($mat !== null && $mat->alpha >= 0.9) {
-                    $matId = $command->materialId;
-                    // Skip emission-only materials (sky, sun, moon, clouds)
-                    if (str_starts_with($matId, 'sky_') || str_starts_with($matId, 'sun_')
-                        || str_starts_with($matId, 'moon_') || str_starts_with($matId, 'cloud_')
-                        || $matId === 'precipitation') {
-                        continue;
+            $lsmCascade = $shadowMap->getLightSpaceMatrixAt($cIdx);
+            $cascadeMatrices[$cIdx] = $lsmCascade;
+            $this->setUniformMat4('u_view', $lsmCascade);
+            $this->setUniformMat4('u_projection', \PHPolygon\Math\Mat4::identity());
+
+            foreach ($commandList->getCommands() as $command) {
+                if ($command instanceof DrawMesh) {
+                    $mat = MaterialRegistry::get($command->materialId);
+                    if ($mat !== null && $mat->alpha >= 0.9) {
+                        $matId = $command->materialId;
+                        if (str_starts_with($matId, 'sky_') || str_starts_with($matId, 'sun_')
+                            || str_starts_with($matId, 'moon_') || str_starts_with($matId, 'cloud_')
+                            || $matId === 'precipitation') {
+                            continue;
+                        }
+                        $this->setUniformMat4('u_model', $command->modelMatrix);
+                        $meshData = MeshRegistry::get($command->meshId);
+                        if ($meshData === null) continue;
+                        if (!isset($this->vaoCache[$command->meshId])) {
+                            $this->uploadMesh($command->meshId, $meshData);
+                        }
+                        $this->setUniformInt('u_use_instancing', 0);
+                        glBindVertexArray($this->vaoCache[$command->meshId]);
+                        glDrawElements(GL_TRIANGLES, $this->indexCountCache[$command->meshId], GL_UNSIGNED_INT, 0);
+                        glBindVertexArray(0);
                     }
-                    $this->setUniformMat4('u_model', $command->modelMatrix);
-                    $meshData = MeshRegistry::get($command->meshId);
-                    if ($meshData === null) continue;
-                    if (!isset($this->vaoCache[$command->meshId])) {
-                        $this->uploadMesh($command->meshId, $meshData);
-                    }
-                    $this->setUniformInt('u_use_instancing', 0);
-                    glBindVertexArray($this->vaoCache[$command->meshId]);
-                    glDrawElements(GL_TRIANGLES, $this->indexCountCache[$command->meshId], GL_UNSIGNED_INT, 0);
-                    glBindVertexArray(0);
                 }
             }
         }
 
         $shadowMap->endShadowPass();
+        // Cascade 0's light-space matrix is what cloud shadows + the
+        // legacy single-map fallback expect.
+        $lsm = $cascadeMatrices[0] ?? $shadowMap->getLightSpaceMatrix();
 
         // Cloud shadows are an opt-in volumetric effect.
         if (!$this->settings->cloudShadows) {
             $this->setUniformInt('u_has_cloud_shadow', 0);
-            // Drain GL errors and bind shadow map only - skip cloud pass.
             while (glGetError() !== 0) {}
             $this->useShaderProgram($this->shaderProgramCache['default']);
-            $shadowMap->bind(6);
-            $this->setUniformInt('u_shadow_map', 6);
-            $this->setUniformMat4('u_light_space_matrix', $shadowMap->getLightSpaceMatrix());
-            $this->setUniformInt('u_has_shadow_map', 1);
+            $this->bindCascadeUniforms($shadowMap, $cascadeMatrices);
             glClear(GL_DEPTH_BUFFER_BIT);
             return;
         }
@@ -1368,10 +1588,7 @@ class OpenGLRenderer3D implements Renderer3DInterface
 
         // Bind both shadow maps for main pass
         $this->useShaderProgram($this->shaderProgramCache['default']);
-        $shadowMap->bind(6);
-        $this->setUniformInt('u_shadow_map', 6);
-        $this->setUniformMat4('u_light_space_matrix', $lsm);
-        $this->setUniformInt('u_has_shadow_map', 1);
+        $this->bindCascadeUniforms($shadowMap, $cascadeMatrices);
 
         if ($hasCloudGeometry) {
             $cloudShadow->bind(7);
@@ -1381,6 +1598,60 @@ class OpenGLRenderer3D implements Renderer3DInterface
 
         // Restore depth buffer for main pass
         glClear(GL_DEPTH_BUFFER_BIT);
+    }
+
+    /**
+     * Push every cascade's depth texture + light-space matrix + far-plane
+     * into the default mesh shader. Cascade 0 also drives the legacy
+     * single-map uniforms (`u_shadow_map`, `u_light_space_matrix`) so any
+     * shader path that hasn't been migrated to CSM still works.
+     *
+     * Texture-unit budget:
+     *   6  = shadow cascade 0 (legacy slot)
+     *   7  = cloud shadow map (separate channel)
+     *   8  = shadow cascade 1
+     *   9  = shadow cascade 2
+     *
+     * @param array<int, \PHPolygon\Math\Mat4> $cascadeMatrices
+     */
+    private function bindCascadeUniforms(ShadowMapRenderer $shadowMap, array $cascadeMatrices): void
+    {
+        $count = $shadowMap->cascadeCount();
+        $orthos = $shadowMap->cascadeOrthoSizes();
+
+        // Cascade 0 -> legacy single-map slot (unit 6) so old shader paths still work.
+        $shadowMap->bind(6, 0);
+        $this->setUniformInt('u_shadow_map', 6);
+        $this->setUniformMat4('u_light_space_matrix', $cascadeMatrices[0] ?? $shadowMap->getLightSpaceMatrix());
+        $this->setUniformInt('u_has_shadow_map', 1);
+
+        // Cascade-array uniforms.
+        $this->setUniformInt('u_csm_count', $count);
+        $this->setUniformMat4('u_csm_matrix_0', $cascadeMatrices[0] ?? $shadowMap->getLightSpaceMatrix());
+        $this->setUniformFloat('u_csm_far_0', $orthos[0] ?? 60.0);
+        $this->setUniformInt('u_csm_map_0', 6);
+
+        if ($count > 1) {
+            $shadowMap->bind(8, 1);
+            $this->setUniformInt('u_csm_map_1', 8);
+            $this->setUniformMat4('u_csm_matrix_1', $cascadeMatrices[1] ?? $shadowMap->getLightSpaceMatrix());
+            $this->setUniformFloat('u_csm_far_1', $orthos[1] ?? 120.0);
+        } else {
+            $this->setUniformInt('u_csm_map_1', 6);
+            $this->setUniformMat4('u_csm_matrix_1', $cascadeMatrices[0] ?? $shadowMap->getLightSpaceMatrix());
+            $this->setUniformFloat('u_csm_far_1', $orthos[0] ?? 60.0);
+        }
+
+        if ($count > 2) {
+            $shadowMap->bind(9, 2);
+            $this->setUniformInt('u_csm_map_2', 9);
+            $this->setUniformMat4('u_csm_matrix_2', $cascadeMatrices[2] ?? $shadowMap->getLightSpaceMatrix());
+            $this->setUniformFloat('u_csm_far_2', $orthos[2] ?? 200.0);
+        } else {
+            $this->setUniformInt('u_csm_map_2', 6);
+            $this->setUniformMat4('u_csm_matrix_2', $cascadeMatrices[0] ?? $shadowMap->getLightSpaceMatrix());
+            $this->setUniformFloat('u_csm_far_2', $orthos[0] ?? 60.0);
+        }
     }
 
     private function renderSkybox(string $cubemapId): void
@@ -1490,6 +1761,14 @@ class OpenGLRenderer3D implements Renderer3DInterface
             $this->fxaaPass = new OpenGLFxaaPass(__DIR__ . '/../../resources/shaders/source');
         }
 
+        if ($this->settings->ssr !== ScreenSpaceReflections::Off && $this->ssrPass === null) {
+            $this->ssrPass = new OpenGLSsrPass(__DIR__ . '/../../resources/shaders/source');
+        }
+
+        if ($this->settings->antiAliasing === AntiAliasing::Taa && $this->taaPass === null) {
+            $this->taaPass = new OpenGLTaaPass(__DIR__ . '/../../resources/shaders/source');
+        }
+
         $this->offscreenTarget->bindForDraw();
         $this->offscreenActive = true;
     }
@@ -1522,6 +1801,14 @@ class OpenGLRenderer3D implements Renderer3DInterface
             return true;
         }
 
-        return $this->settings->antiAliasing !== AntiAliasing::Off;
+        if ($this->settings->antiAliasing !== AntiAliasing::Off) {
+            // FXAA, MSAA2x/4x, AND TAA all need the resolved colour
+            // texture as a sampler target.
+            return true;
+        }
+
+        // SSR samples the resolved scene + depth, which only exist when
+        // the offscreen pipeline is on.
+        return $this->settings->ssr !== ScreenSpaceReflections::Off;
     }
 }

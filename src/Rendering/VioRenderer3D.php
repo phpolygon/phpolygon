@@ -88,6 +88,12 @@ class VioRenderer3D implements Renderer3DInterface
 
     // Shadow map
     private ?VioRenderTarget $shadowTarget = null;
+    /** @var array<int, VioRenderTarget> Per-cascade shadow render targets. */
+    private array $cascadeShadowTargets = [];
+    /** @var array<int, Mat4> Per-cascade light-space matrices. */
+    private array $cascadeLightSpaceMatrices = [];
+    /** Per-cascade ortho-box half-extents (matches OpenGLRenderer3D). */
+    private const CASCADE_ORTHO_SIZES = [15.0, 50.0, 150.0];
     private const SHADOW_MAP_RESOLUTION = 2048;
     private const SHADOW_ORTHO_SIZE = 60.0;
 
@@ -533,7 +539,7 @@ class VioRenderer3D implements Renderer3DInterface
                 if ($material === null || $material->alpha < 1.0) {
                     continue;
                 }
-                $this->drawMeshInstancedCommand($cmd->meshId, $material, $cmd->matrices, $cmd->isStatic, $cmd->materialId);
+                $this->drawMeshInstancedCommand($cmd, $material);
             }
         }
 
@@ -554,7 +560,7 @@ class VioRenderer3D implements Renderer3DInterface
                 if ($material === null || $material->alpha >= 1.0) {
                     continue;
                 }
-                $this->drawMeshInstancedCommand($cmd->meshId, $material, $cmd->matrices, $cmd->isStatic, $cmd->materialId);
+                $this->drawMeshInstancedCommand($cmd, $material);
             }
         }
 
@@ -756,21 +762,30 @@ class VioRenderer3D implements Renderer3DInterface
     {
         if ($this->settings->shadowQuality === \PHPolygon\Rendering\Quality\ShadowQuality::Off) {
             $this->shadowTarget = null;
+            $this->cascadeShadowTargets = [];
             return;
         }
         $resolution = $this->settings->shadowQuality->resolution();
         if ($resolution <= 0) {
             $resolution = self::SHADOW_MAP_RESOLUTION;
         }
-        $target = vio_render_target($this->ctx, [
-            'width' => $resolution,
-            'height' => $resolution,
-            'depth_only' => true,
-        ]);
 
-        if ($target !== false) {
-            $this->shadowTarget = $target;
+        $this->cascadeShadowTargets = [];
+        foreach (self::CASCADE_ORTHO_SIZES as $cIdx => $_size) {
+            $target = vio_render_target($this->ctx, [
+                'width'  => $resolution,
+                'height' => $resolution,
+                'depth_only' => true,
+            ]);
+            if ($target === false) {
+                // Backend rejected - fall back to single-map mode for this run.
+                $this->cascadeShadowTargets = [];
+                return;
+            }
+            $this->cascadeShadowTargets[$cIdx] = $target;
         }
+        // Cascade 0 doubles as the legacy single-map handle.
+        $this->shadowTarget = $this->cascadeShadowTargets[0] ?? null;
     }
 
     /**
@@ -805,75 +820,86 @@ class VioRenderer3D implements Renderer3DInterface
             return false;
         }
 
-        // Compute light-space matrix
-        $lightSpaceMatrix = $this->computeLightSpaceMatrix($lightDir);
-
-        // Bind shadow render target
+        $shadowCenter = $this->currentViewMatrix?->inverse()->getTranslation();
         $shadowRes = $this->settings->shadowQuality->resolution();
         if ($shadowRes <= 0) {
             $shadowRes = self::SHADOW_MAP_RESOLUTION;
         }
-        vio_bind_render_target($this->ctx, $this->shadowTarget);
-        vio_viewport($this->ctx, 0, 0, $shadowRes, $shadowRes);
-        vio_clear($this->ctx, 1.0, 1.0, 1.0, 1.0);
 
-        // Use shadow pipeline
-        $this->bindShadowPipeline();
-        vio_set_uniform($this->ctx, 'u_view', $lightSpaceMatrix->toArray());
-        vio_set_uniform($this->ctx, 'u_projection', Mat4::identity()->toArray());
+        // CSM: render the scene once per cascade into its own target.
+        $this->cascadeLightSpaceMatrices = [];
+        foreach (self::CASCADE_ORTHO_SIZES as $cIdx => $orthoSize) {
+            $target = $this->cascadeShadowTargets[$cIdx] ?? null;
+            if ($target === null) continue;
 
-        // Draw only opaque, non-sky geometry
-        foreach ($commandList->getCommands() as $cmd) {
-            if ($cmd instanceof DrawMesh) {
-                $mat = MaterialRegistry::get($cmd->materialId);
-                if ($mat === null || $mat->alpha < 0.9) {
-                    continue;
+            $lightSpaceMatrix = $this->computeLightSpaceMatrix($lightDir, $shadowCenter, $orthoSize);
+            $this->cascadeLightSpaceMatrices[$cIdx] = $lightSpaceMatrix;
+
+            vio_bind_render_target($this->ctx, $target);
+            vio_viewport($this->ctx, 0, 0, $shadowRes, $shadowRes);
+            vio_clear($this->ctx, 1.0, 1.0, 1.0, 1.0);
+
+            $this->bindShadowPipeline();
+            vio_set_uniform($this->ctx, 'u_view', $lightSpaceMatrix->toArray());
+            vio_set_uniform($this->ctx, 'u_projection', Mat4::identity()->toArray());
+
+            foreach ($commandList->getCommands() as $cmd) {
+                if ($cmd instanceof DrawMesh) {
+                    $mat = MaterialRegistry::get($cmd->materialId);
+                    if ($mat === null || $mat->alpha < 0.9) {
+                        continue;
+                    }
+                    $matId = $cmd->materialId;
+                    if (str_starts_with($matId, 'sky_') || str_starts_with($matId, 'sun_')
+                        || str_starts_with($matId, 'moon_') || str_starts_with($matId, 'cloud_')
+                        || $matId === 'precipitation') {
+                        continue;
+                    }
+                    $mesh = $this->uploadMesh($cmd->meshId);
+                    if ($mesh === null) {
+                        continue;
+                    }
+                    vio_set_uniform($this->ctx, 'u_model', $cmd->modelMatrix->toArray());
+                    vio_set_uniform($this->ctx, 'u_use_instancing', 0);
+                    vio_draw($this->ctx, $mesh);
+                } elseif ($cmd instanceof DrawMeshInstanced) {
+                    $mat = MaterialRegistry::get($cmd->materialId);
+                    if ($mat === null || $mat->alpha < 0.9) {
+                        continue;
+                    }
+                    $matId = $cmd->materialId;
+                    if (str_starts_with($matId, 'sky_') || str_starts_with($matId, 'sun_')
+                        || str_starts_with($matId, 'moon_') || str_starts_with($matId, 'cloud_')
+                        || $matId === 'precipitation') {
+                        continue;
+                    }
+                    $mesh = $this->uploadMesh($cmd->meshId);
+                    if ($mesh === null) {
+                        continue;
+                    }
+                    [$flatMatrices, $instanceCount] = $this->resolveInstanceData($cmd->meshId, $mat, $cmd);
+                    vio_set_uniform($this->ctx, 'u_use_instancing', 1);
+                    vio_draw_instanced($this->ctx, $mesh, $flatMatrices, $instanceCount);
                 }
-                $matId = $cmd->materialId;
-                if (str_starts_with($matId, 'sky_') || str_starts_with($matId, 'sun_')
-                    || str_starts_with($matId, 'moon_') || str_starts_with($matId, 'cloud_')
-                    || $matId === 'precipitation') {
-                    continue;
-                }
-                $mesh = $this->uploadMesh($cmd->meshId);
-                if ($mesh === null) {
-                    continue;
-                }
-                vio_set_uniform($this->ctx, 'u_model', $cmd->modelMatrix->toArray());
-                vio_set_uniform($this->ctx, 'u_use_instancing', 0);
-                vio_draw($this->ctx, $mesh);
-            } elseif ($cmd instanceof DrawMeshInstanced) {
-                $mat = MaterialRegistry::get($cmd->materialId);
-                if ($mat === null || $mat->alpha < 0.9) {
-                    continue;
-                }
-                $matId = $cmd->materialId;
-                if (str_starts_with($matId, 'sky_') || str_starts_with($matId, 'sun_')
-                    || str_starts_with($matId, 'moon_') || str_starts_with($matId, 'cloud_')
-                    || $matId === 'precipitation') {
-                    continue;
-                }
-                $mesh = $this->uploadMesh($cmd->meshId);
-                if ($mesh === null) {
-                    continue;
-                }
-                [$flatMatrices, $instanceCount] = $this->resolveInstanceData($cmd->meshId, $mat, $cmd->matrices, $cmd->isStatic);
-                vio_set_uniform($this->ctx, 'u_use_instancing', 1);
-                vio_draw_instanced($this->ctx, $mesh, $flatMatrices, $instanceCount);
             }
         }
 
         vio_unbind_render_target($this->ctx);
 
-        // Store light-space matrix for main pass
-        $this->currentLightSpaceMatrix = $lightSpaceMatrix;
-
+        // Cascade 0 also fills the legacy single-map slot for cloud-shadow paths.
         return true;
     }
 
-    private ?Mat4 $currentLightSpaceMatrix = null;
-
-    private function computeLightSpaceMatrix(Vec3 $sunDirection): Mat4
+    /**
+     * Build the shadow-pass light-space matrix.
+     *
+     * When a $cameraTarget is supplied the shadow frustum is centred on it
+     * and texel-snapped to the shadow-map grid - both prerequisites for
+     * stable open-world shadows. Without these the shadow box stays
+     * pinned to the world origin and shimmering edges appear as the
+     * camera moves continuously.
+     */
+    private function computeLightSpaceMatrix(Vec3 $sunDirection, ?Vec3 $cameraTarget = null, ?float $orthoSize = null): Mat4
     {
         $len = sqrt($sunDirection->x ** 2 + $sunDirection->y ** 2 + $sunDirection->z ** 2);
         if ($len < 0.001) {
@@ -883,15 +909,30 @@ class VioRenderer3D implements Renderer3DInterface
         $dy = $sunDirection->y / $len;
         $dz = $sunDirection->z / $len;
 
-        $lightPos = new Vec3(-$dx * 80.0, -$dy * 80.0, -$dz * 80.0);
-        $target = Vec3::zero();
+        $center = $cameraTarget ?? Vec3::zero();
+        $s = $orthoSize ?? self::SHADOW_ORTHO_SIZE;
 
-        $up = abs($dy) > 0.9
+        if ($cameraTarget !== null) {
+            $resolution = self::SHADOW_MAP_RESOLUTION;
+            $worldUnitsPerTexel = (2.0 * $s) / $resolution;
+            $center = new Vec3(
+                round($center->x / $worldUnitsPerTexel) * $worldUnitsPerTexel,
+                round($center->y / $worldUnitsPerTexel) * $worldUnitsPerTexel,
+                round($center->z / $worldUnitsPerTexel) * $worldUnitsPerTexel,
+            );
+        }
+
+        $lightPos = new Vec3(
+            $center->x - $dx * 80.0,
+            $center->y - $dy * 80.0,
+            $center->z - $dz * 80.0,
+        );
+
+        $up = abs($dy) > 0.999
             ? new Vec3(0.0, 0.0, 1.0)
             : new Vec3(0.0, 1.0, 0.0);
 
-        $lightView = self::lookAt($lightPos, $target, $up);
-        $s = self::SHADOW_ORTHO_SIZE;
+        $lightView = self::lookAt($lightPos, $center, $up);
         $lightProj = Mat4::orthographic(-$s, $s, -$s, $s, 0.5, 200.0);
 
         return $lightProj->multiply($lightView);
@@ -903,25 +944,47 @@ class VioRenderer3D implements Renderer3DInterface
     private function uploadShadowUniforms(bool $hasShadowMap, array $dirLights): void
     {
         vio_set_uniform($this->ctx, 'u_has_shadow_map', $hasShadowMap ? 1 : 0);
+        vio_set_uniform($this->ctx, 'u_csm_count', count(self::CASCADE_ORTHO_SIZES));
 
-        if ($hasShadowMap && $this->shadowTarget !== null && $this->currentLightSpaceMatrix !== null) {
-            $shadowTex = vio_render_target_texture($this->shadowTarget);
-            vio_bind_texture($this->ctx, $shadowTex, 6);
-            vio_set_uniform($this->ctx, 'u_shadow_map', 6);
+        if (!$hasShadowMap || empty($this->cascadeShadowTargets)) {
+            return;
+        }
 
-            $lsm = $this->currentLightSpaceMatrix->toArray();
+        $backend = vio_backend_name($this->ctx);
+        $flipY = ($backend === 'd3d11' || $backend === 'd3d12');
 
-            // D3D11/D3D12: render target Y is flipped vs OpenGL.
-            // Negate the Y row of the light-space matrix so shadow map UVs match.
-            $backend = vio_backend_name($this->ctx);
-            if ($backend === 'd3d11' || $backend === 'd3d12') {
-                $lsm[1]  = -$lsm[1];   // col0.y
-                $lsm[5]  = -$lsm[5];   // col1.y
-                $lsm[9]  = -$lsm[9];   // col2.y
-                $lsm[13] = -$lsm[13];  // col3.y
+        // Texture units chosen to match the OpenGL CSM budget. Length
+        // must equal CASCADE_ORTHO_SIZES; if the cascade count is ever
+        // raised, extend this array in the same change.
+        $cascadeUnits = [6, 8, 9];
+        foreach (self::CASCADE_ORTHO_SIZES as $cIdx => $orthoSize) {
+            $target = $this->cascadeShadowTargets[$cIdx] ?? null;
+            $matrix = $this->cascadeLightSpaceMatrices[$cIdx] ?? null;
+            if ($target === null || $matrix === null) {
+                continue;
+            }
+            $tex = vio_render_target_texture($target);
+            $unit = $cascadeUnits[$cIdx];
+            vio_bind_texture($this->ctx, $tex, $unit);
+
+            $lsm = $matrix->toArray();
+            if ($flipY) {
+                $lsm[1]  = -$lsm[1];
+                $lsm[5]  = -$lsm[5];
+                $lsm[9]  = -$lsm[9];
+                $lsm[13] = -$lsm[13];
             }
 
-            vio_set_uniform($this->ctx, 'u_light_space_matrix', $lsm);
+            vio_set_uniform($this->ctx, "u_csm_map_{$cIdx}",    $unit);
+            vio_set_uniform($this->ctx, "u_csm_matrix_{$cIdx}", $lsm);
+            vio_set_uniform($this->ctx, "u_csm_far_{$cIdx}",    $orthoSize);
+
+            // Cascade 0 also drives the legacy single-map uniforms so any
+            // legacy shader path still works.
+            if ($cIdx === 0) {
+                vio_set_uniform($this->ctx, 'u_shadow_map', $unit);
+                vio_set_uniform($this->ctx, 'u_light_space_matrix', $lsm);
+            }
         }
     }
 
@@ -1287,54 +1350,61 @@ class VioRenderer3D implements Renderer3DInterface
         vio_draw($this->ctx, $mesh);
     }
 
-    /**
-     * @param Mat4[] $matrices
-     */
-    private function drawMeshInstancedCommand(string $meshId, Material $material, array $matrices, bool $isStatic = false, string $materialId = ''): void
+    private function drawMeshInstancedCommand(DrawMeshInstanced $cmd, Material $material): void
     {
-        if (empty($matrices)) {
+        // Hot-path: read public properties directly instead of via the
+        // accessors. The extra method-call dispatch broke the
+        // boxes-1000-instanced perf budget on first CI run.
+        $instanceCount = $cmd->instanceCount >= 0 ? $cmd->instanceCount : count($cmd->matrices);
+        if ($instanceCount <= 0) {
             return;
         }
 
-        $mesh = $this->uploadMesh($meshId);
+        $mesh = $this->uploadMesh($cmd->meshId);
         if ($mesh === null) {
             return;
         }
 
-        $this->applyMaterial($material, $materialId);
-        $this->bindMeshAabb($meshId);
+        $this->applyMaterial($material, $cmd->materialId);
+        $this->bindMeshAabb($cmd->meshId);
         vio_set_uniform($this->ctx, 'u_use_instancing', 1);
 
-        [$flatMatrices, $instanceCount] = $this->resolveInstanceData($meshId, $material, $matrices, $isStatic);
-        vio_draw_instanced($this->ctx, $mesh, $flatMatrices, $instanceCount);
+        [$packed, $count] = $this->resolveInstanceData($cmd->meshId, $material, $cmd);
+        vio_draw_instanced($this->ctx, $mesh, $packed, $count);
 
         vio_set_uniform($this->ctx, 'u_use_instancing', 0);
     }
 
     /**
      * Resolve instance matrix data as a packed binary string (fast path).
-     * Static instances are cached as packed strings for zero-copy reuse.
+     * Honours both DrawMeshInstanced storage modes: when the command
+     * carries a flat float[] buffer the per-Mat4 toArray() loop is
+     * skipped and pack('f*', ...) consumes the floats directly.
      *
-     * @param Mat4[] $matrices
      * @return array{0: string, 1: int}
      */
-    private function resolveInstanceData(string $meshId, Material $material, array $matrices, bool $isStatic): array
+    private function resolveInstanceData(string $meshId, Material $material, DrawMeshInstanced $cmd): array
     {
+        $isStatic = $cmd->isStatic;
         $cacheKey = $meshId . ':' . ($material->shader) . ':' . spl_object_id($material);
 
         if ($isStatic && isset($this->staticMatrixCache[$cacheKey])) {
             return [$this->staticMatrixCache[$cacheKey], $this->staticInstanceCountCache[$cacheKey]];
         }
 
-        // Pack all matrices into a binary float string (zero-copy to C)
-        $floats = [];
-        foreach ($matrices as $matrix) {
-            foreach ($matrix->toArray() as $v) {
-                $floats[] = $v;
+        if ($cmd->flatMatrices !== []) {
+            $packed = pack('f*', ...$cmd->flatMatrices);
+            $count = $cmd->instanceCount >= 0 ? $cmd->instanceCount : count($cmd->matrices);
+        } else {
+            $floats = [];
+            foreach ($cmd->matrices as $matrix) {
+                foreach ($matrix->toArray() as $v) {
+                    $floats[] = $v;
+                }
             }
+            $packed = pack('f*', ...$floats);
+            $count = count($cmd->matrices);
         }
-        $packed = pack('f*', ...$floats);
-        $count = count($matrices);
 
         if ($isStatic) {
             $this->staticMatrixCache[$cacheKey] = $packed;
@@ -1399,6 +1469,17 @@ class VioRenderer3D implements Renderer3DInterface
         vio_set_uniform($this->ctx, 'u_roughness', $material->roughness);
         vio_set_uniform($this->ctx, 'u_metallic', $material->metallic);
         vio_set_uniform($this->ctx, 'u_alpha', $material->alpha);
+        vio_set_uniform($this->ctx, 'u_clearcoat', $material->clearcoat);
+        vio_set_uniform($this->ctx, 'u_clearcoat_roughness', $material->clearcoatRoughness);
+        vio_set_uniform($this->ctx, 'u_flakes', $material->flakes);
+        vio_set_uniform($this->ctx, 'u_normal_intensity', $material->normalIntensity);
+        vio_set_uniform($this->ctx, 'u_use_environment_map', $material->useEnvironmentMap ? 1 : 0);
+        vio_set_uniform($this->ctx, 'u_normal_pattern', NormalPattern::codeFor($material->normalPattern));
+        vio_set_uniform($this->ctx, 'u_normal_scale', $material->normalScale);
+        vio_set_uniform($this->ctx, 'u_surface_pattern', SurfacePattern::codeFor($material->surfacePattern));
+        vio_set_uniform($this->ctx, 'u_surface_scale', $material->surfaceScale);
+        vio_set_uniform($this->ctx, 'u_surface_intensity', $material->surfaceIntensity);
+        vio_set_uniform($this->ctx, 'u_wetness', $material->wetness);
 
         // Cloth (mirrors OpenGL backend - same uniform names).
         vio_set_uniform($this->ctx, 'u_cloth', $material->cloth ? 1 : 0);
@@ -1465,6 +1546,7 @@ class VioRenderer3D implements Renderer3DInterface
             str_starts_with($prefix, 'hut_window') => 7,
             str_starts_with($prefix, 'hut_thatch') => 8,
             str_starts_with($prefix, 'moon_disc') => 9,
+            str_starts_with($prefix, 'car_paint') => 10,
             default => 0,
         };
 
@@ -1558,6 +1640,20 @@ class VioRenderer3D implements Renderer3DInterface
         vio_set_uniform($this->ctx, 'u_fog_far', $state['fogFar']);
 
         vio_set_uniform($this->ctx, 'u_time', $this->globalTime);
+        vio_set_uniform($this->ctx, 'u_ao_strength', $this->settings->ambientOcclusion->strength());
+
+        // Color grading + vignette per-frame.
+        $grade = $this->settings->colorGrading->params();
+        vio_set_uniform($this->ctx, 'u_grade_lift',        $grade['lift']);
+        vio_set_uniform($this->ctx, 'u_grade_gamma',       $grade['gamma']);
+        vio_set_uniform($this->ctx, 'u_grade_gain',        $grade['gain']);
+        vio_set_uniform($this->ctx, 'u_grade_saturation', $grade['saturation']);
+        vio_set_uniform($this->ctx, 'u_vignette_intensity', $this->settings->vignetteIntensity);
+        vio_set_uniform($this->ctx, 'u_volumetric_fog', $this->settings->volumetricFog ? 1 : 0);
+        vio_set_uniform($this->ctx, 'u_ssr_intensity', $this->settings->ssr->intensity());
+        vio_set_uniform($this->ctx, 'u_viewport_size',
+            [(float)$this->backbufferWidth, (float)$this->backbufferHeight]);
+
         vio_set_uniform($this->ctx, 'u_sky_color', [0.55, 0.70, 0.85]);
         vio_set_uniform($this->ctx, 'u_horizon_color', [0.85, 0.88, 0.92]);
         vio_set_uniform($this->ctx, 'u_snow_cover', $this->snowCover);
@@ -1774,6 +1870,26 @@ uniform vec3 u_emission;
 uniform float u_roughness;
 uniform float u_metallic;
 uniform float u_alpha;
+uniform float u_clearcoat;
+uniform float u_clearcoat_roughness;
+uniform float u_flakes;
+uniform float u_normal_intensity;
+uniform int   u_use_environment_map;
+uniform int   u_normal_pattern;
+uniform float u_normal_scale;
+uniform int   u_surface_pattern;
+uniform float u_surface_scale;
+uniform float u_surface_intensity;
+uniform float u_wetness;
+uniform float u_ssr_intensity;
+uniform int   u_volumetric_fog;
+uniform float u_ao_strength;
+uniform vec3  u_grade_lift;
+uniform vec3  u_grade_gamma;
+uniform vec3  u_grade_gain;
+uniform float u_grade_saturation;
+uniform float u_vignette_intensity;
+uniform vec2  u_viewport_size;
 uniform float u_snow_cover; // 0.0 = no snow, 1.0 = full blanket
 uniform float u_rain_wetness; // 0.0 = dry, 1.0 = rain-soaked
 uniform vec3 u_fog_color;
@@ -1795,6 +1911,18 @@ uniform int u_linear_output;
 // Shadow
 uniform int u_has_shadow_map;
 uniform sampler2DShadow u_shadow_map;
+
+// Cascade Shadow Maps (mirrors mesh3d.frag.glsl).
+uniform sampler2DShadow u_csm_map_0;
+uniform sampler2DShadow u_csm_map_1;
+uniform sampler2DShadow u_csm_map_2;
+uniform mat4 u_csm_matrix_0;
+uniform mat4 u_csm_matrix_1;
+uniform mat4 u_csm_matrix_2;
+uniform float u_csm_far_0;
+uniform float u_csm_far_1;
+uniform float u_csm_far_2;
+uniform int u_csm_count;
 
 // Texture
 uniform int u_has_albedo_texture;
@@ -1834,10 +1962,11 @@ float fbm3(vec2 p) {
 //  Shadow
 // ================================================================
 
-float calcShadow(vec4 lsp, vec3 N) {
-    vec3 pc = lsp.xyz / lsp.w * 0.5 + 0.5;
+// Sample a single cascade with PCF 3x3.
+float sampleCascade(sampler2DShadow map, mat4 lightSpace, vec3 worldPos, vec3 N) {
+    vec4 lsp = lightSpace * vec4(worldPos, 1.0);
+    vec3 pc  = lsp.xyz / lsp.w * 0.5 + 0.5;
     if (pc.x < 0.0 || pc.x > 1.0 || pc.y < 0.0 || pc.y > 1.0 || pc.z > 1.0) return 1.0;
-    if (u_has_shadow_map == 0) return 1.0;
     vec3 lightDir = normalize(-u_dir_light_direction);
     float NdotL = max(dot(N, lightDir), 0.0);
     float bias = mix(0.005, 0.001, NdotL);
@@ -1846,8 +1975,23 @@ float calcShadow(vec4 lsp, vec3 N) {
     float rd = pc.z - bias;
     for (int x = -1; x <= 1; x++)
         for (int y = -1; y <= 1; y++)
-            s += texture(u_shadow_map, vec3(pc.xy + vec2(x,y) * ts, rd));
+            s += texture(map, vec3(pc.xy + vec2(x,y) * ts, rd));
     return s / 9.0;
+}
+
+float calcShadow(vec4 lsp, vec3 N) {
+    if (u_has_shadow_map == 0) return 1.0;
+    // Pick the smallest CSM cascade still containing the fragment based
+    // on distance to the camera (matches the per-cascade ortho extents
+    // built in PHP land).
+    float dist = length(v_worldPos - u_camera_pos);
+    if (u_csm_count >= 2 && dist > u_csm_far_0) {
+        if (u_csm_count >= 3 && dist > u_csm_far_1) {
+            return sampleCascade(u_csm_map_2, u_csm_matrix_2, v_worldPos, N);
+        }
+        return sampleCascade(u_csm_map_1, u_csm_matrix_1, v_worldPos, N);
+    }
+    return sampleCascade(u_csm_map_0, u_csm_matrix_0, v_worldPos, N);
 }
 
 // ================================================================
@@ -1887,10 +2031,81 @@ vec3 cookTorranceSpecular(vec3 N, vec3 V, vec3 L, float roughness, vec3 F0) {
     return (D * G * F) / max(4.0 * NdotV * NdotL, 0.001);
 }
 
+// Curvature-based AO (mirrors mesh3d.frag.glsl). Cheap per-fragment
+// surrogate for SSAO until a depth-buffer pass lands.
+float curvatureAO(vec3 N, float strength) {
+    if (strength <= 0.0) return 1.0;
+    vec3 ddxN = dFdx(N);
+    vec3 ddyN = dFdy(N);
+    float curvature = length(ddxN) + length(ddyN);
+    float occlusion = smoothstep(0.0, 0.4, curvature);
+    return clamp(1.0 - occlusion * strength, 0.0, 1.0);
+}
+
+// ACES filmic tonemap (Narkowicz). Matches the tonemap post-process so
+// the visual response stays the same whether the HDR/Bloom path is on
+// (mesh writes linear, post does ACES) or off (mesh tonemaps inline).
+vec3 toneMapACES(vec3 x) {
+    const float a = 2.51;
+    const float b = 0.03;
+    const float c = 2.43;
+    const float d = 0.59;
+    const float e = 0.14;
+    return clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.0, 1.0);
+}
+
+vec3 volumetricScatter(vec3 worldPos) {
+    if (u_volumetric_fog == 0 || u_dir_light_count == 0) return vec3(0.0);
+    vec3 rayStart = u_camera_pos;
+    vec3 rayEnd   = worldPos;
+    vec3 rayDir   = rayEnd - rayStart;
+    float rayLen  = length(rayDir);
+    if (rayLen < 0.01) return vec3(0.0);
+    rayDir /= rayLen;
+    float marchLen = min(rayLen, u_fog_far);
+    const int STEPS = 8;
+    float step = marchLen / float(STEPS);
+    vec3 sunDir = normalize(-u_dir_lights[0].direction);
+    float cosTheta = dot(rayDir, sunDir);
+    float phase = 0.5 + pow(max(cosTheta, 0.0), 6.0) * 4.0;
+    vec3 scatter = vec3(0.0);
+    float transmittance = 1.0;
+    for (int i = 0; i < STEPS; i++) {
+        vec3 p = rayStart + rayDir * (step * (float(i) + 0.5));
+        float density = exp(-max(p.y, 0.0) * 0.08) * 0.06;
+        vec3 inscatter = u_dir_lights[0].color * u_dir_lights[0].intensity * phase * density;
+        scatter += inscatter * transmittance * step;
+        transmittance *= exp(-density * step);
+    }
+    return scatter;
+}
+
+vec3 applyColorGrading(vec3 color) {
+    color = color + u_grade_lift;
+    color = pow(max(color, vec3(0.0)), vec3(1.0) / u_grade_gamma);
+    color = color * u_grade_gain;
+    float luma = dot(color, vec3(0.2126, 0.7152, 0.0722));
+    return mix(vec3(luma), color, u_grade_saturation);
+}
+
+vec3 applyVignette(vec3 color) {
+    if (u_vignette_intensity <= 0.0 || u_viewport_size.x <= 0.0) {
+        return color;
+    }
+    vec2 uv = gl_FragCoord.xy / u_viewport_size;
+    vec2 d  = uv - 0.5;
+    float r = length(d);
+    float v = smoothstep(0.45, 0.85, r);
+    return color * (1.0 - v * u_vignette_intensity);
+}
+
 vec4 outputColor(vec3 color, float alpha) {
     color = max(color, vec3(0.0));
     if (u_linear_output == 0) {
+        color = applyColorGrading(color);
+        color = toneMapACES(color);
         color = pow(color, vec3(1.0 / 2.2));
+        color = applyVignette(color);
     }
     return vec4(color, alpha);
 }
@@ -2209,6 +2424,185 @@ vec3 computeCloud(vec3 N, vec3 V, vec3 L, vec3 baseAlbedo, out float alphaOut) {
 }
 
 // ================================================================
+//  Procedural Normal Maps (mirrors mesh3d.frag.glsl)
+// ================================================================
+
+vec3 np_bricks(vec2 uv) {
+    vec2 cell = vec2(0.5, 1.0);
+    float rowIndex = floor(uv.y / cell.y);
+    float xOffset = mod(rowIndex, 2.0) * 0.5 * cell.x;
+    vec2 local = vec2(fract((uv.x + xOffset) / cell.x),
+                      fract(uv.y / cell.y));
+    float mortarX = 1.0 - (smoothstep(0.0, 0.06, local.x) *
+                           smoothstep(1.0, 0.94, local.x));
+    float mortarY = 1.0 - (smoothstep(0.0, 0.06, local.y) *
+                           smoothstep(1.0, 0.94, local.y));
+    float groove = max(mortarX, mortarY);
+    vec2 slope = vec2(mortarX, mortarY) *
+                 vec2(local.x < 0.5 ? 1.0 : -1.0,
+                      local.y < 0.5 ? 1.0 : -1.0);
+    return normalize(vec3(slope * 0.6, 1.0 - groove * 0.5));
+}
+
+vec3 np_bumps(vec2 uv) {
+    float e = 0.05;
+    float h  = noise(uv * 8.0);
+    float hx = noise(uv * 8.0 + vec2(e, 0.0));
+    float hy = noise(uv * 8.0 + vec2(0.0, e));
+    vec2 grad = vec2(hx - h, hy - h) / e;
+    return normalize(vec3(-grad * 0.4, 1.0));
+}
+
+vec3 np_orange_peel(vec2 uv) {
+    vec2 p = uv * 60.0;
+    float h  = hash21(floor(p));
+    float hx = hash21(floor(p) + vec2(1.0, 0.0));
+    float hy = hash21(floor(p) + vec2(0.0, 1.0));
+    return normalize(vec3((h - hx) * 0.6, (h - hy) * 0.6, 1.0));
+}
+
+vec3 np_hammered(vec2 uv) {
+    vec2 grid = uv * 6.0;
+    vec2 cell = floor(grid);
+    vec2 local = fract(grid) - 0.5;
+    vec2 jitter = vec2(hash21(cell), hash21(cell + 17.0)) - 0.5;
+    vec2 centred = local - jitter * 0.4;
+    float r = length(centred);
+    float rim = smoothstep(0.45, 0.20, r);
+    vec2 slope = -centred * rim * 1.4;
+    return normalize(vec3(slope, 1.0));
+}
+
+vec3 np_hexagons(vec2 uv) {
+    vec2 p = uv * 5.0;
+    vec2 a = vec2(p.x + p.y * 0.5, p.y * 0.866);
+    vec2 af = fract(a) - 0.5;
+    vec2 slope = -af * 1.2;
+    float edge = smoothstep(0.45, 0.50, max(abs(af.x), abs(af.y)));
+    return normalize(vec3(slope * (1.0 - edge), 1.0 - edge * 0.4));
+}
+
+vec3 np_wood_grain(vec2 uv) {
+    float grad = cos(uv.y * 80.0 + noise(uv * vec2(20.0, 4.0)) * 6.0) * 80.0;
+    float slopeY = grad * 0.005;
+    return normalize(vec3(0.0, slopeY, 1.0));
+}
+
+vec3 np_scratches(vec2 uv) {
+    float rotated = uv.x * 0.97 + uv.y * 0.24;
+    float across  = -uv.x * 0.24 + uv.y * 0.97;
+    float lane = floor(across * 80.0);
+    float laneJitter = hash21(vec2(lane, 0.0));
+    float scratch = sin((rotated + laneJitter * 6.28) * 30.0);
+    float mask = step(0.6, hash21(vec2(lane, 13.0)));
+    return normalize(vec3(scratch * mask * 0.5, 0.0, 1.0));
+}
+
+vec3 np_cracked(vec2 uv) {
+    vec2 p = uv * 8.0;
+    vec2 ip = floor(p);
+    vec2 fp = fract(p);
+    float d1 = 8.0;
+    float d2 = 8.0;
+    for (int x = -1; x <= 1; x++) {
+        for (int y = -1; y <= 1; y++) {
+            vec2 g = vec2(float(x), float(y));
+            vec2 jitter = vec2(hash21(ip + g),
+                               hash21(ip + g + 51.0));
+            float d = length(g + jitter - fp);
+            if (d < d1) { d2 = d1; d1 = d; }
+            else if (d < d2) { d2 = d; }
+        }
+    }
+    float crack = smoothstep(0.04, 0.0, d2 - d1);
+    return normalize(vec3(0.0, 0.0, 1.0) +
+                     vec3((fp.x - 0.5) * crack, (fp.y - 0.5) * crack, 0.0));
+}
+
+vec3 np_noise_pattern(vec2 uv) {
+    float e = 0.04;
+    float h  = fbm3(uv * 6.0);
+    float hx = fbm3(uv * 6.0 + vec2(e, 0.0));
+    float hy = fbm3(uv * 6.0 + vec2(0.0, e));
+    vec2 grad = vec2(hx - h, hy - h) / e;
+    return normalize(vec3(-grad * 0.5, 1.0));
+}
+
+vec3 dispatchProceduralNormal(int code, vec2 uv) {
+    if (code == 1) return np_bricks(uv);
+    if (code == 2) return np_bumps(uv);
+    if (code == 3) return np_orange_peel(uv);
+    if (code == 4) return np_hammered(uv);
+    if (code == 5) return np_hexagons(uv);
+    if (code == 6) return np_wood_grain(uv);
+    if (code == 7) return np_scratches(uv);
+    if (code == 8) return np_cracked(uv);
+    if (code == 9) return np_noise_pattern(uv);
+    return vec3(0.0, 0.0, 1.0);
+}
+
+// ── Procedural Surface-Wear (mirrors mesh3d.frag.glsl) ────────────────────────
+
+vec3 sp_worn_paint(vec2 uv) {
+    float wear = fbm3(uv * 3.0);
+    float chip = step(0.55, wear);
+    float albedoT = mix(0.50, 0.30, chip);
+    float roughD  = mix(0.0,  0.35,  chip);
+    float metalD  = mix(0.0,  0.55,  chip);
+    return vec3(albedoT, roughD, metalD);
+}
+
+vec3 sp_rust(vec2 uv) {
+    float spotty = fbm3(uv * 5.0);
+    float rust   = smoothstep(0.45, 0.65, spotty);
+    float albedoT = mix(0.50, 0.62, rust);
+    float roughD  = mix(0.0,  0.45,  rust);
+    float metalD  = mix(0.0, -0.50,  rust);
+    return vec3(albedoT, roughD, metalD);
+}
+
+vec3 sp_brushed_metal(vec2 uv) {
+    float lane = sin(uv.y * 600.0);
+    return vec3(0.50, lane * 0.10, 0.0);
+}
+
+vec3 sp_polished_rings(vec2 uv) {
+    vec2 c = uv - 0.5;
+    float r = length(c);
+    float ring = sin(r * 80.0);
+    float matte = smoothstep(0.0, 0.4, ring);
+    return vec3(0.50, matte * 0.50 - 0.10, 0.0);
+}
+
+vec3 dispatchSurfacePattern(int code, vec2 uv) {
+    if (code == 1) return sp_worn_paint(uv);
+    if (code == 2) return sp_rust(uv);
+    if (code == 3) return sp_brushed_metal(uv);
+    if (code == 4) return sp_polished_rings(uv);
+    return vec3(0.5, 0.0, 0.0);
+}
+
+vec3 perturbNormalProcedural(vec3 N, vec3 worldPos, vec2 uv,
+                             int patternCode, float patternScale,
+                             float intensity) {
+    if (patternCode == 0 || intensity <= 0.0) return N;
+    vec3 dpx = dFdx(worldPos);
+    vec3 dpy = dFdy(worldPos);
+    vec2 duvx = dFdx(uv);
+    vec2 duvy = dFdy(uv);
+    float det = duvx.x * duvy.y - duvy.x * duvx.y;
+    if (abs(det) < 1e-8) return N;
+    vec3 T = (dpx * duvy.y - dpy * duvx.y) / det;
+    T = normalize(T - N * dot(N, T));
+    vec3 B = normalize(cross(N, T));
+    mat3 TBN = mat3(T, B, N);
+
+    vec3 nMap = dispatchProceduralNormal(patternCode, uv * patternScale);
+    nMap = mix(vec3(0.0, 0.0, 1.0), nMap, clamp(intensity, 0.0, 4.0));
+    return normalize(TBN * nMap);
+}
+
+// ================================================================
 //  Main
 // ================================================================
 
@@ -2221,6 +2615,7 @@ void main() {
     vec3 L = normalize(-u_dir_light_direction);
 
     float roughness = clamp(u_roughness, 0.04, 1.0);
+    float metallic  = u_metallic;
     float alpha = u_alpha;
     vec3 albedo;
 
@@ -2264,10 +2659,47 @@ void main() {
         vec3 mc = vec3(0.85, 0.87, 0.92) * (1.0 - smoothstep(0.42, 0.55, crater) * 0.25);
         frag_color = outputColor(mc * illum + vec3(0.02, 0.025, 0.04) * (1.0 - illum), 1.0);
         return;
+    } else if (u_proc_mode == 10) {
+        // Carpaint: metallic flake micro-normal + per-fragment colour wash.
+        float nse = noise(v_worldPos.xz * 0.4);
+        albedo = texAlbedo * (1.0 + (nse - 0.5) * 0.04);
+        if (u_flakes > 0.0) {
+            vec3 flakePos = floor(v_worldPos * 220.0);
+            float h1 = hash31(flakePos);
+            float h2 = hash31(flakePos + vec3(13.0, 7.0, 5.0));
+            float h3 = hash31(flakePos + vec3(31.0, 17.0, 11.0));
+            vec3 jitter = vec3(h1 - 0.5, h2 - 0.5, h3 - 0.5);
+            N = normalize(N + jitter * 0.18 * u_flakes * u_normal_intensity);
+        }
     } else {
         float nse = noise(v_worldPos.xz * 0.4);
         float noiseMask = smoothstep(0.3, 0.9, roughness);
         albedo = texAlbedo * (1.0 + (nse - 0.5) * 0.12 * noiseMask);
+    }
+
+    // Procedural normal-map pattern (mirrors mesh3d.frag.glsl). Self-shading
+    // procedural materials (water, cloud, moon) have early-returned above so
+    // this only affects standard, sand, rock, palm, wood, thatch, carpaint.
+    N = perturbNormalProcedural(N, v_worldPos, v_uv,
+                                u_normal_pattern, u_normal_scale,
+                                u_normal_intensity);
+
+    if (u_surface_pattern > 0 && u_surface_intensity > 0.0) {
+        vec3 wear = dispatchSurfacePattern(u_surface_pattern, v_uv * u_surface_scale);
+        float t = clamp(u_surface_intensity, 0.0, 4.0);
+        vec3 tint = mix(vec3(1.0), vec3(wear.x * 2.0), t);
+        albedo *= tint;
+        roughness = clamp(roughness + wear.y * t, 0.04, 1.0);
+        metallic  = clamp(metallic  + wear.z * t, 0.0,  1.0);
+    }
+
+    // Per-material wetness (SSR surrogate). Up-facing fragments get a
+    // smoother + darker + brighter-IBL pass to read as wet/polished.
+    if (u_wetness > 0.0) {
+        float upMask = clamp(dot(N, vec3(0.0, 1.0, 0.0)) * 1.4 - 0.2, 0.0, 1.0);
+        float w = u_wetness * upMask;
+        roughness = mix(roughness, max(roughness * 0.25, 0.04), w);
+        albedo    = mix(albedo,    albedo * 0.7,                 w);
     }
 
     // ---- Snow cover: upward-facing surfaces turn white ----
@@ -2284,15 +2716,16 @@ void main() {
 
     // ---- PBR Lighting (Cook-Torrance GGX) ----
     roughness = clamp(roughness, 0.04, 1.0);
-    vec3 F0 = mix(vec3(0.04), albedo, u_metallic);
+    vec3 F0 = mix(vec3(0.04), albedo, metallic);
     float NdotV = max(dot(N, V), 0.001);
     float shadow = calcShadow(v_lightSpacePos, N);
 
     float primaryIntensity = u_dir_light_count > 0 ? u_dir_lights[0].intensity : 0.0;
     float ambientShadow = mix(1.0, mix(0.5, 1.0, shadow), clamp(primaryIntensity, 0.0, 1.0));
     vec3 F_ambient = fresnelSchlick(NdotV, F0);
-    vec3 kD_ambient = (1.0 - F_ambient) * (1.0 - u_metallic);
-    vec3 color = u_ambient_color * u_ambient_intensity * albedo * kD_ambient * ambientShadow;
+    vec3 kD_ambient = (1.0 - F_ambient) * (1.0 - metallic);
+    float ao = curvatureAO(N, u_ao_strength);
+    vec3 color = u_ambient_color * u_ambient_intensity * albedo * kD_ambient * ambientShadow * ao;
 
     for (int dl = 0; dl < u_dir_light_count; dl++) {
         vec3 dL = normalize(-u_dir_lights[dl].direction);
@@ -2302,7 +2735,7 @@ void main() {
         if (dNdotL > 0.0) {
             vec3 spec = cookTorranceSpecular(N, V, dL, roughness, F0);
             vec3 F = fresnelSchlick(max(dot(normalize(V + dL), V), 0.0), F0);
-            vec3 kD = (1.0 - F) * (1.0 - u_metallic);
+            vec3 kD = (1.0 - F) * (1.0 - metallic);
 
             vec3 radiance = u_dir_lights[dl].color * u_dir_lights[dl].intensity;
             color += (kD * albedo / 3.14159265 + spec) * radiance * dNdotL * dShadow;
@@ -2320,11 +2753,32 @@ void main() {
         if (NdotPL > 0.0) {
             vec3 spec = cookTorranceSpecular(N, V, Lp, roughness, F0);
             vec3 F = fresnelSchlick(max(dot(normalize(V + Lp), V), 0.0), F0);
-            vec3 kD = (1.0 - F) * (1.0 - u_metallic);
+            vec3 kD = (1.0 - F) * (1.0 - metallic);
 
             vec3 radiance = u_point_lights[i].color * u_point_lights[i].intensity * atten;
             color += (kD * albedo / 3.14159265 + spec) * radiance * NdotPL;
         }
+    }
+
+    // ---- Clearcoat lobe (carpaint, dielectric F0 ≈ 0.04) ----
+    if (u_clearcoat > 0.0 && u_dir_light_count > 0) {
+        float ccRough = clamp(u_clearcoat_roughness, 0.02, 1.0);
+        vec3 ccF0 = vec3(0.04);
+        vec3 ccL = normalize(-u_dir_lights[0].direction);
+        float ccNdotL = max(dot(N, ccL), 0.0);
+        if (ccNdotL > 0.0) {
+            vec3 ccSpec = cookTorranceSpecular(N, V, ccL, ccRough, ccF0);
+            color += ccSpec * u_dir_lights[0].color * u_dir_lights[0].intensity
+                   * ccNdotL * shadow * u_clearcoat;
+        }
+        // Sky-tint pseudo-IBL when no cubemap binding is available in
+        // this backend: blend horizon/sky based on the reflection vector
+        // and modulate by clearcoat roughness.
+        vec3 ccR = reflect(-V, N);
+        float skyBlend = clamp(ccR.y * 2.0, 0.0, 1.0);
+        vec3 ccEnv = mix(u_horizon_color, u_sky_color, skyBlend);
+        vec3 ccFres = fresnelSchlick(NdotV, ccF0);
+        color += ccEnv * ccFres * u_clearcoat * (1.0 - ccRough * 0.5) * 0.4;
     }
 
     color += u_emission;
@@ -2332,6 +2786,8 @@ void main() {
     float fogDist = length(v_worldPos - u_camera_pos);
     float fogFactor = clamp((fogDist - u_fog_near) / (u_fog_far - u_fog_near), 0.0, 1.0);
     color = mix(color, u_fog_color, 1.0 - exp(-fogFactor * fogFactor * 3.0));
+
+    color += volumetricScatter(v_worldPos);
 
     frag_color = outputColor(color, alpha);
 }

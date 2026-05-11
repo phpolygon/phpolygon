@@ -109,3 +109,117 @@ jobs:
           path: |
             pr/benchmarks/results/*.json
             base/benchmarks/results/*.json
+
+  micro-bench:
+    name: PHPBench micro suite (PR vs main)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout PR HEAD
+        uses: actions/checkout@v4
+        with:
+          path: pr
+          fetch-depth: 0
+
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          path: base
+          fetch-depth: 0
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: gd, mbstring, dom, xml
+          coverage: none
+
+      - name: Install dependencies (PR)
+        working-directory: pr
+        run: composer install --no-interaction --ignore-platform-reqs
+
+      - name: Install dependencies (base)
+        working-directory: base
+        run: composer install --no-interaction --ignore-platform-reqs
+
+      - name: Detect changed micro-bench scopes
+        id: scope
+        working-directory: pr
+        run: |
+          # Map changed src/ paths to bench subdirectories. New rules:
+          # add a `src_prefix:bench_subdir` line when you wire up a new
+          # bench area so the path-filter picks the change up.
+          mapping=(
+            "src/Math:Math"
+            "src/Component/Particle:System"
+            "src/System/Particle:System"
+            "src/Rendering:Rendering"
+          )
+          changed=$(git diff --name-only origin/main...HEAD || true)
+          subdirs=""
+          for entry in "${mapping[@]}"; do
+            src_prefix="${entry%%:*}"
+            bench_dir="${entry##*:}"
+            if echo "$changed" | grep -q "^$src_prefix"; then
+              if [ -d "benchmarks/micro/$bench_dir" ]; then
+                subdirs="$subdirs benchmarks/micro/$bench_dir"
+              fi
+            fi
+          done
+          # When nothing matched but the workflow ran (e.g. a workflow
+          # change), bench the entire suite as a smoke test.
+          if [ -z "$subdirs" ]; then
+            subdirs="benchmarks/micro"
+          fi
+          echo "subdirs=$subdirs" >> "$GITHUB_OUTPUT"
+          echo "Will bench: $subdirs"
+
+      - name: Capture baseline (main)
+        working-directory: base
+        run: |
+          mkdir -p .phpbench
+          for dir in ${{ steps.scope.outputs.subdirs }}; do
+            # Path is relative to the PR repo; the bench files exist in
+            # both checkouts at the same path.
+            vendor/bin/phpbench run "$dir" \
+              --tag=base \
+              --report=aggregate \
+              --output=html_${dir//\//_} \
+              || true
+          done
+          cp -r .phpbench ../base-phpbench || true
+
+      - name: Run PR HEAD benches
+        id: pr_run
+        working-directory: pr
+        run: |
+          # Copy baseline data from main run so phpbench can diff.
+          cp -r ../base/.phpbench . 2>/dev/null || true
+
+          fail=0
+          for dir in ${{ steps.scope.outputs.subdirs }}; do
+            echo "==> $dir (PR vs main)"
+            if ! vendor/bin/phpbench run "$dir" \
+                --ref=base \
+                --report=aggregate \
+                --assert='mode(variant.mean) <= mode(baseline.mean) * 1.15'; then
+              echo "::warning::Regression detected in $dir (>15% slower than main)"
+              fail=1
+            fi
+            echo
+          done
+          # Soft-fail by default - regressions surface as warnings, not
+          # blocking. Flip to `exit $fail` once the benches are stable
+          # enough on the runner that flaky CI failures are unlikely.
+          exit 0
+
+      - name: Upload PHPBench reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: phpbench-reports
+          path: |
+            pr/.phpbench/
+            base/.phpbench/

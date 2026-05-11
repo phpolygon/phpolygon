@@ -220,12 +220,14 @@ The auto-tuner does not require any special API on the Scene - the same
 
 ## Pitfalls
 
-- **Render scale and MSAA are tracked but not yet honoured by the GL
-  pipeline.** The off-screen multisample FBO that implements them is
-  Phase 1.5 work. Settings round-trip correctly today and the auto-tuner
-  steps through them, but pixel output is unaffected. This is documented
-  with TODOs in `OpenGLRenderer3D::applySettings()` and the equivalents
-  in the other backends.
+- **Render scale is honoured by every backend.** MSAA is wired into
+  OpenGL and Vio (multisample renderbuffer + resolve blit); on Metal
+  the offscreen FBO is single-sample only - the `AntiAliasing::Msaa*`
+  modes degrade to FXAA at present. Vulkan owns its own multisample
+  image attachment and re-probes the supported sample count per
+  context. MSAA may silently fall back to single-sample on backends
+  /drivers that reject the requested sample count - a single STDERR
+  diagnostic is logged once per process, but no error is raised.
 - **Hardware fingerprints are coarse.** Two machines with identical OS /
   arch will hash the same until you call `updateHardwareFingerprintFromGl()`
   after the GL context is current. Most games can skip that refinement -
@@ -240,3 +242,166 @@ The auto-tuner does not require any special API on the Scene - the same
   exotic (e.g. a custom batch renderer that requires explicit setup), pass
   `firstLaunchCalibration: false` and run `recalibrate()` yourself once
   your renderer is ready.
+
+---
+
+## Visual quality additions (Phase A+B+C)
+
+Beyond the original render-scale / MSAA / shadow tier knobs, the engine
+now ships a number of analytic visual-quality features. They are all
+shader-side: no extra GPU memory, no precomputed assets.
+
+### `ScreenSpaceAO`
+
+Per-fragment curvature-based ambient occlusion. Darkens corners and
+crevices via screen-space normal derivatives. Tiers map to a single
+`u_ao_strength` uniform: `Off=0.0`, `Low=0.4`, `Medium=0.7`, `High=1.0`
+(the default is `Medium`). A future depth-buffer SSAO pass can replace
+the in-shader path without changing the enum or uniform name.
+
+### `ColorGradingPreset`
+
+Lift / Gamma / Gain + saturation, evaluated in linear space before
+ACES tone-map. Six presets ship: `Neutral`, `Warm`, `Cool`,
+`Cinematic`, `Vibrant`, `Muted`. `Neutral` resolves to identity values
+and short-circuits in the shader.
+
+### Vignette
+
+Radial darkening evaluated in screen space. Set
+`GraphicsSettings::$vignetteIntensity` in `[0, 1]`; 0 disables.
+
+### Volumetric fog / godrays
+
+Eight-step in-shader ray-march with a Henyey-Greenstein-style phase
+function aligned with the primary directional light. Toggle with
+`GraphicsSettings::$volumetricFog`. Independent from the linear
+`SetFog` distance fog, which stays unconditional.
+
+### Procedural normal maps (`NormalPattern`)
+
+Per-material analytic normal patterns: bricks, bumps, orange peel,
+hammered metal, hexagons, wood grain, scratches, cracked surface, fbm
+noise. Tangent space is derived per-fragment via screen-space
+derivatives so meshes stay tangent-buffer-free.
+
+```php
+MaterialRegistry::register('brick_wall', new Material(
+    albedo: new Color(0.55, 0.30, 0.20),
+    roughness: 0.85,
+    normalPattern: NormalPattern::BRICKS,
+    normalScale: 2.0,
+    normalIntensity: 1.0,
+));
+```
+
+### Procedural surface wear (`SurfacePattern`)
+
+Per-material AO / roughness / metallic / albedo modulation. Four
+patterns: `WORN_PAINT`, `RUST`, `BRUSHED_METAL`, `POLISHED_RINGS`.
+
+```php
+MaterialRegistry::register('weathered_door', new Material(
+    albedo: new Color(0.65, 0.55, 0.45),
+    roughness: 0.4, metallic: 0.7,
+    surfacePattern: SurfacePattern::WORN_PAINT,
+    surfaceScale: 2.0,
+    surfaceIntensity: 1.0,
+));
+```
+
+### Wetness (SSR surrogate)
+
+Forward-renderer stand-in for screen-space reflections.
+`Material::$wetness` in `[0, 1]` boosts the IBL contribution on
+upward-facing fragments and reduces effective roughness, so wet
+asphalt and polished floors read as reflective without a G-buffer
+ray-march pass.
+
+### Carpaint extras
+
+`Material::carpaint($albedo, ...)` returns a metallic + clearcoat +
+flake material driven by `proc_mode == 10` in the mesh shader. The
+clearcoat lobe uses a fixed dielectric F0 and an independent
+roughness; flakes are jittered tangent-space normal perturbations.
+
+### Camera-following shadow
+
+`ShadowMapRenderer::updateLightMatrix(direction, cameraTarget)` and
+`VioRenderer3D::computeLightSpaceMatrix(direction, cameraTarget)` both
+accept an optional camera centre. When supplied the shadow frustum
+follows the camera and is texel-snapped to the shadow-map grid.
+Required for stable open-world shadows; both backends pass the camera
+position automatically.
+
+### Area lights (`AreaLightHelper`)
+
+Forward-pipeline stand-in for analytic rectangular area lights. Splits
+the rectangle into a regular point-light grid that sums to the same
+total radiance.
+
+```php
+AreaLightHelper::pushRectangle(
+    $commandList,
+    center: new Vec3(0.0, 4.0, -3.0),
+    orientation: Quaternion::identity(),
+    width: 3.0, height: 1.5,
+    color: new Color(1.0, 0.92, 0.78),
+    intensity: 4.0,
+    samples: 3, // 3x3 = 9 sub-lights
+);
+```
+
+### Particle system
+
+`ParticleEmitter` component + `ParticleSystem`. Emits a single
+`DrawMeshInstanced` per emitter per frame; particles integrate
+position / age in the system's `update`. Renderer-side particles
+remain plain instanced quads - per-instance colour streams and sprite
+atlases are deliberately out of the first cut.
+
+### Screen-space reflections (`ScreenSpaceReflections`)
+
+Quality enum with three tiers (`Off`, `Low`, `High`) bound to a
+`u_ssr_intensity` uniform consumed by every backend's mesh shader.
+
+On the **OpenGL backend** the engine ships a real composite pass
+(`OpenGLSsrPass`):
+
+- `OpenGLOffscreenTarget` exposes the resolved depth attachment as a
+  sampleable texture (`depthTextureId()`).
+- The pass reconstructs world position from the depth sample, world
+  normal from screen-space derivatives, and ray-marches the
+  reflection vector for 24 steps. A hit blends the sampled scene
+  colour into the output; a miss falls back to the standard wetness
+  IBL lobe.
+- SSR and FXAA are mutually exclusive in the present pipeline (FXAA
+  would need a temp render target to break the read/write cycle).
+
+On **Vio + Metal** the same `u_ssr_intensity` uniform amplifies the
+wetness IBL contribution so games get a visible response from the
+setting without needing the depth-buffer pass to migrate first.
+
+### Temporal anti-aliasing (`AntiAliasing::Taa`)
+
+OpenGL ships a real TAA pass (`OpenGLTaaPass`):
+
+- `TaaJitter::offset()` produces Halton(2,3) sub-pixel offsets each
+  frame; `OpenGLRenderer3D::jitteredProjection()` adds the offset to
+  the projection matrix's NDC translation entries before upload.
+- The pass owns a private FBO + colour history texture, blends the
+  current jittered frame against history with neighbourhood clamping
+  (3x3 AABB) to suppress ghosting, then blits the composite into the
+  history target for the next frame.
+- TAA and SSR are mutually exclusive (TAA needs the resolved colour
+  as input, SSR writes directly to the backbuffer).
+
+`AntiAliasing::fallback()` still maps `Taa -> Fxaa` so backends that
+haven't migrated (Vio, Metal) silently degrade rather than blank-frame.
+The OpenGL backend ignores `fallback()` because its TAA path is real.
+
+### Showcase
+
+`examples/quality_showcase.php` exercises every item above with live
+F1..F7 toggles. Use it as the visual reference when modifying any
+mesh-shader path.
