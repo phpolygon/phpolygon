@@ -24,11 +24,14 @@ declare(strict_types=1);
  * Optional: if `glslangValidator` is on $PATH, runs it against every .glsl
  * file for a real compile check. Without it, the PHP-side checks above run.
  *
- * Usage: php scripts/validate-shaders.php
+ * Usage: php scripts/validate-shaders.php [root]
+ *   root: optional project root override (defaults to dirname(__DIR__)).
+ *         Used by tests/Scripts/ValidateShadersTest.php to point the
+ *         validator at a fixture directory.
  * Exit:  0 = OK, 1 = errors found
  */
 
-$root        = dirname(__DIR__);
+$root        = isset($argv[1]) ? rtrim((string)$argv[1], '/') : dirname(__DIR__);
 $shaderDir   = $root . '/resources/shaders/source';
 $renderDir   = $root . '/src/Rendering';
 

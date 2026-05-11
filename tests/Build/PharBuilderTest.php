@@ -87,6 +87,32 @@ class PharBuilderTest extends TestCase
         $this->assertDirectoryDoesNotExist($stagingDir . '/resources/shaders');
     }
 
+    public function testStageIncludesNestedShaderSubdirectories(): void
+    {
+        // Mirror the resources/shaders/source/vio/ structure introduced by
+        // the Vio shader-extraction refactor. PharBuilder copies resources/
+        // entries via copyDirectory(), so any subtree depth must round-trip.
+        @mkdir($this->projectDir . '/resources/shaders/source/vio', 0o755, true);
+        file_put_contents(
+            $this->projectDir . '/resources/shaders/source/vio/mesh3d.vert.glsl',
+            "#version 410 core\nvoid main(){}\n",
+        );
+        file_put_contents(
+            $this->projectDir . '/resources/shaders/source/vio/mesh3d.frag.glsl',
+            "#version 410 core\nvoid main(){}\n",
+        );
+
+        $config = BuildConfig::load($this->projectDir);
+        $builder = new PharBuilder($config);
+
+        $stagingDir = $this->tempDir . '/staging';
+        $builder->stage($stagingDir);
+
+        $this->assertDirectoryExists($stagingDir . '/resources/shaders/source/vio');
+        $this->assertFileExists($stagingDir . '/resources/shaders/source/vio/mesh3d.vert.glsl');
+        $this->assertFileExists($stagingDir . '/resources/shaders/source/vio/mesh3d.frag.glsl');
+    }
+
     public function testStageIncludesCustomEntry(): void
     {
         file_put_contents($this->projectDir . '/main.php', '<?php echo "main";');
