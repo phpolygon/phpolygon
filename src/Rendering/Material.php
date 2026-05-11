@@ -46,6 +46,18 @@ class Material
      *                                      bottom swings (hanging coat / cape).
      *                                      false: bottom is fixed, top swings (banner
      *                                      anchored at the floor, candle-flame style).
+     * @param bool    $useEnvironmentMap    Sample the IBL cubemap for reflections.
+     *                                      Backends without IBL (procedural-cloth
+     *                                      branch) treat this as a hint and ignore
+     *                                      it; the visual-quality stack reads it.
+     * @param float   $clearcoat            Strength of an extra dielectric clearcoat
+     *                                      lobe (0 = off, 1 = full glossy varnish).
+     *                                      Used by glass / car paint. Backends
+     *                                      without clearcoat ignore the field.
+     * @param float   $clearcoatRoughness   Roughness of the clearcoat lobe (small =
+     *                                      sharp mirror highlight, large = blurred).
+     * @param float   $flakes               Metallic-flake amount for car paint
+     *                                      (0 = solid colour, 1 = heavy flake jitter).
      */
     public function __construct(
         public readonly Color $albedo = new Color(0.8, 0.8, 0.8),
@@ -60,6 +72,10 @@ class Material
         public readonly float $clothFrequency = 1.0,
         public readonly float $clothPhase = 0.0,
         public readonly bool $clothAnchorTop = true,
+        public readonly bool $useEnvironmentMap = false,
+        public readonly float $clearcoat = 0.0,
+        public readonly float $clearcoatRoughness = 0.04,
+        public readonly float $flakes = 0.0,
     ) {}
 
     public static function default(): self
@@ -82,6 +98,34 @@ class Material
      * setting `cloth: true` on the standard constructor with sensible
      * defaults for a Cyberpunk-style trenchcoat / cape.
      */
+    /**
+     * Convenience factory for car-paint materials. Sets `useEnvironmentMap`
+     * + `clearcoat` + `flakes` to values that the visual-quality stack's
+     * `proc_mode = 10` carpaint shader path consumes (metallic flake
+     * jitter, dielectric clearcoat lobe, IBL reflection). On backends
+     * without that path the fields fall back to standard PBR (the colour
+     * + metallic + roughness still render as expected, just without the
+     * extra carpaint flair).
+     */
+    public static function carpaint(
+        Color $albedo,
+        float $metallic = 0.6,
+        float $roughness = 0.35,
+        float $flakes = 0.40,
+        float $clearcoat = 1.0,
+        float $clearcoatRoughness = 0.05,
+    ): self {
+        return new self(
+            albedo: $albedo,
+            roughness: $roughness,
+            metallic: $metallic,
+            useEnvironmentMap: true,
+            clearcoat: $clearcoat,
+            clearcoatRoughness: $clearcoatRoughness,
+            flakes: $flakes,
+        );
+    }
+
     public static function cloth(
         Color $albedo,
         float $strength = 0.08,

@@ -1,0 +1,185 @@
+#!/usr/bin/env php
+<?php
+
+declare(strict_types=1);
+
+/**
+ * svg2mesh - convert an SVG file into a PHPolygon procedural mesh class.
+ *
+ * Pipeline:
+ *   .svg → SvgOutlineParser → 2D outlines (Y-up, normalised)
+ *        → MeshExtruder      → MeshData (3D extrusion)
+ *        → MeshSerializer    → .json (committable intermediate)
+ *        → PhpMeshGenerator  → src/Geometry/Generated/<Name>Mesh.php
+ *
+ * Usage:
+ *   bin/svg2mesh <input.svg> <ClassName> [options]
+ *
+ * Options:
+ *   --depth=<float>      Extrusion thickness in normalised units. Default 0.2.
+ *   --out=<path>         Path to the .php output. Default: src/Geometry/Generated/<ClassName>.php
+ *   --json=<path>        Also write the JSON intermediate. Default: alongside .php with .json suffix.
+ *   --namespace=<ns>     PHP namespace. Default: PHPolygon\Geometry\Generated.
+ *   --raw                Don't normalise to the unit box - keep raw SVG coords.
+ *   --no-json            Skip JSON intermediate.
+ *   --help, -h           Print this help.
+ *
+ * Example:
+ *   bin/svg2mesh assets/svg/cup.svg CoffeeCupMesh --depth=0.4
+ *   bin/svg2mesh assets/svg/star.svg StarMesh --out=src/Geometry/StarMesh.php
+ */
+
+declare(strict_types=1);
+
+require_once __DIR__ . '/../vendor/autoload.php';
+
+use PHPolygon\Build\Mesh\MeshExtruder;
+use PHPolygon\Build\Mesh\MeshRevolver;
+use PHPolygon\Build\Mesh\MeshSerializer;
+use PHPolygon\Build\Mesh\PhpMeshGenerator;
+use PHPolygon\Build\Mesh\SvgOutlineParser;
+
+function usage(int $exitCode = 0): never {
+    $self = basename(__FILE__);
+    fwrite(STDERR, <<<HELP
+        Usage: {$self} <input.svg> <ClassName> [options]
+
+        Strategy options (pick one):
+          --extrude           Linear extrusion along Z (default)
+          --revolve           Revolve profile around the Y axis (for tires,
+                              vases, bottles - SVG should be a side-view
+                              cross-section with X≥0)
+
+        Options:
+          --depth=<float>     Extrusion thickness (--extrude only, default 0.2)
+          --segments=<int>    Revolve angular steps (--revolve only, default 32)
+          --out=<path>        Output .php path (default: src/Geometry/Generated/<ClassName>.php)
+          --json=<path>       JSON intermediate path (default: <out>.json)
+          --namespace=<ns>    Output namespace (default: PHPolygon\\Geometry\\Generated)
+          --raw               Keep raw SVG coordinates (skip unit-box normalisation)
+          --no-json           Don't emit a JSON intermediate
+          --help, -h          This help
+
+        Examples:
+          {$self} assets/svg/cup.svg     CoffeeCupMesh --depth=0.4
+          {$self} assets/svg/tire.svg    TireMesh      --revolve --segments=48
+
+        HELP);
+    exit($exitCode);
+}
+
+[$svgPath, $className, $opts] = parseArgv($argv);
+
+if ($svgPath === '' || $className === '') usage(1);
+if (!is_file($svgPath)) {
+    fwrite(STDERR, "Error: SVG not found: {$svgPath}\n");
+    exit(2);
+}
+if (!preg_match('/^[A-Z][A-Za-z0-9_]*$/', $className)) {
+    fwrite(STDERR, "Error: ClassName must be a valid PSR-4 class identifier (got '{$className}')\n");
+    exit(2);
+}
+
+$projectRoot = realpath(__DIR__ . '/..');
+$outPath  = $opts['out']  ?? "{$projectRoot}/src/Geometry/Generated/{$className}.php";
+$jsonPath = $opts['json'] ?? "{$outPath}.json";
+$depth    = (float)($opts['depth']     ?? '0.2');
+$ns       = $opts['namespace']         ?? 'PHPolygon\\Geometry\\Generated';
+$normal   = !($opts['raw']     ?? false);
+$emitJson = !($opts['no-json'] ?? false);
+
+// Ensure output directories exist.
+foreach ([dirname($outPath), $emitJson ? dirname($jsonPath) : null] as $dir) {
+    if ($dir !== null && !is_dir($dir)) {
+        mkdir($dir, 0o755, recursive: true);
+    }
+}
+
+echo "→ Parsing SVG: {$svgPath}\n";
+$parser   = new SvgOutlineParser();
+$outlines = $parser->parseFile($svgPath, normalise: $normal);
+$outlineCount = count($outlines);
+$pointCount   = array_sum(array_map('count', $outlines));
+echo "  {$outlineCount} outline(s), {$pointCount} point(s) total\n";
+
+if ($outlineCount === 0) {
+    fwrite(STDERR, "Error: SVG produced no outlines (unsupported elements? empty paths?)\n");
+    exit(3);
+}
+
+$revolve  = (bool)($opts['revolve'] ?? false);
+$segments = (int)($opts['segments'] ?? '32');
+
+if ($revolve) {
+    // Revolve: take the FIRST outline as the profile (side cross-section).
+    // The profile is used as-drawn: X is the radial axis (must be >= 0),
+    // Y is the rotation axis. A profile that does not touch X=0 produces
+    // a torus (donut/tire); a profile that touches X=0 produces a solid
+    // of revolution (vase/cup).
+    $profile = $outlines[0];
+    $minProfileX = min(array_column($profile, 0));
+    if ($minProfileX < 0.0) {
+        fwrite(STDERR, "Error: profile contains negative X (axis is X<0). Move profile so all X >= 0.\n");
+        exit(4);
+    }
+    echo "→ Revolving profile (segments={$segments}, " . count($profile) . " profile points)\n";
+    $revolver = new MeshRevolver();
+    $mesh = $revolver->revolve($profile, segments: $segments);
+} else {
+    echo "→ Extruding (depth={$depth})\n";
+    $extruder = new MeshExtruder();
+    $mesh = $extruder->extrude($outlines, depth: $depth);
+}
+echo "  {$mesh->vertexCount()} vertices, {$mesh->triangleCount()} triangles\n";
+
+$strategyMeta = $revolve
+    ? ['strategy' => 'revolve', 'segments' => $segments]
+    : ['strategy' => 'extrude', 'depth' => $depth];
+
+if ($emitJson) {
+    echo "→ Writing JSON: {$jsonPath}\n";
+    $serializer = new MeshSerializer();
+    file_put_contents($jsonPath, $serializer->toJson($mesh, array_merge(
+        [
+            'source' => str_replace($projectRoot . '/', '', $svgPath),
+            'tool'   => 'bin/svg2mesh',
+        ],
+        $strategyMeta,
+    )));
+}
+
+echo "→ Generating PHP: {$outPath}\n";
+$generator = new PhpMeshGenerator();
+$srcRel = str_replace($projectRoot . '/', '', $svgPath);
+$strategyText = $revolve
+    ? "revolved around Y (segments={$segments})"
+    : "extruded along Z (depth={$depth})";
+$comment = "Procedural mesh {$strategyText} from `{$srcRel}`.";
+$code = $generator->generate($mesh, $className, $ns, $comment);
+file_put_contents($outPath, $code);
+
+echo "✓ Done\n";
+
+/**
+ * @param list<string> $argv
+ * @return array{0: string, 1: string, 2: array<string, string|bool>}
+ */
+function parseArgv(array $argv): array {
+    array_shift($argv); // script name
+    $positional = [];
+    $opts = [];
+    foreach ($argv as $arg) {
+        if ($arg === '--help' || $arg === '-h') usage(0);
+        if (str_starts_with($arg, '--')) {
+            $eq = strpos($arg, '=');
+            if ($eq === false) {
+                $opts[substr($arg, 2)] = true;
+            } else {
+                $opts[substr($arg, 2, $eq - 2)] = substr($arg, $eq + 1);
+            }
+        } else {
+            $positional[] = $arg;
+        }
+    }
+    return [$positional[0] ?? '', $positional[1] ?? '', $opts];
+}

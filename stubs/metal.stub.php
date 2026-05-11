@@ -41,9 +41,20 @@ class CommandQueue
 class CommandBuffer
 {
     public function createRenderCommandEncoder(RenderPassDescriptor $descriptor): RenderCommandEncoder {}
+    public function createBlitCommandEncoder(): BlitCommandEncoder {}
     public function presentDrawable(Drawable $drawable): void {}
     public function commit(): void {}
     public function waitUntilCompleted(): void {}
+}
+
+class BlitCommandEncoder
+{
+    public function generateMipmaps(Texture $texture): void {}
+    public function copyFromBuffer(Buffer $source, int $sourceOffset, Buffer $destination, int $destinationOffset, int $size): void {}
+    public function copyFromTexture(Texture $src, int $srcSlice, int $srcLevel, array $srcOrigin, array $srcSize, Texture $dst, int $dstSlice, int $dstLevel): void {}
+    public function fillBuffer(Buffer $buffer, int $offset, int $length, int $value): void {}
+    public function synchronizeResource(Buffer $buffer): void {}
+    public function endEncoding(): void {}
 }
 
 class RenderCommandEncoder
@@ -89,6 +100,8 @@ class TextureDescriptor
     public function setUsage(int $usage): void {}
     public function setStorageMode(int $storageMode): void {}
     public function setTextureType(int $textureType): void {}
+    public function setMipmapLevelCount(int $count): void {}
+    public function setArrayLength(int $length): void {}
 }
 
 class RenderPassDescriptor
@@ -104,6 +117,10 @@ class RenderPassDescriptor
     public function setDepthAttachmentStoreAction(int $storeAction): void {}
     public function setDepthAttachmentClearDepth(float $depth): void {}
     public function setDepthAttachmentResolveTexture(Texture $texture): void {}
+    public function setColorAttachmentSlice(int $index, int $slice): void {}
+    public function setColorAttachmentLevel(int $index, int $level): void {}
+    public function setDepthAttachmentSlice(int $slice): void {}
+    public function setDepthAttachmentLevel(int $level): void {}
 }
 
 class RenderPipelineDescriptor
@@ -153,6 +170,11 @@ class SamplerDescriptor
     public function setMagFilter(int $filter): void {}
     public function setSAddressMode(int $mode): void {}
     public function setTAddressMode(int $mode): void {}
+    public function setRAddressMode(int $mode): void {}
+    public function setMipFilter(int $filter): void {}
+    public function setLodMinClamp(float $value): void {}
+    public function setLodMaxClamp(float $value): void {}
+    public function setMaxAnisotropy(int $value): void {}
 }
 
 class SamplerState {}
@@ -196,6 +218,10 @@ const SamplerAddressModeClampToEdge   = 0;
 const SamplerAddressModeRepeat        = 2;
 const SamplerAddressModeMirrorRepeat  = 3;
 const SamplerAddressModeClampToZero   = 4;
+const SamplerMipFilterNotMipmapped    = 0;
+const SamplerMipFilterNearest         = 1;
+const SamplerMipFilterLinear          = 2;
+const PixelFormatRGBA16Float          = 115;
 
 const CullModeNone            = 0;
 const CullModeFront           = 1;

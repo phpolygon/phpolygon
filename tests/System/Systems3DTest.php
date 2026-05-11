@@ -15,6 +15,9 @@ use PHPolygon\Math\Vec3;
 use PHPolygon\Rendering\Command\DrawMesh;
 use PHPolygon\Rendering\Command\SetCamera;
 use PHPolygon\Rendering\Command\SetDirectionalLight;
+use PHPolygon\Rendering\Color;
+use PHPolygon\Rendering\Material;
+use PHPolygon\Rendering\MaterialRegistry;
 use PHPolygon\Rendering\NullRenderer3D;
 use PHPolygon\Rendering\RenderCommandList;
 use PHPolygon\System\Camera3DSystem;
@@ -108,6 +111,55 @@ class Systems3DTest extends TestCase
         $this->assertCount(1, $draws);
         $this->assertEquals('box', $draws[0]->meshId);
         $this->assertEquals('stone', $draws[0]->materialId);
+    }
+
+    public function testRenderer3DSystemSortsTransparentDrawsBackToFrontAfterOpaque(): void
+    {
+        MaterialRegistry::register('opaque_test', new Material(albedo: new Color(1, 0, 0), alpha: 1.0));
+        MaterialRegistry::register('glass_test',  new Material(albedo: new Color(0, 0, 1), alpha: 0.5));
+
+        $world = new World();
+        $renderer = new NullRenderer3D();
+        $commandList = new RenderCommandList();
+
+        // Camera at the origin so distance-from-camera = |position|.
+        $camera = $world->createEntity();
+        $camera->attach(new Camera3DComponent(active: true));
+        $camera->attach(new Transform3D(new Vec3(0, 0, 0)));
+
+        // Two opaque entities (any order).
+        $opaque1 = $world->createEntity();
+        $opaque1->attach(new MeshRenderer('m1', 'opaque_test'));
+        $opaque1->attach(new Transform3D(new Vec3(0, 0, 5)));
+        $opaque2 = $world->createEntity();
+        $opaque2->attach(new MeshRenderer('m2', 'opaque_test'));
+        $opaque2->attach(new Transform3D(new Vec3(0, 0, 50)));
+
+        // Three transparent entities at increasing distance (5, 25, 100).
+        $glassNear = $world->createEntity();
+        $glassNear->attach(new MeshRenderer('near',  'glass_test'));
+        $glassNear->attach(new Transform3D(new Vec3(0, 0, 5)));
+        $glassMid  = $world->createEntity();
+        $glassMid->attach(new MeshRenderer('mid',   'glass_test'));
+        $glassMid->attach(new Transform3D(new Vec3(0, 0, 25)));
+        $glassFar  = $world->createEntity();
+        $glassFar->attach(new MeshRenderer('far',   'glass_test'));
+        $glassFar->attach(new Transform3D(new Vec3(0, 0, 100)));
+
+        $world->addSystem(new Camera3DSystem($commandList, 1280, 720));
+        $world->addSystem(new Renderer3DSystem($renderer, $commandList));
+        $world->render();
+
+        $lastList = $renderer->getLastCommandList();
+        $this->assertNotNull($lastList);
+        $draws = $lastList->ofType(DrawMesh::class);
+
+        $meshIds = array_map(static fn(DrawMesh $d): string => $d->meshId, $draws);
+
+        // The opaque set comes first (order within is irrelevant), and the
+        // transparent set follows in back-to-front order: far -> mid -> near.
+        $this->assertSame(['m1', 'm2'], array_slice($meshIds, 0, 2));
+        $this->assertSame(['far', 'mid', 'near'], array_slice($meshIds, 2));
     }
 
     public function testRenderer3DSystemClearsCommandListAfterFlush(): void

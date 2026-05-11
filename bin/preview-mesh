@@ -1,0 +1,365 @@
+#!/usr/bin/env php
+<?php
+
+declare(strict_types=1);
+
+/**
+ * preview-mesh - render a MeshData to a PNG without GPU/window.
+ *
+ * Self-contained software rasteriser using ext-gd. Produces a 2x2 grid:
+ *   front | side
+ *    top  | iso
+ *
+ * Each view is auto-fit to the mesh's bounding box. Triangles are
+ * flat-shaded with a fixed light direction, sorted via painter's
+ * algorithm (mean depth). Optional wireframe overlay shows topology.
+ *
+ * Usage:
+ *   bin/preview-mesh <mesh.php> [options]
+ *
+ * The input PHP file must return a PHPolygon\Geometry\MeshData (e.g.
+ * via `return LatheMesh::generate(...)`).
+ *
+ * Options:
+ *   --out=<path>       Output PNG path (default: <input>.png)
+ *   --size=<int>       Pixel size of each view tile (default: 384)
+ *   --bg=<hex>         Background colour, e.g. f5f5f5 (default: 1a1a1a)
+ *   --wire             Overlay a wireframe outline on each triangle
+ *   --solid-only       Skip the wireframe overlay (default off)
+ *   --help, -h
+ *
+ * Exit codes: 0 ok, 1 usage, 2 file not found, 3 invalid return value.
+ */
+
+require_once __DIR__ . '/../vendor/autoload.php';
+
+use PHPolygon\Geometry\MeshData;
+
+if (!extension_loaded('gd')) {
+    fwrite(STDERR, "Error: ext-gd is required for bin/preview-mesh\n");
+    exit(5);
+}
+
+[$input, $opts] = parseArgv($argv);
+if ($input === '' || ($opts['help'] ?? false) || ($opts['h'] ?? false)) {
+    usage(($input === '') ? 1 : 0);
+}
+if (!is_file($input)) {
+    fwrite(STDERR, "Error: file not found: {$input}\n");
+    exit(2);
+}
+
+$out      = $opts['out']   ?? preg_replace('/\.php$/', '.png', $input) ?? "{$input}.png";
+$tileSize = max(64, (int)($opts['size'] ?? '384'));
+$bgHex    = (string)($opts['bg'] ?? '1a1a1a');
+$bg       = parseHex($bgHex);
+$wire     = !($opts['solid-only'] ?? false);
+
+echo "-> Loading: {$input}\n";
+$mesh = require $input;
+if (!$mesh instanceof MeshData) {
+    fwrite(STDERR, "Error: {$input} must return a PHPolygon\\Geometry\\MeshData instance\n");
+    exit(3);
+}
+echo "   {$mesh->vertexCount()} vertices, {$mesh->triangleCount()} triangles\n";
+
+// Bounding box / centre.
+[$min, $max] = boundingBox($mesh);
+$center = [
+    ($min[0] + $max[0]) / 2,
+    ($min[1] + $max[1]) / 2,
+    ($min[2] + $max[2]) / 2,
+];
+$extent = max(
+    $max[0] - $min[0],
+    $max[1] - $min[1],
+    $max[2] - $min[2],
+    1e-6,
+);
+
+$views = [
+    ['label' => 'front (xy)', 'mat' => mat3Identity()],                                   // look down -Z
+    ['label' => 'side  (zy)', 'mat' => mat3RotY(deg2rad(-90.0))],                         // look down -X
+    ['label' => 'top   (xz)', 'mat' => mat3RotX(deg2rad(-90.0))],                         // look down -Y
+    ['label' => 'iso',         'mat' => mat3Mul(mat3RotY(deg2rad(-30.0)), mat3RotX(deg2rad(-25.0)))],
+];
+
+$canvasW = $tileSize * 2;
+$canvasH = $tileSize * 2;
+$canvas  = imagecreatetruecolor($canvasW, $canvasH);
+imagealphablending($canvas, true);
+imagesavealpha($canvas, true);
+$bgColor = imagecolorallocate($canvas, $bg[0], $bg[1], $bg[2]);
+imagefilledrectangle($canvas, 0, 0, $canvasW, $canvasH, $bgColor);
+
+foreach ($views as $i => $view) {
+    $tx = ($i % 2) * $tileSize;
+    $ty = (intdiv($i, 2)) * $tileSize;
+    renderView($canvas, $tx, $ty, $tileSize, $mesh, $view['mat'], $center, $extent, $bg, $wire);
+    drawLabel($canvas, $tx, $ty, $view['label']);
+}
+
+// Subtle border between tiles.
+$borderColor = imagecolorallocatealpha($canvas, 255, 255, 255, 100);
+imageline($canvas, $tileSize, 0,        $tileSize, $canvasH, $borderColor);
+imageline($canvas, 0,        $tileSize, $canvasW,  $tileSize, $borderColor);
+
+if (!@imagepng($canvas, $out)) {
+    fwrite(STDERR, "Error: failed to write PNG to {$out}\n");
+    exit(4);
+}
+imagedestroy($canvas);
+echo "OK Wrote {$out}\n";
+
+// ───────────────────────────────────────────────────────────────────────────
+// Rendering
+// ───────────────────────────────────────────────────────────────────────────
+
+/**
+ * @param array{0: float, 1: float, 2: float} $center
+ * @param array{0: int,   1: int,   2: int}   $bg
+ * @param array<int, array<int, float>>       $mat
+ */
+function renderView(
+    \GdImage $canvas, int $tx, int $ty, int $size,
+    MeshData $mesh, array $mat, array $center, float $extent, array $bg, bool $wire,
+): void {
+    // 1. Transform every vertex into view-space (camera looks down -Z).
+    $vCount = $mesh->vertexCount();
+    $viewVerts  = [];
+    $viewNorms  = [];
+    $padding    = 0.92; // leave 4% margin around the bounding box
+    $pixelScale = ($size / $extent) * $padding;
+
+    for ($i = 0; $i < $vCount; $i++) {
+        $vx = $mesh->vertices[$i * 3]     - $center[0];
+        $vy = $mesh->vertices[$i * 3 + 1] - $center[1];
+        $vz = $mesh->vertices[$i * 3 + 2] - $center[2];
+
+        $rx = $mat[0][0] * $vx + $mat[0][1] * $vy + $mat[0][2] * $vz;
+        $ry = $mat[1][0] * $vx + $mat[1][1] * $vy + $mat[1][2] * $vz;
+        $rz = $mat[2][0] * $vx + $mat[2][1] * $vy + $mat[2][2] * $vz;
+        $viewVerts[$i] = [$rx, $ry, $rz];
+
+        $nx = $mesh->normals[$i * 3];
+        $ny = $mesh->normals[$i * 3 + 1];
+        $nz = $mesh->normals[$i * 3 + 2];
+        $rnx = $mat[0][0] * $nx + $mat[0][1] * $ny + $mat[0][2] * $nz;
+        $rny = $mat[1][0] * $nx + $mat[1][1] * $ny + $mat[1][2] * $nz;
+        $rnz = $mat[2][0] * $nx + $mat[2][1] * $ny + $mat[2][2] * $nz;
+        $viewNorms[$i] = [$rnx, $rny, $rnz];
+    }
+
+    // 2. Build screen-space triangles with mean depth.
+    $tris    = [];
+    $triCount = $mesh->triangleCount();
+    for ($t = 0; $t < $triCount; $t++) {
+        $i0 = $mesh->indices[$t * 3];
+        $i1 = $mesh->indices[$t * 3 + 1];
+        $i2 = $mesh->indices[$t * 3 + 2];
+
+        [$v0x, $v0y, $v0z] = $viewVerts[$i0];
+        [$v1x, $v1y, $v1z] = $viewVerts[$i1];
+        [$v2x, $v2y, $v2z] = $viewVerts[$i2];
+
+        // Backface cull using view-space face normal (camera -> -Z).
+        $ex1 = $v1x - $v0x; $ey1 = $v1y - $v0y; $ez1 = $v1z - $v0z;
+        $ex2 = $v2x - $v0x; $ey2 = $v2y - $v0y; $ez2 = $v2z - $v0z;
+        $fnx = $ey1 * $ez2 - $ez1 * $ey2;
+        $fny = $ez1 * $ex2 - $ex1 * $ez2;
+        $fnz = $ex1 * $ey2 - $ey1 * $ex2;
+        if ($fnz <= 0.0) {
+            continue;
+        }
+
+        // Lighting: average vertex normal dot light direction.
+        $anx = ($viewNorms[$i0][0] + $viewNorms[$i1][0] + $viewNorms[$i2][0]) / 3.0;
+        $any = ($viewNorms[$i0][1] + $viewNorms[$i1][1] + $viewNorms[$i2][1]) / 3.0;
+        $anz = ($viewNorms[$i0][2] + $viewNorms[$i1][2] + $viewNorms[$i2][2]) / 3.0;
+        $alen = sqrt($anx * $anx + $any * $any + $anz * $anz);
+        if ($alen < 1e-9) {
+            $anx = 0.0; $any = 0.0; $anz = 1.0;
+        } else {
+            $anx /= $alen; $any /= $alen; $anz /= $alen;
+        }
+        // Light from upper-front-left in view space.
+        $lx = -0.4; $ly = 0.6; $lz = 0.7;
+        $llen = sqrt($lx * $lx + $ly * $ly + $lz * $lz);
+        $lx /= $llen; $ly /= $llen; $lz /= $llen;
+        $ndotl = max(0.0, $anx * $lx + $any * $ly + $anz * $lz);
+        $shade = 0.25 + 0.75 * $ndotl; // ambient 25% + diffuse 75%
+
+        // Project to screen (orthographic): center on tile.
+        $cx = $tx + $size / 2;
+        $cy = $ty + $size / 2;
+        $sx0 = (int)round($cx + $v0x * $pixelScale);
+        $sy0 = (int)round($cy - $v0y * $pixelScale);
+        $sx1 = (int)round($cx + $v1x * $pixelScale);
+        $sy1 = (int)round($cy - $v1y * $pixelScale);
+        $sx2 = (int)round($cx + $v2x * $pixelScale);
+        $sy2 = (int)round($cy - $v2y * $pixelScale);
+
+        $tris[] = [
+            'depth' => ($v0z + $v1z + $v2z) / 3.0,
+            'pts'   => [$sx0, $sy0, $sx1, $sy1, $sx2, $sy2],
+            'shade' => $shade,
+        ];
+    }
+
+    // 3. Painter's algorithm: far first.
+    usort($tris, static fn(array $a, array $b): int => $a['depth'] <=> $b['depth']);
+
+    $wireColor = imagecolorallocatealpha($canvas, 0, 0, 0, 90);
+    $baseR = 0.85; $baseG = 0.55; $baseB = 0.35; // warm clay tone
+    foreach ($tris as $tri) {
+        $r = (int)round(255 * min(1.0, $baseR * $tri['shade']));
+        $g = (int)round(255 * min(1.0, $baseG * $tri['shade']));
+        $b = (int)round(255 * min(1.0, $baseB * $tri['shade']));
+        $color = imagecolorallocate($canvas, $r, $g, $b);
+        imagefilledpolygon($canvas, $tri['pts'], $color);
+        if ($wire) {
+            imagepolygon($canvas, $tri['pts'], $wireColor);
+        }
+    }
+}
+
+function drawLabel(\GdImage $canvas, int $tx, int $ty, string $label): void
+{
+    $color = imagecolorallocatealpha($canvas, 255, 255, 255, 40);
+    imagestring($canvas, 3, $tx + 6, $ty + 4, $label, $color);
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// Geometry helpers
+// ───────────────────────────────────────────────────────────────────────────
+
+/**
+ * @return array{0: array{0: float, 1: float, 2: float}, 1: array{0: float, 1: float, 2: float}}
+ */
+function boundingBox(MeshData $mesh): array
+{
+    $count = $mesh->vertexCount();
+    if ($count === 0) {
+        return [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0]];
+    }
+    $min = [$mesh->vertices[0], $mesh->vertices[1], $mesh->vertices[2]];
+    $max = $min;
+    for ($i = 1; $i < $count; $i++) {
+        for ($j = 0; $j < 3; $j++) {
+            $v = $mesh->vertices[$i * 3 + $j];
+            if ($v < $min[$j]) $min[$j] = $v;
+            if ($v > $max[$j]) $max[$j] = $v;
+        }
+    }
+    return [$min, $max];
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// Tiny 3x3 matrix helpers
+// ───────────────────────────────────────────────────────────────────────────
+
+/** @return array<int, array<int, float>> */
+function mat3Identity(): array
+{
+    return [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+}
+
+function mat3RotX(float $a): array
+{
+    $c = cos($a); $s = sin($a);
+    return [[1.0, 0.0, 0.0], [0.0, $c, -$s], [0.0, $s, $c]];
+}
+
+function mat3RotY(float $a): array
+{
+    $c = cos($a); $s = sin($a);
+    return [[$c, 0.0, $s], [0.0, 1.0, 0.0], [-$s, 0.0, $c]];
+}
+
+/**
+ * @param array<int, array<int, float>> $a
+ * @param array<int, array<int, float>> $b
+ * @return array<int, array<int, float>>
+ */
+function mat3Mul(array $a, array $b): array
+{
+    $out = [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]];
+    for ($i = 0; $i < 3; $i++) {
+        for ($j = 0; $j < 3; $j++) {
+            $out[$i][$j] = $a[$i][0] * $b[0][$j] + $a[$i][1] * $b[1][$j] + $a[$i][2] * $b[2][$j];
+        }
+    }
+    return $out;
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// Argv / misc
+// ───────────────────────────────────────────────────────────────────────────
+
+/**
+ * @param list<string> $argv
+ * @return array{0: string, 1: array<string, string|bool>}
+ */
+function parseArgv(array $argv): array
+{
+    array_shift($argv);
+    $positional = [];
+    $opts = [];
+    foreach ($argv as $arg) {
+        if ($arg === '--help' || $arg === '-h') {
+            $opts['help'] = true;
+            continue;
+        }
+        if (str_starts_with($arg, '--')) {
+            $eq = strpos($arg, '=');
+            if ($eq === false) {
+                $opts[substr($arg, 2)] = true;
+            } else {
+                $opts[substr($arg, 2, $eq - 2)] = substr($arg, $eq + 1);
+            }
+        } else {
+            $positional[] = $arg;
+        }
+    }
+    return [$positional[0] ?? '', $opts];
+}
+
+/** @return array{0: int, 1: int, 2: int} */
+function parseHex(string $hex): array
+{
+    $hex = ltrim($hex, '#');
+    if (strlen($hex) === 3) {
+        $hex = $hex[0] . $hex[0] . $hex[1] . $hex[1] . $hex[2] . $hex[2];
+    }
+    if (strlen($hex) !== 6 || !ctype_xdigit($hex)) {
+        return [26, 26, 26];
+    }
+    return [
+        hexdec(substr($hex, 0, 2)),
+        hexdec(substr($hex, 2, 2)),
+        hexdec(substr($hex, 4, 2)),
+    ];
+}
+
+function usage(int $exit): never
+{
+    $self = basename(__FILE__);
+    fwrite(STDERR, <<<HELP
+        Usage: {$self} <mesh.php> [options]
+
+        The PHP file must `return` a PHPolygon\\Geometry\\MeshData.
+
+        Options:
+          --out=<path>     Output PNG (default: <input>.png)
+          --size=<int>     Pixel size of each view tile (default: 384)
+          --bg=<hex>       Background colour (default: 1a1a1a)
+          --solid-only     Skip wireframe overlay
+          --help, -h       This help
+
+        Example:
+          {$self} examples/meshes/mug.php
+          {$self} examples/meshes/mug.php --size=512 --out=mug.png
+
+        HELP);
+    exit($exit);
+}

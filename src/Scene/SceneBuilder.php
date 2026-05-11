@@ -6,6 +6,7 @@ namespace PHPolygon\Scene;
 
 use PHPolygon\Component\NameTag;
 use PHPolygon\Component\Transform2D;
+use PHPolygon\Component\Transform3D;
 use PHPolygon\ECS\ComponentInterface;
 use PHPolygon\ECS\Entity;
 use PHPolygon\ECS\World;
@@ -32,6 +33,20 @@ class SceneBuilder
         $decl = $prefab->build($this);
         $decl->setPrefabSource($prefabClass);
         return $decl;
+    }
+
+    /**
+     * Bind a Prefab instance to this builder so its modifier chain can finish
+     * with `->place(...)`. Returns the same instance for fluent chaining.
+     *
+     * @template T of Prefab
+     * @param T $prefab
+     * @return T
+     */
+    public function spawn(Prefab $prefab): Prefab
+    {
+        $prefab->bindBuilder($this);
+        return $prefab;
     }
 
     /** @return list<EntityDeclaration> */
@@ -79,17 +94,24 @@ class SceneBuilder
             $entity->attach(new NameTag($decl->getName()));
         }
 
-        // Set parent on Transform2D if this is a child
+        // Wire up parent/child links on whichever transform component exists.
         if ($parentId !== null) {
-            $transform = $world->tryGetComponent($id, Transform2D::class);
-            if ($transform instanceof Transform2D) {
-                $transform->parentEntityId = $parentId;
+            $transform2D = $world->tryGetComponent($id, Transform2D::class);
+            if ($transform2D instanceof Transform2D) {
+                $transform2D->parentEntityId = $parentId;
+            }
+            $parentTransform2D = $world->tryGetComponent($parentId, Transform2D::class);
+            if ($parentTransform2D instanceof Transform2D) {
+                $parentTransform2D->childEntityIds[] = $id;
             }
 
-            // Add to parent's child list
-            $parentTransform = $world->tryGetComponent($parentId, Transform2D::class);
-            if ($parentTransform instanceof Transform2D) {
-                $parentTransform->childEntityIds[] = $id;
+            $transform3D = $world->tryGetComponent($id, Transform3D::class);
+            if ($transform3D instanceof Transform3D) {
+                $transform3D->parentEntityId = $parentId;
+            }
+            $parentTransform3D = $world->tryGetComponent($parentId, Transform3D::class);
+            if ($parentTransform3D instanceof Transform3D) {
+                $parentTransform3D->childEntityIds[] = $id;
             }
         }
 
