@@ -536,17 +536,24 @@ function runDiff(string $a, string $b, string $scenario, float $threshold, float
     $worstRegression = 0.0;
     $worstRegressionMetric = '';
     $noiseFloorHits = [];
+    // Outlier-prone metrics (minMs/maxMs) are reported but not gated.
+    // A single GC pause across 300 frames will always inflate maxMs by
+    // 50%+ regardless of the code under test, so failing on max produces
+    // false positives even with the absolute-delta floor. p50/p95/p99/mean
+    // are the actual quality signals.
+    $gatedMetrics = ['p50Ms', 'p95Ms', 'p99Ms', 'meanMs'];
     foreach (['p50Ms', 'p95Ms', 'p99Ms', 'meanMs', 'minMs', 'maxMs'] as $key) {
         $av = (float) ($resultA['frame'][$key] ?? 0.0);
         $bv = (float) ($resultB['frame'][$key] ?? 0.0);
         $delta = $av > 0.0 ? (($bv - $av) / $av) * 100.0 : 0.0;
         $absDelta = $bv - $av;
-        $countsForGate = $absDelta >= $absFloorMs;
+        $isGated = in_array($key, $gatedMetrics, true);
+        $countsForGate = $isGated && $absDelta >= $absFloorMs;
         if ($countsForGate && $delta > $worstRegression) {
             $worstRegression = $delta;
             $worstRegressionMetric = $key;
         }
-        if ($delta > $threshold && !$countsForGate) {
+        if ($isGated && $delta > $threshold && !$countsForGate) {
             $noiseFloorHits[] = sprintf('%s (+%.1f%%, +%.3fms < %.2fms floor)', $key, $delta, $absDelta, $absFloorMs);
         }
         $sign = $delta >= 0.0 ? '+' : '';
@@ -556,7 +563,8 @@ function runDiff(string $a, string $b, string $scenario, float $threshold, float
             default => '',
         };
         $reset = $color !== '' ? "\033[0m" : '';
-        printf("  %-7s  %7.3fms -> %7.3fms  %s%s%.1f%%%s\n", $key, $av, $bv, $color, $sign, $delta, $reset);
+        $tag = $isGated ? '' : ' (info)';
+        printf("  %-7s  %7.3fms -> %7.3fms  %s%s%.1f%%%s%s\n", $key, $av, $bv, $color, $sign, $delta, $reset, $tag);
     }
 
     $aFps = $resultA['frame']['fps'] ?? 0.0;
