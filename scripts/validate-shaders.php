@@ -121,7 +121,7 @@ foreach (findFiles($shaderDir, 'glsl') as $path) {
         $errors[] = "{$rel}: missing or non-leading '#version' directive (first non-empty line was: " . substr((string)$firstNonEmpty, 0, 60) . ")";
     }
 
-    // Balanced braces / parens (after stripping comments + literal strings)
+    // Balanced braces / parens (after stripping comments)
     $stripped = stripComments($src);
     if (checkBalanced($stripped, '{', '}') !== 0) {
         $errors[] = "{$rel}: unbalanced curly braces { }";
