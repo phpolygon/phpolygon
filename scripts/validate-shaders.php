@@ -71,11 +71,16 @@ function checkBalanced(string $body, string $open, string $close): int
     return $depth;
 }
 
-function stripCommentsAndStrings(string $source): string
+/**
+ * Strip GLSL/MSL line and block comments. Both languages share C-style
+ * comment syntax. Note: we do NOT strip string literals because GLSL/MSL
+ * have no native string literal type (Metal's metal::string is rare and
+ * shader source is overwhelmingly literal-free); attempting it would risk
+ * mangling preprocessor directives.
+ */
+function stripComments(string $source): string
 {
-    // Strip line comments
     $source = preg_replace('!//[^\n]*!', '', $source) ?? $source;
-    // Strip block comments
     $source = preg_replace('!/\*.*?\*/!s', '', $source) ?? $source;
     return $source;
 }
@@ -92,12 +97,14 @@ foreach (findFiles($shaderDir, 'glsl') as $path) {
     }
     $checked['glsl']++;
 
-    // Heredoc terminator regression
-    if (preg_match('/^\s*GLSL;\s*$/m', $src)) {
-        $errors[] = "{$rel}: contains heredoc terminator 'GLSL;' - probable extraction bug";
+    // Heredoc terminator regression (catches '\n    GLSL;' style closers).
+    if (preg_match('/^\s*(GLSL|MSL|HLSL|METAL)\w*;\s*$/m', $src)) {
+        $errors[] = "{$rel}: contains heredoc terminator - probable extraction bug";
     }
-    if (str_contains($src, "<<<'GLSL'") || str_contains($src, '<<<"GLSL"')) {
-        $errors[] = "{$rel}: contains heredoc opener '<<<GLSL' - probable extraction bug";
+    // Heredoc opener regression. Matches `<<<GLSL`, `<<< 'GLSL'`, `<<<"GLSL"`,
+    // and labelled variants like `<<<'GLSL_VERT'`.
+    if (preg_match("/<<<\\s*['\"]?(GLSL|MSL|HLSL|METAL)\\w*/i", $src)) {
+        $errors[] = "{$rel}: contains heredoc opener - probable extraction bug";
     }
 
     // #version line
@@ -115,7 +122,7 @@ foreach (findFiles($shaderDir, 'glsl') as $path) {
     }
 
     // Balanced braces / parens (after stripping comments + literal strings)
-    $stripped = stripCommentsAndStrings($src);
+    $stripped = stripComments($src);
     if (checkBalanced($stripped, '{', '}') !== 0) {
         $errors[] = "{$rel}: unbalanced curly braces { }";
     }
@@ -139,7 +146,7 @@ foreach (findFiles($shaderDir, 'metal') as $path) {
     if (!str_contains($src, '<metal_stdlib>')) {
         $errors[] = "{$rel}: missing #include <metal_stdlib>";
     }
-    $stripped = stripCommentsAndStrings($src);
+    $stripped = stripComments($src);
     if (checkBalanced($stripped, '{', '}') !== 0) {
         $errors[] = "{$rel}: unbalanced curly braces { }";
     }
@@ -149,7 +156,9 @@ foreach (findFiles($shaderDir, 'metal') as $path) {
 // 3. Guard: no shader heredocs anywhere in src/Rendering
 // ---------------------------------------------------------------
 $rendererFiles = findFiles($renderDir, 'php');
-$heredocMarkers = ["<<<'GLSL'", '<<<"GLSL"', "<<<'MSL'", "<<<'METAL'", "<<<'HLSL'"];
+// Catches all heredoc opener variants: <<<GLSL, <<<'GLSL', <<< 'GLSL',
+// <<<"GLSL", and labelled variants like <<<'GLSL_VERT' / <<<METAL_SHADER.
+$heredocPattern = "/<<<\\s*['\"]?(GLSL|MSL|HLSL|METAL)\\w*/i";
 foreach ($rendererFiles as $path) {
     $rel = substr($path, strlen($root) + 1);
     $src = file_get_contents($path);
@@ -157,10 +166,8 @@ foreach ($rendererFiles as $path) {
         $errors[] = "{$rel}: cannot read file";
         continue;
     }
-    foreach ($heredocMarkers as $marker) {
-        if (str_contains($src, $marker)) {
-            $errors[] = "{$rel}: contains embedded shader heredoc '{$marker}'. Move the shader to resources/shaders/source/ and load via file_get_contents().";
-        }
+    if (preg_match($heredocPattern, $src, $m)) {
+        $errors[] = "{$rel}: contains embedded shader heredoc '{$m[0]}'. Move the shader to resources/shaders/source/ and load via file_get_contents().";
     }
 }
 

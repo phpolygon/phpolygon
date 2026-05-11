@@ -89,10 +89,12 @@ final class VioFxaaPass
         $vertSrc = @file_get_contents(self::SHADER_DIR . 'fxaa.vert.glsl');
         $fragSrc = @file_get_contents(self::SHADER_DIR . 'fxaa.frag.glsl');
         if ($vertSrc === false || $fragSrc === false) {
-            $this->pipeline    = false;
-            $this->initialised = true;
-            fwrite(STDERR, "[VioFxaaPass] failed to read fxaa shader sources from " . self::SHADER_DIR . "\n");
-            return;
+            // Throw instead of silently no-opping. A missing shader file means
+            // a broken install or build manifest; users would otherwise see
+            // "AA enabled" in settings while getting unprocessed output.
+            throw new \RuntimeException(
+                'VioFxaaPass: failed to read fxaa shader sources from ' . self::SHADER_DIR
+            );
         }
 
         $shader = vio_shader($this->ctx, [

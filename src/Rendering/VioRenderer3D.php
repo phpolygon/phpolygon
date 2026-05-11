@@ -97,6 +97,9 @@ class VioRenderer3D implements Renderer3DInterface
     private const SHADOW_MAP_RESOLUTION = 2048;
     private const SHADOW_ORTHO_SIZE = 60.0;
 
+    /** Source directory for Vio shader programs. Loaded at init time via loadShader(). */
+    private const SHADER_DIR = __DIR__ . '/../../resources/shaders/source/vio/';
+
     // Skybox / cubemaps
     private ?VioMesh $skyboxMesh = null;
     /**
@@ -637,8 +640,6 @@ class VioRenderer3D implements Renderer3DInterface
     // ----------------------------------------------------------------
     // Shader management
     // ----------------------------------------------------------------
-
-    private const SHADER_DIR = __DIR__ . '/../../resources/shaders/source/vio/';
 
     private function initShaders(): void
     {
