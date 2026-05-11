@@ -4,16 +4,14 @@ declare(strict_types=1);
 
 namespace PHPolygon\Tests\Rendering;
 
-use PHPolygon\Rendering\VioRenderer3D;
 use PHPUnit\Framework\TestCase;
-use ReflectionClass;
 
 /**
  * Locks the procedural-cloth sway formula across the three shader sources
- * so the GLSL (OpenGL), MSL (Metal), and embedded Vio GLSL backends can't
- * silently drift apart. Each "magic constant" is verified to appear in
- * every shader source - the literals are deliberately not extracted into
- * a shared header because each backend lives in its own language.
+ * so the GLSL (OpenGL), MSL (Metal), and Vio GLSL backends can't silently
+ * drift apart. Each "magic constant" is verified to appear in every shader
+ * source - the literals are deliberately not extracted into a shared header
+ * because each backend lives in its own language.
  *
  * If you intentionally re-tune the cloth feel, update the constant here
  * AND the three shader sources in lock-step.
@@ -22,23 +20,17 @@ final class ClothShaderConsistencyTest extends TestCase
 {
     private const GLSL_PATH  = __DIR__ . '/../../resources/shaders/source/mesh3d.vert.glsl';
     private const METAL_PATH = __DIR__ . '/../../resources/shaders/source/mesh3d.metal';
+    private const VIO_PATH   = __DIR__ . '/../../resources/shaders/source/vio/mesh3d.vert.glsl';
 
     /**
      * @return array<string, string>
      */
     private function shaderSources(): array
     {
-        $glsl  = (string) file_get_contents(self::GLSL_PATH);
-        $metal = (string) file_get_contents(self::METAL_PATH);
-
-        $vio = (new ReflectionClass(VioRenderer3D::class))
-            ->getReflectionConstant('DEFAULT_VERT')?->getValue();
-        self::assertIsString($vio, 'VioRenderer3D::DEFAULT_VERT must exist as string constant');
-
         return [
-            'glsl'  => $glsl,
-            'metal' => $metal,
-            'vio'   => $vio,
+            'glsl'  => (string) file_get_contents(self::GLSL_PATH),
+            'metal' => (string) file_get_contents(self::METAL_PATH),
+            'vio'   => (string) file_get_contents(self::VIO_PATH),
         ];
     }
 

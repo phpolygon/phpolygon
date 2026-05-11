@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# PHPolygon pre-commit hook.
+#
+# Install once per clone:
+#   git config core.hooksPath .githooks
+# or run scripts/install-hooks.sh
+#
+# Runs in order:
+#   1. Shader validation (cheap; only if staged shader or renderer files changed)
+#   2. PHPStan
+#   3. PHPUnit (unit + integration; VRT excluded)
+
+set -euo pipefail
+
+ROOT="$(git rev-parse --show-toplevel)"
+cd "$ROOT"
+
+staged=$(git diff --cached --name-only --diff-filter=ACMR)
+
+shader_touched=false
+if echo "$staged" | grep -qE '^(resources/shaders/|src/Rendering/)' ; then
+    shader_touched=true
+fi
+
+if [ "$shader_touched" = true ]; then
+    echo "Shader validation..."
+    php scripts/validate-shaders.php
+    echo "Shader validation passed"
+    echo ""
+fi
+
+if [ -x vendor/bin/phpstan ]; then
+    echo "PHPStan..."
+    vendor/bin/phpstan analyse --no-progress --memory-limit=512M
+    echo "PHPStan passed"
+    echo ""
+fi
+
+if [ -x vendor/bin/phpunit ]; then
+    echo "PHPUnit..."
+    vendor/bin/phpunit --no-coverage --exclude-group font-vrt
+    echo "PHPUnit passed"
+fi
