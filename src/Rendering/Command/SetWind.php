@@ -9,7 +9,7 @@ use PHPolygon\Math\Vec3;
 /**
  * Per-frame global wind state. Drives:
  *   - procedural cloth sway (Material::$cloth = true)
- *   - water wave bias (when the embedded Vio water shader is active)
+ *   - water wave bias (when the Vio water shader is active)
  *   - any future wind-aware procedural animation
  *
  * Push once per frame from a wind-controlling system (typically the

@@ -83,6 +83,26 @@ jobs:
       - name: Run PHPUnit with GPU (exclude font VRT)
         run: xvfb-run --auto-servernum vendor/bin/phpunit --exclude-group font-vrt
 
+  shaders:
+    name: Shader validation
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: mbstring
+          coverage: none
+
+      - name: Install glslang (for advisory pass)
+        run: sudo apt-get update && sudo apt-get install -y glslang-tools
+
+      - name: Validate shaders
+        run: php scripts/validate-shaders.php
+
   static-analysis:
     name: PHPStan
     runs-on: ubuntu-latest

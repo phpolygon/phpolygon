@@ -472,8 +472,10 @@ uploads, no extra passes. All are documented in
 - **Do not** add `applySettings()` paths that bypass `GraphicsSettings::with()`
   - the immutable round-trip is what makes change events deterministic.
 - **Do not** add new procedural normal/surface patterns to one shader
-  copy only. mesh3d.frag.glsl, the embedded Vio shader in
-  `VioRenderer3D::DEFAULT_FRAG`, and `mesh3d.metal` must stay in sync.
+  copy only. The three parallel copies must stay in sync:
+  `resources/shaders/source/mesh3d.frag.glsl` (OpenGL),
+  `resources/shaders/source/vio/mesh3d.frag.glsl` (Vio - all backends),
+  and `resources/shaders/source/mesh3d.metal` (standalone Metal).
   Bump `NormalPattern::codeFor()` / `SurfacePattern::codeFor()` and
   patch all three shader copies in the same change.
 - **Do not** ship gamma-only output paths in mesh-shader exits. Every
