@@ -19,6 +19,9 @@ use PHPolygon\Rendering\Command\SetShader;
 use PHPolygon\Rendering\Command\SetSky;
 use PHPolygon\Rendering\Command\SetSkybox;
 use PHPolygon\Rendering\Command\SetWaveAnimation;
+use PHPolygon\Rendering\Command\SetWind;
+use PHPolygon\Rendering\PostProcess\VioFxaaPass;
+use PHPolygon\Rendering\Quality\AntiAliasing;
 use VioContext;
 use VioCubemap;
 use VioMesh;
@@ -103,24 +106,229 @@ class VioRenderer3D implements Renderer3DInterface
     private ?SetSky $pendingSky = null;
     private float $rainWetness = 0.0;
 
+    /** Current wind state, overwritten by SetWind dispatch. */
+    /** @var array{0:float,1:float,2:float} */
+    private array $windDirection = [0.0, 0.0, 1.0];
+    private float $windIntensity = 0.5;
+
+    /**
+     * @var array<string, array{min: array{0:float,1:float,2:float}, max: array{0:float,1:float,2:float}}>
+     *      Per-mesh local AABB cache. Computed on first upload via
+     *      meshAabb(); drives the cloth-sway anchor weighting.
+     */
+    private array $meshAabbCache = [];
+
     private ?VioTextureManager $textureManager = null;
+
+    /**
+     * Live graphics settings. applySettings() may be called at any time to
+     * hot-swap shadow tier, view-distance clamp, fog, cloud-shadows, anisotropy
+     * and the global shader override (the latter is propagated through
+     * ShaderManager + SetShader rather than directly here).
+     */
+    private GraphicsSettings $settings;
+
+    /**
+     * Phase 1.5 off-screen pipeline: render the 3D pass into a scaled vio
+     * render target and present via FXAA or a passthrough blit. Stays null
+     * for the fast path (renderScale == 1.0 AND antiAliasing == Off).
+     */
+    private ?VioOffscreenTarget $offscreenTarget = null;
+
+    /** Lazy FXAA post-process pass. Allocated when AntiAliasing == Fxaa. */
+    private ?VioFxaaPass $fxaaPass = null;
+
+    /**
+     * True when the current frame is being rendered into the offscreen target
+     * rather than directly into the backbuffer. Set by beginFrame(), read by
+     * endFrame() to know whether to run the present pass.
+     */
+    private bool $offscreenActive = false;
+
+    /** Backbuffer resolution captured at frame start (for blit destination). */
+    private int $backbufferWidth = 0;
+    private int $backbufferHeight = 0;
 
     public function __construct(
         private readonly VioContext $ctx,
         int $width = 1280,
         int $height = 720,
+        ?GraphicsSettings $settings = null,
     ) {
         $this->width = $width;
         $this->height = $height;
+        $this->settings = $settings ?? new GraphicsSettings();
         $this->initShaders();
         $this->initShadowMap();
         $this->initSkyboxMesh();
         $this->initPostProcess();
     }
 
+    public function applySettings(GraphicsSettings $settings): void
+    {
+        $previousShadow = $this->settings->shadowQuality;
+        $this->settings = $settings;
+
+        // Shadow-map tier change forces re-init on next frame.
+        if ($previousShadow !== $settings->shadowQuality) {
+            $this->shadowTarget = null;
+        }
+
+        // Bloom toggle is read live from $this->settings during render.
+        $this->enableHdr = $this->enableHdr && $settings->bloom;
+
+        // Phase 1.5: render-scale + AA pipeline.
+        //
+        // Render-scale and FXAA are delivered through a vio_render_target +
+        // screen-quad post-process pass (see beginFrame()/endFrame()).
+        //
+        // MSAA is probed at allocation time. vio's exact key is undocumented
+        // for samples > 1, so VioOffscreenTarget falls back to single-sample
+        // when the backend rejects the request - meaning render-scale and
+        // FXAA stay functional even on backends without MSAA support.
+        //
+        // The size update is applied immediately so the slider reflects on
+        // the next frame; if the backbuffer dimensions are not yet known,
+        // beginFrame() picks up the latest settings on its first invocation.
+        $this->resizeOffscreenIfNeeded();
+    }
+
+    public function getSettings(): GraphicsSettings
+    {
+        return $this->settings;
+    }
+
     public function setTextureManager(VioTextureManager $textureManager): void
     {
         $this->textureManager = $textureManager;
+    }
+
+    /**
+     * Decide whether the offscreen pipeline is needed and bind the target.
+     * Called from beginFrame() so the 3D pass renders into the offscreen
+     * render target. Returns silently when the fast path applies
+     * (renderScale == 1.0 AND AntiAliasing == Off), keeping behaviour
+     * identical to pre-Phase-1.5 frames at default settings.
+     */
+    private function beginOffscreenIfRequired(): void
+    {
+        if (!$this->offscreenIsActive()) {
+            $this->offscreenActive = false;
+            return;
+        }
+
+        $this->ensureOffscreenTarget();
+        if ($this->offscreenTarget === null || !$this->offscreenTarget->isAllocated()) {
+            $this->offscreenActive = false;
+            return;
+        }
+
+        if ($this->settings->antiAliasing === AntiAliasing::Fxaa && $this->fxaaPass === null) {
+            $this->fxaaPass = new VioFxaaPass($this->ctx);
+        }
+
+        $this->offscreenTarget->bindForDraw();
+        vio_viewport($this->ctx, 0, 0, $this->offscreenTarget->width(), $this->offscreenTarget->height());
+        $this->offscreenActive = true;
+    }
+
+    /**
+     * Recompute target size when applySettings() flips render scale or AA mode.
+     * No-op until the backbuffer dimensions are known (typically after the
+     * first beginFrame()).
+     */
+    private function resizeOffscreenIfNeeded(): void
+    {
+        if ($this->backbufferWidth <= 0 || $this->backbufferHeight <= 0) {
+            return;
+        }
+
+        if (!$this->offscreenIsActive()) {
+            $this->offscreenTarget?->release();
+            return;
+        }
+
+        $this->ensureOffscreenTarget();
+    }
+
+    private function ensureOffscreenTarget(): void
+    {
+        if ($this->backbufferWidth <= 0 || $this->backbufferHeight <= 0) {
+            return;
+        }
+
+        if ($this->offscreenTarget === null) {
+            $this->offscreenTarget = new VioOffscreenTarget($this->ctx);
+        }
+
+        $targetW = max(1, (int)round($this->backbufferWidth  * $this->settings->renderScale));
+        $targetH = max(1, (int)round($this->backbufferHeight * $this->settings->renderScale));
+        $samples = max(1, $this->settings->antiAliasing->sampleCount());
+
+        $this->offscreenTarget->resize($targetW, $targetH, $samples);
+    }
+
+    private function offscreenIsActive(): bool
+    {
+        // The HDR/Bloom path owns its own render target and post-process
+        // pipeline. When HDR is active we skip the Phase 1.5 offscreen
+        // pipeline entirely - the bloom passes already manage scaling and
+        // tonemapping. (HDR is currently disabled in production - see the
+        // D3D11 note in render() - so this branch is mostly defensive.)
+        if ($this->enableHdr) {
+            return false;
+        }
+
+        if ($this->settings->renderScale !== 1.0) {
+            return true;
+        }
+
+        return $this->settings->antiAliasing !== AntiAliasing::Off;
+    }
+
+    /**
+     * Present the offscreen target to the swapchain at backbuffer resolution.
+     *
+     * For AntiAliasing::Fxaa we run a fullscreen FXAA pass that samples the
+     * offscreen colour. For other AA modes (or AA::Off with renderScale != 1)
+     * we use a passthrough blit shader; the bilinear sampler handles the
+     * up/downscale implicitly when source and destination dimensions differ.
+     *
+     * Caller (endFrame()) only invokes this when offscreenActive is true.
+     */
+    private function presentOffscreenIfActive(): void
+    {
+        if (!$this->offscreenActive) {
+            return;
+        }
+
+        $target = $this->offscreenTarget;
+        $quad   = $this->screenQuad;
+        if ($target === null || $quad === null) {
+            $this->offscreenActive = false;
+            return;
+        }
+
+        $sceneTex = $target->texture();
+        if ($sceneTex === null) {
+            $this->offscreenActive = false;
+            return;
+        }
+
+        // Unbind the offscreen target so subsequent draws hit the swapchain.
+        $target->unbind();
+        vio_viewport($this->ctx, 0, 0, $this->backbufferWidth, $this->backbufferHeight);
+
+        if ($this->settings->antiAliasing === AntiAliasing::Fxaa && $this->fxaaPass !== null) {
+            $this->fxaaPass->apply($sceneTex, $target->width(), $target->height(), $quad);
+        } else {
+            $this->bindPostProcessPipeline('passthrough_blit');
+            vio_bind_texture($this->ctx, $sceneTex, 0);
+            vio_set_uniform($this->ctx, 'u_source', 0);
+            vio_draw($this->ctx, $quad);
+        }
+
+        $this->offscreenActive = false;
     }
 
     public function beginFrame(): void
@@ -131,12 +339,18 @@ class VioRenderer3D implements Renderer3DInterface
             $this->height = $size[1];
         }
 
+        $this->backbufferWidth  = $this->width;
+        $this->backbufferHeight = $this->height;
+
         $this->shaderOverride = null;
         $this->globalTime += 1.0 / 60.0;
+
+        $this->beginOffscreenIfRequired();
     }
 
     public function endFrame(): void
     {
+        $this->presentOffscreenIfActive();
         vio_draw_3d($this->ctx);
     }
 
@@ -200,9 +414,15 @@ class VioRenderer3D implements Renderer3DInterface
             } elseif ($cmd instanceof AddPointLight) {
                 $pointLights[] = $cmd;
             } elseif ($cmd instanceof SetFog) {
-                $fogColor = $cmd->color;
-                $fogNear = $cmd->near;
-                $fogFar = $cmd->far;
+                if ($this->settings->fog) {
+                    $fogColor = $cmd->color;
+                    $fogFar = min($cmd->far, $this->settings->viewDistance);
+                    $fogNear = min($cmd->near, max(0.0, $fogFar - 1.0));
+                } else {
+                    // Push fog out of range to neutralise it without altering the shader path.
+                    $fogNear = 99998.0;
+                    $fogFar = 99999.0;
+                }
             } elseif ($cmd instanceof SetSkybox) {
                 $this->pendingSkyboxId = $cmd->cubemapId;
             } elseif ($cmd instanceof SetSky) {
@@ -218,6 +438,11 @@ class VioRenderer3D implements Renderer3DInterface
                 $waveAmplitude = $cmd->amplitude;
                 $waveFrequency = $cmd->frequency;
                 $wavePhase = $cmd->phase;
+            } elseif ($cmd instanceof SetWind) {
+                $this->windDirection = [
+                    $cmd->direction->x, $cmd->direction->y, $cmd->direction->z,
+                ];
+                $this->windIntensity = $cmd->intensity;
             }
         }
 
@@ -253,13 +478,25 @@ class VioRenderer3D implements Renderer3DInterface
         if ($hdrTarget !== null) {
             vio_bind_render_target($this->ctx, $hdrTarget);
             vio_clear($this->ctx, 0, 0, 0, 1);
+            $sceneViewportW = $this->width;
+            $sceneViewportH = $this->height;
+        } elseif ($this->offscreenActive && $this->offscreenTarget !== null) {
+            // The shadow pass unbinds its own target; restore the Phase 1.5
+            // offscreen target for the main scene draws.
+            $this->offscreenTarget->bindForDraw();
+            $sceneViewportW = $this->offscreenTarget->width();
+            $sceneViewportH = $this->offscreenTarget->height();
+        } else {
+            $sceneViewportW = $this->width;
+            $sceneViewportH = $this->height;
         }
 
-        vio_viewport($this->ctx, 0, 0, $this->width, $this->height);
+        vio_viewport($this->ctx, 0, 0, $sceneViewportW, $sceneViewportH);
 
         static $vpDbg = false;
         if (!$vpDbg && getenv('VIO_DEBUG') === '1') {
-            fprintf(STDERR, "[VioRenderer3D] viewport: %dx%d\n", $this->width, $this->height);
+            fprintf(STDERR, "[VioRenderer3D] viewport: %dx%d (offscreen=%s)\n",
+                $sceneViewportW, $sceneViewportH, $this->offscreenActive ? 'yes' : 'no');
             $vpDbg = true;
         }
 
@@ -437,6 +674,7 @@ class VioRenderer3D implements Renderer3DInterface
         $this->compileShader('bloom_extract', self::POSTPROCESS_VERT, self::BLOOM_EXTRACT_FRAG);
         $this->compileShader('bloom_blur', self::POSTPROCESS_VERT, self::BLOOM_BLUR_FRAG);
         $this->compileShader('tonemap', self::POSTPROCESS_VERT, self::TONEMAP_FRAG);
+        $this->compileShader('passthrough_blit', self::POSTPROCESS_VERT, self::PASSTHROUGH_BLIT_FRAG);
 
     }
 
@@ -516,9 +754,17 @@ class VioRenderer3D implements Renderer3DInterface
 
     private function initShadowMap(): void
     {
+        if ($this->settings->shadowQuality === \PHPolygon\Rendering\Quality\ShadowQuality::Off) {
+            $this->shadowTarget = null;
+            return;
+        }
+        $resolution = $this->settings->shadowQuality->resolution();
+        if ($resolution <= 0) {
+            $resolution = self::SHADOW_MAP_RESOLUTION;
+        }
         $target = vio_render_target($this->ctx, [
-            'width' => self::SHADOW_MAP_RESOLUTION,
-            'height' => self::SHADOW_MAP_RESOLUTION,
+            'width' => $resolution,
+            'height' => $resolution,
             'depth_only' => true,
         ]);
 
@@ -535,6 +781,12 @@ class VioRenderer3D implements Renderer3DInterface
      */
     private function renderShadowPass(RenderCommandList $commandList, array $dirLights): bool
     {
+        if ($this->settings->shadowQuality === \PHPolygon\Rendering\Quality\ShadowQuality::Off) {
+            return false;
+        }
+        if ($this->shadowTarget === null) {
+            $this->initShadowMap();
+        }
         if ($this->shadowTarget === null || empty($dirLights)) {
             return false;
         }
@@ -557,8 +809,12 @@ class VioRenderer3D implements Renderer3DInterface
         $lightSpaceMatrix = $this->computeLightSpaceMatrix($lightDir);
 
         // Bind shadow render target
+        $shadowRes = $this->settings->shadowQuality->resolution();
+        if ($shadowRes <= 0) {
+            $shadowRes = self::SHADOW_MAP_RESOLUTION;
+        }
         vio_bind_render_target($this->ctx, $this->shadowTarget);
-        vio_viewport($this->ctx, 0, 0, self::SHADOW_MAP_RESOLUTION, self::SHADOW_MAP_RESOLUTION);
+        vio_viewport($this->ctx, 0, 0, $shadowRes, $shadowRes);
         vio_clear($this->ctx, 1.0, 1.0, 1.0, 1.0);
 
         // Use shadow pipeline
@@ -1026,6 +1282,7 @@ class VioRenderer3D implements Renderer3DInterface
         vio_set_uniform($this->ctx, 'u_normal_matrix', $nm);
 
         $this->applyMaterial($material, $materialId);
+        $this->bindMeshAabb($meshId);
 
         vio_draw($this->ctx, $mesh);
     }
@@ -1045,6 +1302,7 @@ class VioRenderer3D implements Renderer3DInterface
         }
 
         $this->applyMaterial($material, $materialId);
+        $this->bindMeshAabb($meshId);
         vio_set_uniform($this->ctx, 'u_use_instancing', 1);
 
         [$flatMatrices, $instanceCount] = $this->resolveInstanceData($meshId, $material, $matrices, $isStatic);
@@ -1086,6 +1344,54 @@ class VioRenderer3D implements Renderer3DInterface
         return [$packed, $count];
     }
 
+    /**
+     * Push the AABB of the mesh that the next draw will use. Drives
+     * the cloth-sway anchor weighting in mesh3d.vert.glsl. Cached
+     * once per mesh id; called by every drawMeshCommand /
+     * drawMeshInstancedCommand entry.
+     */
+    private function bindMeshAabb(string $meshId): void
+    {
+        $aabb = $this->meshAabb($meshId);
+        vio_set_uniform($this->ctx, 'u_mesh_local_aabb_min', $aabb['min']);
+        vio_set_uniform($this->ctx, 'u_mesh_local_aabb_max', $aabb['max']);
+    }
+
+    /**
+     * @return array{min: array{0:float,1:float,2:float}, max: array{0:float,1:float,2:float}}
+     */
+    private function meshAabb(string $meshId): array
+    {
+        if (isset($this->meshAabbCache[$meshId])) {
+            return $this->meshAabbCache[$meshId];
+        }
+        $mesh = MeshRegistry::get($meshId);
+        if ($mesh === null) {
+            $aabb = ['min' => [0.0, 0.0, 0.0], 'max' => [0.0, 0.0, 0.0]];
+            $this->meshAabbCache[$meshId] = $aabb;
+            return $aabb;
+        }
+        $minX = INF; $minY = INF; $minZ = INF;
+        $maxX = -INF; $maxY = -INF; $maxZ = -INF;
+        $verts = $mesh->vertices;
+        $count = count($verts);
+        for ($i = 0; $i < $count; $i += 3) {
+            $x = $verts[$i];     $y = $verts[$i + 1]; $z = $verts[$i + 2];
+            if ($x < $minX) $minX = $x;
+            if ($y < $minY) $minY = $y;
+            if ($z < $minZ) $minZ = $z;
+            if ($x > $maxX) $maxX = $x;
+            if ($y > $maxY) $maxY = $y;
+            if ($z > $maxZ) $maxZ = $z;
+        }
+        $aabb = [
+            'min' => [$minX === INF ? 0.0 : $minX, $minY === INF ? 0.0 : $minY, $minZ === INF ? 0.0 : $minZ],
+            'max' => [$maxX === -INF ? 0.0 : $maxX, $maxY === -INF ? 0.0 : $maxY, $maxZ === -INF ? 0.0 : $maxZ],
+        ];
+        $this->meshAabbCache[$meshId] = $aabb;
+        return $aabb;
+    }
+
     private function applyMaterial(Material $material, string $materialId = ''): void
     {
         vio_set_uniform($this->ctx, 'u_albedo', [$material->albedo->r, $material->albedo->g, $material->albedo->b]);
@@ -1093,6 +1399,13 @@ class VioRenderer3D implements Renderer3DInterface
         vio_set_uniform($this->ctx, 'u_roughness', $material->roughness);
         vio_set_uniform($this->ctx, 'u_metallic', $material->metallic);
         vio_set_uniform($this->ctx, 'u_alpha', $material->alpha);
+
+        // Cloth (mirrors OpenGL backend - same uniform names).
+        vio_set_uniform($this->ctx, 'u_cloth', $material->cloth ? 1 : 0);
+        vio_set_uniform($this->ctx, 'u_cloth_strength', $material->clothStrength);
+        vio_set_uniform($this->ctx, 'u_cloth_frequency', $material->clothFrequency);
+        vio_set_uniform($this->ctx, 'u_cloth_phase', $material->clothPhase);
+        vio_set_uniform($this->ctx, 'u_cloth_anchor_top', $material->clothAnchorTop ? 1 : 0);
 
         // Procedural material mode
         $procMode = self::$procModeCache[$materialId] ?? $this->resolveProcMode($materialId);
@@ -1253,6 +1566,17 @@ class VioRenderer3D implements Renderer3DInterface
         vio_set_uniform($this->ctx, 'u_wave_amplitude', $state['waveAmplitude']);
         vio_set_uniform($this->ctx, 'u_wave_frequency', $state['waveFrequency']);
         vio_set_uniform($this->ctx, 'u_wave_phase', $state['wavePhase']);
+
+        // Cloth + wind defaults. SetWind during command dispatch
+        // overrides; cloth=0 keeps the per-vertex sway off until a
+        // Material with cloth=true binds via applyMaterial.
+        vio_set_uniform($this->ctx, 'u_cloth', 0);
+        vio_set_uniform($this->ctx, 'u_wind_direction', [
+            $this->windDirection[0], $this->windDirection[1], $this->windDirection[2],
+        ]);
+        vio_set_uniform($this->ctx, 'u_wind_intensity', $this->windIntensity);
+        vio_set_uniform($this->ctx, 'u_mesh_local_aabb_min', [0.0, 0.0, 0.0]);
+        vio_set_uniform($this->ctx, 'u_mesh_local_aabb_max', [0.0, 0.0, 0.0]);
     }
 
     private function extractCameraPosition(Mat4 $viewMatrix): Vec3
@@ -1319,6 +1643,18 @@ uniform float u_wave_amplitude;
 uniform float u_wave_frequency;
 uniform float u_wave_phase;
 
+// Procedural cloth (mirrors mesh3d.vert.glsl). See Material::cloth()
+// and Command\SetWind for the engine-side surface.
+uniform int   u_cloth;
+uniform float u_cloth_strength;
+uniform float u_cloth_frequency;
+uniform float u_cloth_phase;
+uniform int   u_cloth_anchor_top;
+uniform vec3  u_wind_direction;
+uniform float u_wind_intensity;
+uniform vec3  u_mesh_local_aabb_min;
+uniform vec3  u_mesh_local_aabb_max;
+
 uniform mat4 u_light_space_matrix;
 
 out vec3 v_normal;
@@ -1349,6 +1685,20 @@ void main() {
         wave += sin(worldPosRaw.x * f * 0.5 + worldPosRaw.z * f * 0.3 + t * 1.4) * a * 0.08;
         wave += sin(worldPosRaw.x * f * 0.7 - worldPosRaw.z * f * 0.6 + t * 1.8 + 2.7) * a * 0.04;
         pos.y += wave;
+    }
+
+    // Procedural cloth sway (mirrors mesh3d.vert.glsl)
+    if (u_cloth == 1) {
+        float aabbHeight = max(u_mesh_local_aabb_max.y - u_mesh_local_aabb_min.y, 1e-4);
+        float yNorm = clamp((pos.y - u_mesh_local_aabb_min.y) / aabbHeight, 0.0, 1.0);
+        float anchorWeight = u_cloth_anchor_top == 1 ? yNorm : (1.0 - yNorm);
+        float swayMask = 1.0 - anchorWeight;
+        float ct = u_time * u_cloth_frequency + u_cloth_phase;
+        float cwave = sin(ct + pos.x * 2.0) * 0.7 + cos(ct * 1.3 + pos.z * 1.5) * 0.3;
+        vec3 windDir = length(u_wind_direction) > 1e-4 ? normalize(u_wind_direction) : vec3(0.0, 0.0, 1.0);
+        vec3 sway = windDir * (cwave * u_cloth_strength * u_wind_intensity * swayMask);
+        sway.y *= 0.15;
+        pos += sway;
     }
 
     vec4 worldPos = model * vec4(pos, 1.0);
@@ -2465,6 +2815,21 @@ void main() {
         result += texture(u_source, v_uv - off).rgb * weights[i];
     }
     frag_color = vec4(result, 1.0);
+}
+GLSL;
+
+    /**
+     * Passthrough blit used by the Phase 1.5 offscreen pipeline when AA is off.
+     * Samples the offscreen colour image at the swapchain UV, letting the
+     * sampler's bilinear filter handle render-scale up/downscaling.
+     */
+    private const PASSTHROUGH_BLIT_FRAG = <<<'GLSL'
+#version 410 core
+in vec2 v_uv;
+uniform sampler2D u_source;
+out vec4 frag_color;
+void main() {
+    frag_color = vec4(texture(u_source, v_uv).rgb, 1.0);
 }
 GLSL;
 }

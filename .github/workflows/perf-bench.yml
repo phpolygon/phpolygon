@@ -82,7 +82,19 @@ jobs:
           cd pr
           for s in empty-scene boxes-1000 boxes-1000-instanced mixed-scene mesh-gen-stress physics-stack; do
             echo "==> $s"
-            if ! php bin/phpolygon perf:report "$s" "$BASE_SHA" "$PR_SHA"; then
+            # CI runners are noisy at the nano-scale; the
+            # boxes-1000-instanced bench measures p95 at ~0.01 ms,
+            # where 15% is one PHP function call worth of jitter. We
+            # combine two filters:
+            #  - `--threshold 30` raises the percentage gate so small
+            #    workloads can wobble within reason
+            #  - `--abs-floor-ms 0.5` ignores any metric whose absolute
+            #    slowdown is under 0.5 ms (one bad GC pause across 300
+            #    measurement frames is enough to swing a sub-ms p95 by
+            #    60-70% even when nothing in the code path moved)
+            # Local / dedicated perf hardware can tighten via
+            # `--threshold 15 --abs-floor-ms 0` for strict gating.
+            if ! php bin/phpolygon perf:report "$s" "$BASE_SHA" "$PR_SHA" --threshold 30 --abs-floor-ms 0.5; then
               fail=1
             fi
             echo

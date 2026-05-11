@@ -415,12 +415,21 @@ function perfReport(array $args): void
 {
     $useBaseline = false;
     $threshold = 15.0;
+    // Absolute slowdown floor in milliseconds. Regressions with absolute
+    // delta below this are treated as CI noise and ignored regardless of
+    // percentage. A single GC pause across 300 frames is enough to swing
+    // a sub-millisecond p95 by 60-70% even when the code under test
+    // hasn't moved. 0.5ms is roughly the upper end of "one bad frame"
+    // on shared ubuntu-latest runners.
+    $absFloorMs = 0.5;
     $positional = [];
     for ($i = 0; $i < count($args); $i++) {
         if ($args[$i] === '--baseline') {
             $useBaseline = true;
         } elseif ($args[$i] === '--threshold' && isset($args[$i + 1])) {
             $threshold = (float) $args[++$i];
+        } elseif ($args[$i] === '--abs-floor-ms' && isset($args[$i + 1])) {
+            $absFloorMs = (float) $args[++$i];
         } else {
             $positional[] = $args[$i];
         }
@@ -428,7 +437,7 @@ function perfReport(array $args): void
 
     $scenario = $positional[0] ?? null;
     if ($scenario === null) {
-        fwrite(STDERR, "Usage: phpolygon perf:report <scenario> [<sha-a> <sha-b>] [--baseline] [--threshold N]\n");
+        fwrite(STDERR, "Usage: phpolygon perf:report <scenario> [<sha-a> <sha-b>] [--baseline] [--threshold N] [--abs-floor-ms N]\n");
         exit(1);
     }
 
@@ -460,7 +469,7 @@ function perfReport(array $args): void
         usort($matches, fn(string $x, string $y): int => filemtime($y) <=> filemtime($x));
         $a = $baselineFile;
         $b = $matches[0];
-        runDiff($a, $b, $scenario, $threshold);
+        runDiff($a, $b, $scenario, $threshold, $absFloorMs);
         return;
     }
 
@@ -494,10 +503,10 @@ function perfReport(array $args): void
         $a = $files[1];
     }
 
-    runDiff($a, $b, $scenario, $threshold);
+    runDiff($a, $b, $scenario, $threshold, $absFloorMs);
 }
 
-function runDiff(string $a, string $b, string $scenario, float $threshold): void
+function runDiff(string $a, string $b, string $scenario, float $threshold, float $absFloorMs = 0.5): void
 {
     if (!file_exists($a)) {
         fwrite(STDERR, "Missing: {$a}\n");
@@ -525,12 +534,20 @@ function runDiff(string $a, string $b, string $scenario, float $threshold): void
     echo str_repeat('-', 60) . "\n";
 
     $worstRegression = 0.0;
+    $worstRegressionMetric = '';
+    $noiseFloorHits = [];
     foreach (['p50Ms', 'p95Ms', 'p99Ms', 'meanMs', 'minMs', 'maxMs'] as $key) {
         $av = (float) ($resultA['frame'][$key] ?? 0.0);
         $bv = (float) ($resultB['frame'][$key] ?? 0.0);
         $delta = $av > 0.0 ? (($bv - $av) / $av) * 100.0 : 0.0;
-        if ($delta > $worstRegression) {
+        $absDelta = $bv - $av;
+        $countsForGate = $absDelta >= $absFloorMs;
+        if ($countsForGate && $delta > $worstRegression) {
             $worstRegression = $delta;
+            $worstRegressionMetric = $key;
+        }
+        if ($delta > $threshold && !$countsForGate) {
+            $noiseFloorHits[] = sprintf('%s (+%.1f%%, +%.3fms < %.2fms floor)', $key, $delta, $absDelta, $absFloorMs);
         }
         $sign = $delta >= 0.0 ? '+' : '';
         $color = match (true) {
@@ -566,8 +583,22 @@ function runDiff(string $a, string $b, string $scenario, float $threshold): void
 
     echo "\n";
 
+    if ($noiseFloorHits !== []) {
+        echo "  Ignored (below " . sprintf('%.2fms', $absFloorMs) . " absolute-delta floor):\n";
+        foreach ($noiseFloorHits as $hit) {
+            echo "    - {$hit}\n";
+        }
+        echo "\n";
+    }
+
     if ($worstRegression > $threshold) {
-        printf("\033[31mREGRESSION: worst metric is %.1f%% slower (threshold %.0f%%)\033[0m\n", $worstRegression, $threshold);
+        printf(
+            "\033[31mREGRESSION: %s is %.1f%% slower (threshold %.0f%%, abs floor %.2fms)\033[0m\n",
+            $worstRegressionMetric,
+            $worstRegression,
+            $threshold,
+            $absFloorMs,
+        );
         exit(2);
     }
     echo "OK\n";

@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace PHPolygon\Geometry;
 
+use PHPolygon\Runtime\PerfProfiler;
+
 /**
  * Generates a closed cylinder mesh centered at the origin.
  * Top cap at y = +height/2, bottom cap at y = -height/2.
@@ -12,6 +14,12 @@ namespace PHPolygon\Geometry;
 class CylinderMesh
 {
     public static function generate(float $radius, float $height, int $segments): MeshData
+    {
+        return PerfProfiler::section('mesh.generate.cylinder', static fn(): MeshData
+            => self::generateImpl($radius, $height, $segments));
+    }
+
+    private static function generateImpl(float $radius, float $height, int $segments): MeshData
     {
         $vertices = [];
         $normals  = [];

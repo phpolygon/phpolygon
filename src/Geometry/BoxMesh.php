@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace PHPolygon\Geometry;
 
+use PHPolygon\Runtime\PerfProfiler;
+
 /**
  * Generates a box (cuboid) mesh centered at the origin.
  * Each face has its own 4 vertices for correct per-face normals.
@@ -12,6 +14,12 @@ namespace PHPolygon\Geometry;
 class BoxMesh
 {
     public static function generate(float $width, float $height, float $depth): MeshData
+    {
+        return PerfProfiler::section('mesh.generate.box', static fn(): MeshData
+            => self::generateImpl($width, $height, $depth));
+    }
+
+    private static function generateImpl(float $width, float $height, float $depth): MeshData
     {
         $hw = $width  / 2.0;
         $hh = $height / 2.0;

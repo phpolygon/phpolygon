@@ -10,9 +10,11 @@ use Metal\DepthStencilDescriptor;
 use Metal\DepthStencilState;
 use Metal\Device;
 use Metal\Layer;
+use Metal\Library;
 use Metal\RenderPassDescriptor;
 use Metal\RenderPipelineDescriptor;
 use Metal\RenderPipelineState;
+use Metal\Texture;
 use Metal\TextureDescriptor;
 use Metal\VertexDescriptor;
 use PHPolygon\Geometry\MeshData;
@@ -28,6 +30,9 @@ use PHPolygon\Rendering\Command\SetFog;
 use PHPolygon\Rendering\Command\SetSky;
 use PHPolygon\Rendering\Command\SetSkybox;
 use PHPolygon\Rendering\Command\SetSkyColors;
+use PHPolygon\Rendering\Command\SetWind;
+use PHPolygon\Rendering\PostProcess\MetalFxaaPass;
+use PHPolygon\Rendering\Quality\AntiAliasing;
 
 /**
  * Native Apple Metal 3D renderer.
@@ -58,6 +63,34 @@ class MetalRenderer3D implements Renderer3DInterface
     private CommandQueue $commandQueue;
     private RenderPipelineState $pipeline;
     private DepthStencilState $depthStencilState;
+
+    /**
+     * Pipeline-state cache keyed by raster sample count. Metal embeds the
+     * sample count in the PSO so MSAA needs a separate pipeline. The PSO
+     * for samples == 1 is also stored under key 1 (and aliased to
+     * `$this->pipeline` so the legacy single-sample path keeps working).
+     *
+     * @var array<int, RenderPipelineState>
+     */
+    private array $pipelineBySampleCount = [];
+
+    /** Pipeline cache for the sky pass, keyed by raster sample count. */
+    /** @var array<int, RenderPipelineState> */
+    private array $skyPipelineBySampleCount = [];
+
+    /** Phase 1.5 off-screen target (color/depth/resolve textures). */
+    private ?MetalOffscreenTarget $offscreenTarget = null;
+
+    /** Lazy FXAA + passthrough-blit pass. */
+    private ?MetalFxaaPass $presentPass = null;
+
+    /**
+     * Pixel formats reused when allocating the offscreen target so it
+     * matches the layer's drawable format (and therefore the present
+     * pipeline can sample it without conversion).
+     */
+    private int $offscreenColorPixelFormat;
+    private int $offscreenDepthPixelFormat;
 
     private const FRAME_UBO_SIZE = 128;  // mat4 view + mat4 projection
 
@@ -94,6 +127,27 @@ class MetalRenderer3D implements Renderer3DInterface
     private float $alpha     = 1.0;
     private int   $procMode  = 0;
     private float $moonPhase = 0.0;
+
+    // Cloth state, mirror of OpenGL/Vio backends.
+    private bool  $cloth = false;
+    private float $clothStrength = 0.05;
+    private float $clothFrequency = 1.0;
+    private float $clothPhase = 0.0;
+    private bool  $clothAnchorTop = true;
+
+    /** @var float[] {0,0,1} default = wind heading +Z */
+    private array $windDirection = [0.0, 0.0, 1.0];
+    private float $windIntensity = 0.5;
+
+    /** @var float[] mesh-local AABB min, rebound per draw via meshAabb cache */
+    private array $meshAabbMin = [0.0, 0.0, 0.0];
+    /** @var float[] mesh-local AABB max, rebound per draw via meshAabb cache */
+    private array $meshAabbMax = [0.0, 0.0, 0.0];
+
+    /**
+     * @var array<string, array{min: array{0:float,1:float,2:float}, max: array{0:float,1:float,2:float}}>
+     */
+    private array $meshAabbCache = [];
     /** @var float[] [r, g, b, near, far] */
     private array $fog = [0.5, 0.5, 0.5, 50.0, 200.0];
     /** @var float[] [x, y, z] */
@@ -118,12 +172,43 @@ class MetalRenderer3D implements Renderer3DInterface
     /** @var array<string, array{vb: Buffer, ib: Buffer, count: int}> */
     private array $meshCache = [];
 
-    public function __construct(int $width, int $height, int $nativeWindowHandle)
-    {
+    /**
+     * Live graphics settings. Phase 1 honours fog toggle and view-distance
+     * clamp during SetFog handling. Shadow tier and render scale on Metal
+     * are tracked here for the AdaptiveQualityController to read but do
+     * not yet drive an off-screen FBO (Phase 1.5).
+     */
+    private GraphicsSettings $settings;
+
+    public function __construct(
+        int $width,
+        int $height,
+        int $nativeWindowHandle,
+        ?GraphicsSettings $settings = null,
+    ) {
         $this->width    = $width;
         $this->height   = $height;
         $this->bootTime = microtime(true);
+        $this->settings = $settings ?? new GraphicsSettings();
+        $this->offscreenColorPixelFormat = \Metal\PixelFormatBGRA8Unorm;
+        $this->offscreenDepthPixelFormat = \Metal\PixelFormatDepth32Float;
         $this->initMetal($nativeWindowHandle);
+    }
+
+    public function applySettings(GraphicsSettings $settings): void
+    {
+        $this->settings = $settings;
+
+        // Phase 1.5 (Metal): off-screen render target driven by render-scale,
+        // MSAA via Texture2DMultisample + setRasterSampleCount, FXAA via a
+        // present pass that samples the resolved colour image. The actual
+        // resize happens in render() before the encoder is built so we use
+        // the freshest drawable dimensions.
+    }
+
+    public function getSettings(): GraphicsSettings
+    {
+        return $this->settings;
     }
 
     public function beginFrame(): void
@@ -173,6 +258,15 @@ class MetalRenderer3D implements Renderer3DInterface
         $this->fog        = [0.5, 0.5, 0.5, 50.0, 200.0];
         $this->cameraPos  = [0.0, 0.0, 0.0];
 
+        // Cloth + wind reset every frame; SetWind / Material::cloth re-arm them.
+        $this->cloth          = false;
+        $this->clothStrength  = 0.05;
+        $this->clothFrequency = 1.0;
+        $this->clothPhase     = 0.0;
+        $this->clothAnchorTop = true;
+        $this->windDirection  = [0.0, 0.0, 1.0];
+        $this->windIntensity  = 0.5;
+
         foreach ($commandList->getCommands() as $command) {
             if ($command instanceof SetCamera) {
                 $this->viewMatrix = $command->viewMatrix->toArray();
@@ -195,7 +289,13 @@ class MetalRenderer3D implements Renderer3DInterface
                     'radius'    => $command->radius,
                 ];
             } elseif ($command instanceof SetFog) {
-                $this->fog = [$command->color->r, $command->color->g, $command->color->b, $command->near, $command->far];
+                if ($this->settings->fog) {
+                    $clampedFar = min($command->far, $this->settings->viewDistance);
+                    $clampedNear = min($command->near, max(0.0, $clampedFar - 1.0));
+                    $this->fog = [$command->color->r, $command->color->g, $command->color->b, $clampedNear, $clampedFar];
+                } else {
+                    $this->fog = [$command->color->r, $command->color->g, $command->color->b, 99998.0, 99999.0];
+                }
             } elseif ($command instanceof SetSkyColors) {
                 $this->clearR = $command->skyColor->r;
                 $this->clearG = $command->skyColor->g;
@@ -210,30 +310,66 @@ class MetalRenderer3D implements Renderer3DInterface
                 $this->pendingSky = $command;
             } elseif ($command instanceof SetSkybox) {
                 // TODO Phase 7: Skybox pipeline
+            } elseif ($command instanceof SetWind) {
+                $this->windDirection = [
+                    $command->direction->x, $command->direction->y, $command->direction->z,
+                ];
+                $this->windIntensity = $command->intensity;
             }
         }
 
         $this->uploadFrameUbo();
 
-        // ── Acquire drawable + build render pass ───────────────────────────
+        // ── Acquire drawable ───────────────────────────────────────────────
         $drawable     = $this->layer->nextDrawable();
-        $colorTexture = $drawable->getTexture();
+        $drawableTex  = $drawable->getTexture();
 
-        // Depth texture — recreated each frame (simple; optimise with caching if needed)
-        $depthDesc = new TextureDescriptor();
-        $depthDesc->setPixelFormat(\Metal\PixelFormatDepth32Float);
-        $depthDesc->setWidth($this->width);
-        $depthDesc->setHeight($this->height);
-        $depthDesc->setUsage(\Metal\TextureUsageRenderTarget);
-        $depthDesc->setStorageMode(\Metal\StorageModePrivate); // depth/stencil must be Private on Apple GPUs
-        $depthTexture = $this->device->createTexture($depthDesc);
+        // ── Phase 1.5: decide whether to render off-screen ─────────────────
+        $offscreen = $this->ensureOffscreenIfActive();
+        $useOffscreen = $offscreen !== null;
+        $sceneSamples = $useOffscreen ? $offscreen->samples() : 1;
+        $sceneW       = $useOffscreen ? $offscreen->width()   : $this->width;
+        $sceneH       = $useOffscreen ? $offscreen->height()  : $this->height;
+        $scenePipeline = $this->ensurePipelineForSampleCount($sceneSamples);
+
+        // ── Build the scene render pass ────────────────────────────────────
+        if ($useOffscreen) {
+            $colorAttachment = $offscreen->colorTexture();
+            $depthAttachment = $offscreen->depthTexture();
+            $resolveTex      = $offscreen->resolveTexture();
+        } else {
+            $colorAttachment = $drawableTex;
+            $resolveTex      = null;
+
+            // Depth texture - recreated each frame for the legacy direct path
+            // (no caching; offscreen path manages its own depth).
+            $depthDesc = new TextureDescriptor();
+            $depthDesc->setPixelFormat($this->offscreenDepthPixelFormat);
+            $depthDesc->setWidth($this->width);
+            $depthDesc->setHeight($this->height);
+            $depthDesc->setUsage(\Metal\TextureUsageRenderTarget);
+            $depthDesc->setStorageMode(\Metal\StorageModePrivate);
+            $depthAttachment = $this->device->createTexture($depthDesc);
+        }
+
+        if ($colorAttachment === null || $depthAttachment === null) {
+            // Allocation failed - nothing to render this frame; skip cleanly.
+            return;
+        }
 
         $renderPass = new RenderPassDescriptor();
-        $renderPass->setColorAttachmentTexture(0, $colorTexture);
+        $renderPass->setColorAttachmentTexture(0, $colorAttachment);
         $renderPass->setColorAttachmentLoadAction(0, \Metal\LoadActionClear);
-        $renderPass->setColorAttachmentStoreAction(0, \Metal\StoreActionStore);
         $renderPass->setColorAttachmentClearColor(0, $this->clearR, $this->clearG, $this->clearB, 1.0);
-        $renderPass->setDepthAttachmentTexture($depthTexture);
+        if ($resolveTex !== null) {
+            // MSAA: resolve into single-sample texture at end of pass; the
+            // multisample colour image itself is throwaway.
+            $renderPass->setColorAttachmentResolveTexture(0, $resolveTex);
+            $renderPass->setColorAttachmentStoreAction(0, \Metal\StoreActionMultisampleResolve);
+        } else {
+            $renderPass->setColorAttachmentStoreAction(0, \Metal\StoreActionStore);
+        }
+        $renderPass->setDepthAttachmentTexture($depthAttachment);
         $renderPass->setDepthAttachmentLoadAction(\Metal\LoadActionClear);
         $renderPass->setDepthAttachmentStoreAction(\Metal\StoreActionStore);
         $renderPass->setDepthAttachmentClearDepth(1.0);
@@ -242,16 +378,21 @@ class MetalRenderer3D implements Renderer3DInterface
         $commandBuffer = $this->commandQueue->createCommandBuffer();
         $encoder       = $commandBuffer->createRenderCommandEncoder($renderPass);
 
-        $encoder->setViewport(0.0, 0.0, (float) $this->width, (float) $this->height, 0.0, 1.0);
-        $encoder->setScissorRect(0, 0, $this->width, $this->height);
+        $encoder->setViewport(0.0, 0.0, (float)$sceneW, (float)$sceneH, 0.0, 1.0);
+        $encoder->setScissorRect(0, 0, $sceneW, $sceneH);
 
         // ── Atmospheric sky pass (before opaque, depth test off, fullscreen) ──
-        if ($this->pendingSky !== null && $this->skyPipeline !== null) {
-            $this->encodeSkyPass($encoder, $this->pendingSky);
+        if ($this->pendingSky !== null) {
+            $skyPipeline = $sceneSamples === 1
+                ? $this->skyPipeline
+                : $this->ensureSkyPipelineForSampleCount($sceneSamples);
+            if ($skyPipeline !== null) {
+                $this->encodeSkyPass($encoder, $this->pendingSky, $skyPipeline);
+            }
         }
         $this->pendingSky = null;
 
-        $encoder->setRenderPipelineState($this->pipeline);
+        $encoder->setRenderPipelineState($scenePipeline);
         $encoder->setDepthStencilState($this->depthStencilState);
         // Match OpenGLRenderer3D / VioRenderer3D: culling disabled. Many
         // procedural meshes (TerrainMesh, PalmFrondMesh, RoofBuilder gables)
@@ -272,11 +413,19 @@ class MetalRenderer3D implements Renderer3DInterface
         foreach ($commandList->getCommands() as $command) {
             if ($command instanceof DrawMesh) {
                 $this->resolveMaterial($command->materialId);
-                $encoder->setFragmentBytes($this->buildLightingUboBytes(), 2);
+                $this->bindMeshAabb($command->meshId);
+                $uboBytes = $this->buildLightingUboBytes();
+                $encoder->setFragmentBytes($uboBytes, 2);
+                // Cloth animation runs in the vertex shader and reads
+                // from the same struct, so bind it to the vertex stage too.
+                $encoder->setVertexBytes($uboBytes, 2);
                 $this->drawMeshCommand($encoder, $command->meshId, $command->modelMatrix);
             } elseif ($command instanceof DrawMeshInstanced) {
                 $this->resolveMaterial($command->materialId);
-                $encoder->setFragmentBytes($this->buildLightingUboBytes(), 2);
+                $this->bindMeshAabb($command->meshId);
+                $uboBytes = $this->buildLightingUboBytes();
+                $encoder->setFragmentBytes($uboBytes, 2);
+                $encoder->setVertexBytes($uboBytes, 2);
                 foreach ($command->matrices as $matrix) {
                     $this->drawMeshCommand($encoder, $command->meshId, $matrix);
                 }
@@ -284,6 +433,15 @@ class MetalRenderer3D implements Renderer3DInterface
         }
 
         $encoder->endEncoding();
+
+        // ── Phase 1.5 present pass: blit / FXAA into the drawable ──────────
+        if ($useOffscreen) {
+            $presentInput = $offscreen->presentTexture();
+            if ($presentInput !== null) {
+                $this->encodePresentPass($commandBuffer, $drawableTex, $presentInput);
+            }
+        }
+
         $commandBuffer->presentDrawable($drawable);
         $commandBuffer->commit();
 
@@ -294,6 +452,53 @@ class MetalRenderer3D implements Renderer3DInterface
 
     // ── Private helpers ────────────────────────────────────────────────────
 
+    /**
+     * Update $meshAabbMin/Max with the cached AABB for $meshId. Drives
+     * the vertex-stage cloth-sway anchor weighting; computed once on
+     * first encounter, reused thereafter.
+     */
+    private function bindMeshAabb(string $meshId): void
+    {
+        $aabb = $this->meshAabb($meshId);
+        $this->meshAabbMin = $aabb['min'];
+        $this->meshAabbMax = $aabb['max'];
+    }
+
+    /**
+     * @return array{min: array{0:float,1:float,2:float}, max: array{0:float,1:float,2:float}}
+     */
+    private function meshAabb(string $meshId): array
+    {
+        if (isset($this->meshAabbCache[$meshId])) {
+            return $this->meshAabbCache[$meshId];
+        }
+        $mesh = MeshRegistry::get($meshId);
+        if ($mesh === null) {
+            $aabb = ['min' => [0.0, 0.0, 0.0], 'max' => [0.0, 0.0, 0.0]];
+            $this->meshAabbCache[$meshId] = $aabb;
+            return $aabb;
+        }
+        $minX = INF; $minY = INF; $minZ = INF;
+        $maxX = -INF; $maxY = -INF; $maxZ = -INF;
+        $verts = $mesh->vertices;
+        $count = count($verts);
+        for ($i = 0; $i < $count; $i += 3) {
+            $x = $verts[$i];     $y = $verts[$i + 1]; $z = $verts[$i + 2];
+            if ($x < $minX) $minX = $x;
+            if ($y < $minY) $minY = $y;
+            if ($z < $minZ) $minZ = $z;
+            if ($x > $maxX) $maxX = $x;
+            if ($y > $maxY) $maxY = $y;
+            if ($z > $maxZ) $maxZ = $z;
+        }
+        $aabb = [
+            'min' => [$minX === INF ? 0.0 : $minX, $minY === INF ? 0.0 : $minY, $minZ === INF ? 0.0 : $minZ],
+            'max' => [$maxX === -INF ? 0.0 : $maxX, $maxY === -INF ? 0.0 : $maxY, $maxZ === -INF ? 0.0 : $maxZ],
+        ];
+        $this->meshAabbCache[$meshId] = $aabb;
+        return $aabb;
+    }
+
     private function resolveMaterial(string $materialId): void
     {
         $material = MaterialRegistry::get($materialId);
@@ -303,12 +508,22 @@ class MetalRenderer3D implements Renderer3DInterface
             $this->roughness = $material->roughness;
             $this->metallic  = $material->metallic;
             $this->alpha     = $material->alpha;
+            $this->cloth          = $material->cloth;
+            $this->clothStrength  = $material->clothStrength;
+            $this->clothFrequency = $material->clothFrequency;
+            $this->clothPhase     = $material->clothPhase;
+            $this->clothAnchorTop = $material->clothAnchorTop;
         } else {
             $this->albedo    = [0.8, 0.8, 0.8];
             $this->emission  = [0.0, 0.0, 0.0];
             $this->roughness = 0.5;
             $this->metallic  = 0.0;
             $this->alpha     = 1.0;
+            $this->cloth          = false;
+            $this->clothStrength  = 0.05;
+            $this->clothFrequency = 1.0;
+            $this->clothPhase     = 0.0;
+            $this->clothAnchorTop = true;
         }
 
         $this->procMode = self::$procModeCache[$materialId] ?? $this->resolveProcMode($materialId);
@@ -452,6 +667,15 @@ class MetalRenderer3D implements Renderer3DInterface
         $data .= pack('f3l1', $this->seasonTint[0],   $this->seasonTint[1],   $this->seasonTint[2],   $this->procMode);
         $data .= pack('f4',   $this->alpha, 0.0, 0.0, 0.0);
 
+        // Cloth + wind block (mirrors mesh3d.metal LightingUBO struct).
+        $cloth     = $this->cloth ? 1 : 0;
+        $anchorTop = $this->clothAnchorTop ? 1 : 0;
+        $data .= pack('l1f3', $cloth, $this->clothStrength, $this->clothFrequency, $this->clothPhase);
+        $data .= pack('l1f3', $anchorTop, 0.0, 0.0, 0.0);
+        $data .= pack('f3f1', $this->windDirection[0], $this->windDirection[1], $this->windDirection[2], $this->windIntensity);
+        $data .= pack('f3f1', $this->meshAabbMin[0],   $this->meshAabbMin[1],   $this->meshAabbMin[2],   0.0);
+        $data .= pack('f3f1', $this->meshAabbMax[0],   $this->meshAabbMax[1],   $this->meshAabbMax[2],   0.0);
+
         for ($i = 0; $i < 8; $i++) {
             if ($i < $plCount) {
                 $pl    = $this->pointLights[$i];
@@ -462,6 +686,87 @@ class MetalRenderer3D implements Renderer3DInterface
             }
         }
         return $data;
+    }
+
+    /**
+     * Decide whether the Phase 1.5 offscreen path should run this frame.
+     * Returns the offscreen target when active (lazily allocated/resized),
+     * or null when the fast path applies (renderScale == 1.0 and AA off).
+     */
+    private function ensureOffscreenIfActive(): ?MetalOffscreenTarget
+    {
+        $needsOffscreen = $this->settings->renderScale !== 1.0
+            || $this->settings->antiAliasing !== AntiAliasing::Off;
+        if (!$needsOffscreen) {
+            $this->offscreenTarget?->release();
+            return null;
+        }
+
+        if ($this->offscreenTarget === null) {
+            $this->offscreenTarget = new MetalOffscreenTarget(
+                $this->device,
+                $this->offscreenColorPixelFormat,
+                $this->offscreenDepthPixelFormat,
+            );
+        }
+
+        $w = max(1, (int)round($this->width  * $this->settings->renderScale));
+        $h = max(1, (int)round($this->height * $this->settings->renderScale));
+        $samples = max(1, $this->settings->antiAliasing->sampleCount());
+
+        $this->offscreenTarget->resize($w, $h, $samples);
+
+        if ($this->presentPass === null) {
+            // The present pass writes into the drawable, which Metal layers
+            // always create as $offscreenColorPixelFormat (BGRA8Unorm in our
+            // setup). No depth attachment in the present pass.
+            $this->presentPass = new MetalFxaaPass(
+                $this->device,
+                $this->offscreenColorPixelFormat,
+            );
+        }
+
+        if (!$this->offscreenTarget->isAllocated()) {
+            return null;
+        }
+
+        return $this->offscreenTarget;
+    }
+
+    /**
+     * Run the FXAA / passthrough-blit pass into the drawable. Caller has
+     * already ended the scene encoder; we open a new one targeting the
+     * drawable, encode the present, and end it before the command buffer
+     * commits and presents.
+     */
+    private function encodePresentPass(\Metal\CommandBuffer $commandBuffer, Texture $drawableTex, Texture $sceneTex): void
+    {
+        if ($this->presentPass === null) {
+            return;
+        }
+
+        $presentPass = new RenderPassDescriptor();
+        $presentPass->setColorAttachmentTexture(0, $drawableTex);
+        $presentPass->setColorAttachmentLoadAction(0, \Metal\LoadActionDontCare);
+        $presentPass->setColorAttachmentStoreAction(0, \Metal\StoreActionStore);
+        // No depth attachment for the present pass - depth is meaningless
+        // when blitting a fullscreen triangle and the FXAA pipeline uses
+        // depthAlways/no-write.
+
+        $encoder = $commandBuffer->createRenderCommandEncoder($presentPass);
+
+        $bbW = $drawableTex->getWidth();
+        $bbH = $drawableTex->getHeight();
+        $encoder->setViewport(0.0, 0.0, (float)$bbW, (float)$bbH, 0.0, 1.0);
+        $encoder->setScissorRect(0, 0, $bbW, $bbH);
+
+        if ($this->settings->antiAliasing === AntiAliasing::Fxaa) {
+            $this->presentPass->applyFxaa($encoder, $sceneTex);
+        } else {
+            $this->presentPass->applyBlit($encoder, $sceneTex);
+        }
+
+        $encoder->endEncoding();
     }
 
     private function initMetal(int $nativeWindowHandle): void
@@ -501,26 +806,85 @@ class MetalRenderer3D implements Renderer3DInterface
             );
         }
 
-        $library = $this->device->createLibraryWithSource($mslSource);
-        $vertFn  = $library->getFunction('vertex_mesh3d');
-        $fragFn  = $library->getFunction('fragment_mesh3d');
+        $this->meshLibrary = $this->device->createLibraryWithSource($mslSource);
+
+        // Build the single-sample pipeline up front so the legacy direct-to-
+        // drawable path keeps working without a per-frame allocation. MSAA
+        // pipelines are built on demand by ensurePipelineForSampleCount().
+        $this->pipeline = $this->buildScenePipeline(1);
+        $this->pipelineBySampleCount[1] = $this->pipeline;
+    }
+
+    private ?Library $meshLibrary = null;
+
+    private function buildScenePipeline(int $sampleCount): RenderPipelineState
+    {
+        if ($this->meshLibrary === null) {
+            // Should be impossible - createPipeline() populates this first.
+            $msl = (string)file_get_contents(self::SHADER_PATH);
+            $this->meshLibrary = $this->device->createLibraryWithSource($msl);
+        }
+
+        $vertFn = $this->meshLibrary->getFunction('vertex_mesh3d');
+        $fragFn = $this->meshLibrary->getFunction('fragment_mesh3d');
 
         // Vertex layout: position(float3) + normal(float3) + uv(float2) = 32 bytes
-        // Slot 0 = model matrix (setVertexBytes), slot 1 = FrameUBO, so vertex data goes to slot 3.
         $vertexDesc = new VertexDescriptor();
-        $vertexDesc->setAttribute(0, \Metal\VertexFormatFloat3, 0,  3); // [[attribute(0)]] position  — buffer 3
-        $vertexDesc->setAttribute(1, \Metal\VertexFormatFloat3, 12, 3); // [[attribute(1)]] normal    — buffer 3
-        $vertexDesc->setAttribute(2, \Metal\VertexFormatFloat2, 24, 3); // [[attribute(2)]] uv        — buffer 3
-        $vertexDesc->setLayout(3, 32);                                   // stride 32, buffer slot 3
+        $vertexDesc->setAttribute(0, \Metal\VertexFormatFloat3, 0,  3);
+        $vertexDesc->setAttribute(1, \Metal\VertexFormatFloat3, 12, 3);
+        $vertexDesc->setAttribute(2, \Metal\VertexFormatFloat2, 24, 3);
+        $vertexDesc->setLayout(3, 32);
 
         $pipelineDesc = new RenderPipelineDescriptor();
         $pipelineDesc->setVertexFunction($vertFn);
         $pipelineDesc->setFragmentFunction($fragFn);
-        $pipelineDesc->getColorAttachment(0)->setPixelFormat(\Metal\PixelFormatBGRA8Unorm);
-        $pipelineDesc->setDepthAttachmentPixelFormat(\Metal\PixelFormatDepth32Float);
+        $pipelineDesc->getColorAttachment(0)->setPixelFormat($this->offscreenColorPixelFormat);
+        $pipelineDesc->setDepthAttachmentPixelFormat($this->offscreenDepthPixelFormat);
         $pipelineDesc->setVertexDescriptor($vertexDesc);
+        $pipelineDesc->setRasterSampleCount(max(1, $sampleCount));
 
-        $this->pipeline = $this->device->createRenderPipelineState($pipelineDesc);
+        return $this->device->createRenderPipelineState($pipelineDesc);
+    }
+
+    private function ensurePipelineForSampleCount(int $sampleCount): RenderPipelineState
+    {
+        $sampleCount = max(1, $sampleCount);
+        if (!isset($this->pipelineBySampleCount[$sampleCount])) {
+            $this->pipelineBySampleCount[$sampleCount] = $this->buildScenePipeline($sampleCount);
+        }
+        return $this->pipelineBySampleCount[$sampleCount];
+    }
+
+    private function ensureSkyPipelineForSampleCount(int $sampleCount): ?RenderPipelineState
+    {
+        $sampleCount = max(1, $sampleCount);
+        if (isset($this->skyPipelineBySampleCount[$sampleCount])) {
+            return $this->skyPipelineBySampleCount[$sampleCount];
+        }
+
+        $msl = @file_get_contents(self::SKY_SHADER_PATH);
+        if ($msl === false) {
+            return null;
+        }
+
+        try {
+            $library = $this->device->createLibraryWithSource($msl);
+            $vertFn  = $library->getFunction('vertex_sky');
+            $fragFn  = $library->getFunction('fragment_sky');
+
+            $desc = new RenderPipelineDescriptor();
+            $desc->setVertexFunction($vertFn);
+            $desc->setFragmentFunction($fragFn);
+            $desc->getColorAttachment(0)->setPixelFormat($this->offscreenColorPixelFormat);
+            $desc->setDepthAttachmentPixelFormat($this->offscreenDepthPixelFormat);
+            $desc->setRasterSampleCount($sampleCount);
+
+            $pso = $this->device->createRenderPipelineState($desc);
+            $this->skyPipelineBySampleCount[$sampleCount] = $pso;
+            return $pso;
+        } catch (\Throwable) {
+            return null;
+        }
     }
 
     private function createDepthStencilState(): void
@@ -550,38 +914,24 @@ class MetalRenderer3D implements Renderer3DInterface
 
     private function createSkyPipeline(): void
     {
-        $mslSource = @file_get_contents(self::SKY_SHADER_PATH);
-        if ($mslSource === false) {
-            // Sky is optional — log and skip. Renderer falls back to clear color.
-            return;
-        }
-
-        try {
-            $library = $this->device->createLibraryWithSource($mslSource);
-            $vertFn  = $library->getFunction('vertex_sky');
-            $fragFn  = $library->getFunction('fragment_sky');
-
-            $desc = new RenderPipelineDescriptor();
-            $desc->setVertexFunction($vertFn);
-            $desc->setFragmentFunction($fragFn);
-            $desc->getColorAttachment(0)->setPixelFormat(\Metal\PixelFormatBGRA8Unorm);
-            $desc->setDepthAttachmentPixelFormat(\Metal\PixelFormatDepth32Float);
-            // No vertex descriptor — fullscreen triangle uses [[vertex_id]].
-
-            $this->skyPipeline = $this->device->createRenderPipelineState($desc);
-        } catch (\Throwable $e) {
-            $this->skyPipeline = null;
-        }
+        // Build the single-sample variant up front; MSAA variants are added
+        // lazily by ensureSkyPipelineForSampleCount() the first time a frame
+        // requires them. Sky is optional - any failure here leaves the field
+        // null and the renderer falls back to clear colour.
+        $this->skyPipeline = $this->ensureSkyPipelineForSampleCount(1);
     }
 
     /**
      * Encode the atmospheric sky pass. Runs INSIDE the same render encoder as
      * the opaque pass — depth state is "always pass, never write" so the
      * sky is rendered first and opaque geometry overdraws it.
+     *
+     * The pipeline state is supplied by the caller so MSAA-enabled frames
+     * can route to the correct sample-count-cached PSO.
      */
-    private function encodeSkyPass(\Metal\RenderCommandEncoder $encoder, SetSky $sky): void
+    private function encodeSkyPass(\Metal\RenderCommandEncoder $encoder, SetSky $sky, RenderPipelineState $skyPipeline): void
     {
-        if ($this->skyPipeline === null || $this->skyDepthState === null) {
+        if ($this->skyDepthState === null) {
             return;
         }
 
@@ -606,7 +956,7 @@ class MetalRenderer3D implements Renderer3DInterface
         $vp    = $proj->multiply($rotView);
         $invVp = $vp->inverse();
 
-        $encoder->setRenderPipelineState($this->skyPipeline);
+        $encoder->setRenderPipelineState($skyPipeline);
         $encoder->setDepthStencilState($this->skyDepthState);
         $encoder->setCullMode(\Metal\CullModeNone);
 

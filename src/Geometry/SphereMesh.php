@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace PHPolygon\Geometry;
 
+use PHPolygon\Runtime\PerfProfiler;
+
 /**
  * Generates a UV sphere mesh centered at the origin.
  * Normals are the normalized position vectors (radius = 1 surface).
@@ -11,6 +13,12 @@ namespace PHPolygon\Geometry;
 class SphereMesh
 {
     public static function generate(float $radius, int $stacks, int $slices): MeshData
+    {
+        return PerfProfiler::section('mesh.generate.sphere', static fn(): MeshData
+            => self::generateImpl($radius, $stacks, $slices));
+    }
+
+    private static function generateImpl(float $radius, int $stacks, int $slices): MeshData
     {
         $vertices = [];
         $normals  = [];

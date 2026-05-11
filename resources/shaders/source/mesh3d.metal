@@ -73,6 +73,25 @@ struct LightingUBO {
     float  _pad6;
     float  _pad7;
 
+    // Procedural cloth (mirrors PHPolygon\Rendering\Material::$cloth*).
+    // Anchor weight is computed from local Y over the mesh's local AABB
+    // exactly like the GLSL backend.
+    int    cloth;
+    float  cloth_strength;
+    float  cloth_frequency;
+    float  cloth_phase;
+    int    cloth_anchor_top;
+    float  _pad_cloth_a;
+    float  _pad_cloth_b;
+    float  _pad_cloth_c;
+
+    packed_float3 wind_direction;
+    float  wind_intensity;
+    packed_float3 mesh_local_aabb_min;
+    float  _pad_aabb_a;
+    packed_float3 mesh_local_aabb_max;
+    float  _pad_aabb_b;
+
     PointLight point_lights[8];
 };
 
@@ -130,9 +149,30 @@ static inline float3 fresnelSchlick(float cosTheta, float3 F0) {
 vertex VertexOut vertex_mesh3d(
     VertexIn         in     [[stage_in]],
     constant PushConstants& push  [[buffer(0)]],
-    constant FrameUBO&      frame [[buffer(1)]]
+    constant FrameUBO&      frame [[buffer(1)]],
+    constant LightingUBO&   light [[buffer(2)]]
 ) {
-    float4 world_pos = push.model * float4(in.position, 1.0);
+    float3 pos = in.position;
+
+    // Procedural cloth sway — anchor weight from local Y over the mesh AABB,
+    // matches the GLSL backend (mesh3d.vert.glsl) exactly.
+    if (light.cloth == 1) {
+        float3 aabbMin = float3(light.mesh_local_aabb_min);
+        float3 aabbMax = float3(light.mesh_local_aabb_max);
+        float aabbHeight = max(aabbMax.y - aabbMin.y, 1e-4);
+        float yNorm = clamp((pos.y - aabbMin.y) / aabbHeight, 0.0, 1.0);
+        float anchorWeight = light.cloth_anchor_top == 1 ? yNorm : (1.0 - yNorm);
+        float swayMask = 1.0 - anchorWeight;
+        float t = light.time * light.cloth_frequency + light.cloth_phase;
+        float wave = sin(t + pos.x * 2.0) * 0.7 + cos(t * 1.3 + pos.z * 1.5) * 0.3;
+        float3 wd = float3(light.wind_direction);
+        float3 windDir = length(wd) > 1e-4 ? normalize(wd) : float3(0.0, 0.0, 1.0);
+        float3 sway = windDir * (wave * light.cloth_strength * light.wind_intensity * swayMask);
+        sway.y *= 0.15;
+        pos += sway;
+    }
+
+    float4 world_pos = push.model * float4(pos, 1.0);
 
     // Approximation: use upper-left 3×3 of model (valid for uniform scale).
     float3x3 normalMatrix = float3x3(
