@@ -166,6 +166,11 @@ class SceneManager implements SceneManagerInterface
         return isset($this->loaded[$name]);
     }
 
+    public function isRegistered(string $name): bool
+    {
+        return isset($this->registry[$name]);
+    }
+
     public function markPersistent(int $entityId): void
     {
         $this->persistentEntities[$entityId] = true;

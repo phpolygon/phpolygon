@@ -54,8 +54,23 @@ final class GraphicsAutoTuner
         $events->dispatch(new GraphicsCalibrationStarted($targetFps));
 
         $scene = $custom ?? $this->resolveDefaultBenchmarkScene();
+        $sceneClass = get_class($scene);
+        $previousActive = $this->engine->scenes->getActiveSceneName();
+
+        // SceneManager::loadScene() expects a registered name. The auto-tuner
+        // instantiates an ad-hoc benchmark scene that no game ever registers,
+        // so we register it under its FQCN before loading. Without this the
+        // load throws, the catch swallows it, and the calibration runs against
+        // the live game scene — defeating the point of having a controlled
+        // benchmark workload and risking crashes in renderer paths that the
+        // real scene exercises but the benchmark would not.
+        $benchmarkLoaded = false;
         try {
-            $this->engine->scenes->loadScene(get_class($scene));
+            if (!$this->engine->scenes->isRegistered($sceneClass)) {
+                $this->engine->scenes->register($sceneClass, $sceneClass);
+            }
+            $this->engine->scenes->loadScene($sceneClass);
+            $benchmarkLoaded = true;
         } catch (\Throwable $e) {
             // Some test environments do not support full scene loading;
             // we still measure against the live scene state.
@@ -102,6 +117,23 @@ final class GraphicsAutoTuner
             finalSettings: $current,
             tierHistory: $history,
         );
+
+        // Restore the scene the game had loaded before calibration. loadScene()
+        // in Single mode unloads everything else, so without this step the
+        // game-loop would start with the benchmark workload still active and
+        // the original scene gone.
+        if ($benchmarkLoaded
+            && $previousActive !== null
+            && $previousActive !== $sceneClass
+            && $this->engine->scenes->isRegistered($previousActive)
+        ) {
+            try {
+                $this->engine->scenes->loadScene($previousActive);
+            } catch (\Throwable $e) {
+                // Restore failures are non-fatal; the game can re-issue a
+                // scene load itself if needed.
+            }
+        }
 
         $events->dispatch(new GraphicsCalibrationCompleted($result));
         return $result;

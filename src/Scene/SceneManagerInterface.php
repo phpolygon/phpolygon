@@ -42,6 +42,9 @@ interface SceneManagerInterface
     /** Returns true if the named scene is currently loaded. */
     public function isLoaded(string $name): bool;
 
+    /** Returns true if a scene class is registered under the given name. */
+    public function isRegistered(string $name): bool;
+
     /** Mark an entity as persistent across scene unloads. */
     public function markPersistent(int $entityId): void;
 
