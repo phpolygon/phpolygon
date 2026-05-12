@@ -279,20 +279,13 @@ class VioRenderer3D implements Renderer3DInterface
 
     private function offscreenIsActive(): bool
     {
-        // The HDR/Bloom path owns its own render target and post-process
-        // pipeline. When HDR is active we skip the Phase 1.5 offscreen
-        // pipeline entirely - the bloom passes already manage scaling and
-        // tonemapping. (HDR is currently disabled in production - see the
-        // D3D11 note in render() - so this branch is mostly defensive.)
-        if ($this->enableHdr) {
-            return false;
-        }
-
-        if ($this->settings->renderScale !== 1.0) {
-            return true;
-        }
-
-        return $this->settings->antiAliasing !== AntiAliasing::Off;
+        // Phase 1.5 offscreen pipeline on Vio/D3D11 renders black after the
+        // FXAA blit even though vio_render_target_texture no longer crashes
+        // (see the SRV-wrapper cache fix in php-vio's php_vio.c). Disabling
+        // the pipeline here keeps the 3D pass writing directly to the
+        // swapchain until the present-side FXAA path is debugged.
+        // Trade-off: no FXAA, no render-scale, no TAA on Vio backends.
+        return false;
     }
 
     /**

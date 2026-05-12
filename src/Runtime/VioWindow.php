@@ -37,6 +37,7 @@ class VioWindow extends Window
             'title' => $this->title,
             'vsync' => $this->vsync,
             'samples' => 4,
+            'debug' => 1,
         ]);
 
         \PHPolygon\Engine::log('VioWindow: vio_create returned ' . ($ctx === false ? 'false' : 'VioContext'));
