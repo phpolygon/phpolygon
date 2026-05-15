@@ -694,6 +694,28 @@ function spawnPartRot(World $world, string $mesh, string $material, Vec3 $pos, V
 }
 
 /**
+ * Spawn a single hair card - a thin vertical cylinder hanging straight
+ * down from an attachment point on the skull. Used by the longer
+ * hairstyles to replace flat back-of-head panels with individual
+ * strands that catch highlights and break up the silhouette.
+ *
+ * @param list<Entity> $out
+ */
+function spawnHairCard(
+    World $world,
+    string $material,
+    Vec3 $top,
+    float $length,
+    float $thickness,
+    array &$out,
+): void {
+    $out[] = spawnPart($world, 'unit_cylinder', $material,
+        new Vec3($top->x, $top->y - $length * 0.5, $top->z),
+        new Vec3($thickness, $length, $thickness),
+    );
+}
+
+/**
  * Returns nose dimensions as [width, height, depth, dipFactor] - all in
  * relative-to-bodyHeight units; the caller multiplies by $h. dipFactor > 0
  * spawns a downward "tip droop" sphere; 0.0 disables it.
@@ -936,36 +958,106 @@ function buildHair(World $world, PlayerProportions $p, Vec3 $base, float $headY,
             break;
 
         case HairStyle::Medium:
+            // Scalp cap + shorter hair cards on the back/sides. Reaches
+            // around to the nape - just past the ears.
             $out[] = spawnPart($world, 'unit_sphere', $mat,
                 new Vec3($base->x, $headY + $headH * 0.15, $base->z),
                 new Vec3($headW * 1.18, $headH * 1.1, $headD * 1.18),
             );
-            $out[] = spawnPart($world, 'unit_box', $mat,
-                new Vec3($base->x, $headY - $headH * 0.05, $base->z - $headD * 0.45),
-                new Vec3($headW * 1.05, $headH * 0.8, 0.06),
-            );
+            $mStrandLen   = $headH * 0.95;
+            $mStrandThick = 0.022;
+            $mStrandY     = $headY + $headH * 0.05;
+            foreach ([
+                [-0.50, -0.05, 0.85],
+                [-0.45, -0.25, 0.95],
+                [-0.30, -0.45, 1.00],
+                [-0.10, -0.55, 1.03],
+                [ 0.10, -0.55, 1.03],
+                [ 0.30, -0.45, 1.00],
+                [ 0.45, -0.25, 0.95],
+                [ 0.50, -0.05, 0.85],
+            ] as [$xF, $zF, $lm]) {
+                spawnHairCard($world, $mat,
+                    new Vec3(
+                        $base->x + $headW * $xF,
+                        $mStrandY,
+                        $base->z + $headD * $zF,
+                    ),
+                    $mStrandLen * $lm,
+                    $mStrandThick,
+                    $out,
+                );
+            }
             break;
 
         case HairStyle::Long:
+            // Scalp cap sits a bit higher than the skull surface so the
+            // hair reads as covering the crown.
             $out[] = spawnPart($world, 'unit_sphere', $mat,
                 new Vec3($base->x, $headY + $headH * 0.18, $base->z),
                 new Vec3($headW * 1.18, $headH * 1.1, $headD * 1.18),
             );
-            $out[] = spawnPart($world, 'unit_box', $mat,
-                new Vec3($base->x, $headY - $headH * 1.0, $base->z - $headD * 0.35),
-                new Vec3($headW * 1.1, $headH * 2.4, 0.08),
-            );
+            // Hair cards: thin strands hanging from a U-shaped ring around
+            // the back half of the skull. Strand length tapers slightly
+            // shorter on the sides so the silhouette has a soft outline
+            // rather than a flat fringe.
+            $strandLen   = $headH * 2.2;
+            $strandThick = 0.024;
+            $strandY     = $headY + $headH * 0.10;
+            $strandRing  = [
+                // [xFactor, zFactor, lengthMul]
+                [-0.55,  0.05, 0.85],   // left temple
+                [-0.55, -0.10, 0.92],
+                [-0.50, -0.30, 0.97],
+                [-0.40, -0.45, 1.00],
+                [-0.25, -0.55, 1.02],
+                [-0.08, -0.58, 1.03],
+                [ 0.08, -0.58, 1.03],
+                [ 0.25, -0.55, 1.02],
+                [ 0.40, -0.45, 1.00],
+                [ 0.50, -0.30, 0.97],
+                [ 0.55, -0.10, 0.92],
+                [ 0.55,  0.05, 0.85],   // right temple
+            ];
+            foreach ($strandRing as [$xF, $zF, $lm]) {
+                spawnHairCard($world, $mat,
+                    new Vec3(
+                        $base->x + $headW * $xF,
+                        $strandY,
+                        $base->z + $headD * $zF,
+                    ),
+                    $strandLen * $lm,
+                    $strandThick,
+                    $out,
+                );
+            }
             break;
 
         case HairStyle::Ponytail:
+            // Scalp cap + a small gathered bundle of cards at the back of
+            // the head. The strands fan out very slightly so the bundle
+            // reads as several hairs tied together, not a single rod.
             $out[] = spawnPart($world, 'unit_sphere', $mat,
                 new Vec3($base->x, $headY + $headH * 0.12, $base->z),
                 new Vec3($headW * 1.05, $headH * 0.9, $headD * 1.05),
             );
-            $out[] = spawnPart($world, 'unit_cylinder', $mat,
-                new Vec3($base->x, $headY - $headH * 0.3, $base->z - $headD * 0.55),
-                new Vec3(0.06, $headH * 1.6, 0.06),
+            $tailLen   = $headH * 1.5;
+            $tailThick = 0.022;
+            $tailY     = $headY + $headH * 0.02;
+            $tailZ     = $base->z - $headD * 0.55;
+            // Tie-off knot - a small sphere where the strands converge.
+            $out[] = spawnPart($world, 'unit_sphere', $mat,
+                new Vec3($base->x, $tailY, $tailZ),
+                new Vec3(0.06, 0.06, 0.06),
             );
+            foreach ([-0.025, -0.012, 0.0, 0.012, 0.025] as $xOff) {
+                spawnHairCard($world, $mat,
+                    new Vec3($base->x + $xOff, $tailY - 0.015, $tailZ),
+                    $tailLen,
+                    $tailThick,
+                    $out,
+                );
+            }
             break;
 
         case HairStyle::Topknot:
@@ -1004,28 +1096,72 @@ function buildHair(World $world, PlayerProportions $p, Vec3 $base, float $headY,
             break;
 
         case HairStyle::Dreadlocks:
+            // Thicker scalp cap + a dense ring of chunky cards around the
+            // back of the skull. Each dread is thicker than the regular
+            // hair card and a touch longer for the iconic shoulder-length
+            // drop.
             $out[] = spawnPart($world, 'unit_sphere', $mat,
                 new Vec3($base->x, $headY + $headH * 0.12, $base->z),
                 new Vec3($headW * 1.2, $headH * 1.05, $headD * 1.2),
             );
-            for ($i = -2; $i <= 2; $i++) {
-                $x = $base->x + $i * 0.04;
-                $out[] = spawnPart($world, 'unit_cylinder', $mat,
-                    new Vec3($x, $headY - $headH * 0.5, $base->z - 0.04),
-                    new Vec3(0.035, $headH * 1.4, 0.035),
+            $drLen   = $headH * 1.6;
+            $drThick = 0.038;
+            $drY     = $headY + $headH * 0.04;
+            foreach ([
+                [-0.50,  0.05, 0.85],
+                [-0.55, -0.10, 0.95],
+                [-0.50, -0.30, 1.02],
+                [-0.35, -0.45, 1.05],
+                [-0.18, -0.55, 1.08],
+                [ 0.00, -0.58, 1.10],
+                [ 0.18, -0.55, 1.08],
+                [ 0.35, -0.45, 1.05],
+                [ 0.50, -0.30, 1.02],
+                [ 0.55, -0.10, 0.95],
+                [ 0.50,  0.05, 0.85],
+            ] as [$xF, $zF, $lm]) {
+                spawnHairCard($world, $mat,
+                    new Vec3(
+                        $base->x + $headW * $xF,
+                        $drY,
+                        $base->z + $headD * $zF,
+                    ),
+                    $drLen * $lm,
+                    $drThick,
+                    $out,
                 );
             }
             break;
 
         case HairStyle::Mullet:
+            // Tight top, longer hair cards only on the back: "business in
+            // front, party in the back".
             $out[] = spawnPart($world, 'unit_sphere', $mat,
                 new Vec3($base->x, $headY + $headH * 0.1, $base->z),
                 new Vec3($headW * 1.08, $headH * 0.95, $headD * 1.08),
             );
-            $out[] = spawnPart($world, 'unit_box', $mat,
-                new Vec3($base->x, $headY - $headH * 0.45, $base->z - $headD * 0.5),
-                new Vec3($headW * 1.0, $headH * 1.1, 0.06),
-            );
+            $muStrandLen   = $headH * 1.30;
+            $muStrandThick = 0.026;
+            $muStrandY     = $headY - $headH * 0.10;
+            foreach ([
+                [-0.40, -0.50, 0.90],
+                [-0.22, -0.58, 0.98],
+                [-0.05, -0.60, 1.02],
+                [ 0.05, -0.60, 1.02],
+                [ 0.22, -0.58, 0.98],
+                [ 0.40, -0.50, 0.90],
+            ] as [$xF, $zF, $lm]) {
+                spawnHairCard($world, $mat,
+                    new Vec3(
+                        $base->x + $headW * $xF,
+                        $muStrandY,
+                        $base->z + $headD * $zF,
+                    ),
+                    $muStrandLen * $lm,
+                    $muStrandThick,
+                    $out,
+                );
+            }
             break;
 
         default:
