@@ -300,23 +300,61 @@ function buildCharacter(World $world, PlayerProportions $p, Entity $root, array 
     $headY    = $neckY + $neckH * 0.5 + $headH * 0.5;
     $shldY    = $base->y + $legH + $hipH + $waistH + $chestH - 0.04 * $h;
 
-    // Legs (cylinders)
+    // Legs - segmented: thigh + knee + calf + ankle + foot. Splitting at
+    // the knee makes the silhouette read as "leg" rather than "pillar"
+    // even on a static rig, and the joint sphere bulges out enough to
+    // catch a highlight under direct light.
+    //
+    // Anatomical-ish split: femur ~55 % of leg, tibia ~45 %. Summing to
+    // 1.0 means the thigh top reaches the hip line with no gap.
     $legOffset = $hipW * 0.35;
+    $thighH = $legH * 0.55;
+    $calfH  = $legH * 0.45;
+    $kneeY  = $base->y + $calfH;          // knee at top of calf
+    $thighR = $legR * 1.05;
+    $calfR  = $legR * 0.92;
+    $kneeR  = $legR * 1.10;
+    $ankleR = $legR * 0.85;
     foreach ([-$legOffset, $legOffset] as $sx) {
+        // Thigh (top half)
         $out[] = spawnPart($world, 'unit_cylinder', $skinMat,
-            new Vec3($base->x + $sx, $base->y + $legH * 0.5, $base->z),
-            new Vec3($legR * 2, $legH, $legR * 2),
+            new Vec3($base->x + $sx, $kneeY + $thighH * 0.5, $base->z),
+            new Vec3($thighR * 2, $thighH, $thighR * 2),
+        );
+        // Knee joint
+        $out[] = spawnPart($world, 'unit_sphere', $skinMat,
+            new Vec3($base->x + $sx, $kneeY, $base->z),
+            new Vec3($kneeR * 2, $kneeR * 2, $kneeR * 2),
+        );
+        // Calf (bottom half)
+        $out[] = spawnPart($world, 'unit_cylinder', $skinMat,
+            new Vec3($base->x + $sx, $base->y + $calfH * 0.5, $base->z),
+            new Vec3($calfR * 2, $calfH, $calfR * 2),
+        );
+        // Ankle (small joint above the foot)
+        $out[] = spawnPart($world, 'unit_sphere', $skinMat,
+            new Vec3($base->x + $sx, $base->y + $ankleR, $base->z),
+            new Vec3($ankleR * 2, $ankleR * 2, $ankleR * 2),
         );
     }
 
-    // Feet
-    $footW = $legR * 2.4;
-    $footL = $legR * 3.2;
-    $footH = 0.04 * $h;
+    // Feet - heel (wider, taller) + toe (narrower, shorter) so the foot
+    // reads as a shoe shape rather than a flat tile.
+    $footW   = $legR * 2.4;
+    $heelL   = $legR * 1.5;
+    $toeL    = $legR * 1.9;
+    $heelH   = 0.045 * $h;
+    $toeH    = 0.030 * $h;
     foreach ([-$legOffset, $legOffset] as $sx) {
+        // Heel - centred under the ankle
         $out[] = spawnPart($world, 'unit_box', 'cloth_dark',
-            new Vec3($base->x + $sx, $base->y + $footH * 0.5, $base->z + $footL * 0.15),
-            new Vec3($footW, $footH, $footL),
+            new Vec3($base->x + $sx, $base->y + $heelH * 0.5, $base->z - $heelL * 0.3),
+            new Vec3($footW, $heelH, $heelL),
+        );
+        // Toe - in front of heel, narrower
+        $out[] = spawnPart($world, 'unit_box', 'cloth_dark',
+            new Vec3($base->x + $sx, $base->y + $toeH * 0.5, $base->z + ($heelL * 0.5) + $toeL * 0.3),
+            new Vec3($footW * 0.85, $toeH, $toeL),
         );
     }
 
@@ -332,6 +370,18 @@ function buildCharacter(World $world, PlayerProportions $p, Entity $root, array 
         new Vec3($waistW, $waistH, $waistD),
     );
 
+    // Hip-waist corner caps - same trick as shoulder caps, rounds off the
+    // step between hip box (wider) and waist box (narrower).
+    $hipCornerR = ($hipW - $waistW) * 0.6;
+    if ($hipCornerR > 0.005) {
+        foreach ([-1, 1] as $side) {
+            $out[] = spawnPart($world, 'unit_sphere', $skinMat,
+                new Vec3($base->x + $side * $waistW * 0.5, $waistY - $waistH * 0.5, $base->z),
+                new Vec3($hipCornerR * 2, $hipCornerR * 2, $waistD * 0.9),
+            );
+        }
+    }
+
     // Chest (broader)
     $out[] = spawnPart($world, 'unit_box', $skinMat,
         new Vec3($base->x, $chestY, $base->z),
@@ -346,23 +396,92 @@ function buildCharacter(World $world, PlayerProportions $p, Entity $root, array 
         );
     }
 
-    // Neck
+    // Neck - cylinder for the bulk, sphere on top to widen into the jaw
+    // line so the head doesn't sit on a perfect pillar.
     $out[] = spawnPart($world, 'unit_cylinder', $skinMat,
         new Vec3($base->x, $neckY, $base->z),
-        new Vec3(0.09 * $h, $neckH, 0.09 * $h),
+        new Vec3(0.085 * $h, $neckH, 0.085 * $h),
+    );
+    $out[] = spawnPart($world, 'unit_sphere', $skinMat,
+        new Vec3($base->x, $neckY + $neckH * 0.45, $base->z),
+        new Vec3(0.11 * $h * $p->skullWidth, 0.04 * $h, 0.10 * $h * $p->skullWidth),
     );
 
-    // Arms
-    $armOffset = $shldW * 0.5 + $armR;
+    // Arms - segmented: upper arm + elbow + forearm + wrist + hand.
+    // Same logic as legs: the joint sphere catches a highlight and makes
+    // the arm read as anatomical rather than a single broomstick.
+    //
+    // Arms drift outward by ~6 % of the shoulder width between the
+    // shoulder and the wrist, so they don't hang strictly vertical -
+    // matches a natural relaxed stance and gives the silhouette some
+    // bounce.
+    $armOffset       = $shldW * 0.5 + $armR;
+    $armDriftOutward = $armR * 0.6;
+    $upperArmH    = $armL * 0.50;
+    $forearmH     = $armL * 0.45;
+    $elbowY       = $shldY - $upperArmH;
+    $wristY       = $elbowY - $forearmH;
+    $upperArmR    = $armR * 1.05;
+    $forearmR     = $armR * 0.88;
+    $elbowR       = $armR * 1.08;
+    $wristR       = $armR * 0.85;
     foreach ([-$armOffset, $armOffset] as $sx) {
+        $dir       = $sx < 0 ? -1.0 : 1.0;
+        $shoulderX = $base->x + $sx;
+        $elbowX    = $base->x + $sx + $dir * $armDriftOutward * 0.5;
+        $wristX    = $base->x + $sx + $dir * $armDriftOutward;
+
+        // Upper arm - between shoulder and elbow X
         $out[] = spawnPart($world, 'unit_cylinder', $skinMat,
-            new Vec3($base->x + $sx, $shldY - $armL * 0.5, $base->z),
-            new Vec3($armR * 2, $armL, $armR * 2),
+            new Vec3(($shoulderX + $elbowX) * 0.5, $shldY - $upperArmH * 0.5, $base->z),
+            new Vec3($upperArmR * 2, $upperArmH, $upperArmR * 2),
         );
-        // Hand
+        // Elbow joint
         $out[] = spawnPart($world, 'unit_sphere', $skinMat,
-            new Vec3($base->x + $sx, $shldY - $armL - $armR * 0.6, $base->z),
-            new Vec3($armR * 2.4, $armR * 2.6, $armR * 2.4),
+            new Vec3($elbowX, $elbowY, $base->z),
+            new Vec3($elbowR * 2, $elbowR * 2, $elbowR * 2),
+        );
+        // Forearm - between elbow and wrist X
+        $out[] = spawnPart($world, 'unit_cylinder', $skinMat,
+            new Vec3(($elbowX + $wristX) * 0.5, $wristY + $forearmH * 0.5, $base->z),
+            new Vec3($forearmR * 2, $forearmH, $forearmR * 2),
+        );
+        // Wrist joint
+        $out[] = spawnPart($world, 'unit_sphere', $skinMat,
+            new Vec3($wristX, $wristY, $base->z),
+            new Vec3($wristR * 2, $wristR * 2, $wristR * 2),
+        );
+        // Palm - flattened sphere just below wrist
+        $palmY = $wristY - $armR * 0.85;
+        $palmW = $armR * 2.2;
+        $palmH = $armR * 0.9;
+        $palmD = $armR * 2.2;
+        $out[] = spawnPart($world, 'unit_sphere', $skinMat,
+            new Vec3($wristX, $palmY, $base->z),
+            new Vec3($palmW, $palmH * 2.0, $palmD),
+        );
+        // Four finger stubs hanging below the palm. Slight horizontal
+        // spread so they read as individual fingers, not one paddle.
+        $fingerLen   = $armR * 1.4;
+        $fingerR     = $armR * 0.30;
+        $fingerTopY  = $palmY - $palmH * 0.7;
+        $fingerCtrY  = $fingerTopY - $fingerLen * 0.5;
+        for ($f = 0; $f < 4; $f++) {
+            $offsetX = (($f - 1.5) / 1.5) * ($palmW * 0.30);
+            $out[] = spawnPart($world, 'unit_cylinder', $skinMat,
+                new Vec3($wristX + $offsetX, $fingerCtrY, $base->z),
+                new Vec3($fingerR * 2, $fingerLen, $fingerR * 2),
+            );
+        }
+        // Thumb - shorter stub on the inside of the palm
+        $thumbDir = -$dir; // thumb points toward body centre
+        $out[] = spawnPart($world, 'unit_cylinder', $skinMat,
+            new Vec3(
+                $wristX + $thumbDir * $palmW * 0.45,
+                $palmY - $palmH * 0.1,
+                $base->z + $palmD * 0.10,
+            ),
+            new Vec3($fingerR * 2.1, $fingerLen * 0.7, $fingerR * 2.1),
         );
     }
 
@@ -372,18 +491,49 @@ function buildCharacter(World $world, PlayerProportions $p, Entity $root, array 
         new Vec3($headW, $headH, $headD),
     );
 
+    // Ears - small sphere stubs on each side of the skull at eye-line
+    // height. Slightly squashed front-to-back so they read as ears, not
+    // skull-mounted balls.
+    foreach ([-1, 1] as $earSide) {
+        $out[] = spawnPart($world, 'unit_sphere', $skinMat,
+            new Vec3(
+                $base->x + $earSide * $headW * 0.52,
+                $headY + $headH * 0.05,
+                $base->z - $headD * 0.05,
+            ),
+            new Vec3($headW * 0.16, $headH * 0.30, $headD * 0.45),
+        );
+    }
+
+    // Eyebrows - thin horizontal bars in the hair colour, above the eyes.
+    // Hair on a bald scalp still has eyebrows, so this isn't gated on
+    // hair style.
+    $browMat = 'hair_' . $p->hairColor->name;
+    $browOffsetX = $headW * 0.32 * $p->eyeSpacing;
+    foreach ([-$browOffsetX, $browOffsetX] as $bx) {
+        $out[] = spawnPart($world, 'unit_box', $browMat,
+            new Vec3(
+                $base->x + $bx,
+                $headY + $headH * 0.14,
+                $base->z + $headD * 0.5 - 0.003 * $h,
+            ),
+            new Vec3($headW * 0.32, 0.018 * $h, 0.012 * $h),
+        );
+    }
+
     // Jaw - jawWidth pushes a small wedge below the head front
     $out[] = spawnPart($world, 'unit_sphere', $skinMat,
         new Vec3($base->x, $headY - $headH * 0.35, $base->z + $headD * 0.05),
         new Vec3($headW * (0.55 + 0.35 * $p->jawWidth), $jawDrop, $headD * 0.9),
     );
 
-    // Brow (subtle ridge above eyes - keeps it from looking like sunglasses)
+    // Brow ridge (skin-coloured ridge above the brows, only on prominent
+    // brows - keeps it from looking like sunglasses on subtle faces).
     $browProm = $p->browProminence;
     if ($browProm > 0.25) {
         $browZ = $base->z + $headD * 0.5 - 0.005 * $h;
         $out[] = spawnPart($world, 'unit_box', $skinMat,
-            new Vec3($base->x, $headY + $headH * 0.18, $browZ),
+            new Vec3($base->x, $headY + $headH * 0.20, $browZ),
             new Vec3($headW * 0.7, 0.012 * $h, 0.025 * (0.5 + $browProm) * $h),
         );
     }
