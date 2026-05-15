@@ -24,10 +24,13 @@ declare(strict_types=1);
 require_once __DIR__ . '/../vendor/autoload.php';
 
 use PHPolygon\Character\DNA\CharacterDNA;
+use PHPolygon\Character\DNA\Enum\Accessory;
 use PHPolygon\Character\DNA\Enum\EyeColor;
 use PHPolygon\Character\DNA\Enum\EyeShape;
+use PHPolygon\Character\DNA\Enum\FacialHair;
 use PHPolygon\Character\DNA\Enum\HairColor;
 use PHPolygon\Character\DNA\Enum\HairStyle;
+use PHPolygon\Character\DNA\Enum\NoseShape;
 use PHPolygon\Character\DNA\Enum\SkinTone;
 use PHPolygon\Character\DNA\GeneDecoder;
 use PHPolygon\Character\DNA\PlayerProportions;
@@ -41,10 +44,12 @@ use PHPolygon\Engine;
 use PHPolygon\EngineConfig;
 use PHPolygon\Geometry\BoxMesh;
 use PHPolygon\Geometry\CylinderMesh;
+use PHPolygon\Geometry\LatheMesh;
 use PHPolygon\Geometry\MeshRegistry;
 use PHPolygon\Geometry\PlaneMesh;
 use PHPolygon\Geometry\SphereMesh;
 use PHPolygon\Math\Quaternion;
+use PHPolygon\Math\Vec2;
 use PHPolygon\Math\Vec3;
 use PHPolygon\Rendering\Color;
 use PHPolygon\Rendering\Command\SetAmbientLight;
@@ -154,6 +159,22 @@ function registerMeshes(): void
     MeshRegistry::register('unit_sphere',   SphereMesh::generate(0.5, 12, 20));
     MeshRegistry::register('unit_cylinder', CylinderMesh::generate(0.5, 1.0, 12));
     MeshRegistry::register('eye_sphere',    SphereMesh::generate(0.5, 8, 12));
+
+    // Normalised torso profile: revolved around the Y axis to give one
+    // single solid that replaces the waist box + hip-waist caps + chest
+    // box. Profile lives in [0, 0.5] radius and [0, 1] height, so the
+    // mesh fits a 1x1x1 unit box and is positioned/sized per-character
+    // through Transform3D.scale.
+    MeshRegistry::register('torso_lathe', LatheMesh::generate([
+        new Vec2(0.00, 0.00),   // bottom pole (sits inside the hip belt)
+        new Vec2(0.42, 0.04),   // hip joint - ring picks up quickly
+        new Vec2(0.40, 0.30),   // waist - narrowest point of the silhouette
+        new Vec2(0.46, 0.55),   // chest swell
+        new Vec2(0.50, 0.78),   // upper chest / pec line
+        new Vec2(0.42, 0.92),   // shoulder slope
+        new Vec2(0.28, 0.98),   // neck approach
+        new Vec2(0.00, 1.00),   // top pole (hidden under the neck)
+    ], 24));
 }
 
 function registerMaterials(): void
@@ -194,8 +215,16 @@ function registerMaterials(): void
         ));
     }
     foreach (HairColor::cases() as $color) {
+        $albedo = Color::hex($color->value);
         MaterialRegistry::register('hair_' . $color->name, new Material(
-            albedo: Color::hex($color->value), roughness: 0.55, metallic: 0.0,
+            albedo: $albedo, roughness: 0.55, metallic: 0.0,
+        ));
+        // Facial hair shares the hair colour but slightly darker + matte so
+        // beard/stubble reads as denser than scalp hair.
+        MaterialRegistry::register('facial_hair_' . $color->name, new Material(
+            albedo: new Color($albedo->r * 0.70, $albedo->g * 0.70, $albedo->b * 0.70),
+            roughness: 0.80,
+            metallic: 0.0,
         ));
     }
     foreach (EyeColor::cases() as $color) {
@@ -203,6 +232,17 @@ function registerMaterials(): void
             albedo: Color::hex($color->value), roughness: 0.25, metallic: 0.0,
         ));
     }
+
+    // Accessory materials - shared across all characters.
+    MaterialRegistry::register('accessory_metal', new Material(
+        albedo: new Color(0.85, 0.78, 0.42), roughness: 0.30, metallic: 0.9,
+    ));
+    MaterialRegistry::register('accessory_dark', new Material(
+        albedo: new Color(0.08, 0.08, 0.10), roughness: 0.40, metallic: 0.1,
+    ));
+    MaterialRegistry::register('accessory_glass', new Material(
+        albedo: new Color(0.12, 0.14, 0.18), roughness: 0.20, metallic: 0.0,
+    ));
 }
 
 // ---------------------------------------------------------------------------
@@ -236,13 +276,22 @@ function spawnCharacters(World $world, GeneDecoder $decoder, array &$roots, arra
         $parts[]  = $created;
 
         printf(
-            "  #%d  height=%.2f  skin=%-13s hair=%-10s style=%-11s eyes=%s\n",
+            "  #%d  h=%.2f  skin=%-13s hair=%-10s style=%-11s eyes=%s\n",
             $i + 1,
             $props->bodyHeight,
             $props->skinTone->name,
             $props->hairColor->name,
             $props->hairStyle->name,
             $props->eyeColor->name,
+        );
+        printf(
+            "     beard=%-9s nose=%-8s ears=%.2f  age=%.2f  build=%+.2f  extra=%s\n",
+            $props->facialHair->name,
+            $props->noseShape->name,
+            $props->earSize,
+            $props->age,
+            $props->buildBias,
+            $props->accessory->name,
         );
         printf("     ACGT: %s\n", $dna->toAcgt());
     }
@@ -269,6 +318,14 @@ function buildCharacter(World $world, PlayerProportions $p, Entity $root, array 
 {
     $h = $p->bodyHeight;
 
+    // BuildBias in [-1, 1]: -1 lean, 0 neutral, +1 stocky. Modulates limb
+    // thickness, torso girth, and waist width. Keep amplitudes small so the
+    // silhouette stays recognisable as the same skeleton.
+    $bias    = $p->buildBias;
+    $thickMul = 1.0 + 0.22 * $bias;     // limb radii
+    $girthMul = 1.0 + 0.18 * $bias;     // chest depth, waist depth
+    $waistMul = 1.0 + 0.15 * $bias;     // waist width relative to chest
+
     $legH   = 0.82 * $p->limbLength * $h;
     $hipH   = 0.18 * $h;
     $chestH = 0.34 * $p->torsoLength * $h;
@@ -277,16 +334,16 @@ function buildCharacter(World $world, PlayerProportions $p, Entity $root, array 
     $headH  = 0.26 * $p->skullHeight * $h;
 
     $hipW    = 0.34 * $p->hipWidth * $h;
-    $waistW  = 0.30 * (0.6 + 0.4 * $p->shoulderWidth) * $h;
+    $waistW  = 0.30 * (0.6 + 0.4 * $p->shoulderWidth) * $h * $waistMul;
     $shldW   = 0.50 * $p->shoulderWidth * $h;
-    $chestD  = 0.24 * $h;
-    $waistD  = 0.20 * $h;
+    $chestD  = 0.24 * $h * $girthMul;
+    $waistD  = 0.20 * $h * $girthMul;
     $headW   = 0.20 * $p->skullWidth * $h;
     $headD   = 0.22 * $p->skullWidth * $h;
     $jawDrop = 0.05 * $p->jawWidth * $h;
 
-    $legR   = 0.085 * (0.4 + 0.6 * $p->limbTaper) * $h;
-    $armR   = 0.062 * (0.4 + 0.6 * $p->limbTaper) * $h;
+    $legR   = 0.085 * (0.4 + 0.6 * $p->limbTaper) * $h * $thickMul;
+    $armR   = 0.062 * (0.4 + 0.6 * $p->limbTaper) * $h * $thickMul;
     $armL   = 0.68  * $p->limbLength * $h;
 
     $skinMat = 'skin_' . $p->skinTone->name;
@@ -294,8 +351,6 @@ function buildCharacter(World $world, PlayerProportions $p, Entity $root, array 
     $base = $root->get(Transform3D::class)->position;
 
     $hipY     = $base->y + $legH + $hipH * 0.5;
-    $waistY   = $base->y + $legH + $hipH + $waistH * 0.5;
-    $chestY   = $base->y + $legH + $hipH + $waistH + $chestH * 0.5;
     $neckY    = $base->y + $legH + $hipH + $waistH + $chestH + $neckH * 0.5;
     $headY    = $neckY + $neckH * 0.5 + $headH * 0.5;
     $shldY    = $base->y + $legH + $hipH + $waistH + $chestH - 0.04 * $h;
@@ -364,28 +419,18 @@ function buildCharacter(World $world, PlayerProportions $p, Entity $root, array 
         new Vec3($hipW, $hipH, $waistD * 1.05),
     );
 
-    // Waist (slimmer than chest -> visible torso taper)
-    $out[] = spawnPart($world, 'unit_box', $skinMat,
-        new Vec3($base->x, $waistY, $base->z),
-        new Vec3($waistW, $waistH, $waistD),
-    );
-
-    // Hip-waist corner caps - same trick as shoulder caps, rounds off the
-    // step between hip box (wider) and waist box (narrower).
-    $hipCornerR = ($hipW - $waistW) * 0.6;
-    if ($hipCornerR > 0.005) {
-        foreach ([-1, 1] as $side) {
-            $out[] = spawnPart($world, 'unit_sphere', $skinMat,
-                new Vec3($base->x + $side * $waistW * 0.5, $waistY - $waistH * 0.5, $base->z),
-                new Vec3($hipCornerR * 2, $hipCornerR * 2, $waistD * 0.9),
-            );
-        }
-    }
-
-    // Chest (broader)
-    $out[] = spawnPart($world, 'unit_box', $skinMat,
-        new Vec3($base->x, $chestY, $base->z),
-        new Vec3($shldW, $chestH, $chestD),
+    // Torso - single tapered solid of revolution that covers waist + chest
+    // in one mesh. The normalised profile already encodes the hourglass
+    // silhouette; scale.x/scale.z modulate breadth/depth from DNA, and
+    // scale.y stretches the profile to match waistH + chestH. Bottom pole
+    // sinks slightly into the hip belt so the seam is hidden.
+    $torsoH       = $waistH + $chestH;
+    $torsoBottom  = $base->y + $legH + $hipH - 0.005 * $h;
+    $torsoBreadth = max($waistW, $shldW * 0.95);
+    $torsoDepth   = max($waistD, $chestD * 0.95);
+    $out[] = spawnPart($world, 'torso_lathe', $skinMat,
+        new Vec3($base->x, $torsoBottom, $base->z),
+        new Vec3($torsoBreadth, $torsoH, $torsoDepth),
     );
 
     // Shoulder caps (round off the boxy shoulders)
@@ -493,31 +538,46 @@ function buildCharacter(World $world, PlayerProportions $p, Entity $root, array 
 
     // Ears - small sphere stubs on each side of the skull at eye-line
     // height. Slightly squashed front-to-back so they read as ears, not
-    // skull-mounted balls.
+    // skull-mounted balls. earSize scales the whole ear volume around the
+    // attachment point so a 1.35 multiplier reads as Spock-grade ears.
+    $earScale = $p->earSize;
+    $earCenterY = $headY + $headH * 0.05;
+    $earCenterX = $headW * 0.52;
     foreach ([-1, 1] as $earSide) {
         $out[] = spawnPart($world, 'unit_sphere', $skinMat,
             new Vec3(
-                $base->x + $earSide * $headW * 0.52,
-                $headY + $headH * 0.05,
+                $base->x + $earSide * $earCenterX,
+                $earCenterY,
                 $base->z - $headD * 0.05,
             ),
-            new Vec3($headW * 0.16, $headH * 0.30, $headD * 0.45),
+            new Vec3(
+                $headW * 0.16 * $earScale,
+                $headH * 0.30 * $earScale,
+                $headD * 0.45 * $earScale,
+            ),
         );
     }
 
     // Eyebrows - thin horizontal bars in the hair colour, above the eyes.
     // Hair on a bald scalp still has eyebrows, so this isn't gated on
-    // hair style.
+    // hair style. eyebrowThickness scales width + height; eyebrowAngle
+    // tilts each bar around the head's forward axis, mirrored per side so
+    // a positive angle reads as "inner-up" (concerned) and a negative
+    // angle as "outer-up" (skeptical).
     $browMat = 'hair_' . $p->hairColor->name;
     $browOffsetX = $headW * 0.32 * $p->eyeSpacing;
-    foreach ([-$browOffsetX, $browOffsetX] as $bx) {
-        $out[] = spawnPart($world, 'unit_box', $browMat,
-            new Vec3(
-                $base->x + $bx,
-                $headY + $headH * 0.14,
-                $base->z + $headD * 0.5 - 0.003 * $h,
-            ),
-            new Vec3($headW * 0.32, 0.018 * $h, 0.012 * $h),
+    $browW = $headW * 0.32 * $p->eyebrowThickness;
+    $browH = 0.018 * $h * (0.7 + 0.6 * $p->eyebrowThickness);
+    $browD = 0.012 * $h;
+    $browZ = $base->z + $headD * 0.5 - 0.003 * $h;
+    $browY = $headY + $headH * 0.14;
+    foreach ([-1, 1] as $bs) {
+        $angle = $p->eyebrowAngle * $bs;       // mirror across the centre line
+        $rot = Quaternion::fromAxisAngle(new Vec3(0.0, 0.0, 1.0), $angle);
+        $out[] = spawnPartRot($world, 'unit_box', $browMat,
+            new Vec3($base->x + $bs * $browOffsetX, $browY, $browZ),
+            new Vec3($browW, $browH, $browD),
+            $rot,
         );
     }
 
@@ -538,11 +598,27 @@ function buildCharacter(World $world, PlayerProportions $p, Entity $root, array 
         );
     }
 
-    // Nose (small wedge)
+    // Nose - shape varies per NoseShape. The first sphere is the bridge
+    // bulk; the optional second sphere is the tip (hooked = drooped tip).
+    [$noseW, $noseHi, $noseDp, $noseDip] = noseShapeDims($p->noseShape);
+    $noseY = $headY - $headH * 0.05;
+    $noseZ = $base->z + $headD * 0.5 + 0.015 * $h;
     $out[] = spawnPart($world, 'unit_sphere', $skinMat,
-        new Vec3($base->x, $headY - $headH * 0.05, $base->z + $headD * 0.5 + 0.015 * $h),
-        new Vec3(0.025 * $h, 0.04 * $h, 0.04 * $h),
+        new Vec3($base->x, $noseY, $noseZ),
+        new Vec3($noseW * $h, $noseHi * $h, $noseDp * $h),
     );
+    if ($noseDip > 0.0) {
+        // Tip droop for the hooked nose - small sphere pulled down + slightly
+        // further forward so the silhouette shows a beak.
+        $out[] = spawnPart($world, 'unit_sphere', $skinMat,
+            new Vec3(
+                $base->x,
+                $noseY - $noseHi * $h * $noseDip,
+                $noseZ + $noseDp * $h * 0.25,
+            ),
+            new Vec3($noseW * $h * 0.85, $noseHi * $h * 0.55, $noseDp * $h * 0.55),
+        );
+    }
 
     // Mouth (thin dark line)
     $out[] = spawnPart($world, 'unit_box', 'mouth',
@@ -569,8 +645,36 @@ function buildCharacter(World $world, PlayerProportions $p, Entity $root, array 
         );
     }
 
+    // Facial hair - rendered against the lower face. Sits in front of the
+    // mouth/jaw geometry so jaw outline still reads through.
+    buildFacialHair($world, $p, $base, $headY, $headW, $headH, $headD, $out);
+
+    // Age detail - faint dark line under each eye at high age. Cheap
+    // "experienced face" cue without rebuilding the skull.
+    if ($p->age > 0.65) {
+        $wrinkleZ = $base->z + $headD * 0.5 - 0.004 * $h;
+        $wrinkleY = $eyeY - $scleraSize * 0.95;
+        $wrinkleAlpha = ($p->age - 0.65) / 0.35;   // 0..1 across the band
+        foreach ([-$eyeOffsetX, $eyeOffsetX] as $sx) {
+            $out[] = spawnPart($world, 'unit_box', 'mouth',
+                new Vec3($base->x + $sx, $wrinkleY, $wrinkleZ),
+                new Vec3($headW * 0.18, 0.005 * $h, 0.003 * $h * (0.5 + $wrinkleAlpha)),
+            );
+        }
+    }
+
     // Hair / scalp
     buildHair($world, $p, $base, $headY, $headW, $headH, $headD, $out);
+
+    // Accessories - spawned last so they overlay everything else.
+    buildAccessory(
+        $world, $p, $base,
+        $headY, $headW, $headH, $headD,
+        $eyeOffsetX, $eyeY, $eyeZ,
+        $earCenterX, $earCenterY,
+        $neckY, $neckH, $shldW,
+        $out,
+    );
 }
 
 function spawnPart(World $world, string $mesh, string $material, Vec3 $pos, Vec3 $scale): Entity
@@ -579,6 +683,202 @@ function spawnPart(World $world, string $mesh, string $material, Vec3 $pos, Vec3
     $e->attach(new MeshRenderer($mesh, $material));
     $e->attach(new Transform3D(position: $pos, scale: $scale));
     return $e;
+}
+
+function spawnPartRot(World $world, string $mesh, string $material, Vec3 $pos, Vec3 $scale, Quaternion $rot): Entity
+{
+    $e = $world->createEntity();
+    $e->attach(new MeshRenderer($mesh, $material));
+    $e->attach(new Transform3D(position: $pos, rotation: $rot, scale: $scale));
+    return $e;
+}
+
+/**
+ * Returns nose dimensions as [width, height, depth, dipFactor] - all in
+ * relative-to-bodyHeight units; the caller multiplies by $h. dipFactor > 0
+ * spawns a downward "tip droop" sphere; 0.0 disables it.
+ *
+ * @return array{0: float, 1: float, 2: float, 3: float}
+ */
+function noseShapeDims(NoseShape $shape): array
+{
+    return match ($shape) {
+        NoseShape::Button   => [0.026, 0.030, 0.038, 0.0],
+        NoseShape::Straight => [0.022, 0.055, 0.040, 0.0],
+        NoseShape::Wide     => [0.038, 0.034, 0.034, 0.0],
+        NoseShape::Pointed  => [0.018, 0.045, 0.058, 0.0],
+        NoseShape::Hooked   => [0.024, 0.050, 0.044, 0.55],
+    };
+}
+
+/** @param list<Entity> $out */
+function buildFacialHair(World $world, PlayerProportions $p, Vec3 $base, float $headY, float $headW, float $headH, float $headD, array &$out): void
+{
+    if ($p->facialHair === FacialHair::None) {
+        return;
+    }
+
+    $mat = 'facial_hair_' . $p->hairColor->name;
+    $faceZ = $base->z + $headD * 0.5 - 0.002 * 1.0;   // skim the face plane
+    $mouthY = $headY - $headH * 0.28;
+
+    switch ($p->facialHair) {
+        case FacialHair::Stubble:
+            // Thin dusting from cheekbones down to chin - one wide flat
+            // patch reads as 5-o'clock shadow.
+            $out[] = spawnPart($world, 'unit_box', $mat,
+                new Vec3($base->x, $mouthY - $headH * 0.04, $faceZ),
+                new Vec3($headW * 0.85, $headH * 0.30, 0.004),
+            );
+            break;
+
+        case FacialHair::Mustache:
+            // Short horizontal bar just above the mouth.
+            $out[] = spawnPart($world, 'unit_box', $mat,
+                new Vec3($base->x, $mouthY + $headH * 0.04, $faceZ),
+                new Vec3($headW * 0.42, $headH * 0.07, 0.012),
+            );
+            break;
+
+        case FacialHair::Goatee:
+            // Small patch under the lower lip + a slightly thicker chin tuft.
+            $out[] = spawnPart($world, 'unit_box', $mat,
+                new Vec3($base->x, $mouthY - $headH * 0.10, $faceZ),
+                new Vec3($headW * 0.22, $headH * 0.18, 0.012),
+            );
+            $out[] = spawnPart($world, 'unit_sphere', $mat,
+                new Vec3($base->x, $mouthY - $headH * 0.22, $faceZ),
+                new Vec3($headW * 0.20, $headH * 0.14, 0.020),
+            );
+            break;
+
+        case FacialHair::FullBeard:
+            // Wraps the jaw - one wide box spanning ear-to-ear and dropping
+            // below the head, plus a sphere on the chin for volume.
+            $out[] = spawnPart($world, 'unit_box', $mat,
+                new Vec3($base->x, $mouthY - $headH * 0.16, $faceZ - 0.005),
+                new Vec3($headW * 0.92, $headH * 0.42, 0.030),
+            );
+            $out[] = spawnPart($world, 'unit_sphere', $mat,
+                new Vec3($base->x, $mouthY - $headH * 0.30, $faceZ + 0.005),
+                new Vec3($headW * 0.55, $headH * 0.32, 0.045),
+            );
+            break;
+
+        case FacialHair::Sideburns:
+            // Two vertical strips running down the temples to the jawline.
+            foreach ([-1, 1] as $side) {
+                $out[] = spawnPart($world, 'unit_box', $mat,
+                    new Vec3(
+                        $base->x + $side * $headW * 0.44,
+                        $headY - $headH * 0.12,
+                        $faceZ - 0.008,
+                    ),
+                    new Vec3($headW * 0.10, $headH * 0.45, 0.020),
+                );
+            }
+            break;
+
+        default:
+            break;
+    }
+}
+
+/** @param list<Entity> $out */
+function buildAccessory(
+    World $world,
+    PlayerProportions $p,
+    Vec3 $base,
+    float $headY,
+    float $headW,
+    float $headH,
+    float $headD,
+    float $eyeOffsetX,
+    float $eyeY,
+    float $eyeZ,
+    float $earCenterX,
+    float $earCenterY,
+    float $neckY,
+    float $neckH,
+    float $shldW,
+    array &$out,
+): void {
+    switch ($p->accessory) {
+        case Accessory::None:
+            return;
+
+        case Accessory::Glasses:
+            // Two thin lens frames in front of the eyes + a bridge bar.
+            $lensW = $headW * 0.30;
+            $lensH = $headH * 0.18;
+            $lensZ = $eyeZ + 0.030;
+            foreach ([-$eyeOffsetX, $eyeOffsetX] as $sx) {
+                // Lens fill - dark tinted glass
+                $out[] = spawnPart($world, 'unit_box', 'accessory_glass',
+                    new Vec3($base->x + $sx, $eyeY, $lensZ),
+                    new Vec3($lensW * 0.85, $lensH * 0.85, 0.004),
+                );
+                // Frame ring - slightly larger box behind the glass
+                $out[] = spawnPart($world, 'unit_box', 'accessory_dark',
+                    new Vec3($base->x + $sx, $eyeY, $lensZ - 0.003),
+                    new Vec3($lensW, $lensH, 0.006),
+                );
+            }
+            // Bridge connecting the lenses
+            $out[] = spawnPart($world, 'unit_box', 'accessory_dark',
+                new Vec3($base->x, $eyeY, $lensZ - 0.003),
+                new Vec3($eyeOffsetX * 2.0 - $lensW * 0.95, $lensH * 0.10, 0.006),
+            );
+            return;
+
+        case Accessory::Earrings:
+            // Tiny gold spheres dangling from the lower edge of each ear.
+            $earringR = $headW * 0.04 * $p->earSize;
+            foreach ([-1, 1] as $side) {
+                $out[] = spawnPart($world, 'unit_sphere', 'accessory_metal',
+                    new Vec3(
+                        $base->x + $side * $earCenterX,
+                        $earCenterY - $headH * 0.22 * $p->earSize,
+                        $eyeZ - 0.02,
+                    ),
+                    new Vec3($earringR, $earringR, $earringR),
+                );
+            }
+            return;
+
+        case Accessory::Headband:
+            // Thin metallic ring around the forehead - approximated by a
+            // wide cylinder sized to wrap the skull.
+            $out[] = spawnPart($world, 'unit_cylinder', 'accessory_metal',
+                new Vec3($base->x, $headY + $headH * 0.30, $base->z),
+                new Vec3($headW * 1.08, $headH * 0.10, $headD * 1.08),
+            );
+            return;
+
+        case Accessory::Necklace:
+            // Arc of small spheres at the base of the neck. Spans the
+            // shoulder width so it sits naturally on the collarbone.
+            $arcWidth = $shldW * 0.55;
+            $arcY = $neckY - $neckH * 0.40;
+            $arcRingZ = $base->z + $headD * 0.45;
+            $beadCount = 7;
+            $beadR = $headW * 0.05;
+            for ($i = 0; $i < $beadCount; $i++) {
+                $t = $i / ($beadCount - 1);   // 0..1
+                $bx = -$arcWidth + 2.0 * $arcWidth * $t;
+                // Drape - centre beads sit lower (parabolic)
+                $drop = 1.0 - 4.0 * ($t - 0.5) * ($t - 0.5);
+                $out[] = spawnPart($world, 'unit_sphere', 'accessory_metal',
+                    new Vec3(
+                        $base->x + $bx,
+                        $arcY - $drop * $headH * 0.18,
+                        $arcRingZ - $drop * 0.005,
+                    ),
+                    new Vec3($beadR, $beadR, $beadR),
+                );
+            }
+            return;
+    }
 }
 
 /** @return array{0: float, 1: float} */

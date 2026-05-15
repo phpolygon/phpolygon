@@ -5,10 +5,13 @@ declare(strict_types=1);
 namespace PHPolygon\Tests\Character\DNA;
 
 use PHPolygon\Character\DNA\CharacterDNA;
+use PHPolygon\Character\DNA\Enum\Accessory;
 use PHPolygon\Character\DNA\Enum\EyeColor;
 use PHPolygon\Character\DNA\Enum\EyeShape;
+use PHPolygon\Character\DNA\Enum\FacialHair;
 use PHPolygon\Character\DNA\Enum\HairColor;
 use PHPolygon\Character\DNA\Enum\HairStyle;
+use PHPolygon\Character\DNA\Enum\NoseShape;
 use PHPolygon\Character\DNA\Enum\SkinTone;
 use PHPolygon\Character\DNA\GeneDecoder;
 use PHPolygon\Character\DNA\PlayerProportions;
@@ -49,6 +52,32 @@ class PlayerProportionsTest extends TestCase
         // hipWidth: ContinuousRange(0.70, 1.20), codon 2 = 26
         // 0.70 + (26/63) * 0.50 ~= 0.9063492063492063
         $this->assertEqualsWithDelta(0.9063492063492063, $props->hipWidth, 1e-12);
+
+        // Reserve loci 16..23 are now active. The alternating-byte pattern
+        // produces predictable codons at each locus boundary - cover a few
+        // to lock in the new mappings.
+
+        // Locus 16 (FacialHair): bases 48..50 land entirely in a 0x55
+        // byte, giving codon 21. 21 % 6 = 3 -> Goatee (case index 3).
+        $this->assertSame(FacialHair::Goatee, $props->facialHair);
+
+        // Locus 17 (eyebrowThickness): codon 41 -> 0.60 + (41/63) * 0.90.
+        $this->assertEqualsWithDelta(
+            0.60 + (41.0 / 63.0) * 0.90,
+            $props->eyebrowThickness,
+            1e-12,
+        );
+
+        // Locus 19 (NoseShape): codon 21. 21 % 5 = 1 -> Straight.
+        $this->assertSame(NoseShape::Straight, $props->noseShape);
+
+        // Locus 22 (buildBias): bases 66..68 straddle a 0x55/0xAA boundary,
+        // giving codon 37. -1.0 + (37/63) * 2.0 ~= 0.1746031746031746.
+        $this->assertEqualsWithDelta(
+            -1.0 + (37.0 / 63.0) * 2.0,
+            $props->buildBias,
+            1e-12,
+        );
     }
 
     public function testAcgtRoundtripPreservesProportions(): void
@@ -78,6 +107,29 @@ class PlayerProportionsTest extends TestCase
             $this->assertContains($props->hairStyle, HairStyle::cases());
             $this->assertContains($props->eyeColor, EyeColor::cases());
             $this->assertContains($props->eyeShape, EyeShape::cases());
+            $this->assertContains($props->facialHair, FacialHair::cases());
+            $this->assertContains($props->noseShape, NoseShape::cases());
+            $this->assertContains($props->accessory, Accessory::cases());
+        }
+    }
+
+    public function testContinuousReserveLociStayInDeclaredRange(): void
+    {
+        $rand = new \Random\Randomizer(new \Random\Engine\Mt19937(11));
+        $decoder = new GeneDecoder();
+
+        for ($i = 0; $i < 30; $i++) {
+            $props = $decoder->decode(CharacterDNA::random($rand), PlayerProportions::class);
+            $this->assertGreaterThanOrEqual(0.60, $props->eyebrowThickness);
+            $this->assertLessThanOrEqual(1.50, $props->eyebrowThickness);
+            $this->assertGreaterThanOrEqual(-0.35, $props->eyebrowAngle);
+            $this->assertLessThanOrEqual(0.35, $props->eyebrowAngle);
+            $this->assertGreaterThanOrEqual(0.75, $props->earSize);
+            $this->assertLessThanOrEqual(1.35, $props->earSize);
+            $this->assertGreaterThanOrEqual(0.00, $props->age);
+            $this->assertLessThanOrEqual(1.00, $props->age);
+            $this->assertGreaterThanOrEqual(-1.00, $props->buildBias);
+            $this->assertLessThanOrEqual(1.00, $props->buildBias);
         }
     }
 }
