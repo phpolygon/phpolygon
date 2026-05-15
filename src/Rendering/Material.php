@@ -120,6 +120,21 @@ class Material
      *                                     coat / cape). false: bottom is
      *                                     fixed, top swings (banner anchored
      *                                     at the floor, candle-flame style).
+     * @param Color   $subsurfaceColor     Warm transmission tint for the
+     *                                     skin-SSS approximation. Sampled at
+     *                                     the terminator (NdotL near zero)
+     *                                     and on back-lit fragments to fake
+     *                                     light wrapping through translucent
+     *                                     tissue (ears, fingers, nose).
+     *                                     Ignored when subsurfaceStrength = 0.
+     * @param float   $subsurfaceStrength  0 = no SSS (default, byte-identical
+     *                                     to the legacy lit path so existing
+     *                                     materials render unchanged). 1 =
+     *                                     full skin scattering: wrap-diffuse
+     *                                     extends past the terminator and
+     *                                     warm tint bleeds into the shadow
+     *                                     boundary. Use Material::skin(...)
+     *                                     for sensible skin defaults.
      */
     public function __construct(
         public readonly Color $albedo = new Color(0.8, 0.8, 0.8),
@@ -145,6 +160,8 @@ class Material
         public readonly float $clothFrequency = 1.0,
         public readonly float $clothPhase = 0.0,
         public readonly bool $clothAnchorTop = true,
+        public readonly Color $subsurfaceColor = new Color(1.0, 0.35, 0.25),
+        public readonly float $subsurfaceStrength = 0.0,
     ) {}
 
     public static function default(): self
@@ -209,6 +226,36 @@ class Material
             clothFrequency: $frequency,
             clothPhase: $phase,
             clothAnchorTop: $anchorTop,
+        );
+    }
+
+    /**
+     * Convenience factory for human skin. Sets a dielectric PBR profile
+     * (low metallic, mid roughness, no clearcoat) and enables the
+     * subsurface-scattering path in the lit shader:
+     *
+     *   - $subsurfaceColor is the warm transmission tint sampled at the
+     *     light terminator and on back-lit fragments. The default is a
+     *     human-blood pink; pass a desaturated variant for animals /
+     *     non-human creatures, or a derived tint per skin tone.
+     *   - $subsurfaceStrength scales the SSS contribution. 0.5..1.0 is
+     *     the sensible range; 0 disables SSS and degrades to standard PBR.
+     *
+     * The shader gates the entire SSS path on subsurfaceStrength > 0, so
+     * any other material remains byte-identical to its pre-SSS output.
+     */
+    public static function skin(
+        Color $albedo,
+        Color $subsurfaceColor = new Color(1.0, 0.35, 0.25),
+        float $subsurfaceStrength = 0.8,
+        float $roughness = 0.55,
+    ): self {
+        return new self(
+            albedo: $albedo,
+            roughness: $roughness,
+            metallic: 0.0,
+            subsurfaceColor: $subsurfaceColor,
+            subsurfaceStrength: $subsurfaceStrength,
         );
     }
 }

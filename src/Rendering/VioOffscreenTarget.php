@@ -35,6 +35,7 @@ final class VioOffscreenTarget
     private int $samples = 1;
 
     private ?VioRenderTarget $target = null;
+    private ?VioTexture $textureCache = null;
     private bool $allocated = false;
 
     /**
@@ -145,7 +146,10 @@ final class VioOffscreenTarget
         if (!$this->allocated || $this->target === null) {
             return null;
         }
-        return vio_render_target_texture($this->target);
+        if ($this->textureCache === null) {
+            $this->textureCache = vio_render_target_texture($this->target);
+        }
+        return $this->textureCache;
     }
 
     public function width(): int
@@ -184,8 +188,9 @@ final class VioOffscreenTarget
     public function release(): void
     {
         // vio releases the GPU resource when the PHP reference is dropped.
-        $this->target    = null;
-        $this->allocated = false;
+        $this->target       = null;
+        $this->textureCache = null;
+        $this->allocated    = false;
         // Width/height/samples retained so resize() can short-circuit.
     }
 }

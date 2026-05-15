@@ -92,6 +92,14 @@ class VioRenderer3D implements Renderer3DInterface
     private array $cascadeShadowTargets = [];
     /** @var array<int, Mat4> Per-cascade light-space matrices. */
     private array $cascadeLightSpaceMatrices = [];
+    /**
+     * A 1x1 depth render target wired to every sampler2DShadow slot in the
+     * mesh3d fragment shader when no real shadow map is active. Without this
+     * macOS OpenGL silently aborts the fragment stage and the frame stays
+     * at the headless-fbo clear colour (~0.098 grey). See
+     * uploadShadowUniforms() for the binding logic.
+     */
+    private ?VioRenderTarget $dummyShadowTarget = null;
     /** Per-cascade ortho-box half-extents (matches OpenGLRenderer3D). */
     private const CASCADE_ORTHO_SIZES = [15.0, 50.0, 150.0];
     private const SHADOW_MAP_RESOLUTION = 2048;
@@ -958,6 +966,25 @@ class VioRenderer3D implements Renderer3DInterface
         vio_set_uniform($this->ctx, 'u_csm_count', count(self::CASCADE_ORTHO_SIZES));
 
         if (!$hasShadowMap || empty($this->cascadeShadowTargets)) {
+            // No real shadow map this frame, but mesh3d.frag.glsl still
+            // declares sampler2DShadow uniforms (u_csm_map_0..2, u_shadow_map).
+            // macOS OpenGL collapses the fragment stage to a constant grey
+            // when those samplers reference a default texture unit that
+            // doesn't hold a depth texture - even though the runtime control
+            // flow gated by u_has_shadow_map never samples them. Binding a
+            // pre-allocated 1x1 depth target keeps the driver happy without
+            // affecting the lighting result.
+            $this->ensureDummyShadowTarget();
+            if ($this->dummyShadowTarget !== null) {
+                $dummyTex = vio_render_target_texture($this->dummyShadowTarget);
+                foreach ([6, 8, 9] as $unit) {
+                    vio_bind_texture($this->ctx, $dummyTex, $unit);
+                }
+                vio_set_uniform($this->ctx, 'u_csm_map_0',  6);
+                vio_set_uniform($this->ctx, 'u_csm_map_1',  8);
+                vio_set_uniform($this->ctx, 'u_csm_map_2',  9);
+                vio_set_uniform($this->ctx, 'u_shadow_map', 6);
+            }
             return;
         }
 
@@ -996,6 +1023,29 @@ class VioRenderer3D implements Renderer3DInterface
                 vio_set_uniform($this->ctx, 'u_shadow_map', $unit);
                 vio_set_uniform($this->ctx, 'u_light_space_matrix', $lsm);
             }
+        }
+    }
+
+    /**
+     * Lazy-create the 1x1 depth target used as a placeholder for the
+     * shadow samplers when no scene shadow map is active. Allocation
+     * happens on first frame so contexts that never enter the lit 3D
+     * path don't pay for it. Returns silently if vio refuses the
+     * depth-only RT - in that case mesh3d's shadow path still works
+     * because the engine just won't render unlit objects through it.
+     */
+    private function ensureDummyShadowTarget(): void
+    {
+        if ($this->dummyShadowTarget !== null) {
+            return;
+        }
+        $rt = vio_render_target($this->ctx, [
+            'width'      => 1,
+            'height'     => 1,
+            'depth_only' => true,
+        ]);
+        if ($rt !== false) {
+            $this->dummyShadowTarget = $rt;
         }
     }
 
@@ -1491,6 +1541,15 @@ class VioRenderer3D implements Renderer3DInterface
         vio_set_uniform($this->ctx, 'u_surface_scale', $material->surfaceScale);
         vio_set_uniform($this->ctx, 'u_surface_intensity', $material->surfaceIntensity);
         vio_set_uniform($this->ctx, 'u_wetness', $material->wetness);
+
+        // Subsurface scattering (skin path). Gated by strength > 0 in the
+        // shader so non-skin materials remain visually identical.
+        vio_set_uniform($this->ctx, 'u_subsurface_color', [
+            $material->subsurfaceColor->r,
+            $material->subsurfaceColor->g,
+            $material->subsurfaceColor->b,
+        ]);
+        vio_set_uniform($this->ctx, 'u_subsurface_strength', $material->subsurfaceStrength);
 
         // Cloth (mirrors OpenGL backend - same uniform names).
         vio_set_uniform($this->ctx, 'u_cloth', $material->cloth ? 1 : 0);

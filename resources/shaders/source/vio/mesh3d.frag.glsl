@@ -54,6 +54,8 @@ uniform int   u_surface_pattern;
 uniform float u_surface_scale;
 uniform float u_surface_intensity;
 uniform float u_wetness;
+uniform vec3  u_subsurface_color;
+uniform float u_subsurface_strength;
 uniform float u_ssr_intensity;
 uniform int   u_volumetric_fog;
 uniform float u_ao_strength;
@@ -255,7 +257,10 @@ vec3 volumetricScatter(vec3 worldPos) {
 
 vec3 applyColorGrading(vec3 color) {
     color = color + u_grade_lift;
-    color = pow(max(color, vec3(0.0)), vec3(1.0) / u_grade_gamma);
+    // Guard against gamma component == 0 (uninitialized uniform → div by 0 →
+    // pow(x, +inf) collapses every fragment to 0 → fully black screen).
+    vec3 gammaSafe = max(u_grade_gamma, vec3(1e-3));
+    color = pow(max(color, vec3(0.0)), vec3(1.0) / gammaSafe);
     color = color * u_grade_gain;
     float luma = dot(color, vec3(0.2126, 0.7152, 0.0722));
     return mix(vec3(luma), color, u_grade_saturation);
@@ -902,16 +907,39 @@ void main() {
 
     for (int dl = 0; dl < u_dir_light_count; dl++) {
         vec3 dL = normalize(-u_dir_lights[dl].direction);
-        float dNdotL = max(dot(N, dL), 0.0);
+        float rawNdotL = dot(N, dL);
         float dShadow = (dl == 0) ? shadow : 1.0;
+        vec3 radiance = u_dir_lights[dl].color * u_dir_lights[dl].intensity;
 
-        if (dNdotL > 0.0) {
-            vec3 spec = cookTorranceSpecular(N, V, dL, roughness, F0);
+        if (u_subsurface_strength > 0.0) {
+            // Skin path: wrap-diffuse extends light past the terminator,
+            // warm subsurface tint bleeds at grazing angles, and a small
+            // back-transmission term lights up thin areas viewed against
+            // the light (ear edges, nose tip, finger silhouettes).
+            float wrap        = 0.5;
+            float wrapNdotL   = clamp((rawNdotL + wrap) / (1.0 + wrap), 0.0, 1.0);
+            float terminator  = (1.0 - clamp(rawNdotL, 0.0, 1.0)) * wrapNdotL;
+            vec3  scatterTint = mix(vec3(1.0), u_subsurface_color, terminator * u_subsurface_strength);
+            vec3  effAlbedo   = albedo * scatterTint;
+            float backlight   = pow(clamp(dot(V, -dL), 0.0, 1.0), 3.0)
+                              * clamp(-rawNdotL, 0.0, 1.0);
+
             vec3 F = fresnelSchlick(max(dot(normalize(V + dL), V), 0.0), F0);
             vec3 kD = (1.0 - F) * (1.0 - metallic);
-
-            vec3 radiance = u_dir_lights[dl].color * u_dir_lights[dl].intensity;
-            color += (kD * albedo / 3.14159265 + spec) * radiance * dNdotL * dShadow;
+            color += (kD * effAlbedo / 3.14159265) * radiance * wrapNdotL * dShadow;
+            if (rawNdotL > 0.0) {
+                vec3 spec = cookTorranceSpecular(N, V, dL, roughness, F0);
+                color += spec * radiance * rawNdotL * dShadow;
+            }
+            color += u_subsurface_color * albedo * backlight * u_subsurface_strength * radiance;
+        } else {
+            float dNdotL = max(rawNdotL, 0.0);
+            if (dNdotL > 0.0) {
+                vec3 spec = cookTorranceSpecular(N, V, dL, roughness, F0);
+                vec3 F = fresnelSchlick(max(dot(normalize(V + dL), V), 0.0), F0);
+                vec3 kD = (1.0 - F) * (1.0 - metallic);
+                color += (kD * albedo / 3.14159265 + spec) * radiance * dNdotL * dShadow;
+            }
         }
     }
 
