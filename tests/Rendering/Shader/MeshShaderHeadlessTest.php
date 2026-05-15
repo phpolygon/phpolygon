@@ -173,6 +173,57 @@ class MeshShaderHeadlessTest extends TestCase
     }
 
     /**
+     * SKIN surface pattern (freckle mask) must produce per-pixel variation
+     * across the offscreen frame. We sample three positions across the
+     * fullscreen quad - their UVs differ enough that the noise-stack
+     * cannot collapse to the same freckle decision for all three. Any
+     * shift larger than the noise floor proves the pattern is wired
+     * end-to-end (dispatch switch hit, scale/intensity uniforms applied,
+     * tint multiplied into albedo).
+     */
+    public function testSkinSurfacePatternVariesAcrossPixels(): void
+    {
+        $h = HeadlessShaderHarness::open(64, 64);
+        $this->assertNotNull($h);
+        try {
+            $shader   = $h->compileShaderFromFiles('vio/mesh3d.vert.glsl', 'vio/mesh3d.frag.glsl');
+            $pipeline = $h->createPipeline($shader);
+            $rgba     = $h->renderAndRead(
+                $pipeline,
+                $h->fullscreenQuad(),
+                function (HeadlessShaderHarness $h): void {
+                    self::setNeutralMeshUniforms($h, 64, 64);
+                    $h->setUniform('u_surface_pattern',   5);    // SKIN
+                    $h->setUniform('u_surface_intensity', 1.0);  // full strength so freckle
+                                                                 // darkening is observable
+                    $h->setUniform('u_surface_scale',     1.0);
+                },
+            );
+
+            $a = $h->samplePixel($rgba, 8,  8);
+            $b = $h->samplePixel($rgba, 32, 32);
+            $c = $h->samplePixel($rgba, 56, 56);
+            $maxDelta = 0.0;
+            foreach ([[$a, $b], [$a, $c], [$b, $c]] as [$p, $q]) {
+                $d = abs($p[0] - $q[0]) + abs($p[1] - $q[1]) + abs($p[2] - $q[2]);
+                if ($d > $maxDelta) {
+                    $maxDelta = $d;
+                }
+            }
+            $this->assertGreaterThan(
+                0.01,
+                $maxDelta,
+                sprintf(
+                    'SKIN surface pattern must vary across pixels (a=(%.3f,%.3f,%.3f) b=(%.3f,%.3f,%.3f) c=(%.3f,%.3f,%.3f), maxDelta=%.3f)',
+                    $a[0], $a[1], $a[2], $b[0], $b[1], $b[2], $c[0], $c[1], $c[2], $maxDelta
+                )
+            );
+        } finally {
+            $h->close();
+        }
+    }
+
+    /**
      * Sanity: with subsurfaceStrength = 0 the lit-path output must match
      * what the legacy non-SSS path produced. We can't easily reach into a
      * historical shader build, so the proxy assertion is: at NdotL > 0

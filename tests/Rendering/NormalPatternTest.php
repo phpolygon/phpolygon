@@ -52,6 +52,7 @@ class NormalPatternTest extends TestCase
             NormalPattern::SCRATCHES,
             NormalPattern::CRACKED,
             NormalPattern::NOISE,
+            NormalPattern::SKIN,
         ];
         $this->assertSame($expected, NormalPattern::all());
     }

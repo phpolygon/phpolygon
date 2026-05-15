@@ -249,11 +249,17 @@ class Material
         Color $subsurfaceColor = new Color(1.0, 0.35, 0.25),
         float $subsurfaceStrength = 0.8,
         float $roughness = 0.55,
+        float $detailIntensity = 0.15,
     ): self {
         return new self(
             albedo: $albedo,
             roughness: $roughness,
             metallic: 0.0,
+            normalPattern: $detailIntensity > 0.0 ? NormalPattern::SKIN : null,
+            normalScale: 1.0,
+            surfacePattern: $detailIntensity > 0.0 ? SurfacePattern::SKIN : null,
+            surfaceScale: 1.0,
+            surfaceIntensity: $detailIntensity,
             subsurfaceColor: $subsurfaceColor,
             subsurfaceStrength: $subsurfaceStrength,
         );

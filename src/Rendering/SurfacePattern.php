@@ -31,6 +31,13 @@ final class SurfacePattern
     public const RUST            = 'rust';
     public const BRUSHED_METAL   = 'brushed_metal';
     public const POLISHED_RINGS  = 'polished_rings';
+    /**
+     * Skin freckle / pigmentation pattern. Blotchy large-scale variation
+     * gates a smaller-scale freckle field; output darkens albedo (~30 %)
+     * and adds a touch of roughness where freckles appear. Pairs naturally
+     * with {@see NormalPattern::SKIN}.
+     */
+    public const SKIN            = 'skin';
 
     public static function codeFor(?string $pattern): int
     {
@@ -39,6 +46,7 @@ final class SurfacePattern
             self::RUST           => 2,
             self::BRUSHED_METAL  => 3,
             self::POLISHED_RINGS => 4,
+            self::SKIN           => 5,
             default              => 0,
         };
     }
@@ -53,6 +61,7 @@ final class SurfacePattern
             self::RUST,
             self::BRUSHED_METAL,
             self::POLISHED_RINGS,
+            self::SKIN,
         ];
     }
 }

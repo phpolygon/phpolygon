@@ -706,16 +706,32 @@ vec3 np_noise_pattern(vec2 uv) {
     return normalize(vec3(-grad * 0.5, 1.0));
 }
 
+// Skin micro-relief: medium-scale pore noise + slow wrinkle FBM. The
+// deflection is kept small (0.06) so a fullscreen flat surface looks
+// like skin under raking light, not like a topographic map. Tune
+// u_normal_intensity from game code to push harder.
+vec3 np_skin(vec2 uv) {
+    float e = 0.02;
+    float h  = noise(uv * 14.0) * 0.55 + fbm3(uv * 4.0) * 0.45;
+    float hx = noise((uv + vec2(e, 0.0)) * 14.0) * 0.55
+             + fbm3((uv + vec2(e, 0.0)) * 4.0) * 0.45;
+    float hy = noise((uv + vec2(0.0, e)) * 14.0) * 0.55
+             + fbm3((uv + vec2(0.0, e)) * 4.0) * 0.45;
+    vec2 grad = vec2(hx - h, hy - h) / e;
+    return normalize(vec3(-grad * 0.06, 1.0));
+}
+
 vec3 dispatchProceduralNormal(int code, vec2 uv) {
-    if (code == 1) return np_bricks(uv);
-    if (code == 2) return np_bumps(uv);
-    if (code == 3) return np_orange_peel(uv);
-    if (code == 4) return np_hammered(uv);
-    if (code == 5) return np_hexagons(uv);
-    if (code == 6) return np_wood_grain(uv);
-    if (code == 7) return np_scratches(uv);
-    if (code == 8) return np_cracked(uv);
-    if (code == 9) return np_noise_pattern(uv);
+    if (code == 1)  return np_bricks(uv);
+    if (code == 2)  return np_bumps(uv);
+    if (code == 3)  return np_orange_peel(uv);
+    if (code == 4)  return np_hammered(uv);
+    if (code == 5)  return np_hexagons(uv);
+    if (code == 6)  return np_wood_grain(uv);
+    if (code == 7)  return np_scratches(uv);
+    if (code == 8)  return np_cracked(uv);
+    if (code == 9)  return np_noise_pattern(uv);
+    if (code == 10) return np_skin(uv);
     return vec3(0.0, 0.0, 1.0);
 }
 
@@ -752,11 +768,25 @@ vec3 sp_polished_rings(vec2 uv) {
     return vec3(0.50, matte * 0.50 - 0.10, 0.0);
 }
 
+// Skin freckles + blotchy pigmentation. Two smoothstep gates instead of a
+// binary `step()` so freckles fade in/out rather than tiling like an
+// animal print. The pigment lift is small (~12 % albedo darkening at max
+// intensity) - the goal is mottled skin, not warpaint.
+vec3 sp_skin(vec2 uv) {
+    float blotchy = fbm3(uv * 1.5);
+    float fine    = fbm3(uv * 5.0);
+    float freckle = smoothstep(0.65, 0.78, fine) * smoothstep(0.40, 0.60, blotchy);
+    float albedoT = mix(0.50, 0.44, freckle);
+    float roughD  = mix(0.0,  0.04, freckle);
+    return vec3(albedoT, roughD, 0.0);
+}
+
 vec3 dispatchSurfacePattern(int code, vec2 uv) {
     if (code == 1) return sp_worn_paint(uv);
     if (code == 2) return sp_rust(uv);
     if (code == 3) return sp_brushed_metal(uv);
     if (code == 4) return sp_polished_rings(uv);
+    if (code == 5) return sp_skin(uv);
     return vec3(0.5, 0.0, 0.0);
 }
 
