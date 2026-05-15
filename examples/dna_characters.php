@@ -47,6 +47,7 @@ use PHPolygon\Geometry\CylinderMesh;
 use PHPolygon\Geometry\LatheMesh;
 use PHPolygon\Geometry\MeshRegistry;
 use PHPolygon\Geometry\PlaneMesh;
+use PHPolygon\Geometry\SkullMesh;
 use PHPolygon\Geometry\SphereMesh;
 use PHPolygon\Math\Quaternion;
 use PHPolygon\Math\Vec2;
@@ -159,6 +160,10 @@ function registerMeshes(): void
     MeshRegistry::register('unit_sphere',   SphereMesh::generate(0.5, 12, 20));
     MeshRegistry::register('unit_cylinder', CylinderMesh::generate(0.5, 1.0, 12));
     MeshRegistry::register('eye_sphere',    SphereMesh::generate(0.5, 8, 12));
+
+    // Procedural skull: sphere topology with eye-socket depressions so the
+    // sclera spheres sit inside the head rather than on top of it.
+    MeshRegistry::register('skull_proc',    SkullMesh::generate(0.5, 32, 48));
 
     // Normalised torso profile: revolved around the Y axis to give one
     // single solid that replaces the waist box + hip-waist caps + chest
@@ -530,8 +535,8 @@ function buildCharacter(World $world, PlayerProportions $p, Entity $root, array 
         );
     }
 
-    // Head
-    $out[] = spawnPart($world, 'unit_sphere', $skinMat,
+    // Head - procedural skull mesh with carved eye sockets.
+    $out[] = spawnPart($world, 'skull_proc', $skinMat,
         new Vec3($base->x, $headY, $base->z),
         new Vec3($headW, $headH, $headD),
     );
@@ -626,21 +631,27 @@ function buildCharacter(World $world, PlayerProportions $p, Entity $root, array 
         new Vec3($headW * 0.35, 0.012 * $h, 0.005 * $h),
     );
 
-    // Eyes (sclera recessed slightly into the socket so they read as eyes, not goggles)
+    // Eyes - sclera sphere recessed into the procedural skull socket so
+    // the eyes look set into the face rather than glued onto a sphere.
+    // $eyeZ still tracks the un-displaced skull surface so accessories
+    // (glasses), the brow ridge, and age wrinkles continue to land in
+    // front of the head; $eyeSocketZ is a separate, deeper anchor for
+    // the eyeballs themselves.
     $eyeOffsetX = $headW * 0.32 * $p->eyeSpacing;
     $eyeY       = $headY + $headH * 0.05;
     $eyeZ       = $base->z + $headD * 0.5 - 0.005 * $h;
+    $eyeSocketZ = $eyeZ - $headD * 0.12;
     [$ex, $ey] = eyeShapeScale($p->eyeShape);
     $scleraSize = 0.055 * $h;
     $irisSize   = 0.028 * $h;
 
     foreach ([-$eyeOffsetX, $eyeOffsetX] as $sx) {
         $out[] = spawnPart($world, 'unit_sphere', 'eye_white',
-            new Vec3($base->x + $sx, $eyeY, $eyeZ),
+            new Vec3($base->x + $sx, $eyeY, $eyeSocketZ),
             new Vec3($scleraSize * $ex, $scleraSize * $ey, $scleraSize * 0.6),
         );
         $out[] = spawnPart($world, 'unit_sphere', 'eye_' . $p->eyeColor->name,
-            new Vec3($base->x + $sx, $eyeY, $eyeZ + 0.015 * $h),
+            new Vec3($base->x + $sx, $eyeY, $eyeSocketZ + 0.015 * $h),
             new Vec3($irisSize * $ex, $irisSize * $ey, $irisSize * 0.5),
         );
     }
