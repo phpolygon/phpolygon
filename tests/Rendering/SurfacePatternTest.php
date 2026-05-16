@@ -37,6 +37,7 @@ final class SurfacePatternTest extends TestCase
             SurfacePattern::RUST,
             SurfacePattern::BRUSHED_METAL,
             SurfacePattern::POLISHED_RINGS,
+            SurfacePattern::SKIN,
         ], SurfacePattern::all());
     }
 }

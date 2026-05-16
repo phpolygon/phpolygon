@@ -647,11 +647,24 @@ static inline float3 sp_polished_rings(float2 uv) {
     float matte = smoothstep(0.0, 0.4, ring);
     return float3(0.50, matte * 0.50 - 0.10, 0.0);
 }
+// Skin freckles + blotchy pigmentation (mirrors the GLSL copies). Two
+// smoothstep gates so freckles fade in/out rather than tiling like an
+// animal print.
+static inline float3 sp_skin(float2 uv) {
+    float blotchy = fbm(uv * 1.5, 3);
+    float fine    = fbm(uv * 5.0, 3);
+    float freckle = smoothstep(0.65, 0.78, fine) * smoothstep(0.40, 0.60, blotchy);
+    float albedoT = mix(0.50, 0.44, freckle);
+    float roughD  = mix(0.0,  0.04, freckle);
+    return float3(albedoT, roughD, 0.0);
+}
+
 static inline float3 dispatchSurfacePattern(int code, float2 uv) {
     if (code == 1) return sp_worn_paint(uv);
     if (code == 2) return sp_rust(uv);
     if (code == 3) return sp_brushed_metal(uv);
     if (code == 4) return sp_polished_rings(uv);
+    if (code == 5) return sp_skin(uv);
     return float3(0.5, 0.0, 0.0);
 }
 
@@ -798,16 +811,30 @@ static inline float3 np_noise_pattern(float2 uv) {
     return normalize(float3(-grad * 0.5, 1.0));
 }
 
+// Skin micro-relief: medium-scale pore noise + slow wrinkle FBM (mirrors
+// the Vio + OpenGL shader copies verbatim).
+static inline float3 np_skin(float2 uv) {
+    float e = 0.02;
+    float h  = vnoise(uv * 14.0) * 0.55 + fbm(uv * 4.0, 3) * 0.45;
+    float hx = vnoise((uv + float2(e, 0.0)) * 14.0) * 0.55
+             + fbm((uv + float2(e, 0.0)) * 4.0, 3) * 0.45;
+    float hy = vnoise((uv + float2(0.0, e)) * 14.0) * 0.55
+             + fbm((uv + float2(0.0, e)) * 4.0, 3) * 0.45;
+    float2 grad = float2(hx - h, hy - h) / e;
+    return normalize(float3(-grad * 0.06, 1.0));
+}
+
 static inline float3 dispatchProceduralNormal(int code, float2 uv) {
-    if (code == 1) return np_bricks(uv);
-    if (code == 2) return np_bumps(uv);
-    if (code == 3) return np_orange_peel(uv);
-    if (code == 4) return np_hammered(uv);
-    if (code == 5) return np_hexagons(uv);
-    if (code == 6) return np_wood_grain(uv);
-    if (code == 7) return np_scratches(uv);
-    if (code == 8) return np_cracked(uv);
-    if (code == 9) return np_noise_pattern(uv);
+    if (code == 1)  return np_bricks(uv);
+    if (code == 2)  return np_bumps(uv);
+    if (code == 3)  return np_orange_peel(uv);
+    if (code == 4)  return np_hammered(uv);
+    if (code == 5)  return np_hexagons(uv);
+    if (code == 6)  return np_wood_grain(uv);
+    if (code == 7)  return np_scratches(uv);
+    if (code == 8)  return np_cracked(uv);
+    if (code == 9)  return np_noise_pattern(uv);
+    if (code == 10) return np_skin(uv);
     return float3(0.0, 0.0, 1.0);
 }
 

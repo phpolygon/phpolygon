@@ -54,6 +54,8 @@ uniform int   u_surface_pattern;
 uniform float u_surface_scale;
 uniform float u_surface_intensity;
 uniform float u_wetness;
+uniform vec3  u_subsurface_color;
+uniform float u_subsurface_strength;
 uniform float u_ssr_intensity;
 uniform int   u_volumetric_fog;
 uniform float u_ao_strength;
@@ -255,7 +257,10 @@ vec3 volumetricScatter(vec3 worldPos) {
 
 vec3 applyColorGrading(vec3 color) {
     color = color + u_grade_lift;
-    color = pow(max(color, vec3(0.0)), vec3(1.0) / u_grade_gamma);
+    // Guard against gamma component == 0 (uninitialized uniform → div by 0 →
+    // pow(x, +inf) collapses every fragment to 0 → fully black screen).
+    vec3 gammaSafe = max(u_grade_gamma, vec3(1e-3));
+    color = pow(max(color, vec3(0.0)), vec3(1.0) / gammaSafe);
     color = color * u_grade_gain;
     float luma = dot(color, vec3(0.2126, 0.7152, 0.0722));
     return mix(vec3(luma), color, u_grade_saturation);
@@ -701,16 +706,32 @@ vec3 np_noise_pattern(vec2 uv) {
     return normalize(vec3(-grad * 0.5, 1.0));
 }
 
+// Skin micro-relief: medium-scale pore noise + slow wrinkle FBM. The
+// deflection is kept small (0.06) so a fullscreen flat surface looks
+// like skin under raking light, not like a topographic map. Tune
+// u_normal_intensity from game code to push harder.
+vec3 np_skin(vec2 uv) {
+    float e = 0.02;
+    float h  = noise(uv * 14.0) * 0.55 + fbm3(uv * 4.0) * 0.45;
+    float hx = noise((uv + vec2(e, 0.0)) * 14.0) * 0.55
+             + fbm3((uv + vec2(e, 0.0)) * 4.0) * 0.45;
+    float hy = noise((uv + vec2(0.0, e)) * 14.0) * 0.55
+             + fbm3((uv + vec2(0.0, e)) * 4.0) * 0.45;
+    vec2 grad = vec2(hx - h, hy - h) / e;
+    return normalize(vec3(-grad * 0.06, 1.0));
+}
+
 vec3 dispatchProceduralNormal(int code, vec2 uv) {
-    if (code == 1) return np_bricks(uv);
-    if (code == 2) return np_bumps(uv);
-    if (code == 3) return np_orange_peel(uv);
-    if (code == 4) return np_hammered(uv);
-    if (code == 5) return np_hexagons(uv);
-    if (code == 6) return np_wood_grain(uv);
-    if (code == 7) return np_scratches(uv);
-    if (code == 8) return np_cracked(uv);
-    if (code == 9) return np_noise_pattern(uv);
+    if (code == 1)  return np_bricks(uv);
+    if (code == 2)  return np_bumps(uv);
+    if (code == 3)  return np_orange_peel(uv);
+    if (code == 4)  return np_hammered(uv);
+    if (code == 5)  return np_hexagons(uv);
+    if (code == 6)  return np_wood_grain(uv);
+    if (code == 7)  return np_scratches(uv);
+    if (code == 8)  return np_cracked(uv);
+    if (code == 9)  return np_noise_pattern(uv);
+    if (code == 10) return np_skin(uv);
     return vec3(0.0, 0.0, 1.0);
 }
 
@@ -747,11 +768,25 @@ vec3 sp_polished_rings(vec2 uv) {
     return vec3(0.50, matte * 0.50 - 0.10, 0.0);
 }
 
+// Skin freckles + blotchy pigmentation. Two smoothstep gates instead of a
+// binary `step()` so freckles fade in/out rather than tiling like an
+// animal print. The pigment lift is small (~12 % albedo darkening at max
+// intensity) - the goal is mottled skin, not warpaint.
+vec3 sp_skin(vec2 uv) {
+    float blotchy = fbm3(uv * 1.5);
+    float fine    = fbm3(uv * 5.0);
+    float freckle = smoothstep(0.65, 0.78, fine) * smoothstep(0.40, 0.60, blotchy);
+    float albedoT = mix(0.50, 0.44, freckle);
+    float roughD  = mix(0.0,  0.04, freckle);
+    return vec3(albedoT, roughD, 0.0);
+}
+
 vec3 dispatchSurfacePattern(int code, vec2 uv) {
     if (code == 1) return sp_worn_paint(uv);
     if (code == 2) return sp_rust(uv);
     if (code == 3) return sp_brushed_metal(uv);
     if (code == 4) return sp_polished_rings(uv);
+    if (code == 5) return sp_skin(uv);
     return vec3(0.5, 0.0, 0.0);
 }
 
@@ -902,16 +937,39 @@ void main() {
 
     for (int dl = 0; dl < u_dir_light_count; dl++) {
         vec3 dL = normalize(-u_dir_lights[dl].direction);
-        float dNdotL = max(dot(N, dL), 0.0);
+        float rawNdotL = dot(N, dL);
         float dShadow = (dl == 0) ? shadow : 1.0;
+        vec3 radiance = u_dir_lights[dl].color * u_dir_lights[dl].intensity;
 
-        if (dNdotL > 0.0) {
-            vec3 spec = cookTorranceSpecular(N, V, dL, roughness, F0);
+        if (u_subsurface_strength > 0.0) {
+            // Skin path: wrap-diffuse extends light past the terminator,
+            // warm subsurface tint bleeds at grazing angles, and a small
+            // back-transmission term lights up thin areas viewed against
+            // the light (ear edges, nose tip, finger silhouettes).
+            float wrap        = 0.5;
+            float wrapNdotL   = clamp((rawNdotL + wrap) / (1.0 + wrap), 0.0, 1.0);
+            float terminator  = (1.0 - clamp(rawNdotL, 0.0, 1.0)) * wrapNdotL;
+            vec3  scatterTint = mix(vec3(1.0), u_subsurface_color, terminator * u_subsurface_strength);
+            vec3  effAlbedo   = albedo * scatterTint;
+            float backlight   = pow(clamp(dot(V, -dL), 0.0, 1.0), 3.0)
+                              * clamp(-rawNdotL, 0.0, 1.0);
+
             vec3 F = fresnelSchlick(max(dot(normalize(V + dL), V), 0.0), F0);
             vec3 kD = (1.0 - F) * (1.0 - metallic);
-
-            vec3 radiance = u_dir_lights[dl].color * u_dir_lights[dl].intensity;
-            color += (kD * albedo / 3.14159265 + spec) * radiance * dNdotL * dShadow;
+            color += (kD * effAlbedo / 3.14159265) * radiance * wrapNdotL * dShadow;
+            if (rawNdotL > 0.0) {
+                vec3 spec = cookTorranceSpecular(N, V, dL, roughness, F0);
+                color += spec * radiance * rawNdotL * dShadow;
+            }
+            color += u_subsurface_color * albedo * backlight * u_subsurface_strength * radiance;
+        } else {
+            float dNdotL = max(rawNdotL, 0.0);
+            if (dNdotL > 0.0) {
+                vec3 spec = cookTorranceSpecular(N, V, dL, roughness, F0);
+                vec3 F = fresnelSchlick(max(dot(normalize(V + dL), V), 0.0), F0);
+                vec3 kD = (1.0 - F) * (1.0 - metallic);
+                color += (kD * albedo / 3.14159265 + spec) * radiance * dNdotL * dShadow;
+            }
         }
     }
 

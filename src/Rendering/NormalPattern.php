@@ -39,6 +39,12 @@ final class NormalPattern
     public const SCRATCHES   = 'scratches';
     public const CRACKED     = 'cracked';
     public const NOISE       = 'noise';
+    /**
+     * Skin micro-relief: dense small pores layered over softer wrinkle FBM.
+     * Designed for the Material::skin() factory; intensity 0.3..0.6 is the
+     * realistic range, higher values exaggerate the orange-peel-like look.
+     */
+    public const SKIN        = 'skin';
 
     /**
      * Map a string pattern id to the integer code consumed by the shader's
@@ -57,6 +63,7 @@ final class NormalPattern
             self::SCRATCHES   => 7,
             self::CRACKED     => 8,
             self::NOISE       => 9,
+            self::SKIN        => 10,
             default           => 0,
         };
     }
@@ -76,6 +83,7 @@ final class NormalPattern
             self::SCRATCHES,
             self::CRACKED,
             self::NOISE,
+            self::SKIN,
         ];
     }
 }

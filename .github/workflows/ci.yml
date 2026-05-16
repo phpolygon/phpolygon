@@ -14,8 +14,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - php: '8.2'
-            os: ubuntu-latest
           - php: '8.3'
             os: ubuntu-latest
           - php: '8.4'
@@ -24,7 +22,7 @@ jobs:
             os: macos-14
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Setup PHP
         uses: shivammathur/setup-php@v2
@@ -48,7 +46,7 @@ jobs:
         php: ['8.3', '8.4']
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Setup PHP
         uses: shivammathur/setup-php@v2
@@ -88,7 +86,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Setup PHP
         uses: shivammathur/setup-php@v2
@@ -108,7 +106,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Setup PHP
         uses: shivammathur/setup-php@v2
@@ -160,7 +158,7 @@ jobs:
             git unzip
           ln -s /usr/bin/php84 /usr/bin/php
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install Composer
         run: |
