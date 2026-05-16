@@ -42,14 +42,14 @@ jobs:
 
     steps:
       - name: Checkout PHPolygon engine
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           path: engine
 
       # If a game repo is specified, check it out; otherwise use engine examples
       - name: Checkout game project
         if: inputs.game_repo != ''
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           repository: ${{ inputs.game_repo }}
           ref: ${{ inputs.game_ref || 'main' }}
