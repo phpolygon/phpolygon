@@ -727,6 +727,49 @@ $engine = new Engine(new EngineConfig(splashDuration: 1.5));
 
 ---
 
+## Character DNA
+
+Procedural humanoid characters are built from an 18-byte / 72-base / 24-codon
+strand (`CharacterDNA`). A reflection-driven decoder (`GeneDecoder`) maps each
+codon (0..63) through a `GeneMapping` strategy (`ContinuousRange`, `EnumChoice`,
+`Palette`) onto a typed trait class. The built-in trait class is
+`PlayerProportions` (all 24 loci active). The strand round-trips through a
+72-character ACGT string for save games and sharing.
+
+```php
+$dna = CharacterDNA::random();
+$root = $world->createEntity();
+$root->attach(new Transform3D(position: new Vec3(0, 0, 0)));
+$root->attach(new CharacterDnaComponent($dna));
+
+$parts = CharacterMeshBuilder::buildOn($world, $root);  // ~80-120 entities
+```
+
+`CharacterDnaComponent` is `#[Serializable]` — only the 72-char ACGT field is
+persisted; `dna()` / `proportions()` decode lazily on first call and cache.
+`CharacterMeshBuilder` is a stateless static helper; `registerDefaults()` is
+idempotent and auto-runs on the first `buildOn()` call. Full reference in
+**`docs/dna-system.md`**.
+
+### Anti-patterns
+
+- **Do not** rewrite character rig construction inside game code. Always go
+  through `CharacterMeshBuilder::buildOn()` so the engine can evolve the mesh
+  set + material naming centrally.
+- **Do not** change locus assignments on `PlayerProportions`. Existing ACGT
+  save strings depend on the codon-at-locus mapping. New traits go on unused
+  loci or a `CharacterDNAv2` class — never by reordering the existing v1
+  constructor parameters.
+- **Do not** extend `STRAND_BYTES` / `STRAND_BASES` on `CharacterDNA` itself.
+  Add a versioned subclass instead, and migrate at the component layer.
+- **Do not** mutate `CharacterDnaComponent::$acgt` directly. Call `setDna()`
+  so the cached `dna()` / `proportions()` are invalidated.
+- **Do not** swap `EnumChoice` for `Palette` on a stable locus to insert a
+  value in the middle. The modulo wrap shifts every existing strand's
+  decoded value. Append at the end of the enum / palette only.
+
+---
+
 ## Testing and visual regression testing (VRT)
 
 Three layers: PHPUnit unit tests, headless integration tests
