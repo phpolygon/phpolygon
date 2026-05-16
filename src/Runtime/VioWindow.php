@@ -29,30 +29,68 @@ class VioWindow extends Window
     public function initialize(InputInterface $input): void
     {
         \PHPolygon\Engine::log('VioWindow::initialize() backend=' . $this->backend . ' size=' . $this->width . 'x' . $this->height);
-        \PHPolygon\Engine::log('VioWindow: calling vio_create...');
 
-        $ctx = vio_create($this->backend, [
-            'width' => $this->width,
-            'height' => $this->height,
-            'title' => $this->title,
-            'vsync' => $this->vsync,
+        $config = [
+            'width'   => $this->width,
+            'height'  => $this->height,
+            'title'   => $this->title,
+            'vsync'   => $this->vsync,
             'samples' => 4,
-            'debug' => 1,
-        ]);
+            'debug'   => 1,
+        ];
 
-        \PHPolygon\Engine::log('VioWindow: vio_create returned ' . ($ctx === false ? 'false' : 'VioContext'));
+        // Try the requested backend first; on failure, walk a platform-aware
+        // fallback list. On Linux a missing Vulkan loader / driver makes the
+        // 'auto' picker return false and we'd otherwise leave the user with
+        // a hard "Failed to create Vulkan instance" without trying OpenGL.
+        $candidates = self::backendCandidates($this->backend);
+        $ctx = false;
+        $chosen = '';
+        foreach ($candidates as $backend) {
+            \PHPolygon\Engine::log('VioWindow: trying vio_create backend=' . $backend);
+            $ctx = vio_create($backend, $config);
+            if ($ctx !== false) {
+                $chosen = $backend;
+                break;
+            }
+            \PHPolygon\Engine::log('VioWindow: backend=' . $backend . ' returned false, trying next');
+        }
 
         if ($ctx === false) {
-            throw new \RuntimeException('Failed to create VIO context with backend=' . $this->backend);
+            throw new \RuntimeException(
+                'Failed to create VIO context. Tried backends: ' . implode(', ', $candidates)
+                . '. Check that your GPU driver supports at least one of them '
+                . '(OpenGL 3.3+ or Vulkan 1.1+ on Linux).'
+            );
         }
 
         $this->ctx = $ctx;
+        $this->backend = $chosen;
         $this->initialized = true;
         \PHPolygon\Engine::log('VioWindow: actual backend=' . vio_backend_name($ctx));
 
         if ($input instanceof VioInput) {
             $input->setContext($ctx);
         }
+    }
+
+    /**
+     * Ordered list of backends to try when initialising. The caller-supplied
+     * backend always comes first, followed by platform-appropriate fallbacks
+     * that don't share the failure mode of the primary (e.g. OpenGL after a
+     * Vulkan-instance creation failure on Linux).
+     *
+     * @return list<string>
+     */
+    private static function backendCandidates(string $primary): array
+    {
+        $fallbacks = match (PHP_OS_FAMILY) {
+            'Windows' => ['d3d11', 'opengl'],
+            'Darwin'  => ['metal', 'opengl'],
+            'Linux'   => ['opengl', 'vulkan'],
+            default   => ['opengl'],
+        };
+        return array_values(array_unique(array_merge([$primary], $fallbacks)));
     }
 
     public function shouldClose(): bool
