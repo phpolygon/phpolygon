@@ -1012,39 +1012,67 @@ class Engine
 
         $barY = (float) ($h - 60);
 
+        // Reserve vertical room for the task checklist (when present) so the
+        // logo/title block lifts up and stays clear of the rows.
+        $hasTasks = !empty($this->splashTasks);
+        $listRowH = 18.0;
+        $listMarginTop = 24.0;   // gap between logo/info and first row
+        $listMarginBottom = 32.0;// gap between last row and the progress bar
+        $listH = $hasTasks ? (count($this->splashTasks) * $listRowH) : 0.0;
+        $listTop = $hasTasks ? ($barY - $listMarginBottom - $listH) : (float) $h;
+        $infoBottom = $listTop - $listMarginTop; // logo/info block must fit above this
+
         if ($this->splashLogo !== null) {
-            $maxW = $w * 0.6;
-            $scale = $maxW / $this->splashLogo->width;
+            // Logo is constrained to fit *above* the task list. Use whichever
+            // of "60% width / 30% height" is smaller so the layout never spills.
+            $maxByWidth = $w * 0.6;
+            $maxByHeight = ($hasTasks ? max(40.0, $infoBottom * 0.55) : $h * 0.6);
+            $scale = min(
+                $maxByWidth / $this->splashLogo->width,
+                $maxByHeight / $this->splashLogo->height,
+            );
             $logoW = $this->splashLogo->width * $scale;
             $logoH = $this->splashLogo->height * $scale;
             $logoX = ($w - $logoW) / 2;
-            $logoY = ($h - $logoH) / 2 - 30;
+            // "Developed with" caption + renderer info both attach to the logo,
+            // so the whole block has to fit inside infoBottom when tasks are set.
+            $captionGap = 12.0;
+            $infoGap = 16.0;
+            $blockH = 18.0 + $captionGap + $logoH + $infoGap + 14.0;
+            $blockTop = $hasTasks
+                ? max(20.0, ($infoBottom - $blockH) / 2.0)
+                : ($h - $blockH) / 2.0 - 8.0;
+            $logoY = $blockTop + 18.0 + $captionGap;
 
             $this->renderer2D->drawSprite($this->splashLogo, null, (float) $logoX, (float) $logoY, (float) $logoW, (float) $logoH);
 
             $this->renderer2D->setFont('regular');
             $this->renderer2D->setTextAlign(TextAlign::CENTER | TextAlign::BOTTOM);
-            $this->renderer2D->drawText('Developed with', (float) ($w / 2), (float) ($logoY - 12), 18.0, $white);
+            $this->renderer2D->drawText('Developed with', (float) ($w / 2), (float) ($logoY - $captionGap), 18.0, $white);
 
             if ($this->splashRendererInfo !== '') {
                 $this->renderer2D->setTextAlign(TextAlign::CENTER | TextAlign::TOP);
-                $this->renderer2D->drawText($this->splashRendererInfo, (float) ($w / 2), (float) ($logoY + $logoH + 16), 14.0, $gray);
+                $this->renderer2D->drawText($this->splashRendererInfo, (float) ($w / 2), (float) ($logoY + $logoH + $infoGap), 14.0, $gray);
             }
         } else {
+            // No logo — fall back to a stacked title in the same block.
+            $blockTop = $hasTasks
+                ? max(20.0, ($infoBottom - 110.0) / 2.0)
+                : ($h / 2 - 50);
+
             $this->renderer2D->setFont('regular');
-            $this->renderer2D->setTextAlign(TextAlign::CENTER | TextAlign::MIDDLE);
-            $this->renderer2D->drawText('Developed with', (float) ($w / 2), (float) ($h / 2 - 30), 18.0, $white);
-            $this->renderer2D->drawText('PHPolygon', (float) ($w / 2), (float) ($h / 2 + 20), 42.0, $white);
+            $this->renderer2D->setTextAlign(TextAlign::CENTER | TextAlign::TOP);
+            $this->renderer2D->drawText('Developed with', (float) ($w / 2), (float) $blockTop, 18.0, $white);
+            $this->renderer2D->drawText('PHPolygon', (float) ($w / 2), (float) ($blockTop + 30.0), 42.0, $white);
 
             if ($this->splashRendererInfo !== '') {
-                $this->renderer2D->drawText($this->splashRendererInfo, (float) ($w / 2), (float) ($h / 2 + 60), 14.0, $gray);
+                $this->renderer2D->drawText($this->splashRendererInfo, (float) ($w / 2), (float) ($blockTop + 86.0), 14.0, $gray);
             }
         }
 
-        // Task checklist — drawn left-aligned below logo when set by the game
-        // via setSplashTasks(). Each row gets a status indicator ([✓] / [●] / [ ]).
-        if (!empty($this->splashTasks)) {
-            $this->renderSplashTaskList($w, $h, $barY);
+        // Task checklist — sits in the lower middle, anchored above the bar.
+        if ($hasTasks) {
+            $this->renderSplashTaskList($w, $listTop, $listRowH);
         }
 
         // Progress bar and label
@@ -1078,19 +1106,14 @@ class Engine
     /**
      * Render the splash task checklist. Centred horizontally in a column wide
      * enough for the longest label; each row shows a coloured dot (done=green,
-     * active=pulsing white, pending=dim grey) plus the label text.
+     * active=pulsing white, pending=dim grey) plus the label text. The caller
+     * decides the vertical anchor so the list never overlaps the logo block.
      */
-    private function renderSplashTaskList(int $w, int $h, float $barY): void
+    private function renderSplashTaskList(int $w, float $startY, float $rowH): void
     {
         $r2d = $this->renderer2D;
-        $rowH = 18.0;
         $iconW = 14.0;
         $iconGap = 8.0;
-        $totalH = count($this->splashTasks) * $rowH;
-        // Sit the list above the progress bar with a comfortable gap; bias up if
-        // there's a logo, otherwise fall back to lower portion.
-        $listBottom = $barY - 18.0;
-        $startY = $listBottom - $totalH;
 
         $maxLabelW = 0.0;
         $r2d->setFont('regular');
