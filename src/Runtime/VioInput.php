@@ -124,7 +124,7 @@ class VioInput implements InputInterface
 
     public function isMouseButtonReleased(int $button): bool
     {
-        if ($this->ctx === null) {
+        if ($this->ctx === null || $this->isSuppressed()) {
             return false;
         }
         return $this->mouseJustReleased[$button] ?? false;

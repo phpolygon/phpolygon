@@ -96,6 +96,9 @@ class Input implements InputInterface
 
     public function isKeyReleased(int $key): bool
     {
+        if ($this->isSuppressed()) {
+            return false;
+        }
         if($key === 259) {
             return
                 array_key_exists($key, $this->keysPrev) && $this->keysPrev[$key];
@@ -116,6 +119,9 @@ class Input implements InputInterface
 
     public function isMouseButtonReleased(int $button): bool
     {
+        if ($this->isSuppressed()) {
+            return false;
+        }
         return !(bool)($this->mouseDown[$button] ?? false) && (bool)($this->mousePrev[$button] ?? false);
     }
 
