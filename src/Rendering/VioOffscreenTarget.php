@@ -38,6 +38,14 @@ final class VioOffscreenTarget
     private bool $allocated = false;
 
     /**
+     * Cached PHP wrapper for the colour image of `$target`. `vio_render_target_texture()`
+     * returns a fresh wrapper around the same GPU resource on every call, which
+     * breaks identity-based caching in consumers (and the no-op-resize tests).
+     * Invalidated by release() and rebuilt lazily by texture().
+     */
+    private ?VioTexture $textureCache = null;
+
+    /**
      * Tri-state MSAA support cache:
      *   null  - not yet probed
      *   true  - vio accepted a samples>1 target on this context
@@ -145,7 +153,10 @@ final class VioOffscreenTarget
         if (!$this->allocated || $this->target === null) {
             return null;
         }
-        return vio_render_target_texture($this->target);
+        if ($this->textureCache === null) {
+            $this->textureCache = vio_render_target_texture($this->target);
+        }
+        return $this->textureCache;
     }
 
     public function width(): int
@@ -184,8 +195,9 @@ final class VioOffscreenTarget
     public function release(): void
     {
         // vio releases the GPU resource when the PHP reference is dropped.
-        $this->target    = null;
-        $this->allocated = false;
+        $this->target       = null;
+        $this->textureCache = null;
+        $this->allocated    = false;
         // Width/height/samples retained so resize() can short-circuit.
     }
 }
