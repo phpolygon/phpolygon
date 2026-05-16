@@ -120,6 +120,43 @@ class UIContextTest extends TestCase
         $this->assertTrue($result);
     }
 
+    public function testSetInteractiveBlocksClicks(): void
+    {
+        // Same setup as testButtonReturnsTrueOnClick — but interactive=false on
+        // the release frame should drop the click on the floor.
+        $this->input->handleCursorPosEvent(15.0, 15.0);
+        $this->input->handleMouseButtonEvent(0, 1); // PRESS
+        $this->ctx->begin(10.0, 10.0, 300.0);
+        $this->ctx->button('btn1', 'Click me');
+        $this->ctx->end();
+
+        $this->input->unsuppress();
+        $this->input->endFrame();
+        $this->input->handleCursorPosEvent(15.0, 15.0);
+        $this->input->handleMouseButtonEvent(0, 0); // RELEASE
+
+        $this->ctx->setInteractive(false);
+        $this->ctx->begin(10.0, 10.0, 300.0);
+        $result = $this->ctx->button('btn1', 'Click me');
+        $this->ctx->end();
+
+        $this->assertFalse($result, 'click must be blocked when interactive=false');
+    }
+
+    public function testSetInteractiveDefaultsTrue(): void
+    {
+        $this->assertTrue($this->ctx->isInteractive());
+    }
+
+    public function testSetInteractiveRoundtrip(): void
+    {
+        $this->ctx->setInteractive(false);
+        $this->assertFalse($this->ctx->isInteractive());
+
+        $this->ctx->setInteractive(true);
+        $this->assertTrue($this->ctx->isInteractive());
+    }
+
     public function testCheckboxToggles(): void
     {
         // Place cursor inside checkbox area, simulate release (click = release while hovered)

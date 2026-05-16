@@ -610,6 +610,25 @@ Text fields support:
 - Character insertion at cursor position (not just append)
 - Arrow key navigation, backspace at cursor, delete forward
 
+### UIContext — modal interaction gate
+
+Use `setInteractive(false)` to gate an underlying scene while a modal overlay
+draws on top. Hover misses for every widget rendered while interactive=false,
+which also blocks click triggers (click requires hover):
+
+```php
+$ui->setInteractive(false);
+drawPanelsBehindModal();   // visible but unresponsive
+$ui->setInteractive(true);
+ConfirmDialog::draw($engine, $w, $h);   // own widgets respond again
+```
+
+Widgets still render — only input is gated. Defaults to `true` on construction;
+restore to `true` before the modal itself draws or its own buttons are dead.
+Suppressing via `Input::suppress()` only blocks the click/release edges, not
+hover state, so the underlying button still flashes its hover color without
+this. `setInteractive()` is the right tool when something is layered on top.
+
 ### VioInput — non-consuming events
 
 `isMouseButtonPressed()` and `isMouseButtonReleased()` do **not** consume events.

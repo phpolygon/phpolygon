@@ -71,6 +71,18 @@ class UIContext
     /** Content scale for resolution-independent rendering (e.g. 2.0 = game renders at 2x) */
     private float $contentScale = 1.0;
 
+    /**
+     * When false, hover detection short-circuits to false. Used by callers
+     * that want to render an underlying scene visually while a modal overlay
+     * (e.g. a confirm dialog) absorbs input — set to false before drawing
+     * the blocked layer, back to true before the modal itself draws.
+     *
+     * Affects hover for every widget. Since click triggers require hover,
+     * clicks are blocked too. Visual states (button hover color, slider
+     * grab) stay in their resting appearance.
+     */
+    private bool $interactive = true;
+
     public function __construct(
         Renderer2DInterface $renderer,
         InputInterface $input,
@@ -766,10 +778,38 @@ class UIContext
         $this->contentScale = max(0.001, $scale);
     }
 
+    /**
+     * Toggle whether widgets respond to hover/click. False makes every
+     * widget rendered after the call non-interactive — hover misses, button
+     * release-triggers never fire, sliders/text fields can't be grabbed.
+     * Use to gate an underlying scene while a modal overlay is open:
+     *
+     *   $ui->setInteractive(false);
+     *   drawPanelsBehindModal();
+     *   $ui->setInteractive(true);
+     *   ConfirmDialog::draw($engine, $w, $h);
+     *
+     * Widgets still render — only input is blocked. Defaults to true on
+     * construction; callers must restore to true before drawing the modal
+     * itself or its own widgets will be dead.
+     */
+    public function setInteractive(bool $on): void
+    {
+        $this->interactive = $on;
+    }
+
+    public function isInteractive(): bool
+    {
+        return $this->interactive;
+    }
+
     // ── Internals ────────────────────────────────────────────────
 
     private function isHovered(Rect $rect): bool
     {
+        if (!$this->interactive) {
+            return false;
+        }
         $mouse = $this->input->getMousePosition();
         // Adjust mouse position for viewport offset (letterboxing) and content scale
         $adjustedMouse = new Vec2(
