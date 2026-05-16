@@ -725,6 +725,36 @@ $engine = new Engine(new EngineConfig(splashDuration: 1.5));
 - Closing the window during splash exits cleanly
 - `buildRendererInfo()` returns the active backends as a human-readable string
 
+### Init progress: single label vs. task checklist
+
+Two compatible ways to surface progress during `onInit`:
+
+```php
+// (1) Single progress bar + label - simple linear init
+$engine->setSplashProgress(0.4, 'Loading fonts...');
+$engine->setSplashProgress(0.8, 'Compiling shaders...');
+
+// (2) Task checklist - granular multi-step init
+$engine->setSplashTasks([
+    'Loading fonts',
+    'Compiling shaders',
+    'Building scene graph',
+    'Spawning entities',
+]);
+$engine->advanceSplashTask();                  // marks first done, second active
+$engine->advanceSplashTask('Loading PHP');      // override next label dynamically
+$engine->completeSplashTasks();                 // mark every remaining task done
+```
+
+When `setSplashTasks()` has been called, the renderer draws a left-aligned
+checklist between the logo/renderer-info and the progress bar (green square =
+done, pulsing white = active, dim grey = pending). The single label below the
+bar is suppressed in that mode to avoid duplication. Aufrufer, die ausschließlich
+`setSplashProgress()` nutzen, sehen unverändert nur Bar + Label.
+
+`advanceSplashTask()` is safe to call past the end of the list (no-op). The
+progress bar auto-fills based on how many tasks are `done`.
+
 ---
 
 ## Testing and visual regression testing (VRT)
