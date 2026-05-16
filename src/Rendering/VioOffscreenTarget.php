@@ -35,8 +35,15 @@ final class VioOffscreenTarget
     private int $samples = 1;
 
     private ?VioRenderTarget $target = null;
-    private ?VioTexture $textureCache = null;
     private bool $allocated = false;
+
+    /**
+     * Cached PHP wrapper for the colour image of `$target`. `vio_render_target_texture()`
+     * returns a fresh wrapper around the same GPU resource on every call, which
+     * breaks identity-based caching in consumers (and the no-op-resize tests).
+     * Invalidated by release() and rebuilt lazily by texture().
+     */
+    private ?VioTexture $textureCache = null;
 
     /**
      * Tri-state MSAA support cache:

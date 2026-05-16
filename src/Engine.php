@@ -111,6 +111,16 @@ class Engine
     private float $splashProgress = 0.0;
     private string $splashLabel = '';
 
+    /**
+     * Splash task checklist — each entry is rendered as a status row during
+     * the splash screen, so the player sees granular init progress instead of
+     * a static "Init Game" label. Set via setSplashTasks(); advance via
+     * advanceSplashTask().
+     *
+     * @var array<int, array{label: string, status: string}> status ∈ {'pending','active','done'}
+     */
+    private array $splashTasks = [];
+
     public function __construct(
         private readonly EngineConfig $config = new EngineConfig(),
     ) {
@@ -369,6 +379,77 @@ class Engine
     {
         $this->splashProgress = max(0.0, min(1.0, $progress));
         $this->splashLabel = $label;
+        $this->renderSplashFrame();
+    }
+
+    /**
+     * Declare a checklist of init tasks shown on the splash screen. Each entry
+     * renders as a row with a status icon; advanceSplashTask() walks through
+     * the list, marking the current one done and the next one active.
+     *
+     * Existing setSplashProgress() / splashLabel API keeps working alongside.
+     *
+     * @param list<string> $taskLabels in display order
+     */
+    public function setSplashTasks(array $taskLabels): void
+    {
+        $this->splashTasks = [];
+        foreach ($taskLabels as $label) {
+            $this->splashTasks[] = ['label' => $label, 'status' => 'pending'];
+        }
+        $this->splashProgress = 0.0;
+        $this->splashLabel = $taskLabels[0] ?? '';
+        $this->renderSplashFrame();
+    }
+
+    /**
+     * Mark the currently-active task as `done` and promote the next pending
+     * task to `active`. If `$newLabel` is given, overrides the next task's
+     * label (handy when init runs dynamic content like "Loading <lang>").
+     *
+     * Safe to call past the end of the list — extra calls just no-op.
+     */
+    public function advanceSplashTask(?string $newLabel = null): void
+    {
+        if (empty($this->splashTasks)) return;
+
+        $nextActive = -1;
+        foreach ($this->splashTasks as $i => $t) {
+            if ($t['status'] === 'active') {
+                $this->splashTasks[$i] = ['label' => $t['label'], 'status' => 'done'];
+            }
+            if ($t['status'] === 'pending' && $nextActive < 0) {
+                $nextActive = $i;
+            }
+        }
+        if ($nextActive >= 0) {
+            $label = $newLabel ?? $this->splashTasks[$nextActive]['label'];
+            $this->splashTasks[$nextActive] = ['label' => $label, 'status' => 'active'];
+            $this->splashLabel = $label;
+        } else {
+            $this->splashLabel = '';
+        }
+
+        $done = 0;
+        foreach ($this->splashTasks as $t) {
+            if ($t['status'] === 'done') $done++;
+        }
+        $this->splashProgress = $done / max(1, count($this->splashTasks));
+        $this->renderSplashFrame();
+    }
+
+    /**
+     * Mark every remaining splash task as done. Use at the end of init so the
+     * checklist shows all-green for the final hold-and-fade phase.
+     */
+    public function completeSplashTasks(): void
+    {
+        if (empty($this->splashTasks)) return;
+        foreach ($this->splashTasks as $i => $t) {
+            $this->splashTasks[$i] = ['label' => $t['label'], 'status' => 'done'];
+        }
+        $this->splashProgress = 1.0;
+        $this->splashLabel = '';
         $this->renderSplashFrame();
     }
 
@@ -931,33 +1012,67 @@ class Engine
 
         $barY = (float) ($h - 60);
 
+        // Reserve vertical room for the task checklist (when present) so the
+        // logo/title block lifts up and stays clear of the rows.
+        $hasTasks = !empty($this->splashTasks);
+        $listRowH = 18.0;
+        $listMarginTop = 24.0;   // gap between logo/info and first row
+        $listMarginBottom = 32.0;// gap between last row and the progress bar
+        $listH = $hasTasks ? (count($this->splashTasks) * $listRowH) : 0.0;
+        $listTop = $hasTasks ? ($barY - $listMarginBottom - $listH) : (float) $h;
+        $infoBottom = $listTop - $listMarginTop; // logo/info block must fit above this
+
         if ($this->splashLogo !== null) {
-            $maxW = $w * 0.6;
-            $scale = $maxW / $this->splashLogo->width;
+            // Logo is constrained to fit *above* the task list. Use whichever
+            // of "60% width / 30% height" is smaller so the layout never spills.
+            $maxByWidth = $w * 0.6;
+            $maxByHeight = ($hasTasks ? max(40.0, $infoBottom * 0.55) : $h * 0.6);
+            $scale = min(
+                $maxByWidth / $this->splashLogo->width,
+                $maxByHeight / $this->splashLogo->height,
+            );
             $logoW = $this->splashLogo->width * $scale;
             $logoH = $this->splashLogo->height * $scale;
             $logoX = ($w - $logoW) / 2;
-            $logoY = ($h - $logoH) / 2 - 30;
+            // "Developed with" caption + renderer info both attach to the logo,
+            // so the whole block has to fit inside infoBottom when tasks are set.
+            $captionGap = 12.0;
+            $infoGap = 16.0;
+            $blockH = 18.0 + $captionGap + $logoH + $infoGap + 14.0;
+            $blockTop = $hasTasks
+                ? max(20.0, ($infoBottom - $blockH) / 2.0)
+                : ($h - $blockH) / 2.0 - 8.0;
+            $logoY = $blockTop + 18.0 + $captionGap;
 
             $this->renderer2D->drawSprite($this->splashLogo, null, (float) $logoX, (float) $logoY, (float) $logoW, (float) $logoH);
 
             $this->renderer2D->setFont('regular');
             $this->renderer2D->setTextAlign(TextAlign::CENTER | TextAlign::BOTTOM);
-            $this->renderer2D->drawText('Developed with', (float) ($w / 2), (float) ($logoY - 12), 18.0, $white);
+            $this->renderer2D->drawText('Developed with', (float) ($w / 2), (float) ($logoY - $captionGap), 18.0, $white);
 
             if ($this->splashRendererInfo !== '') {
                 $this->renderer2D->setTextAlign(TextAlign::CENTER | TextAlign::TOP);
-                $this->renderer2D->drawText($this->splashRendererInfo, (float) ($w / 2), (float) ($logoY + $logoH + 16), 14.0, $gray);
+                $this->renderer2D->drawText($this->splashRendererInfo, (float) ($w / 2), (float) ($logoY + $logoH + $infoGap), 14.0, $gray);
             }
         } else {
+            // No logo — fall back to a stacked title in the same block.
+            $blockTop = $hasTasks
+                ? max(20.0, ($infoBottom - 110.0) / 2.0)
+                : ($h / 2 - 50);
+
             $this->renderer2D->setFont('regular');
-            $this->renderer2D->setTextAlign(TextAlign::CENTER | TextAlign::MIDDLE);
-            $this->renderer2D->drawText('Developed with', (float) ($w / 2), (float) ($h / 2 - 30), 18.0, $white);
-            $this->renderer2D->drawText('PHPolygon', (float) ($w / 2), (float) ($h / 2 + 20), 42.0, $white);
+            $this->renderer2D->setTextAlign(TextAlign::CENTER | TextAlign::TOP);
+            $this->renderer2D->drawText('Developed with', (float) ($w / 2), (float) $blockTop, 18.0, $white);
+            $this->renderer2D->drawText('PHPolygon', (float) ($w / 2), (float) ($blockTop + 30.0), 42.0, $white);
 
             if ($this->splashRendererInfo !== '') {
-                $this->renderer2D->drawText($this->splashRendererInfo, (float) ($w / 2), (float) ($h / 2 + 60), 14.0, $gray);
+                $this->renderer2D->drawText($this->splashRendererInfo, (float) ($w / 2), (float) ($blockTop + 86.0), 14.0, $gray);
             }
+        }
+
+        // Task checklist — sits in the lower middle, anchored above the bar.
+        if ($hasTasks) {
+            $this->renderSplashTaskList($w, $listTop, $listRowH);
         }
 
         // Progress bar and label
@@ -973,8 +1088,8 @@ class Engine
                 $this->renderer2D->drawRect($barX, $barY, (float) ($barW * $this->splashProgress), $barH, $white);
             }
 
-            // Label below bar
-            if ($this->splashLabel !== '') {
+            // Label below bar — only when no task list (the list already shows the active label).
+            if ($this->splashLabel !== '' && empty($this->splashTasks)) {
                 $this->renderer2D->setFont('regular');
                 $this->renderer2D->setTextAlign(TextAlign::CENTER | TextAlign::TOP);
                 $this->renderer2D->drawText($this->splashLabel, (float) ($w / 2), $barY + $barH + 8, 13.0, $gray);
@@ -986,6 +1101,64 @@ class Engine
         $this->renderer2D->endFrame();
         $this->window->swapBuffers();
         $this->window->pollEvents();
+    }
+
+    /**
+     * Render the splash task checklist. Centred horizontally in a column wide
+     * enough for the longest label; each row shows a coloured dot (done=green,
+     * active=pulsing white, pending=dim grey) plus the label text. The caller
+     * decides the vertical anchor so the list never overlaps the logo block.
+     */
+    private function renderSplashTaskList(int $w, float $startY, float $rowH): void
+    {
+        $r2d = $this->renderer2D;
+        $iconW = 14.0;
+        $iconGap = 8.0;
+
+        $maxLabelW = 0.0;
+        $r2d->setFont('regular');
+        foreach ($this->splashTasks as $t) {
+            $m = $r2d->measureText($t['label'], 13.0);
+            if ($m->width > $maxLabelW) $maxLabelW = $m->width;
+        }
+        $colW = $iconW + $iconGap + $maxLabelW;
+        $colX = (float) (($w - $colW) / 2.0);
+
+        $done    = new Color(0.30, 0.85, 0.50);
+        $active  = new Color(1.00, 1.00, 1.00);
+        $pending = new Color(0.40, 0.40, 0.40);
+        $labelDone    = new Color(0.70, 0.82, 0.75);
+        $labelActive  = new Color(1.00, 1.00, 1.00);
+        $labelPending = new Color(0.45, 0.45, 0.45);
+
+        // Subtle pulse for the active row so the user sees the renderer is alive.
+        $pulse = 0.55 + 0.45 * (float) sin(microtime(true) * 5.5);
+
+        foreach ($this->splashTasks as $i => $task) {
+            $rowY = $startY + $i * $rowH;
+            $iconCx = $colX + $iconW / 2.0;
+            $iconCy = $rowY + $rowH / 2.0;
+
+            switch ($task['status']) {
+                case 'done':
+                    $r2d->drawRect($iconCx - 4.0, $iconCy - 4.0, 8.0, 8.0, $done);
+                    $labelColor = $labelDone;
+                    break;
+                case 'active':
+                    $r2d->setGlobalAlpha($this->splashFadeAlpha * $pulse);
+                    $r2d->drawRect($iconCx - 4.0, $iconCy - 4.0, 8.0, 8.0, $active);
+                    $r2d->setGlobalAlpha($this->splashFadeAlpha);
+                    $labelColor = $labelActive;
+                    break;
+                default:
+                    $r2d->drawRect($iconCx - 3.0, $iconCy - 3.0, 6.0, 6.0, $pending);
+                    $labelColor = $labelPending;
+            }
+
+            $r2d->setFont('regular');
+            $r2d->setTextAlign(TextAlign::LEFT | TextAlign::MIDDLE);
+            $r2d->drawText($task['label'], $colX + $iconW + $iconGap, $iconCy, 13.0, $labelColor);
+        }
     }
 
     /**
