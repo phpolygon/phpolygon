@@ -571,12 +571,10 @@ class Engine
             }
 
             $this->paintBootFrame();
-            $this->loadEngineFonts();
         } elseif (!$this->headless && !$nativeBackend) {
             $this->renderer2D = new Renderer2D($this->window);
 
             $this->paintBootFrame();
-            $this->loadEngineFonts();
         } elseif (!$this->headless && $nativeBackend) {
             $this->renderer2D = new NullRenderer2D($this->config->width, $this->config->height);
         }
@@ -979,6 +977,15 @@ class Engine
         $this->splashLabel = 'Init Engine';
 
         $this->splashFadeAlpha = 1.0;
+
+        // Load engine fonts as the last setup step before the visible splash
+        // animation begins. Done here (not in Engine::run) so the helper
+        // sits next to the only code that actually uses 'regular' / 'semibold'
+        // - the splash itself, the calibration overlay, and the F3 perf HUD.
+        // Each loadFont call pumps events between, so the WM ping stays
+        // answered on slow GPUs even though no frame is rendered until the
+        // fade-in loop below.
+        $this->loadEngineFonts();
 
         // Phase 1: Fade in
         $fadeIn = 0.4;
