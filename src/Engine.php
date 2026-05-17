@@ -949,24 +949,6 @@ class Engine
     }
 
     /**
-     * Wire up the CJK fallback chain for the engine fonts. Split out from
-     * loadEngineFonts() so the first splash frame can render with only the
-     * primary Inter font (no chain traversal); the chain is then attached
-     * once one visible frame is on screen, deferring the 2-3 s CJK font
-     * parse to a later frame instead of blocking the boot.
-     *
-     * Idempotent: subsequent calls are no-ops because VioRenderer2D dedupes
-     * the chain entries by name.
-     */
-    private function addEngineFontFallbacks(): void
-    {
-        $this->renderer2D->addFallbackFont('regular', 'noto-sans-sc');
-        $this->renderer2D->addFallbackFont('regular', 'noto-sans-kr');
-        $this->renderer2D->addFallbackFont('semibold', 'noto-sans-sc');
-        $this->renderer2D->addFallbackFont('semibold', 'noto-sans-kr');
-    }
-
-    /**
      * @param callable|null $initFn  Game init callback to run during the splash screen.
      *                               Executed after the first frame is visible, so the
      *                               splash stays on screen while the game loads.
@@ -1005,23 +987,24 @@ class Engine
         // fade-in loop below.
         $this->loadEngineFonts();
 
-        // Phase 1: Fade in
+        // Phase 1: Fade in. Engine fonts intentionally have no CJK fallback
+        // chain - vio's drawTextWithChain iterates every fallback on every
+        // draw to compute max width, which lazy-parses NotoSansSC (8 MB) +
+        // NotoSansKR (5 MB) on first chain traversal. Adding the chain even
+        // after the first visible frame just deferred that 3 s cost onto
+        // frame #2, breaking the fade-in animation.
+        //
+        // Engine-rendered splash text is always Latin (logo caption, renderer
+        // info string). Game-supplied setSplashTasks() labels render glyphs
+        // the primary font has; missing chars render as .notdef. Games whose
+        // splash needs CJK can call $engine->renderer2D->addFallbackFont()
+        // themselves after the splash exits, or pass ASCII task labels.
         $fadeIn = 0.4;
         $fadeInStart = microtime(true);
-        $fallbacksWired = false;
         while (!$this->window->shouldClose()) {
             $elapsed = microtime(true) - $fadeInStart;
             $this->splashFadeAlpha = min(1.0, (float) ($elapsed / $fadeIn));
             $this->renderSplashFrame();
-            if (!$fallbacksWired) {
-                // First frame is now on screen using only Inter (no CJK chain
-                // traversal). Wire up the CJK fallback chain now so the second
-                // frame onwards has it - the lazy NotoSansSC/KR parse (~2.5 s
-                // on first use) happens behind a visible logo instead of an
-                // empty back buffer.
-                $this->addEngineFontFallbacks();
-                $fallbacksWired = true;
-            }
             if ($elapsed >= $fadeIn) {
                 break;
             }
