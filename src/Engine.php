@@ -570,43 +570,13 @@ class Engine
                 $this->renderer3D->setTextureManager($vioTextures);
             }
 
-            $fontDir = $this->resolveEngineFontDir();
-            if ($fontDir !== null && is_dir($fontDir)) {
-                $this->renderer2D->loadFont('regular',  $fontDir . DIRECTORY_SEPARATOR . 'Inter-Regular.ttf');
-                $this->renderer2D->loadFont('semibold', $fontDir . DIRECTORY_SEPARATOR . 'Inter-SemiBold.ttf');
-                $this->renderer2D->setFont('regular');
-
-                // CJK fallback fonts
-                $cjkDir = $fontDir . DIRECTORY_SEPARATOR . 'noto-sans-cjk';
-                if (is_dir($cjkDir)) {
-                    $this->renderer2D->loadFont('noto-sans-sc', $cjkDir . DIRECTORY_SEPARATOR . 'NotoSansSC-Regular.otf');
-                    $this->renderer2D->loadFont('noto-sans-kr', $cjkDir . DIRECTORY_SEPARATOR . 'NotoSansKR-Regular.otf');
-                    $this->renderer2D->addFallbackFont('regular', 'noto-sans-sc');
-                    $this->renderer2D->addFallbackFont('regular', 'noto-sans-kr');
-                    $this->renderer2D->addFallbackFont('semibold', 'noto-sans-sc');
-                    $this->renderer2D->addFallbackFont('semibold', 'noto-sans-kr');
-                }
-            }
+            $this->paintBootFrame();
+            $this->loadEngineFonts();
         } elseif (!$this->headless && !$nativeBackend) {
             $this->renderer2D = new Renderer2D($this->window);
 
-            $fontDir = $this->resolveEngineFontDir();
-            if ($fontDir !== null && is_dir($fontDir)) {
-                $this->renderer2D->loadFont('regular',  $fontDir . DIRECTORY_SEPARATOR . 'Inter-Regular.ttf');
-                $this->renderer2D->loadFont('semibold', $fontDir . DIRECTORY_SEPARATOR . 'Inter-SemiBold.ttf');
-                $this->renderer2D->setFont('regular');
-
-                // CJK fallback fonts
-                $cjkDir = $fontDir . DIRECTORY_SEPARATOR . 'noto-sans-cjk';
-                if (is_dir($cjkDir)) {
-                    $this->renderer2D->loadFont('noto-sans-sc', $cjkDir . DIRECTORY_SEPARATOR . 'NotoSansSC-Regular.otf');
-                    $this->renderer2D->loadFont('noto-sans-kr', $cjkDir . DIRECTORY_SEPARATOR . 'NotoSansKR-Regular.otf');
-                    $this->renderer2D->addFallbackFont('regular', 'noto-sans-sc');
-                    $this->renderer2D->addFallbackFont('regular', 'noto-sans-kr');
-                    $this->renderer2D->addFallbackFont('semibold', 'noto-sans-sc');
-                    $this->renderer2D->addFallbackFont('semibold', 'noto-sans-kr');
-                }
-            }
+            $this->paintBootFrame();
+            $this->loadEngineFonts();
         } elseif (!$this->headless && $nativeBackend) {
             $this->renderer2D = new NullRenderer2D($this->config->width, $this->config->height);
         }
@@ -923,6 +893,61 @@ class Engine
 
             $this->input->endFrame();
         }
+    }
+
+    /**
+     * Paint a single black frame immediately after the renderer exists, before
+     * the engine spends seconds loading fonts. Without this, the freshly
+     * mapped window sits unanswered while font I/O blocks the main thread —
+     * and Linux compositors (Mutter/KWin) pop "not responding" before the
+     * splash screen has had a chance to draw its first frame.
+     *
+     * One swapBuffers + pollEvents is enough: the WM ping is answered, the
+     * window has a defined initial pixel state, and any cost on slow GPUs is
+     * negligible compared to the loadFont cascade that follows.
+     */
+    private function paintBootFrame(): void
+    {
+        $this->renderer2D->beginFrame();
+        $this->renderer2D->clear(new Color(0.0, 0.0, 0.0));
+        $this->renderer2D->endFrame();
+        $this->window->swapBuffers();
+        $this->window->pollEvents();
+    }
+
+    /**
+     * Load the engine's bundled fonts (Inter + Noto Sans CJK fallbacks) into
+     * the freshly-created renderer. Calls pollEvents() between fonts so the
+     * window stays responsive on slow GPUs (Intel HD 3000 + Mesa): each
+     * loadFont can stall for hundreds of ms while the TTF is parsed and the
+     * first glyph atlas is allocated; the CJK fonts in particular are 5-10 MB
+     * each. Without inter-font pumping a cold cache can push the cumulative
+     * stall over the WM's _NET_WM_PING budget.
+     */
+    private function loadEngineFonts(): void
+    {
+        $fontDir = $this->resolveEngineFontDir();
+        if ($fontDir === null || !is_dir($fontDir)) return;
+
+        $this->renderer2D->loadFont('regular',  $fontDir . DIRECTORY_SEPARATOR . 'Inter-Regular.ttf');
+        $this->window->pollEvents();
+        $this->renderer2D->loadFont('semibold', $fontDir . DIRECTORY_SEPARATOR . 'Inter-SemiBold.ttf');
+        $this->window->pollEvents();
+        $this->renderer2D->setFont('regular');
+
+        // CJK fallback fonts - large files, definitely worth pumping events
+        // between them.
+        $cjkDir = $fontDir . DIRECTORY_SEPARATOR . 'noto-sans-cjk';
+        if (!is_dir($cjkDir)) return;
+
+        $this->renderer2D->loadFont('noto-sans-sc', $cjkDir . DIRECTORY_SEPARATOR . 'NotoSansSC-Regular.otf');
+        $this->window->pollEvents();
+        $this->renderer2D->loadFont('noto-sans-kr', $cjkDir . DIRECTORY_SEPARATOR . 'NotoSansKR-Regular.otf');
+        $this->window->pollEvents();
+        $this->renderer2D->addFallbackFont('regular', 'noto-sans-sc');
+        $this->renderer2D->addFallbackFont('regular', 'noto-sans-kr');
+        $this->renderer2D->addFallbackFont('semibold', 'noto-sans-sc');
+        $this->renderer2D->addFallbackFont('semibold', 'noto-sans-kr');
     }
 
     /**
