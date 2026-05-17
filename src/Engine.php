@@ -933,8 +933,12 @@ class Engine
         $this->window->pollEvents();
         $this->renderer2D->setFont('regular');
 
-        // CJK fallback fonts - large files, definitely worth pumping events
-        // between them.
+        // CJK fonts: registered here (cheap - vio just stores the path) but
+        // the *chain* (addFallbackFont) is set up later by
+        // addEngineFontFallbacks() so the very first splash drawText only
+        // parses Inter (~300 KB) instead of also parsing NotoSansSC (8 MB)
+        // + NotoSansKR (5 MB) - that lazy parse on the first chain-using
+        // drawText cost 2.6 s on the splash's first visible frame.
         $cjkDir = $fontDir . DIRECTORY_SEPARATOR . 'noto-sans-cjk';
         if (!is_dir($cjkDir)) return;
 
@@ -942,6 +946,20 @@ class Engine
         $this->window->pollEvents();
         $this->renderer2D->loadFont('noto-sans-kr', $cjkDir . DIRECTORY_SEPARATOR . 'NotoSansKR-Regular.otf');
         $this->window->pollEvents();
+    }
+
+    /**
+     * Wire up the CJK fallback chain for the engine fonts. Split out from
+     * loadEngineFonts() so the first splash frame can render with only the
+     * primary Inter font (no chain traversal); the chain is then attached
+     * once one visible frame is on screen, deferring the 2-3 s CJK font
+     * parse to a later frame instead of blocking the boot.
+     *
+     * Idempotent: subsequent calls are no-ops because VioRenderer2D dedupes
+     * the chain entries by name.
+     */
+    private function addEngineFontFallbacks(): void
+    {
         $this->renderer2D->addFallbackFont('regular', 'noto-sans-sc');
         $this->renderer2D->addFallbackFont('regular', 'noto-sans-kr');
         $this->renderer2D->addFallbackFont('semibold', 'noto-sans-sc');
@@ -990,10 +1008,20 @@ class Engine
         // Phase 1: Fade in
         $fadeIn = 0.4;
         $fadeInStart = microtime(true);
+        $fallbacksWired = false;
         while (!$this->window->shouldClose()) {
             $elapsed = microtime(true) - $fadeInStart;
             $this->splashFadeAlpha = min(1.0, (float) ($elapsed / $fadeIn));
             $this->renderSplashFrame();
+            if (!$fallbacksWired) {
+                // First frame is now on screen using only Inter (no CJK chain
+                // traversal). Wire up the CJK fallback chain now so the second
+                // frame onwards has it - the lazy NotoSansSC/KR parse (~2.5 s
+                // on first use) happens behind a visible logo instead of an
+                // empty back buffer.
+                $this->addEngineFontFallbacks();
+                $fallbacksWired = true;
+            }
             if ($elapsed >= $fadeIn) {
                 break;
             }
