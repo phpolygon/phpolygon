@@ -61,6 +61,38 @@ class HeadlessEngineTest extends TestCase
         $this->assertGreaterThanOrEqual(3, $updateCount);
     }
 
+    /**
+     * Headless / skipSplash path must drive generator-style onInit callbacks
+     * to completion. Regression test for the bug where the headless branch
+     * called the generator function and discarded the returned Generator,
+     * leaving init code never executed.
+     */
+    public function testHeadlessRunDrivesGeneratorOnInit(): void
+    {
+        $engine = new Engine(new EngineConfig(headless: true));
+
+        $chunks = 0;
+        $finalReached = false;
+
+        $engine->onInit(function (Engine $e) use (&$chunks, &$finalReached) {
+            $chunks++;
+            yield;
+            $chunks++;
+            yield;
+            $chunks++;
+            $finalReached = true;
+        });
+
+        $engine->onUpdate(function (Engine $e) {
+            $e->stop();
+        });
+
+        $engine->run();
+
+        $this->assertSame(3, $chunks, 'all three chunks between yields must execute');
+        $this->assertTrue($finalReached, 'code after the last yield must run');
+    }
+
     public function testHeadlessEngineCanLoadScenes(): void
     {
         $engine = new Engine(new EngineConfig(headless: true));

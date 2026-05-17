@@ -774,6 +774,39 @@ bar is suppressed in that mode to avoid duplication. Aufrufer, die ausschließli
 `advanceSplashTask()` is safe to call past the end of the list (no-op). The
 progress bar auto-fills based on how many tasks are `done`.
 
+### Cooperative init (generators)
+
+`onInit` callbacks may be **generator functions**. Each `yield` is a chunk
+boundary — the engine renders one splash frame and pumps window events on
+each yield. This keeps `_NET_WM_PING` answered when a single init chunk
+would otherwise block the main thread for >5 s, so Linux compositors
+(Mutter/KWin) don't flag the window as "not responding" during heavy
+startup work (font atlas pre-warming, large content generation, Steam
+runtime handshake, etc.) on slow GPUs (e.g. Intel HD 3000 + Mesa).
+
+```php
+$engine->onInit(function (Engine $engine) {
+    $engine->setSplashTasks(['Loading fonts', 'Building world']);
+
+    $engine->advanceSplashTask();
+    loadFonts();
+    yield;                          // splash redraws, events pump
+
+    $engine->advanceSplashTask();
+    foreach ($chunkedWork as $chunk) {
+        process($chunk);
+        yield;                      // pump between chunks
+    }
+
+    $engine->completeSplashTasks();
+});
+```
+
+Backward-compatible: void-returning callbacks bypass the generator branch
+entirely and run synchronously as before. The same generator-driving
+contract holds on the headless / `skipSplash` path — chunks are iterated
+to completion (without rendering between yields).
+
 ---
 
 ## Character DNA

@@ -362,6 +362,21 @@ class Engine
         return $img;
     }
 
+    /**
+     * Register the game-init callback. The callback runs during the splash so
+     * the player sees real progress (advanceSplashTask()) instead of a frozen
+     * window.
+     *
+     * Cooperative mode: if the callback is a generator function (uses `yield`),
+     * the engine drives it across multiple splash frames — each `yield` is a
+     * chunk boundary where the engine renders one splash frame and pumps
+     * window events. This keeps the WM ping (_NET_WM_PING) answered even when
+     * a single init chunk would otherwise block the main thread for >5 s, so
+     * Linux compositors (Mutter/KWin) don't flag the window as "not responding"
+     * during heavy startup work like font atlas pre-warming on slow GPUs.
+     *
+     * Legacy void-returning callbacks still run synchronously as before.
+     */
     public function onInit(callable $callback): self
     {
         $this->onInit = $callback;
@@ -608,7 +623,16 @@ class Engine
             self::log('Splash screen done');
         } elseif ($initFn !== null) {
             self::log('Running onInit callback...');
-            $initFn($this);
+            $result = $initFn($this);
+            if ($result instanceof \Generator) {
+                // Headless / skipSplash path: drain the generator without a
+                // splash. Each chunk still runs to completion; we just don't
+                // render between yields. Without this, generator-style onInits
+                // would be silently constructed-and-discarded.
+                while ($result->valid()) {
+                    $result->next();
+                }
+            }
             self::log('onInit callback done');
         }
 
@@ -951,7 +975,14 @@ class Engine
             $this->renderSplashFrame();
 
             self::log('Running onInit during splash...');
-            $initFn($this);
+            $result = $initFn($this);
+            if ($result instanceof \Generator) {
+                while ($result->valid()) {
+                    if ($this->window->shouldClose()) break;
+                    $this->renderSplashFrame();
+                    $result->next();
+                }
+            }
             self::log('onInit done');
 
             $this->splashProgress = 0.98;
