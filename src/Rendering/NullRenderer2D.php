@@ -76,4 +76,10 @@ class NullRenderer2D implements Renderer2DInterface
     public function drawArc(float $cx, float $cy, float $r, float $startAngle, float $endAngle, Color $color, int $direction = 0): void {}
     public function saveState(): void {}
     public function restoreState(): void {}
+
+    // Offscreen-frame contract — no GPU here, so begin/end are pure no-ops.
+    // Engine::warmRender() still invokes the callback so glyph and texture
+    // book-keeping code paths get exercised on the headless backend.
+    public function beginOffscreenFrame(int $width, int $height): void {}
+    public function endOffscreenFrame(): void {}
 }

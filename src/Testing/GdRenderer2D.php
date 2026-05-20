@@ -454,6 +454,20 @@ class GdRenderer2D implements Renderer2DInterface
         }
     }
 
+    /**
+     * GD draws into an in-memory image buffer that is never presented, so the
+     * offscreen contract is satisfied by ordinary beginFrame/endFrame here.
+     */
+    public function beginOffscreenFrame(int $width, int $height): void
+    {
+        $this->beginFrame();
+    }
+
+    public function endOffscreenFrame(): void
+    {
+        $this->endFrame();
+    }
+
     // --- Private helpers ---
 
     private function allocateColor(Color $color): int

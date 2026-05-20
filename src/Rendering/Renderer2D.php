@@ -48,6 +48,22 @@ class Renderer2D implements Renderer2DInterface
         $this->vg->endFrame();
     }
 
+    /**
+     * NanoVG/GLFW fallback has no equivalent of vio's render-target binding —
+     * the warm pass renders into the swapchain and the next swapBuffers() will
+     * present it. Engine::warmRender() callers accept the brief flash on this
+     * path; vio is the shipping backend where the contract is upheld.
+     */
+    public function beginOffscreenFrame(int $width, int $height): void
+    {
+        $this->beginFrame();
+    }
+
+    public function endOffscreenFrame(): void
+    {
+        $this->endFrame();
+    }
+
     public function clear(Color $color): void
     {
         glClearColor($color->r, $color->g, $color->b, $color->a);

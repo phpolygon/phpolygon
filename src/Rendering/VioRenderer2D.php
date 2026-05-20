@@ -67,8 +67,47 @@ class VioRenderer2D implements Renderer2DInterface
         return $z;
     }
 
+    /**
+     * Active off-screen target while in warm-render mode. Holding the wrapper
+     * as a property (instead of a local) keeps the underlying VioRenderTarget
+     * alive across beginFrame/endFrame calls inside the warm callback — PHP
+     * would otherwise free the GPU resource at the end of a single bind.
+     *
+     * Non-null between beginOffscreenFrame() and endOffscreenFrame(); inside
+     * that window every beginFrame() rebinds the target and every endFrame()
+     * keeps it bound. The pair is closed in endOffscreenFrame().
+     */
+    private ?VioOffscreenTarget $offscreenWarmTarget = null;
+
+    /**
+     * Cached offscreen dimensions for the warm window. Drives the viewport on
+     * each redirected beginFrame() and is also reported by getWidth()/getHeight()
+     * so the callback sees a coherent target size.
+     */
+    private int $offscreenWarmWidth = 0;
+    private int $offscreenWarmHeight = 0;
+
     public function beginFrame(): void
     {
+        if ($this->offscreenWarmTarget !== null) {
+            // Redirected path: route this frame's draws into the warm-up
+            // offscreen target instead of the swapchain. Window-size sync is
+            // skipped — getWidth/getHeight already reflect the warm dimensions
+            // (set by beginOffscreenFrame()) and that's the value the callback
+            // should see.
+            $w = $this->offscreenWarmWidth;
+            $h = $this->offscreenWarmHeight;
+
+            vio_viewport($this->ctx, 0, 0, $w, $h);
+            $this->offscreenWarmTarget->bindForDraw();
+            vio_begin($this->ctx);
+            vio_viewport($this->ctx, 0, 0, $w, $h);
+
+            $this->zCounter = 0.0;
+            vio_clear($this->ctx, 0.0, 0.0, 0.0, 1.0);
+            return;
+        }
+
         // Sync dimensions from vio context (handles window resize/maximize)
         $size = vio_window_size($this->ctx);
         $this->width = $size[0];
@@ -93,6 +132,69 @@ class VioRenderer2D implements Renderer2DInterface
     {
         vio_draw_2d($this->ctx);
         vio_end($this->ctx);
+
+        // In warm-render mode, unbind so the swapchain is the default target
+        // again — if endOffscreenFrame() never runs (callback never invoked
+        // beginFrame/endFrame), the target is released by endOffscreenFrame
+        // itself. Each beginFrame() inside the warm callback rebinds.
+        if ($this->offscreenWarmTarget !== null) {
+            $this->offscreenWarmTarget->unbind();
+        }
+    }
+
+    public function beginOffscreenFrame(int $width, int $height): void
+    {
+        $width  = max(1, $width);
+        $height = max(1, $height);
+
+        // Allocate a fresh target every call. warmRender() callers expect the
+        // GPU resource to be released after endOffscreenFrame() so the next
+        // real frame isn't competing with a stale offscreen image for memory.
+        $target = new VioOffscreenTarget($this->ctx);
+        $target->resize($width, $height, 1);
+        if (!$target->isAllocated()) {
+            // Allocation failed — leave the warm target null so beginFrame()
+            // / endFrame() inside the callback fall through to the regular
+            // swapchain path. We accept the visible flash because we couldn't
+            // honour the offscreen contract anyway.
+            $this->offscreenWarmTarget = null;
+            return;
+        }
+
+        $this->offscreenWarmTarget = $target;
+        $this->offscreenWarmWidth  = $width;
+        $this->offscreenWarmHeight = $height;
+
+        // Mirror beginFrame()'s logical-size sync so widgets that read
+        // getWidth()/getHeight() see the offscreen dimensions, not the
+        // swapchain's. Restored in endOffscreenFrame().
+        $this->width  = $width;
+        $this->height = $height;
+    }
+
+    public function endOffscreenFrame(): void
+    {
+        if ($this->offscreenWarmTarget === null) {
+            // beginOffscreenFrame() failed to allocate; nothing to release.
+            // Still resync dimensions in case the caller polluted them.
+            $size = vio_window_size($this->ctx);
+            $this->width  = $size[0];
+            $this->height = $size[1];
+            return;
+        }
+
+        $this->offscreenWarmTarget->unbind();
+        $this->offscreenWarmTarget->release();
+        $this->offscreenWarmTarget = null;
+        $this->offscreenWarmWidth  = 0;
+        $this->offscreenWarmHeight = 0;
+
+        // Resync logical dimensions to the actual window — warmRender() may be
+        // followed by real frames immediately, and those expect getWidth()
+        // /getHeight() to track the swapchain.
+        $size = vio_window_size($this->ctx);
+        $this->width  = $size[0];
+        $this->height = $size[1];
     }
 
     public function clear(Color $color): void

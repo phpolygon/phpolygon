@@ -784,6 +784,50 @@ would otherwise block the main thread for >5 s, so Linux compositors
 startup work (font atlas pre-warming, large content generation, Steam
 runtime handshake, etc.) on slow GPUs (e.g. Intel HD 3000 + Mesa).
 
+### Warm rendering — off-screen pre-rasterisation
+
+`Engine::warmRender(callable $renderFn): void` runs a render callback whose
+draws are routed into a **private off-screen target that is never presented**.
+Used during splash to pre-warm font atlases, sprite textures, and panel
+layouts so the first real frame doesn't stutter while glyph rasterisation
+catches up.
+
+```php
+$engine->warmRender(function () use ($engine, $state) {
+    // Inside this block, beginFrame()/endFrame() route into a private
+    // VioRenderTarget instead of the swapchain. Glyph atlas + texture
+    // uploads survive into the next real frame; the warmed pixels never
+    // appear on screen.
+    GameApp::renderScene($engine, 1280, 720, $state);
+});
+```
+
+Contract:
+- Target is sized to the current framebuffer (falls back to the renderer's
+  logical size if the window isn't initialised yet).
+- The `VioRenderTarget` is released (PHP GC) before `warmRender()` returns,
+  so the next real frame is unaffected.
+- Safe to call repeatedly — every call allocates and releases its own target.
+- Safe to call from inside generator-based `onInit` chunks. No `yield` is
+  required during warm-render itself.
+- Backend behaviour:
+  - **vio (primary):** redirects via `vio_bind_render_target`. Genuinely
+    off-screen, no flash.
+  - **NanoVG / GLFW fallback:** falls back to the swapchain. Brief flash
+    possible; acceptable because vio is the shipping path.
+  - **NullRenderer2D / GdRenderer2D:** no-op redirect; the callback still
+    runs so glyph and texture book-keeping paths execute.
+
+Underlying primitives on the renderer interface:
+- `Renderer2DInterface::beginOffscreenFrame(int $w, int $h): void`
+- `Renderer2DInterface::endOffscreenFrame(): void`
+
+The interface methods are stateful: between `beginOffscreenFrame()` and
+`endOffscreenFrame()`, every `beginFrame()` rebinds the warm target and
+every `endFrame()` unbinds it. Mixing the two pairs in the same frame is
+undefined; always run `warmRender()` outside of the main game loop's
+render call.
+
 ```php
 $engine->onInit(function (Engine $engine) {
     $engine->setSplashTasks(['Loading fonts', 'Building world']);

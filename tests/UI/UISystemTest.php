@@ -86,6 +86,8 @@ class UISystemTest extends TestCase
             public function drawArc(float $cx, float $cy, float $r, float $startAngle, float $endAngle, \PHPolygon\Rendering\Color $color, int $direction = 0): void {}
             public function saveState(): void {}
             public function restoreState(): void {}
+            public function beginOffscreenFrame(int $width, int $height): void {}
+            public function endOffscreenFrame(): void {}
         };
 
         return new UISystem($renderer, new \PHPolygon\Runtime\Input());

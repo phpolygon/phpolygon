@@ -853,6 +853,64 @@ class Engine
     }
 
     /**
+     * Run a render-style callback into a private off-screen target that is
+     * never presented to the screen. Intended for splash-phase warm-up work
+     * (font atlas pre-rasterisation, sprite texture uploads) where the game
+     * wants real `Renderer2D::beginFrame()`/`endFrame()` semantics — including
+     * glyph rasterisation and texture upload — without the warm pixels ever
+     * appearing on the swapchain.
+     *
+     * Contract:
+     *  - The active `Renderer2D` is switched into off-screen mode for the
+     *    duration of the callback. Calls to `beginFrame()`/`endFrame()` inside
+     *    `$renderFn` route into a private target sized to the current
+     *    framebuffer.
+     *  - The off-screen target is released (GC drops the underlying
+     *    `VioRenderTarget`) before this method returns, so the next real
+     *    frame is unaffected.
+     *  - Safe to call repeatedly — every call allocates and releases its own
+     *    target.
+     *  - Safe to call from inside a generator-based `onInit` (the
+     *    cooperative init pattern). The callback runs synchronously within
+     *    the current chunk; no `yield` is required.
+     *  - On backends without offscreen support (NanoVG/GLFW fallback,
+     *    `NullRenderer2D`, GD test renderer) the callback still runs so glyph
+     *    paths are exercised, but the offscreen redirect is a no-op. Callers
+     *    on those backends accept a brief flash; vio is the shipping path.
+     *
+     * @param callable $renderFn fn(): void — draws one or more frames using
+     *                            `$engine->renderer2D->beginFrame()/endFrame()`.
+     *                            Return value is ignored.
+     */
+    public function warmRender(callable $renderFn): void
+    {
+        // Size the offscreen target to match the current framebuffer so glyph
+        // atlases warmed here are the same resolution the swapchain will use.
+        // Window may not be initialised yet in some test paths; fall back to
+        // the renderer's logical size in that case.
+        $fbW = $this->window->getFramebufferWidth();
+        $fbH = $this->window->getFramebufferHeight();
+        if ($fbW <= 0 || $fbH <= 0) {
+            $fbW = max(1, $this->renderer2D->getWidth());
+            $fbH = max(1, $this->renderer2D->getHeight());
+        }
+
+        // Flip the renderer into offscreen-redirect mode. On vio, subsequent
+        // beginFrame()/endFrame() calls inside $renderFn route into a private
+        // VioRenderTarget that is released in endOffscreenFrame(). On other
+        // backends this is a no-op and the callback renders against the
+        // default surface (a brief flash on GLFW, no effect headless).
+        $renderer = $this->renderer2D;
+        $renderer->beginOffscreenFrame($fbW, $fbH);
+
+        try {
+            $renderFn();
+        } finally {
+            $renderer->endOffscreenFrame();
+        }
+    }
+
+    /**
      * Render a single test frame with an optional input modifier callback.
      * Designed for VRT and interaction tests — handles beginFrame/endFrame/input lifecycle.
      *

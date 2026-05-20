@@ -94,4 +94,32 @@ interface Renderer2DInterface extends RenderContextInterface
      * Restores the most recently saved drawing state from the internal stack.
      */
     public function restoreState(): void;
+
+    /**
+     * Begin a frame whose draws are routed into a private off-screen render
+     * target instead of the swapchain. Used by `Engine::warmRender()` to
+     * pre-rasterise glyph atlases and warm sprite uploads during splash without
+     * ever presenting the pixels.
+     *
+     * Implementations that cannot redirect rendering (NanoVG/GLFW fallback,
+     * `NullRenderer2D`, GD test renderer) may treat this as a no-op alias for
+     * `beginFrame()` — the warm callback still exercises glyph paths against
+     * the default surface; we accept the minor flash on those backends because
+     * vio is the shipping path.
+     *
+     * Lifecycle: every `beginOffscreenFrame()` must be paired with exactly one
+     * `endOffscreenFrame()`. Mixing with `beginFrame()` / `endFrame()` inside
+     * the same frame is undefined.
+     *
+     * @param int $width  Desired off-screen target width in pixels (>= 1).
+     * @param int $height Desired off-screen target height in pixels (>= 1).
+     */
+    public function beginOffscreenFrame(int $width, int $height): void;
+
+    /**
+     * End a frame that was started with `beginOffscreenFrame()`. The off-screen
+     * target is unbound and the swapchain becomes the active draw target again.
+     * On backends without offscreen support this falls back to `endFrame()`.
+     */
+    public function endOffscreenFrame(): void;
 }

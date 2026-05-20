@@ -53,4 +53,6 @@ class WidgetTestHelper implements Renderer2DInterface
     public function drawArc(float $cx, float $cy, float $r, float $startAngle, float $endAngle, Color $color, int $direction = 0): void {}
     public function saveState(): void {}
     public function restoreState(): void {}
+    public function beginOffscreenFrame(int $width, int $height): void {}
+    public function endOffscreenFrame(): void {}
 }
