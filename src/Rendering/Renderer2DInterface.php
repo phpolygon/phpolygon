@@ -28,6 +28,13 @@ interface Renderer2DInterface extends RenderContextInterface
 
     public function drawTextCentered(string $text, float $cx, float $cy, float $size, Color $color): void;
 
+    /**
+     * Draws text wrapped to fit within `breakWidth`. Word-wraps on spaces.
+     *
+     * Explicit newline characters (`\n`, `\r\n`, `\r`) are honoured as hard line
+     * breaks across all backends. Empty paragraphs (`"\n\n"`) take one line of
+     * vertical space. Word-wrap then runs within each hard-broken paragraph.
+     */
     public function drawTextBox(string $text, float $x, float $y, float $breakWidth, float $size, Color $color): void;
 
     public function drawSprite(Texture $texture, ?Rect $srcRegion, float $x, float $y, float $w, float $h, float $opacity = 1.0): void;
@@ -57,6 +64,10 @@ interface Renderer2DInterface extends RenderContextInterface
 
     /**
      * Measures the bounding box of text wrapped at the given breakWidth.
+     *
+     * Honours explicit `\n` / `\r\n` / `\r` as hard line breaks, so the reported
+     * height matches what `drawTextBox()` will actually render. Empty paragraphs
+     * contribute one `lineHeight` each.
      */
     public function measureTextBox(string $text, float $breakWidth, float $size): TextMetrics;
 

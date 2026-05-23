@@ -371,28 +371,48 @@ class VioRenderer2D implements Renderer2DInterface
         $argb = $this->colorToArgb($color);
         $z = $this->nextZ();
         $align = $this->textAlign;
-        $words = explode(' ', $text);
-        $line = '';
         $lineHeight = $size * 1.2;
         // vio_text renders from baseline — offset each line by ascender
         $ascender = $size * 0.65;
         $lineY = $y + $ascender;
 
-        foreach ($words as $word) {
-            $testLine = $line === '' ? $word : $line . ' ' . $word;
-            $metrics = vio_text_measure($font, $testLine);
-            if ($metrics['width'] > $breakWidth && $line !== '') {
+        // Split on hard line breaks first so explicit \n in the source forces
+        // a new line. Word-wrap then runs *within* each paragraph. Without this
+        // step "10 LET X = 5\n20 LET Y = X + 3" would render as one long line
+        // because explode(' ', ...) preserves \n inside the resulting tokens.
+        $paragraphs = preg_split('/\r\n?|\n/', $text);
+        if ($paragraphs === false) {
+            $paragraphs = [$text];
+        }
+
+        foreach ($paragraphs as $paragraph) {
+            if ($paragraph === '') {
+                // Empty paragraph (e.g. consecutive \n\n) advances by one
+                // line height to produce a visible blank line.
+                $lineY += $lineHeight;
+                continue;
+            }
+
+            $words = explode(' ', $paragraph);
+            $line = '';
+
+            foreach ($words as $word) {
+                $testLine = $line === '' ? $word : $line . ' ' . $word;
+                $metrics = vio_text_measure($font, $testLine);
+                if ($metrics['width'] > $breakWidth && $line !== '') {
+                    $lx = $this->alignTextX($font, $line, $x, $breakWidth, $align);
+                    vio_text($this->ctx, $font, $line, $lx, $lineY, ['color' => $argb, 'z' => $z]);
+                    $lineY += $lineHeight;
+                    $line = $word;
+                } else {
+                    $line = $testLine;
+                }
+            }
+            if ($line !== '') {
                 $lx = $this->alignTextX($font, $line, $x, $breakWidth, $align);
                 vio_text($this->ctx, $font, $line, $lx, $lineY, ['color' => $argb, 'z' => $z]);
                 $lineY += $lineHeight;
-                $line = $word;
-            } else {
-                $line = $testLine;
             }
-        }
-        if ($line !== '') {
-            $lx = $this->alignTextX($font, $line, $x, $breakWidth, $align);
-            vio_text($this->ctx, $font, $line, $lx, $lineY, ['color' => $argb, 'z' => $z]);
         }
     }
 
@@ -496,29 +516,45 @@ class VioRenderer2D implements Renderer2DInterface
             return new TextMetrics($breakWidth, $size);
         }
 
-        // Word-wrap and measure each line, same algorithm as drawTextBox
-        $words = explode(' ', $text);
-        $line = '';
+        // Word-wrap and measure each line, same algorithm as drawTextBox.
+        // Must honour explicit \n breaks so measureTextBox() agrees with what
+        // drawTextBox() actually renders. Empty paragraphs contribute one
+        // lineHeight just like an empty visible line would.
         $lineHeight = $size * 1.2;
         $maxWidth = 0.0;
         $totalHeight = 0.0;
 
-        foreach ($words as $word) {
-            $testLine = $line === '' ? $word : $line . ' ' . $word;
-            $metrics = vio_text_measure($font, $testLine);
-            if ($metrics['width'] > $breakWidth && $line !== '') {
+        $paragraphs = preg_split('/\r\n?|\n/', $text);
+        if ($paragraphs === false) {
+            $paragraphs = [$text];
+        }
+
+        foreach ($paragraphs as $paragraph) {
+            if ($paragraph === '') {
+                $totalHeight += $lineHeight;
+                continue;
+            }
+
+            $words = explode(' ', $paragraph);
+            $line = '';
+
+            foreach ($words as $word) {
+                $testLine = $line === '' ? $word : $line . ' ' . $word;
+                $metrics = vio_text_measure($font, $testLine);
+                if ($metrics['width'] > $breakWidth && $line !== '') {
+                    $lineMetrics = vio_text_measure($font, $line);
+                    $maxWidth = max($maxWidth, (float)$lineMetrics['width']);
+                    $totalHeight += $lineHeight;
+                    $line = $word;
+                } else {
+                    $line = $testLine;
+                }
+            }
+            if ($line !== '') {
                 $lineMetrics = vio_text_measure($font, $line);
                 $maxWidth = max($maxWidth, (float)$lineMetrics['width']);
                 $totalHeight += $lineHeight;
-                $line = $word;
-            } else {
-                $line = $testLine;
             }
-        }
-        if ($line !== '') {
-            $lineMetrics = vio_text_measure($font, $line);
-            $maxWidth = max($maxWidth, (float)$lineMetrics['width']);
-            $totalHeight += $lineHeight;
         }
 
         return new TextMetrics($maxWidth, $totalHeight);
