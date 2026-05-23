@@ -266,27 +266,42 @@ class GdRenderer2D implements Renderer2DInterface
         }
 
         $fontPath = $this->fonts[$this->currentFont];
-        $words = explode(' ', $text);
-        $line = '';
         $lineY = $y;
         $lineHeight = $size * 1.4;
 
-        foreach ($words as $word) {
-            $testLine = $line === '' ? $word : $line . ' ' . $word;
-            $bbox = imagettfbbox($size, 0, $fontPath, $testLine);
-            /** @var array<int, int>|false $bbox */
-            $lineWidth = $bbox !== false ? ($bbox[2] - $bbox[0]) : 0;
-
-            if ($lineWidth > $breakWidth && $line !== '') {
-                $this->drawText($line, $x, $lineY, $size, $color);
-                $line = $word;
-                $lineY += $lineHeight;
-            } else {
-                $line = $testLine;
-            }
+        // Split on hard line breaks first; word-wrap runs within each paragraph.
+        $paragraphs = preg_split('/\r\n?|\n/', $text);
+        if ($paragraphs === false) {
+            $paragraphs = [$text];
         }
-        if ($line !== '') {
-            $this->drawText($line, $x, $lineY, $size, $color);
+
+        foreach ($paragraphs as $paragraph) {
+            if ($paragraph === '') {
+                $lineY += $lineHeight;
+                continue;
+            }
+
+            $words = explode(' ', $paragraph);
+            $line = '';
+
+            foreach ($words as $word) {
+                $testLine = $line === '' ? $word : $line . ' ' . $word;
+                $bbox = imagettfbbox($size, 0, $fontPath, $testLine);
+                /** @var array<int, int>|false $bbox */
+                $lineWidth = $bbox !== false ? ($bbox[2] - $bbox[0]) : 0;
+
+                if ($lineWidth > $breakWidth && $line !== '') {
+                    $this->drawText($line, $x, $lineY, $size, $color);
+                    $line = $word;
+                    $lineY += $lineHeight;
+                } else {
+                    $line = $testLine;
+                }
+            }
+            if ($line !== '') {
+                $this->drawText($line, $x, $lineY, $size, $color);
+                $lineY += $lineHeight;
+            }
         }
     }
 
@@ -368,37 +383,50 @@ class GdRenderer2D implements Renderer2DInterface
         }
 
         $fontPath = $this->fonts[$this->currentFont];
-        $words = explode(' ', $text);
-        $line = '';
         $lineHeight = $size * 1.4;
         $maxWidth = 0.0;
         $totalHeight = 0.0;
 
-        foreach ($words as $word) {
-            $testLine = $line === '' ? $word : $line . ' ' . $word;
-            $bbox = imagettfbbox($size, 0, $fontPath, $testLine);
-            /** @var array<int, int>|false $bbox */
-            $lineWidth = $bbox !== false ? (float)($bbox[2] - $bbox[0]) : 0.0;
+        $paragraphs = preg_split('/\r\n?|\n/', $text);
+        if ($paragraphs === false) {
+            $paragraphs = [$text];
+        }
 
-            if ($lineWidth > $breakWidth && $line !== '') {
+        foreach ($paragraphs as $paragraph) {
+            if ($paragraph === '') {
+                $totalHeight += $lineHeight;
+                continue;
+            }
+
+            $words = explode(' ', $paragraph);
+            $line = '';
+
+            foreach ($words as $word) {
+                $testLine = $line === '' ? $word : $line . ' ' . $word;
+                $bbox = imagettfbbox($size, 0, $fontPath, $testLine);
+                /** @var array<int, int>|false $bbox */
+                $lineWidth = $bbox !== false ? (float)($bbox[2] - $bbox[0]) : 0.0;
+
+                if ($lineWidth > $breakWidth && $line !== '') {
+                    /** @var array<int, int>|false $lineBbox */
+                    $lineBbox = imagettfbbox($size, 0, $fontPath, $line);
+                    if ($lineBbox !== false) {
+                        $maxWidth = max($maxWidth, (float)($lineBbox[2] - $lineBbox[0]));
+                    }
+                    $totalHeight += $lineHeight;
+                    $line = $word;
+                } else {
+                    $line = $testLine;
+                }
+            }
+            if ($line !== '') {
                 /** @var array<int, int>|false $lineBbox */
                 $lineBbox = imagettfbbox($size, 0, $fontPath, $line);
                 if ($lineBbox !== false) {
                     $maxWidth = max($maxWidth, (float)($lineBbox[2] - $lineBbox[0]));
                 }
                 $totalHeight += $lineHeight;
-                $line = $word;
-            } else {
-                $line = $testLine;
             }
-        }
-        if ($line !== '') {
-            /** @var array<int, int>|false $lineBbox */
-            $lineBbox = imagettfbbox($size, 0, $fontPath, $line);
-            if ($lineBbox !== false) {
-                $maxWidth = max($maxWidth, (float)($lineBbox[2] - $lineBbox[0]));
-            }
-            $totalHeight += $lineHeight;
         }
 
         return new TextMetrics($maxWidth, $totalHeight);
