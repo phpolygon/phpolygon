@@ -644,6 +644,18 @@ class UIContext
     }
 
     /**
+     * Programmatically focus a text field / area (e.g. so a freshly-opened
+     * editor accepts typing without a click first). Seeds the edit buffer with
+     * $value and puts the caret at the end.
+     */
+    public function focusTextField(string $id, string $value = ''): void
+    {
+        $this->focusedTextField = $id;
+        $this->textFieldBuffer = $value;
+        $this->textFieldCursor = mb_strlen($value);
+    }
+
+    /**
      * Dropdown selector. Returns the (possibly new) selected index.
      *
      * Click on the closed field toggles the option list open.
