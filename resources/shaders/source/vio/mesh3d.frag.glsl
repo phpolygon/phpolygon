@@ -306,6 +306,26 @@ vec3 computeSand(vec3 N, vec3 V, vec3 L, out float roughOut) {
     // comes from the environmental state feeding the shader.
     float zone = v_uv.x;
 
+    // Grass zone (UV.x = 1.0): inland terrain is painted green here instead
+    // of as a separate overlay mesh, so one terrain mesh covers shore sand
+    // AND inland grass. TerrainMesh encodes a 'grass' material as UV.x = 1.0.
+    if (zone > 0.9) {
+        vec3 grassBase = vec3(0.368, 0.478, 0.220) * u_season_tint; // ~#5E7A38
+        float g1 = fbm2(v_worldPos.xz * 0.8);          // broad sun/shadow patches
+        float g2 = noise(v_worldPos.xz * 5.0);         // clumps
+        float g3 = noise(v_worldPos.xz * 22.0);        // blade-scale speckle
+        vec3 grass = grassBase;
+        grass *= 0.80 + g1 * 0.34;
+        grass *= 0.90 + (g2 - 0.5) * 0.26;
+        grass *= 0.92 + (g3 - 0.5) * 0.20;
+        // Sun-dried tips on raised clumps — a touch warmer/yellower.
+        grass = mix(grass, grass * vec3(1.12, 1.06, 0.66), smoothstep(0.6, 0.95, g2) * 0.3);
+        // Rain deepens the green.
+        grass = mix(grass, grass * 0.72, u_rain_wetness * 0.4);
+        roughOut = 0.95;
+        return grass;
+    }
+
     vec3 baseColor = u_albedo * u_season_tint;
 
     // Three noise octaves: broad patches, mid texture, individual grains.

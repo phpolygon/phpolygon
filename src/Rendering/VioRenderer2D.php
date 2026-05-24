@@ -39,6 +39,9 @@ class VioRenderer2D implements Renderer2DInterface
     /** @var array<string, list<string>> Base font name -> list of fallback font names */
     private array $fallbackFonts = [];
 
+    /** @var array<string, array<string, mixed>> Memoized vio_text_measure results, keyed by font-object-id|text */
+    private array $measureCache = [];
+
     /**
      * State stack for saveState()/restoreState().
      * Each entry stores: [fontName, textAlign, globalAlpha]
@@ -327,16 +330,20 @@ class VioRenderer2D implements Renderer2DInterface
         $primary = $chain[0];
         vio_text($this->ctx, $primary, $text, $x, $y, ['color' => $argb, 'z' => $z]);
 
-        // If no fallbacks, done
-        if (count($chain) <= 1) {
+        // If no fallbacks, or the text is plain Latin/Western (the only thing
+        // the configured CJK fallback fonts could add is Han/Hangul glyphs),
+        // we're done. This skips the per-glyph coverage scan AND the extra
+        // vio_text draws through the large CJK fallback fonts — which cost
+        // ~40 ms/frame on a HUD full of Latin text.
+        if (count($chain) <= 1 || !self::textNeedsFallback($text)) {
             return;
         }
 
         // Check if primary covers everything
-        $primaryW = (float)vio_text_measure($primary, $text)['width'];
+        $primaryW = (float)$this->measureCached($primary, $text)['width'];
         $chainW = 0.0;
         foreach ($chain as $font) {
-            $w = (float)vio_text_measure($font, $text)['width'];
+            $w = (float)$this->measureCached($font, $text)['width'];
             if ($w > $chainW) { $chainW = $w; }
         }
         if ($primaryW >= $chainW - 0.01) {
@@ -350,7 +357,7 @@ class VioRenderer2D implements Renderer2DInterface
             $fbText = '';
             for ($c = 0; $c < $len; $c++) {
                 $ch = mb_substr($text, $c, 1);
-                $pw = (float)vio_text_measure($primary, $ch)['width'];
+                $pw = (float)$this->measureCached($primary, $ch)['width'];
                 if ($pw > 0.001) {
                     // Primary has this glyph — insert a space so fallback advances cursor
                     $fbText .= ' ';
@@ -398,7 +405,7 @@ class VioRenderer2D implements Renderer2DInterface
 
             foreach ($words as $word) {
                 $testLine = $line === '' ? $word : $line . ' ' . $word;
-                $metrics = vio_text_measure($font, $testLine);
+                $metrics = $this->measureCached($font, $testLine);
                 if ($metrics['width'] > $breakWidth && $line !== '') {
                     $lx = $this->alignTextX($font, $line, $x, $breakWidth, $align);
                     vio_text($this->ctx, $font, $line, $lx, $lineY, ['color' => $argb, 'z' => $z]);
@@ -495,12 +502,44 @@ class VioRenderer2D implements Renderer2DInterface
      * all fonts (each font contributes width for glyphs it has, skips missing).
      * @param list<VioFont> $chain
      */
+    /**
+     * Memoized {@see vio_text_measure}. UI/HUD text re-measures the same
+     * strings every frame across the whole font fallback chain — including
+     * the large CJK fallback fonts (noto-sans-sc/kr) — which dominated the
+     * 2D frame cost (~120 ms with the HUD up). Fonts are immutable and cached
+     * per (name, size), so the font object id + text is a stable cache key.
+     *
+     * @return array<string, mixed>
+     */
+    private function measureCached(mixed $font, string $text): array
+    {
+        if (!is_object($font)) {
+            return vio_text_measure($font, $text);
+        }
+        $key = \spl_object_id($font) . '|' . $text;
+        return $this->measureCache[$key] ??= vio_text_measure($font, $text);
+    }
+
+    /**
+     * Whether $text contains any codepoint outside the Latin/Western range
+     * the primary UI font already covers. The only fallback fonts wired up
+     * are CJK (noto-sans-sc/kr), so plain Western text never needs the chain
+     * — and skipping it avoids the dominant per-frame HUD text cost.
+     */
+    private static function textNeedsFallback(string $text): bool
+    {
+        return (bool) preg_match('/[\x{0500}-\x{10FFFF}]/u', $text);
+    }
+
     private function measureTextWithChain(array $chain, string $text): TextMetrics
     {
+        if (count($chain) > 1 && !self::textNeedsFallback($text)) {
+            $chain = [$chain[0]];
+        }
         $maxW = 0.0;
         $maxH = 0.0;
         foreach ($chain as $font) {
-            $m = vio_text_measure($font, $text);
+            $m = $this->measureCached($font, $text);
             $w = (float)$m['width'];
             $h = (float)$m['height'];
             if ($w > $maxW) { $maxW = $w; }
@@ -540,9 +579,9 @@ class VioRenderer2D implements Renderer2DInterface
 
             foreach ($words as $word) {
                 $testLine = $line === '' ? $word : $line . ' ' . $word;
-                $metrics = vio_text_measure($font, $testLine);
+                $metrics = $this->measureCached($font, $testLine);
                 if ($metrics['width'] > $breakWidth && $line !== '') {
-                    $lineMetrics = vio_text_measure($font, $line);
+                    $lineMetrics = $this->measureCached($font, $line);
                     $maxWidth = max($maxWidth, (float)$lineMetrics['width']);
                     $totalHeight += $lineHeight;
                     $line = $word;
@@ -551,7 +590,7 @@ class VioRenderer2D implements Renderer2DInterface
                 }
             }
             if ($line !== '') {
-                $lineMetrics = vio_text_measure($font, $line);
+                $lineMetrics = $this->measureCached($font, $line);
                 $maxWidth = max($maxWidth, (float)$lineMetrics['width']);
                 $totalHeight += $lineHeight;
             }
@@ -628,11 +667,11 @@ class VioRenderer2D implements Renderer2DInterface
     private function alignTextX(VioFont $font, string $text, float $x, float $boxWidth, int $align): float
     {
         if ($align & TextAlign::CENTER) {
-            $metrics = vio_text_measure($font, $text);
+            $metrics = $this->measureCached($font, $text);
             return $x + ($boxWidth - (float)$metrics['width']) / 2.0;
         }
         if ($align & TextAlign::RIGHT) {
-            $metrics = vio_text_measure($font, $text);
+            $metrics = $this->measureCached($font, $text);
             return $x + $boxWidth - (float)$metrics['width'];
         }
         return $x;

@@ -941,10 +941,21 @@ class VioRenderer3D implements Renderer3DInterface
             );
         }
 
+        // Size the light frustum to THIS cascade. The old code put the light
+        // a fixed 80 units back and used the same [0.5, 200] depth slab for
+        // every cascade — so the small near cascade (s=15, a 30 m box) packed
+        // its depth comparison into a 200 m range, making the fragment-shader
+        // bias map to a ~1 m world offset. That blanketed cascade 0's ~15 m
+        // radius (the disc around the camera) in a constant dark shadow term.
+        // Backing the light off by the cascade extent + caster headroom and
+        // bracketing near/far to the cascade restores a sane bias-to-world
+        // ratio without changing the (fixed) per-cascade ortho footprint.
+        $casterHeadroom = max(30.0, $s); // room for tall casters above the box
+        $backoff = $s + $casterHeadroom;
         $lightPos = new Vec3(
-            $center->x - $dx * 80.0,
-            $center->y - $dy * 80.0,
-            $center->z - $dz * 80.0,
+            $center->x - $dx * $backoff,
+            $center->y - $dy * $backoff,
+            $center->z - $dz * $backoff,
         );
 
         $up = abs($dy) > 0.999
@@ -952,7 +963,9 @@ class VioRenderer3D implements Renderer3DInterface
             : new Vec3(0.0, 1.0, 0.0);
 
         $lightView = self::lookAt($lightPos, $center, $up);
-        $lightProj = Mat4::orthographic(-$s, $s, -$s, $s, 0.5, 200.0);
+        $nearPlane = 0.5;
+        $farPlane = $backoff + $s + 5.0; // reach the far/low side of the box
+        $lightProj = Mat4::orthographic(-$s, $s, -$s, $s, $nearPlane, $farPlane);
 
         return $lightProj->multiply($lightView);
     }
