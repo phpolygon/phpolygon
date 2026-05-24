@@ -200,6 +200,15 @@ class VioInput implements InputInterface
 
     public function endFrame(): void
     {
+        // Drop "just pressed" keys that no system consumed this frame. The GLFW
+        // callback sets keyJustPressed, but it's otherwise only cleared when a
+        // system reads it — so a Space typed into a modal text field (which
+        // reads char input, not the Space key) lingered until the modal closed
+        // and the player controller read it as a jump. A press should live one
+        // frame. (keyJustReleased is left alone — the text field's backspace
+        // handling depends on its current behaviour.)
+        $this->keyJustPressed = [];
+
         // Clear previous frame's mouse edges, then detect new ones.
         // Mouse button state is polled (not callback-based like keys), so edges
         // are detected by comparing current vs prev. Edges are NOT consumed on
