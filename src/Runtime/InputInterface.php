@@ -71,6 +71,13 @@ interface InputInterface
 
     public function isSuppressed(): bool;
 
+    /**
+     * Drop buffered "just pressed/released" key edges that no system consumed.
+     * Call when returning to gameplay from a modal so a key typed into the
+     * modal can't fire as a buffered action the moment it closes.
+     */
+    public function clearKeyEdges(): void;
+
     // ---- Engine lifecycle (called by Engine::run, not by game systems) ----
 
     /** Advance frame state: snapshot pressed→prev, clear scroll/chars. */

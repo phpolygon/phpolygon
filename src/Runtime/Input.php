@@ -208,6 +208,14 @@ class Input implements InputInterface
         return $this->suppressed || $this->suppressFrames > 0 || microtime(true) < $this->suppressUntil;
     }
 
+    public function clearKeyEdges(): void
+    {
+        // Drop this frame's press edges and align prev→current so neither a
+        // pending press nor a release edge survives into the next poll.
+        $this->keyPressedThisFrame = [];
+        $this->keysPrev = $this->keysDown;
+    }
+
     public function endFrame(): void
     {
         $this->keysPrev = $this->keysDown;

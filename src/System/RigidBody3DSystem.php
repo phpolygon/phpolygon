@@ -28,7 +28,17 @@ class RigidBody3DSystem extends AbstractSystem
     private SpatialHash3D $spatialHash;
     private float $characterPushForce;
 
-    // No static cache — re-collected each frame for correctness with kinematic movers
+    /**
+     * Cached world AABBs for static colliders (no RigidBody3D), keyed by
+     * entity id. Static colliders don't move, so their world AABB only needs
+     * recomputing when their transform actually changes — recomputing every
+     * collider every frame (hundreds of building/prop colliders) was the
+     * dominant per-frame physics cost. Entries store a transform snapshot so a
+     * collider that IS moved still refreshes correctly.
+     *
+     * @var array<int, array{aabb: array{min: Vec3, max: Vec3}, px: float, py: float, pz: float, rx: float, ry: float, rz: float, rw: float, sx: float, sy: float, sz: float}>
+     */
+    private array $staticAabbCache = [];
 
     public function __construct(
         ?Vec3 $gravity = null,
@@ -220,8 +230,13 @@ class RigidBody3DSystem extends AbstractSystem
     /** @param array<int, array{entityId: int, rigid: RigidBody3D, transform: Transform3D, collider: BoxCollider3D, min: Vec3, max: Vec3, posX: float, posY: float, posZ: float}> &$bodies */
     private function resolveStaticCollisions(World $world, array &$bodies): void
     {
-        // Collect static colliders each frame (no RigidBody3D, just BoxCollider3D)
+        // Collect static colliders (no RigidBody3D, just BoxCollider3D). Their
+        // world AABBs are cached and only recomputed when the collider's
+        // transform changes — almost never, since these are static buildings
+        // and props. This avoids hundreds of getWorldAABB() matrix evaluations
+        // every frame.
         $staticAABBs = [];
+        $seen = [];
         foreach ($world->query(BoxCollider3D::class, Transform3D::class) as $entity) {
             if ($world->tryGetComponent($entity->id, RigidBody3D::class) !== null) {
                 continue; // Skip bodies handled above
@@ -229,9 +244,35 @@ class RigidBody3DSystem extends AbstractSystem
             $collider = $entity->get(BoxCollider3D::class);
             if ($collider->isTrigger) continue;
 
+            $id = $entity->id;
+            $seen[$id] = true;
             $transform = $entity->get(Transform3D::class);
+            $p = $transform->position;
+            $r = $transform->rotation;
+            $s = $transform->scale;
+
+            $cached = $this->staticAabbCache[$id] ?? null;
+            if ($cached !== null
+                && $cached['px'] === $p->x && $cached['py'] === $p->y && $cached['pz'] === $p->z
+                && $cached['rx'] === $r->x && $cached['ry'] === $r->y && $cached['rz'] === $r->z && $cached['rw'] === $r->w
+                && $cached['sx'] === $s->x && $cached['sy'] === $s->y && $cached['sz'] === $s->z
+            ) {
+                $staticAABBs[$id] = $cached['aabb'];
+                continue;
+            }
+
             $aabb = $collider->getWorldAABB($transform->getWorldMatrix());
-            $staticAABBs[$entity->id] = $aabb;
+            $staticAABBs[$id] = $aabb;
+            $this->staticAabbCache[$id] = [
+                'aabb' => $aabb,
+                'px' => $p->x, 'py' => $p->y, 'pz' => $p->z,
+                'rx' => $r->x, 'ry' => $r->y, 'rz' => $r->z, 'rw' => $r->w,
+                'sx' => $s->x, 'sy' => $s->y, 'sz' => $s->z,
+            ];
+        }
+        // Drop cache entries for colliders that no longer exist (scene change).
+        if (count($this->staticAabbCache) > count($seen)) {
+            $this->staticAabbCache = array_intersect_key($this->staticAabbCache, $seen);
         }
 
         foreach ($bodies as &$body) {

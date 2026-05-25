@@ -177,6 +177,30 @@ class UIContext
     }
 
     /**
+     * Like {@see label()} but word-wraps to the current region width and grows
+     * to as many lines as the text needs — for descriptions, output and hints
+     * that would otherwise overflow on a single line.
+     */
+    public function labelWrapped(string $text, ?Color $color = null): void
+    {
+        $color ??= $this->style->textColor;
+        $size = $this->style->fontSize;
+        $pad = $this->style->padding;
+        $breakWidth = max(1.0, $this->regionWidth - $pad * 2);
+
+        $metrics = $this->renderer->measureTextBox($text, $breakWidth, $size);
+        $this->renderer->drawTextBox(
+            $text,
+            $this->cursorX + $pad,
+            $this->cursorY + $pad,
+            $breakWidth,
+            $size,
+            $color,
+        );
+        $this->advance($metrics->height + $pad * 2);
+    }
+
+    /**
      * Clickable button. Returns true on the frame it was clicked.
      *
      * @param float $width    Override width (0 = auto: regionWidth in vertical, text-fit in horizontal)
@@ -476,6 +500,159 @@ class UIContext
 
         $this->advance($totalH);
         return $value;
+    }
+
+    /**
+     * Multi-line text input (code editor). Like {@see textField()} but renders
+     * and edits across several lines: Enter inserts a newline, backspace can
+     * merge lines, and the caret tracks its line + column. $rows sets the
+     * visible height. Call from the render phase (reads keys once per frame).
+     */
+    public function textArea(string $id, string $value, int $rows = 8): string
+    {
+        $s = $this->style;
+        $lineH = $s->fontSize * 1.35;
+
+        $fieldX = $this->cursorX + $s->padding;
+        $fieldY = $this->cursorY;
+        $fieldW = $this->regionWidth - $s->padding * 2;
+        $fieldH = $rows * $lineH + $s->padding * 2;
+        $fieldRect = new Rect($fieldX, $fieldY, $fieldW, $fieldH);
+
+        $hovered = $this->isHovered($fieldRect);
+        if ($hovered) {
+            $this->anyHovered = true;
+        }
+
+        $focused = $this->focusedTextField === $id;
+        if ($hovered && $this->input->isMouseButtonReleased(0)) {
+            $this->focusedTextField = $id;
+            $this->textFieldBuffer = $value;
+            $this->textFieldCursor = mb_strlen($value);
+            $focused = true;
+        } elseif (!$hovered && $this->input->isMouseButtonReleased(0) && $focused) {
+            $this->focusedTextField = '';
+            $focused = false;
+        }
+
+        if ($focused) {
+            $buf = $this->textFieldBuffer;
+            $cur = $this->textFieldCursor;
+
+            foreach ($this->input->getCharsTyped() as $char) {
+                $buf = mb_substr($buf, 0, $cur) . $char . mb_substr($buf, $cur);
+                $cur++;
+            }
+            // Enter / keypad enter → newline
+            if ($this->input->isKeyPressed(257) || $this->input->isKeyPressed(335)) {
+                $buf = mb_substr($buf, 0, $cur) . "\n" . mb_substr($buf, $cur);
+                $cur++;
+            }
+            // Backspace (259)
+            if ($this->input->isKeyDown(259) && $this->input->isKeyReleased(259) && $cur > 0 && !$this->input->isSuppressed()) {
+                $buf = mb_substr($buf, 0, $cur - 1) . mb_substr($buf, $cur);
+                $cur--;
+                $this->input->suppress(1, 0.1);
+            }
+            // Delete (261)
+            if ($this->input->isKeyPressed(261) && $cur < mb_strlen($buf)) {
+                $buf = mb_substr($buf, 0, $cur) . mb_substr($buf, $cur + 1);
+            }
+            // Left / Right (263 / 262)
+            if ($this->input->isKeyPressed(263) && $cur > 0) {
+                $cur--;
+            }
+            if ($this->input->isKeyPressed(262) && $cur < mb_strlen($buf)) {
+                $cur++;
+            }
+            // Up / Down (265 / 264) — keep the column on the neighbouring line.
+            if ($this->input->isKeyPressed(265)) {
+                $cur = $this->moveCaretVertically($buf, $cur, -1);
+            }
+            if ($this->input->isKeyPressed(264)) {
+                $cur = $this->moveCaretVertically($buf, $cur, 1);
+            }
+
+            $this->textFieldBuffer = $buf;
+            $this->textFieldCursor = $cur;
+            $value = $buf;
+        }
+
+        // Background
+        $borderCol = $focused ? $s->accentColor : $s->borderColor;
+        $this->renderer->drawRoundedRect($fieldX, $fieldY, $fieldW, $fieldH, $s->borderRadius, $s->backgroundColor);
+        $this->renderer->drawRectOutline($fieldX, $fieldY, $fieldW, $fieldH, $borderCol, $focused ? 2.0 : $s->borderWidth);
+
+        // Lines
+        $lines = explode("\n", $value);
+        foreach ($lines as $i => $line) {
+            $this->renderer->drawText(
+                $line,
+                $fieldX + $s->padding,
+                $fieldY + $s->padding + $i * $lineH,
+                $s->fontSize,
+                $s->textColor,
+            );
+        }
+
+        // Caret (line + column)
+        if ($focused) {
+            $blinkOn = fmod(\PHPolygon\Runtime\Clock::now() / 1_000_000_000, 1.0) < 0.5;
+            if ($blinkOn) {
+                $before = mb_substr($value, 0, $this->textFieldCursor);
+                $beforeLines = explode("\n", $before);
+                $row = count($beforeLines) - 1;
+                $colText = $beforeLines[$row];
+                $metrics = $this->renderer->measureText($colText, $s->fontSize);
+                $caretX = $fieldX + $s->padding + $metrics->width;
+                $caretY = $fieldY + $s->padding + $row * $lineH;
+                $this->renderer->drawLine(
+                    new Vec2($caretX, $caretY),
+                    new Vec2($caretX, $caretY + $s->fontSize),
+                    $s->accentColor,
+                    1.5,
+                );
+            }
+        }
+
+        $this->advance($fieldH + $s->padding);
+        return $value;
+    }
+
+    /**
+     * Move a caret index up/down one line, keeping the column where possible.
+     * $dir = -1 for up, +1 for down.
+     */
+    private function moveCaretVertically(string $buf, int $cursor, int $dir): int
+    {
+        $before = mb_substr($buf, 0, $cursor);
+        $beforeLines = explode("\n", $before);
+        $row = count($beforeLines) - 1;
+        $col = mb_strlen($beforeLines[$row]);
+
+        $allLines = explode("\n", $buf);
+        $targetRow = $row + $dir;
+        if ($targetRow < 0 || $targetRow >= count($allLines)) {
+            return $cursor;
+        }
+
+        $offset = 0;
+        for ($i = 0; $i < $targetRow; $i++) {
+            $offset += mb_strlen($allLines[$i]) + 1; // +1 for the newline
+        }
+        return $offset + min($col, mb_strlen($allLines[$targetRow]));
+    }
+
+    /**
+     * Programmatically focus a text field / area (e.g. so a freshly-opened
+     * editor accepts typing without a click first). Seeds the edit buffer with
+     * $value and puts the caret at the end.
+     */
+    public function focusTextField(string $id, string $value = ''): void
+    {
+        $this->focusedTextField = $id;
+        $this->textFieldBuffer = $value;
+        $this->textFieldCursor = mb_strlen($value);
     }
 
     /**

@@ -198,6 +198,24 @@ class VioInput implements InputInterface
         return $this->suppressed || $this->suppressFrames > 0 || microtime(true) < $this->suppressUntil;
     }
 
+    /**
+     * Drop any buffered "just pressed" / "just released" key edges that no
+     * system consumed. Call this when handing input back to gameplay from a
+     * modal (e.g. closing the code editor) so a key typed into the modal — a
+     * Space goes in as a character, not a consumed key event — can't linger in
+     * the buffer and fire as a jump the moment the modal closes.
+     *
+     * Key edges are otherwise *not* cleared per frame: isKeyPressed() consumes
+     * them on read, and leaving unread presses buffered is deliberate — it lets
+     * a jump pressed a hair before landing still fire (the controller only
+     * reads Space once it's grounded).
+     */
+    public function clearKeyEdges(): void
+    {
+        $this->keyJustPressed = [];
+        $this->keyJustReleased = [];
+    }
+
     public function endFrame(): void
     {
         // Clear previous frame's mouse edges, then detect new ones.
