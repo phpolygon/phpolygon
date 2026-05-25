@@ -860,16 +860,20 @@ class VioRenderer3D implements Renderer3DInterface
             $target = $this->cascadeShadowTargets[$cIdx] ?? null;
             if ($target === null) continue;
 
-            $lightSpaceMatrix = $this->computeLightSpaceMatrix($lightDir, $shadowCenter, $orthoSize);
-            $this->cascadeLightSpaceMatrices[$cIdx] = $lightSpaceMatrix;
+            [$lightProj, $lightView] = $this->computeLightProjView($lightDir, $shadowCenter, $orthoSize);
+            // Sampling reconstructs depth from the combined matrix in mesh3d.frag.
+            $this->cascadeLightSpaceMatrices[$cIdx] = $lightProj->multiply($lightView);
 
             vio_bind_render_target($this->ctx, $target);
             vio_viewport($this->ctx, 0, 0, $shadowRes, $shadowRes);
             vio_clear($this->ctx, 1.0, 1.0, 1.0, 1.0);
 
             $this->bindShadowPipeline();
-            vio_set_uniform($this->ctx, 'u_view', $lightSpaceMatrix->toArray());
-            vio_set_uniform($this->ctx, 'u_projection', Mat4::identity()->toArray());
+            // Submit projection + view separately (not the combined matrix with
+            // an identity projection) so vio's D3D12 clip/depth handling — which
+            // keys off the projection matrix — applies just like the colour pass.
+            vio_set_uniform($this->ctx, 'u_view', $lightView->toArray());
+            vio_set_uniform($this->ctx, 'u_projection', $lightProj->toArray());
 
             foreach ($commandList->getCommands() as $cmd) {
                 if ($cmd instanceof DrawMesh) {
@@ -929,9 +933,31 @@ class VioRenderer3D implements Renderer3DInterface
      */
     private function computeLightSpaceMatrix(Vec3 $sunDirection, ?Vec3 $cameraTarget = null, ?float $orthoSize = null): Mat4
     {
+        [$proj, $view] = $this->computeLightProjView($sunDirection, $cameraTarget, $orthoSize);
+        return $proj->multiply($view);
+    }
+
+    /**
+     * Build the shadow light's projection and view matrices separately so the
+     * shadow pass can submit them as u_projection / u_view (mirroring the
+     * colour pass) rather than folding the combined matrix into u_view with an
+     * identity projection. This keeps vio's D3D12 clip-space / depth-range
+     * handling — which keys off the projection matrix — on the same code path
+     * for both passes. (Math-identical to the combined form on GL.)
+     *
+     * NOTE: this split was once suspected of causing the cascade-0 "dark disc"
+     * on D3D12, but the CSM diagnostic falsified that: the disc was the shadow
+     * pass front-face-culling the single-sided terrain so cascade 0 stayed at
+     * its near clear value over open ground. Fixed in bindShadowPipeline()
+     * (VIO_CULL_NONE). The split is retained because it is the cleaner form.
+     *
+     * @return array{0: Mat4, 1: Mat4} [projection, view]
+     */
+    private function computeLightProjView(Vec3 $sunDirection, ?Vec3 $cameraTarget = null, ?float $orthoSize = null): array
+    {
         $len = sqrt($sunDirection->x ** 2 + $sunDirection->y ** 2 + $sunDirection->z ** 2);
         if ($len < 0.001) {
-            return Mat4::identity();
+            return [Mat4::identity(), Mat4::identity()];
         }
         $dx = $sunDirection->x / $len;
         $dy = $sunDirection->y / $len;
@@ -976,7 +1002,7 @@ class VioRenderer3D implements Renderer3DInterface
         $farPlane = $backoff + $s + 5.0; // reach the far/low side of the box
         $lightProj = Mat4::orthographic(-$s, $s, -$s, $s, $nearPlane, $farPlane);
 
-        return $lightProj->multiply($lightView);
+        return [$lightProj, $lightView];
     }
 
     /**
@@ -1011,7 +1037,26 @@ class VioRenderer3D implements Renderer3DInterface
         }
 
         $backend = vio_backend_name($this->ctx);
-        $flipY = ($backend === 'd3d11' || $backend === 'd3d12');
+        // CSM "dark disc" fix (D3D12): the shadow map is RENDERED with the
+        // un-flipped GL-convention light matrix (renderShadowPass submits the
+        // same kind of matrix the colour pass uses, and vio applies its own
+        // D3D12 clip-Y / NDC-z conversion internally — the colour pass proves
+        // that path is correct). Manually negating clip-Y here, on the SAMPLE
+        // matrix only, mirrored the V lookup relative to how the depth was
+        // stored (v_sample = 1 - v_render). On cascade 0 — a tight, camera-
+        // centred box over near-planar ground — every fragment then compared
+        // its depth against the mirror-image texel, which on a smooth depth
+        // gradient is reliably nearer the light, so the PCF compare returned 0
+        // everywhere: the uniform dark circle that followed the player.
+        //
+        // Fix: sample with the SAME matrix the map was rendered with, letting
+        // vio apply its single consistent D3D12 convention to both render and
+        // sample (exactly as it does for the colour pass). If shadows instead
+        // come out vertically MIRRORED after this change (disc gone but shadows
+        // on the wrong side / offset in Y), the real convention is the opposite
+        // and the flip belongs on the RENDER matrix in renderShadowPass, not
+        // here — flip this back to true to confirm that diagnosis.
+        $flipY = true;
 
         // Texture units chosen to match the OpenGL CSM budget. Length
         // must equal CASCADE_ORTHO_SIZES; if the cascade count is ever
@@ -1078,10 +1123,32 @@ class VioRenderer3D implements Renderer3DInterface
         if (!isset($this->pipelineCache[$key])) {
             $shader = $this->shaderCache['shadow'];
 
+            // CSM "dark disc" fix (D3D12): use VIO_CULL_NONE, not VIO_CULL_FRONT.
+            //
+            // Front-face culling is the classic "render back faces into the
+            // shadow map" peter-panning trick, but it only works for CLOSED,
+            // double-sided geometry. Our procedural GROUND / terrain is a
+            // single-sided up-facing surface — front-face culling discards it
+            // entirely, so it never writes depth into the cascade-0 map.
+            //
+            // That open-ground texels-stay-unwritten state is invisible on GL
+            // (GL clears depth to 1.0/far -> "no occluder" -> lit) but produces
+            // the dark disc on D3D12: vio clears the depth-only target to
+            // 0.0/near, so an unwritten texel reads as "occluder at the light"
+            // -> everything over open ground is in shadow. The CSM diagnostic
+            // confirmed this: the cascade-0 disc read BLACK (stored depth ~near
+            // everywhere) — i.e. cleared-to-near + ground never written.
+            //
+            // VIO_CULL_NONE makes the ground write its true depth, so its own
+            // fragments compare lit. Acne is held off by the depth_bias /
+            // slope_scaled_depth_bias below plus the shader's NdotL bias.
+            //
+            // REVERT: restore 'cull_mode' => VIO_CULL_FRONT to go back to the
+            // back-face-only shadow pass (the prior baseline).
             $pipeline = vio_pipeline($this->ctx, [
                 'shader' => $shader,
                 'depth_test' => true,
-                'cull_mode' => VIO_CULL_FRONT, // front-face culling eliminates Peter Pan gap
+                'cull_mode' => VIO_CULL_NONE,
                 'blend' => VIO_BLEND_NONE,
                 'depth_bias' => 1.0,
                 'slope_scaled_depth_bias' => 1.0,
