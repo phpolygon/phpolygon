@@ -299,6 +299,10 @@ final class FakeInput implements InputInterface
         return false;
     }
 
+    public function clearKeyEdges(): void
+    {
+    }
+
     public function endFrame(): void
     {
     }
