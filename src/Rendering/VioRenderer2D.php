@@ -25,7 +25,7 @@ class VioRenderer2D implements Renderer2DInterface
     /** @var array<string, string> Font name -> file path */
     private array $fontPaths = [];
 
-    /** @var array<string, VioFont> Cache key "name:size" -> VioFont */
+    /** @var array<string, \VioFont> Cache key "name:size" -> VioFont */
     private array $fontCache = [];
 
     public function clearFontCache(): void
@@ -39,7 +39,7 @@ class VioRenderer2D implements Renderer2DInterface
     /** @var array<string, list<string>> Base font name -> list of fallback font names */
     private array $fallbackFonts = [];
 
-    /** @var array<string, array<string, mixed>> Memoized vio_text_measure results, keyed by font-object-id|text */
+    /** @var array<string, array{width: float, height: float}> Memoized vio_text_measure results, keyed by font-object-id|text */
     private array $measureCache = [];
 
     /**
@@ -498,24 +498,16 @@ class VioRenderer2D implements Renderer2DInterface
     }
 
     /**
-     * Measure text width using the font chain. Takes the max width across
-     * all fonts (each font contributes width for glyphs it has, skips missing).
-     * @param list<VioFont> $chain
-     */
-    /**
      * Memoized {@see vio_text_measure}. UI/HUD text re-measures the same
      * strings every frame across the whole font fallback chain — including
      * the large CJK fallback fonts (noto-sans-sc/kr) — which dominated the
      * 2D frame cost (~120 ms with the HUD up). Fonts are immutable and cached
      * per (name, size), so the font object id + text is a stable cache key.
      *
-     * @return array<string, mixed>
+     * @return array{width: float, height: float}
      */
-    private function measureCached(mixed $font, string $text): array
+    private function measureCached(\VioFont $font, string $text): array
     {
-        if (!is_object($font)) {
-            return vio_text_measure($font, $text);
-        }
         $key = \spl_object_id($font) . '|' . $text;
         return $this->measureCache[$key] ??= vio_text_measure($font, $text);
     }
@@ -531,6 +523,11 @@ class VioRenderer2D implements Renderer2DInterface
         return (bool) preg_match('/[\x{0500}-\x{10FFFF}]/u', $text);
     }
 
+    /**
+     * Measure text using the font chain, taking the max width/height across
+     * all fonts (each contributes for the glyphs it has).
+     * @param list<\VioFont> $chain
+     */
     private function measureTextWithChain(array $chain, string $text): TextMetrics
     {
         if (count($chain) > 1 && !self::textNeedsFallback($text)) {
@@ -704,7 +701,7 @@ class VioRenderer2D implements Renderer2DInterface
 
     /**
      * Get the primary font plus all registered fallback fonts for the current font.
-     * @return list<VioFont>
+     * @return list<\VioFont>
      */
     private function resolveFontChain(float $size): array
     {

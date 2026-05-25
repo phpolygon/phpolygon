@@ -56,6 +56,22 @@ interface InputInterface
     /** All characters typed this frame as a single concatenated string. */
     public function getTextInput(): string;
 
+    /**
+     * Number of backspaces from an on-screen keyboard since the last call.
+     * Non-zero only on touch platforms (iOS); on desktop physical Backspace
+     * flows through the key API and this returns 0.
+     */
+    public function getBackspaceCount(): int;
+
+    /**
+     * Show / hide the on-screen keyboard. No-op on desktop (physical keyboard).
+     * On touch platforms (iOS) the engine calls these when a text field gains
+     * or loses focus so the soft keyboard appears.
+     */
+    public function showSoftKeyboard(): void;
+
+    public function hideSoftKeyboard(): void;
+
     // ---- Suppression ----
 
     /**

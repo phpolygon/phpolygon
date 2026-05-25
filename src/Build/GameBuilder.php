@@ -10,6 +10,7 @@ class GameBuilder
     private PharBuilder $pharBuilder;
     private StaticPhpResolver $staticPhpResolver;
     private PlatformPackager $platformPackager;
+    private IosAppBuilder $iosAppBuilder;
 
     /** @var callable|null */
     private $logger = null;
@@ -20,6 +21,7 @@ class GameBuilder
         $this->pharBuilder = new PharBuilder($config);
         $this->staticPhpResolver = new StaticPhpResolver();
         $this->platformPackager = new PlatformPackager($config);
+        $this->iosAppBuilder = new IosAppBuilder($config);
     }
 
     /**
@@ -29,6 +31,7 @@ class GameBuilder
     {
         $this->logger = $logger;
         $this->staticPhpResolver->setLogger(fn(string $msg) => $logger('info', $msg));
+        $this->iosAppBuilder->setLogger(fn(string $msg) => $logger('info', $msg));
     }
 
     /**
@@ -36,7 +39,7 @@ class GameBuilder
      *
      * @return array{outputPath: string, pharSize: int, binarySize: int, bundleSize: int}
      */
-    public function build(string $platform, string $outputDir, ?string $microSfxPath = null, ?string $arch = null, string $variant = 'base', string $buildType = 'full', string $phpVersion = '8.5'): array
+    public function build(string $platform, string $outputDir, ?string $microSfxPath = null, ?string $arch = null, string $variant = 'base', string $buildType = 'full', string $phpVersion = '8.5', bool $iosRelease = false, bool $iosExportIpa = false): array
     {
         $arch = $arch ?? StaticPhpResolver::detectArch();
 
@@ -79,6 +82,23 @@ class GameBuilder
                 $constants = $buildTypeConfig['constants'];
                 $this->applyBuildTypeConstants($stagingDir, $constants);
                 $this->log('info', "Applied build type '{$buildType}' constants");
+            }
+
+            // iOS branch: no phar / micro.sfx / combine. Link the staged tree
+            // against an embed libphp.a in a UIKit/Metal wrapper via Xcode.
+            if (str_starts_with($platform, 'ios')) {
+                $libphpDir = $this->resolveIosBuildroot($platform);
+                $mode = $iosRelease ? 'release' : 'debug';
+                $this->log('info', "Building iOS {$mode} ({$platform}) against {$libphpDir}...");
+                $appPath = $this->iosAppBuilder->build($stagingDir, $libphpDir, $platformOutputDir, $platform, $mode, $iosExportIpa);
+                $this->log('success', 'Output: ' . $appPath);
+                // tempDir + vendor are cleaned up by the finally block below.
+                return [
+                    'outputPath' => $appPath,
+                    'pharSize'   => 0,
+                    'binarySize' => 0,
+                    'bundleSize' => $this->getDirectorySize($appPath),
+                ];
             }
 
             // Phase 3: Create PHAR
@@ -126,6 +146,39 @@ class GameBuilder
             }
             $this->restoreVendor();
         }
+    }
+
+    /**
+     * Locate the static-php-cli buildroot holding the iOS embed libphp.a and
+     * PHP headers. Resolution order:
+     *   1. PHPOLYGON_IOS_BUILDROOT env
+     *   2. build.json platforms.ios.buildroot
+     *   3. ../static-php-cli/buildroot relative to the project root
+     */
+    private function resolveIosBuildroot(string $slice): string
+    {
+        $candidates = [];
+        $env = getenv('PHPOLYGON_IOS_BUILDROOT');
+        if (is_string($env) && $env !== '') {
+            $candidates[] = $env;
+        }
+        $ios = $this->config->platforms['ios'] ?? [];
+        if (isset($ios['buildroot']) && is_string($ios['buildroot'])) {
+            $candidates[] = $ios['buildroot'];
+        }
+        $candidates[] = dirname($this->config->projectRoot) . '/static-php-cli/buildroot';
+
+        foreach ($candidates as $dir) {
+            if (is_file($dir . '/lib/libphp.a')) {
+                return $dir;
+            }
+        }
+        throw new \RuntimeException(
+            "iOS buildroot with lib/libphp.a not found. Looked in:\n  - " .
+            implode("\n  - ", $candidates) . "\n" .
+            "Set PHPOLYGON_IOS_BUILDROOT or platforms.ios.buildroot in build.json, " .
+            "and build libphp.a with: SPC_TARGET={$slice} bin/spc build <exts> --build-embed"
+        );
     }
 
     private function prepareVendor(): void

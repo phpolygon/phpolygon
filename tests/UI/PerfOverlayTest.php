@@ -286,6 +286,19 @@ final class FakeInput implements InputInterface
         return '';
     }
 
+    public function getBackspaceCount(): int
+    {
+        return 0;
+    }
+
+    public function showSoftKeyboard(): void
+    {
+    }
+
+    public function hideSoftKeyboard(): void
+    {
+    }
+
     public function suppress(int $frames = 0, float $seconds = 0.0): void
     {
     }

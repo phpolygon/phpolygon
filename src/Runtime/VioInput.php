@@ -170,6 +170,28 @@ class VioInput implements InputInterface
         return $this->charBuffer;
     }
 
+    public function getBackspaceCount(): int
+    {
+        if ($this->ctx === null) {
+            return 0;
+        }
+        return vio_ime_backspaces($this->ctx);
+    }
+
+    public function showSoftKeyboard(): void
+    {
+        if ($this->ctx !== null) {
+            vio_keyboard_show($this->ctx);
+        }
+    }
+
+    public function hideSoftKeyboard(): void
+    {
+        if ($this->ctx !== null) {
+            vio_keyboard_hide($this->ctx);
+        }
+    }
+
     public function getTextInput(): string
     {
         return implode('', $this->charBuffer);
