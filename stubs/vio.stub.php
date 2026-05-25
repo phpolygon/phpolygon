@@ -131,6 +131,15 @@ function vio_on_key(VioContext $ctx, callable $callback): void {}
 /** @param callable(int): void $callback */
 function vio_on_char(VioContext $ctx, callable $callback): void {}
 
+/** On-screen-keyboard backspaces since the last call (iOS; 0 on desktop). */
+function vio_ime_backspaces(VioContext $ctx): int {}
+
+/** Show the on-screen keyboard (iOS; no-op on desktop). */
+function vio_keyboard_show(VioContext $ctx): void {}
+
+/** Hide the on-screen keyboard (iOS; no-op on desktop). */
+function vio_keyboard_hide(VioContext $ctx): void {}
+
 // ----------------------------------------------------------------
 // 3D: Shaders, pipelines, meshes
 // ----------------------------------------------------------------

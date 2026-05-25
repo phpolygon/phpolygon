@@ -168,6 +168,22 @@ class Input implements InputInterface
         return implode('', $this->charBuffer);
     }
 
+    /** Desktop has a physical keyboard; no on-screen keyboard / soft backspaces. */
+    public function getBackspaceCount(): int
+    {
+        return 0;
+    }
+
+    public function showSoftKeyboard(): void
+    {
+        // No-op: desktop uses a physical keyboard.
+    }
+
+    public function hideSoftKeyboard(): void
+    {
+        // No-op: desktop uses a physical keyboard.
+    }
+
     /**
      * Suppress game input (key/mouse). Char events still pass through.
      *

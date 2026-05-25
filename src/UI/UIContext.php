@@ -423,13 +423,13 @@ class UIContext
         $focused = $this->focusedTextField === $id;
         // Click to focus
         if ($hovered && $this->input->isMouseButtonReleased(0)) {
-            $this->focusedTextField = $id;
+            $this->setTextFieldFocus($id);
             $this->textFieldBuffer = $value;
             $this->textFieldCursor = mb_strlen($value);
             $focused = true;
         } elseif (!$hovered && $this->input->isMouseButtonReleased(0) && $focused) {
             // Click outside → unfocus
-            $this->focusedTextField = '';
+            $this->setTextFieldFocus('');
             $focused = false;
         }
 
@@ -448,6 +448,14 @@ class UIContext
                     . mb_substr($this->textFieldBuffer, $this->textFieldCursor);
                 $this->textFieldCursor--;
                 $this->input->suppress(1, 0.1);
+            }
+
+            // On-screen-keyboard backspaces (iOS): no physical key edge, so the
+            // soft keyboard's delete key is delivered as a per-frame count.
+            for ($bs = $this->input->getBackspaceCount(); $bs > 0 && $this->textFieldCursor > 0; $bs--) {
+                $this->textFieldBuffer = mb_substr($this->textFieldBuffer, 0, $this->textFieldCursor - 1)
+                    . mb_substr($this->textFieldBuffer, $this->textFieldCursor);
+                $this->textFieldCursor--;
             }
 
             // Delete (GLFW_KEY_DELETE = 261)
@@ -526,12 +534,12 @@ class UIContext
 
         $focused = $this->focusedTextField === $id;
         if ($hovered && $this->input->isMouseButtonReleased(0)) {
-            $this->focusedTextField = $id;
+            $this->setTextFieldFocus($id);
             $this->textFieldBuffer = $value;
             $this->textFieldCursor = mb_strlen($value);
             $focused = true;
         } elseif (!$hovered && $this->input->isMouseButtonReleased(0) && $focused) {
-            $this->focusedTextField = '';
+            $this->setTextFieldFocus('');
             $focused = false;
         }
 
@@ -553,6 +561,11 @@ class UIContext
                 $buf = mb_substr($buf, 0, $cur - 1) . mb_substr($buf, $cur);
                 $cur--;
                 $this->input->suppress(1, 0.1);
+            }
+            // On-screen-keyboard backspaces (iOS): delivered as a per-frame count.
+            for ($bs = $this->input->getBackspaceCount(); $bs > 0 && $cur > 0; $bs--) {
+                $buf = mb_substr($buf, 0, $cur - 1) . mb_substr($buf, $cur);
+                $cur--;
             }
             // Delete (261)
             if ($this->input->isKeyPressed(261) && $cur < mb_strlen($buf)) {
@@ -644,13 +657,31 @@ class UIContext
     }
 
     /**
+     * Set (or clear, with '') the focused text field, raising/dismissing the
+     * on-screen keyboard on the transition. No-op for the keyboard on desktop;
+     * on iOS it brings up / hides the soft keyboard so touch users can type.
+     */
+    private function setTextFieldFocus(string $id): void
+    {
+        if ($id === $this->focusedTextField) {
+            return;
+        }
+        $this->focusedTextField = $id;
+        if ($id !== '') {
+            $this->input->showSoftKeyboard();
+        } else {
+            $this->input->hideSoftKeyboard();
+        }
+    }
+
+    /**
      * Programmatically focus a text field / area (e.g. so a freshly-opened
      * editor accepts typing without a click first). Seeds the edit buffer with
      * $value and puts the caret at the end.
      */
     public function focusTextField(string $id, string $value = ''): void
     {
-        $this->focusedTextField = $id;
+        $this->setTextFieldFocus($id);
         $this->textFieldBuffer = $value;
         $this->textFieldCursor = mb_strlen($value);
     }
