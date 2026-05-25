@@ -25,7 +25,7 @@ class VioRenderer2D implements Renderer2DInterface
     /** @var array<string, string> Font name -> file path */
     private array $fontPaths = [];
 
-    /** @var array<string, VioFont> Cache key "name:size" -> VioFont */
+    /** @var array<string, \VioFont> Cache key "name:size" -> VioFont */
     private array $fontCache = [];
 
     public function clearFontCache(): void
@@ -493,7 +493,7 @@ class VioRenderer2D implements Renderer2DInterface
     /**
      * Measure text width using the font chain. Takes the max width across
      * all fonts (each font contributes width for glyphs it has, skips missing).
-     * @param list<VioFont> $chain
+     * @param list<\VioFont> $chain
      */
     private function measureTextWithChain(array $chain, string $text): TextMetrics
     {
@@ -665,7 +665,7 @@ class VioRenderer2D implements Renderer2DInterface
 
     /**
      * Get the primary font plus all registered fallback fonts for the current font.
-     * @return list<VioFont>
+     * @return list<\VioFont>
      */
     private function resolveFontChain(float $size): array
     {
