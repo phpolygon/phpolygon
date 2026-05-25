@@ -52,7 +52,7 @@ and game logic are generated and iterated on through AI-assisted workflows.
   command bus for editor operations, NativePHP desktop app with Vue 3 SPA
 - **Build system** — 7-phase pipeline producing standalone executables: PHAR
   creation, static PHP binary (micro.sfx), platform packaging (macOS .app,
-  Linux, Windows)
+  Linux, Windows), plus a native iOS/iPadOS `.app` via embed libphp.a + Xcode
 - **Headless mode** — Full engine without GPU: `EngineConfig(headless: true)`
   swaps in NullWindow, NullRenderer2D, NullTextureManager for CI/testing
 - **Visual regression testing** — Playwright-style VRT with GD software renderer,
@@ -189,6 +189,9 @@ php -d phar.readonly=0 vendor/bin/phpolygon build macos-arm64
 # Build all platforms
 php -d phar.readonly=0 vendor/bin/phpolygon build all
 
+# Build a native iOS / iPadOS .app (needs Xcode + libphp.a)
+php -d phar.readonly=0 vendor/bin/phpolygon build ios-arm64
+
 # Preview configuration
 php vendor/bin/phpolygon build --dry-run
 ```
@@ -196,6 +199,8 @@ php vendor/bin/phpolygon build --dry-run
 The build pipeline creates a PHAR archive, resolves a static PHP binary
 (micro.sfx), concatenates them into a single executable, and packages it
 for the target platform (macOS `.app` bundle, Linux directory, Windows `.exe`).
+iOS is the exception: it links an embed `libphp.a` into a UIKit/Metal wrapper
+and builds with Xcode - see [docs/ios-build.md](docs/ios-build.md).
 
 Configure via `build.json` in your game project root. See CLAUDE.md for
 full configuration reference.

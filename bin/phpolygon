@@ -222,6 +222,12 @@ function resolveTargets(string $platformArg): array
         'linux-x86_64'    => ['platform' => 'linux',   'arch' => 'x86_64'],
         'linux-arm64'     => ['platform' => 'linux',   'arch' => 'arm64'],
         'windows-x86_64'  => ['platform' => 'windows', 'arch' => 'x86_64'],
+        // iOS: the slice is carried as the platform string (GameBuilder
+        // dispatches on str_starts_with($platform, 'ios') and passes it to
+        // IosAppBuilder). Not part of 'all' (Apple-only, needs Xcode + signing).
+        'ios-arm64'              => ['platform' => 'ios-arm64',             'arch' => 'arm64'],
+        'ios-simulator-arm64'    => ['platform' => 'ios-simulator-arm64',   'arch' => 'arm64'],
+        'ios-simulator-x86_64'   => ['platform' => 'ios-simulator-x86_64',  'arch' => 'x86_64'],
     ];
 
     if ($platformArg === '' || $platformArg === 'auto') {
@@ -232,13 +238,24 @@ function resolveTargets(string $platformArg): array
     }
 
     if ($platformArg === 'all') {
-        // linux-arm64 excluded from 'all' — not a Steam target
+        // linux-arm64 excluded from 'all' — not a Steam target.
+        // iOS slices excluded — Apple-only, need Xcode + signing, built explicitly.
         unset($allTargets['linux-arm64']);
+        foreach (array_keys($allTargets) as $name) {
+            if (str_starts_with($name, 'ios')) {
+                unset($allTargets[$name]);
+            }
+        }
         return $allTargets;
     }
 
     if (isset($allTargets[$platformArg])) {
         return [$platformArg => $allTargets[$platformArg]];
+    }
+
+    // 'ios' shorthand → on-device arm64 slice
+    if ($platformArg === 'ios') {
+        return ['ios-arm64' => $allTargets['ios-arm64']];
     }
 
     // Platform-only match
@@ -282,6 +299,18 @@ function dryRun(BuildConfig $config, array $targets, string $outputDir, ?string 
     echo "\n";
     $resolver = new StaticPhpResolver();
     foreach ($targets as $name => $target) {
+        // iOS links an embed libphp.a (no micro.sfx); report the buildroot.
+        if (str_starts_with($target['platform'], 'ios')) {
+            $buildroot = getenv('PHPOLYGON_IOS_BUILDROOT')
+                ?: ($config->platforms['ios']['buildroot'] ?? null)
+                ?: dirname($config->projectRoot) . '/static-php-cli/buildroot';
+            if (is_file($buildroot . '/lib/libphp.a')) {
+                echo "  \033[32m✓\033[0m {$name}: embed libphp.a at {$buildroot}/lib/libphp.a\n";
+            } else {
+                echo "  \033[33m!\033[0m {$name}: no libphp.a at {$buildroot}/lib (build with SPC_TARGET={$target['platform']} bin/spc build … --build-embed)\n";
+            }
+            continue;
+        }
         try {
             $sfxPath = $resolver->resolve($microSfxPath, $target['platform'], $target['arch']);
             echo "  \033[32m✓\033[0m {$name}: micro.sfx found at {$sfxPath}\n";
@@ -378,10 +407,14 @@ Platforms:
   linux-x86_64       Linux x86_64
   linux-arm64        Linux ARM64
   windows-x86_64     Windows x86_64
+  ios-arm64          iOS / iPadOS device (needs Xcode + libphp.a embed build)
+  ios-simulator-arm64   iOS Simulator (Apple Silicon)
+  ios-simulator-x86_64  iOS Simulator (Intel)
   macos              All macOS targets
   linux              All Linux targets
   windows            All Windows targets
-  all                Every platform
+  ios                iOS device (ios-arm64 shorthand)
+  all                Every desktop platform (excludes iOS)
   (empty)            Auto-detect current platform
 
 Options:
@@ -397,6 +430,7 @@ Examples:
   phpolygon build                                Build for current platform
   phpolygon build macos-arm64                    Build for macOS ARM
   phpolygon build all --variant steam            Build all platforms with Steam
+  phpolygon build ios-arm64                      Build the iOS / iPadOS .app
   phpolygon build --php-version 8.4              Build with PHP 8.4 runtime
   phpolygon build --dry-run                      Show config without building
   phpolygon editor                       Launch the scene editor
