@@ -8,9 +8,12 @@ use PHPUnit\Framework\TestCase;
 use PHPolygon\Component\Camera2DComponent;
 use PHPolygon\Component\SpriteRenderer;
 use PHPolygon\Component\Transform2D;
+use PHPolygon\Component\Transform3D;
 use PHPolygon\ECS\Serializer\AttributeSerializer;
+use PHPolygon\Math\Quaternion;
 use PHPolygon\Math\Rect;
 use PHPolygon\Math\Vec2;
+use PHPolygon\Math\Vec3;
 use PHPolygon\Rendering\Color;
 
 class AttributeSerializerTest extends TestCase
@@ -45,6 +48,34 @@ class AttributeSerializerTest extends TestCase
         $this->assertTrue($original->position->equals($restored->position));
         $this->assertEquals($original->rotation, $restored->rotation);
         $this->assertTrue($original->scale->equals($restored->scale));
+    }
+
+    public function testRoundTripTransform3DPreservesQuaternionRotation(): void
+    {
+        // Regression: Quaternion was not wired into the serializer, so
+        // Transform3D.rotation silently serialized to null and the
+        // canonical 3D transform lost its orientation on every round-trip.
+        $rotation = Quaternion::fromEuler(0.3, 1.2, -0.7);
+        $original = new Transform3D(
+            position: new Vec3(1.5, -2.0, 3.25),
+            rotation: $rotation,
+            scale: new Vec3(2.0, 2.0, 2.0),
+        );
+
+        $array = $this->serializer->toArray($original);
+        $this->assertIsArray($array['rotation'], 'Quaternion rotation must serialize to an {x,y,z,w} array, not null');
+        $this->assertEqualsWithDelta($rotation->x, $array['rotation']['x'], 1e-9);
+        $this->assertEqualsWithDelta($rotation->w, $array['rotation']['w'], 1e-9);
+
+        $restored = $this->serializer->fromArray($array, Transform3D::class);
+        $this->assertInstanceOf(Transform3D::class, $restored);
+        /** @var Transform3D $restored */
+        $this->assertTrue($original->position->equals($restored->position));
+        $this->assertTrue($original->scale->equals($restored->scale));
+        $this->assertTrue(
+            $rotation->equals($restored->rotation),
+            'Quaternion rotation must survive a serialize/deserialize round-trip',
+        );
     }
 
     public function testRoundTripSpriteRenderer(): void

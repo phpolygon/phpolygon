@@ -7,9 +7,11 @@ namespace PHPolygon\ECS\Serializer;
 use PHPolygon\ECS\Attribute\Hidden;
 use PHPolygon\ECS\Attribute\Property;
 use PHPolygon\ECS\Attribute\Serializable;
+use PHPolygon\Math\Quaternion;
 use PHPolygon\Math\Rect;
 use PHPolygon\Math\Vec2;
 use PHPolygon\Math\Vec3;
+use PHPolygon\Math\Vec4;
 use PHPolygon\Rendering\Color;
 use ReflectionClass;
 use ReflectionNamedType;
@@ -79,6 +81,14 @@ class AttributeSerializer implements SerializerInterface
             return $value->toArray();
         }
 
+        if ($value instanceof Vec4) {
+            return $value->toArray();
+        }
+
+        if ($value instanceof Quaternion) {
+            return $value->toArray();
+        }
+
         if ($value instanceof Rect) {
             return $value->toArray();
         }
@@ -126,6 +136,8 @@ class AttributeSerializer implements SerializerInterface
             return match ($typeName) {
                 Vec2::class => new Vec2($this->toFloat($data['x'] ?? 0), $this->toFloat($data['y'] ?? 0)),
                 Vec3::class => new Vec3($this->toFloat($data['x'] ?? 0), $this->toFloat($data['y'] ?? 0), $this->toFloat($data['z'] ?? 0)),
+                Vec4::class => new Vec4($this->toFloat($data['x'] ?? 0), $this->toFloat($data['y'] ?? 0), $this->toFloat($data['z'] ?? 0), $this->toFloat($data['w'] ?? 1)),
+                Quaternion::class => new Quaternion($this->toFloat($data['x'] ?? 0), $this->toFloat($data['y'] ?? 0), $this->toFloat($data['z'] ?? 0), $this->toFloat($data['w'] ?? 1)),
                 Rect::class => new Rect($this->toFloat($data['x'] ?? 0), $this->toFloat($data['y'] ?? 0), $this->toFloat($data['width'] ?? 0), $this->toFloat($data['height'] ?? 0)),
                 Color::class => new Color($this->toFloat($data['r'] ?? 0), $this->toFloat($data['g'] ?? 0), $this->toFloat($data['b'] ?? 0), $this->toFloat($data['a'] ?? 1)),
                 'array' => $data,
