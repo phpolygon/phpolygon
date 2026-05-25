@@ -61,6 +61,8 @@ $options = [
     'variant' => 'base',
     'type' => 'full',
     'php-version' => '8.5',
+    'release' => false,
+    'ipa' => false,
 ];
 
 $i = 0;
@@ -81,6 +83,12 @@ while ($i < count($args)) {
         $options['type'] = $args[++$i];
     } elseif ($arg === '--php-version' && isset($args[$i + 1])) {
         $options['php-version'] = $args[++$i];
+    } elseif ($arg === '--release') {
+        $options['release'] = true;
+    } elseif ($arg === '--ipa') {
+        // App Store .ipa export implies a release archive.
+        $options['release'] = true;
+        $options['ipa'] = true;
     } elseif ($arg === '--help' || $arg === '-h') {
         printUsage();
         exit(0);
@@ -126,6 +134,8 @@ $microSfxPath = $options['micro-sfx'];
 $variant = $options['variant'];
 $buildType = $options['type'];
 $phpVersion = $options['php-version'];
+$iosRelease = $options['release'];
+$iosExportIpa = $options['ipa'];
 
 if (!in_array($variant, ['base', 'steam'], true)) {
     fwrite(STDERR, "Error: Unknown variant '{$variant}'. Use 'base' or 'steam'.\n");
@@ -183,6 +193,8 @@ foreach ($targets as $targetName => $target) {
             $variant,
             $buildType,
             $phpVersion,
+            $iosRelease,
+            $iosExportIpa,
         );
         $results[$targetName] = $result;
 
@@ -424,13 +436,18 @@ Options:
   --variant NAME     Build variant: base or steam (default: base)
   --type NAME        Build type from build.json (default: full)
   --php-version VER  PHP runtime version: 8.4 or 8.5 (default: 8.5)
+  --release          iOS only: build a Release .xcarchive (App Store-bound)
+  --ipa              iOS only: export an App Store Connect .ipa (implies
+                     --release; needs distribution signing)
   -h, --help         Show this help
 
 Examples:
   phpolygon build                                Build for current platform
   phpolygon build macos-arm64                    Build for macOS ARM
   phpolygon build all --variant steam            Build all platforms with Steam
-  phpolygon build ios-arm64                      Build the iOS / iPadOS .app
+  phpolygon build ios-arm64                      Build the iOS / iPadOS .app (dev)
+  phpolygon build ios-arm64 --release            Build a Release .xcarchive (App Store)
+  phpolygon build ios-arm64 --ipa                Export an App Store Connect .ipa
   phpolygon build --php-version 8.4              Build with PHP 8.4 runtime
   phpolygon build --dry-run                      Show config without building
   phpolygon editor                       Launch the scene editor

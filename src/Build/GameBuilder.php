@@ -39,7 +39,7 @@ class GameBuilder
      *
      * @return array{outputPath: string, pharSize: int, binarySize: int, bundleSize: int}
      */
-    public function build(string $platform, string $outputDir, ?string $microSfxPath = null, ?string $arch = null, string $variant = 'base', string $buildType = 'full', string $phpVersion = '8.5'): array
+    public function build(string $platform, string $outputDir, ?string $microSfxPath = null, ?string $arch = null, string $variant = 'base', string $buildType = 'full', string $phpVersion = '8.5', bool $iosRelease = false, bool $iosExportIpa = false): array
     {
         $arch = $arch ?? StaticPhpResolver::detectArch();
 
@@ -88,8 +88,9 @@ class GameBuilder
             // against an embed libphp.a in a UIKit/Metal wrapper via Xcode.
             if (str_starts_with($platform, 'ios')) {
                 $libphpDir = $this->resolveIosBuildroot($platform);
-                $this->log('info', "Building iOS app ({$platform}) against {$libphpDir}...");
-                $appPath = $this->iosAppBuilder->build($stagingDir, $libphpDir, $platformOutputDir, $platform);
+                $mode = $iosRelease ? 'release' : 'debug';
+                $this->log('info', "Building iOS {$mode} ({$platform}) against {$libphpDir}...");
+                $appPath = $this->iosAppBuilder->build($stagingDir, $libphpDir, $platformOutputDir, $platform, $mode, $iosExportIpa);
                 $this->log('success', 'Output: ' . $appPath);
                 // tempDir + vendor are cleaned up by the finally block below.
                 return [
