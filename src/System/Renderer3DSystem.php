@@ -132,6 +132,13 @@ class Renderer3DSystem extends AbstractSystem
         $candidates = [];
         foreach ($world->query(PointLight::class, Transform3D::class) as $entity) {
             $light = $entity->get(PointLight::class);
+            // Skip lights dimmed to (near) nothing — e.g. decorative lights
+            // switched off in daylight. Keeps them from consuming a slot in the
+            // per-frame point-light budget where they'd contribute no visible
+            // light anyway.
+            if ($light->intensity <= 0.001) {
+                continue;
+            }
             $pos = $entity->get(Transform3D::class)->getWorldPosition();
             if ($cameraPos !== null) {
                 $dx = $pos->x - $cameraPos->x;
