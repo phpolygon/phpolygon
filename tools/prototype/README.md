@@ -64,6 +64,11 @@ node scripts/scene-extract.mjs path/to/Prototype.jsx --out prototype.import.json
 php ../../bin/phpolygon scene:import prototype.import.json --out ../../src/Scene/Prototype.php
 ```
 
+`scene:import` also scaffolds a runnable `game.php` (camera framed to the
+scene's bounds, a sky, the 3D systems; the GPU backend is chosen per platform).
+It is written once if absent - `--game <path>` overwrites, `--no-game` skips.
+Then `php game.php` opens the scene in a window.
+
 `scene-extract.mjs` is layered:
 
 1. **Declarative R3F** (static, no execution) - `<mesh>`/`<group>` + transforms,

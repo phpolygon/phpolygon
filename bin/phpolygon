@@ -59,6 +59,7 @@ use PHPolygon\Prototype\SerializableScanner;
 use PHPolygon\Rendering\Material;
 use PHPolygon\Rendering\MaterialRegistry;
 use PHPolygon\Scene\Scene;
+use PHPolygon\Scene\Transpiler\GameEntryGenerator;
 use PHPolygon\Scene\Transpiler\SceneImportGenerator;
 use PHPolygon\Scene\Transpiler\SceneTranspiler;
 
@@ -76,6 +77,7 @@ $options = [
     'php-version' => '8.5',
     'release' => false,
     'ipa' => false,
+    'game' => null, // scene:import game entry: null=auto-scaffold, false=skip, string=force path
 ];
 
 $i = 0;
@@ -84,6 +86,10 @@ while ($i < count($args)) {
 
     if ($arg === '--dry-run') {
         $options['dry-run'] = true;
+    } elseif ($arg === '--game' && isset($args[$i + 1])) {
+        $options['game'] = $args[++$i];
+    } elseif ($arg === '--no-game') {
+        $options['game'] = false;
     } elseif ($arg === '--micro-sfx' && isset($args[$i + 1])) {
         $options['micro-sfx'] = $args[++$i];
     } elseif (($arg === '--output' || $arg === '--out') && isset($args[$i + 1])) {
@@ -142,7 +148,7 @@ if ($command === 'scene:transpile') {
 }
 
 if ($command === 'scene:import') {
-    sceneImport($platformArg, $options['output']);
+    sceneImport($platformArg, $options['output'], $options['game']);
     exit(0);
 }
 
@@ -940,10 +946,10 @@ function copyTree(string $source, string $target, array $exclude = [], string $b
  * R3F TSX importer). Registers procedural meshes + materials and places the
  * imported entities. Writes to --output when given, otherwise stdout.
  */
-function sceneImport(string $input, string $outputOption): void
+function sceneImport(string $input, string $outputOption, string|bool|null $gameOption = null): void
 {
     if ($input === '') {
-        fwrite(STDERR, "Usage: phpolygon scene:import <file.import.json> [--out Scene.php]\n");
+        fwrite(STDERR, "Usage: phpolygon scene:import <file.import.json> [--out Scene.php] [--game game.php | --no-game]\n");
         exit(1);
     }
     if (!is_file($input)) {
@@ -972,14 +978,33 @@ function sceneImport(string $input, string $outputOption): void
         exit(1);
     }
 
-    if ($outputOption !== '') {
-        if (file_put_contents($outputOption, $php) === false) {
-            fwrite(STDERR, "\033[31mError:\033[0m Failed to write {$outputOption}\n");
-            exit(1);
-        }
-        echo "\033[32m✓\033[0m Wrote {$outputOption}\n";
+    if ($outputOption === '') {
+        echo $php . "\n";
         return;
     }
 
-    echo $php . "\n";
+    if (file_put_contents($outputOption, $php) === false) {
+        fwrite(STDERR, "\033[31mError:\033[0m Failed to write {$outputOption}\n");
+        exit(1);
+    }
+    echo "\033[32m✓\033[0m Wrote {$outputOption}\n";
+
+    // Also generate a runnable game.php (backend chosen per platform at runtime).
+    // Default: scaffold ./game.php if absent. --game <path> forces; --no-game skips.
+    if ($gameOption === false) {
+        return;
+    }
+    $projectRoot = getcwd() ?: dirname(__DIR__);
+    $gamePath = is_string($gameOption) ? $gameOption : $projectRoot . '/game.php';
+    if (!is_string($gameOption) && is_file($gamePath)) {
+        echo "  \033[34m→\033[0m game.php exists - kept (use --game <path> to overwrite, --no-game to skip)\n";
+        return;
+    }
+    /** @var array<string, mixed> $data */
+    $gameSrc = (new GameEntryGenerator())->generate($data);
+    if (file_put_contents($gamePath, $gameSrc) === false) {
+        fwrite(STDERR, "\033[31mError:\033[0m Failed to write {$gamePath}\n");
+        exit(1);
+    }
+    echo "\033[32m✓\033[0m Generated game entry: {$gamePath}\n";
 }
