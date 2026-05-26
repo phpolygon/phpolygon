@@ -40,6 +40,8 @@ final class SceneImportGenerator
         'SphereMesh' => ['float', 'int', 'int'],
         'CylinderMesh' => ['float', 'float', 'int'],
         'PlaneMesh' => ['float', 'float', 'int'],
+        'TorusMesh' => ['float', 'float', 'int', 'int'],
+        'OctahedronMesh' => ['float'],
     ];
 
     public function __construct(

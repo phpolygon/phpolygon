@@ -9,7 +9,8 @@
     "build": "vue-tsc --noEmit && vite build",
     "preview": "vite preview",
     "gen": "node scripts/generate.mjs",
-    "import": "node scripts/r3f-import.mjs",
+    "import": "node scripts/scene-extract.mjs",
+    "import:jsx": "node scripts/r3f-import.mjs",
     "test": "node --test scripts/*.test.mjs"
   },
   "dependencies": {
@@ -19,7 +20,11 @@
     "vue": "^3.5.0"
   },
   "devDependencies": {
+    "@babel/core": "^7.25.0",
     "@babel/parser": "^7.25.0",
+    "@babel/plugin-transform-modules-commonjs": "^7.25.0",
+    "@babel/preset-react": "^7.25.0",
+    "@babel/preset-typescript": "^7.25.0",
     "@types/three": "^0.169.0",
     "@vitejs/plugin-vue": "^5.1.0",
     "@vitejs/plugin-vue-jsx": "^4.0.0",

@@ -56,21 +56,32 @@ then re-run `prototype:export`.
 
 ## Import an R3F TSX prototype
 
-Have a react-three-fiber `.tsx` (e.g. from Claude Desktop)? Import it into a
-canonical PHP Scene:
+Have a three.js / react-three-fiber `.tsx`/`.jsx` (e.g. from Claude Desktop)?
+Import it into a canonical PHP Scene:
 
 ```bash
-node scripts/r3f-import.mjs examples/prototype.tsx --out prototype.import.json
+node scripts/scene-extract.mjs path/to/Prototype.jsx --out prototype.import.json
 php ../../bin/phpolygon scene:import prototype.import.json --out ../../src/Scene/Prototype.php
 ```
 
-The importer maps `<mesh>`/`<group>` + transforms, primitive geometries
-(`boxGeometry`/`sphereGeometry`/`cylinderGeometry`/`planeGeometry`) → the
-matching `*Mesh` generators, `<meshStandardMaterial>` → `Material`, and
-`<directionalLight>`/`<pointLight>` → `DirectionalLight`/`PointLight`. Anything
-that can't map to PHPolygon's procedural model (imported models, raw buffer
-geometry, `<ambientLight>`/`<spotLight>`, arbitrary JS) is listed under
-`warnings` instead of being silently dropped. See `examples/prototype.tsx`.
+`scene-extract.mjs` is layered:
+
+1. **Declarative R3F** (static, no execution) - `<mesh>`/`<group>` + transforms,
+   primitive geometries, `<meshStandardMaterial>`, lights. (`scripts/r3f-import.mjs`)
+2. **Imperative three.js fallback** - if no declarative JSX matched, the file is
+   **executed** with a mocked React (effects run synchronously) and a patched
+   THREE (renderer stubbed, `Scene` instrumented); the built scene graph is then
+   traversed. This is how it handles the common case where the scene is built at
+   runtime via `new THREE.Mesh(...)` + `scene.add(...)`. ⚠️ this runs the input
+   file - only import code you trust. Only the initial frame is captured.
+
+Geometry maps to PHPolygon generators: Box/Sphere/Cylinder/Plane/**Torus**
+(coins/rings) / **Octahedron** (gems/stars) → the matching `*Mesh`. Materials →
+`Material`; directional/point lights → light components. What can't map to the
+procedural model is listed under `warnings` rather than dropped:
+`<ambientLight>`/`<hemisphereLight>`/`<spotLight>` (no equivalent component) and
+**`BufferGeometry`** - arbitrary per-vertex geometry, which has no procedural
+generator (importing it would be a baked vertex dump, against "geometry as code").
 
 ## Authoring (Scratchpad)
 

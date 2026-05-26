@@ -206,15 +206,28 @@ is a dev-time import - TSX becomes committed PHP, not loaded at runtime.
 prototype.tsx ──(Node: r3f-import.mjs, @babel/parser)──► import.json ──(scene:import)──► PHP Scene
 ```
 
-The Node half is needed because PHP can't parse TSX; it maps the R3F subset
-that corresponds to PHPolygon's procedural model:
+The Node half is needed because PHP can't parse TSX. The importer
+(`scene-extract.mjs`) is layered:
+
+1. **Declarative R3F** (`r3f-import.mjs`) - static, no execution. Maps `<mesh>`
+   tags as below.
+2. **Imperative three.js fallback** - when there is no declarative JSX (the
+   scene is built at runtime via `new THREE.Mesh(...)` + `scene.add(...)`, which
+   is what Claude Desktop tends to produce), the file is **executed** with a
+   mocked React (effects run synchronously) + patched THREE (renderer stubbed,
+   `Scene` instrumented), and the built scene graph is traversed -
+   `geometry.parameters`, world transforms, `material.color` and lights are read
+   straight off the real objects. Caveat: this runs the input file (trust only),
+   initial frame only.
+
+Either way it maps the subset that corresponds to PHPolygon's procedural model:
 
 | Maps cleanly | Reported as a warning (not dropped) |
 |---|---|
 | `<mesh>` / `<group>` + `position` / `rotation` (Euler→Quaternion) / `scale` | imported models (`useGLTF`, `<primitive>`) - violate "geometry as code" |
-| `<boxGeometry args>` → `BoxMesh::generate`, sphere/cylinder/plane likewise | raw `<bufferGeometry>` (no generator) |
+| Box / Sphere / Cylinder / Plane / **Torus** / **Octahedron** geometry → the matching `*Mesh` | **`BufferGeometry`** - arbitrary per-vertex geometry has no procedural generator |
 | `<meshStandardMaterial color roughness metalness emissive>` → `Material` | non-hex colours, arbitrary JS |
-| `<directionalLight>` → `DirectionalLight`, `<pointLight>` → `PointLight` | `<ambientLight>` (no component), `<spotLight>` / `<hemisphereLight>` |
+| `<directionalLight>` → `DirectionalLight`, `<pointLight>` → `PointLight` | `<ambientLight>` / `<hemisphereLight>` / `<spotLight>` (no component) |
 
 ```bash
 cd tools/prototype && npm install
