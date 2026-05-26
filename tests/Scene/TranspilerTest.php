@@ -6,7 +6,9 @@ namespace PHPolygon\Tests\Scene;
 
 use PHPUnit\Framework\TestCase;
 use PHPolygon\Component\Camera2DComponent;
+use PHPolygon\Component\Camera3DComponent;
 use PHPolygon\Component\MeshRenderer;
+use PHPolygon\Component\ProjectionType;
 use PHPolygon\Component\SpriteRenderer;
 use PHPolygon\Component\Transform2D;
 use PHPolygon\Component\Transform3D;
@@ -246,6 +248,63 @@ class TranspilerTest extends TestCase
                 'Quaternion rotation must survive JSON -> PHP -> runtime',
             );
             $this->assertTrue($transform->position->equals(new Vec3(1.0, 2.0, 3.0)));
+        } finally {
+            unlink($tmp);
+        }
+    }
+
+    public function testGeneratedPhpRendersEnumConstructorArgs(): void
+    {
+        // Regression: enum-typed params (Camera3DComponent.projectionType, a
+        // pure enum) were rendered as bare scalars, type-erroring at load.
+        $namespace = 'Proto\\Gen\\E' . bin2hex(random_bytes(5));
+        $data = [
+            '_version' => 1,
+            '_scene' => $namespace . '\\Ignored',
+            'name' => 'enum_scene',
+            'systems' => [],
+            'entities' => [
+                [
+                    'name' => 'Cam',
+                    'components' => [
+                        [
+                            '_class' => Camera3DComponent::class,
+                            'fov' => 60.0,
+                            'near' => 0.1,
+                            'far' => 1000.0,
+                            'projectionType' => 'Orthographic',
+                            'active' => true,
+                        ],
+                    ],
+                ],
+            ],
+        ];
+
+        $php = $this->transpiler->fromArray($data);
+
+        $this->assertStringContainsString('ProjectionType::Orthographic', $php);
+        $this->assertStringContainsString('use PHPolygon\\Component\\ProjectionType;', $php);
+        $this->assertStringNotContainsString("projectionType: 'Orthographic'", $php);
+
+        $tmp = tempnam(sys_get_temp_dir(), 'phpolygon-enum-') . '.php';
+        file_put_contents($tmp, $php);
+        try {
+            require $tmp;
+            /** @var class-string<Scene> $fqcn */
+            $fqcn = $namespace . '\\EnumScene';
+            $scene = new $fqcn();
+
+            $builder = new SceneBuilder();
+            $scene->build($builder);
+
+            $camera = null;
+            foreach ($builder->getDeclarations()[0]->getComponents() as $component) {
+                if ($component instanceof Camera3DComponent) {
+                    $camera = $component;
+                }
+            }
+            $this->assertInstanceOf(Camera3DComponent::class, $camera);
+            $this->assertSame(ProjectionType::Orthographic, $camera->projectionType);
         } finally {
             unlink($tmp);
         }

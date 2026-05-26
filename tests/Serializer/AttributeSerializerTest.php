@@ -6,6 +6,8 @@ namespace PHPolygon\Tests\Serializer;
 
 use PHPUnit\Framework\TestCase;
 use PHPolygon\Component\Camera2DComponent;
+use PHPolygon\Component\Camera3DComponent;
+use PHPolygon\Component\ProjectionType;
 use PHPolygon\Component\SpriteRenderer;
 use PHPolygon\Component\Transform2D;
 use PHPolygon\Component\Transform3D;
@@ -76,6 +78,22 @@ class AttributeSerializerTest extends TestCase
             $rotation->equals($restored->rotation),
             'Quaternion rotation must survive a serialize/deserialize round-trip',
         );
+    }
+
+    public function testRoundTripPreservesPureEnum(): void
+    {
+        // Regression: serializeValue only handled \BackedEnum, so a pure
+        // (non-backed) enum like ProjectionType serialized to null and the
+        // deserialize side fataled on ::from().
+        $original = new Camera3DComponent(fov: 70.0, projectionType: ProjectionType::Orthographic);
+
+        $array = $this->serializer->toArray($original);
+        $this->assertSame('Orthographic', $array['projectionType'], 'Pure enum serializes by case name');
+
+        $restored = $this->serializer->fromArray($array, Camera3DComponent::class);
+        $this->assertInstanceOf(Camera3DComponent::class, $restored);
+        /** @var Camera3DComponent $restored */
+        $this->assertSame(ProjectionType::Orthographic, $restored->projectionType);
     }
 
     public function testRoundTripSpriteRenderer(): void

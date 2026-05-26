@@ -101,6 +101,11 @@ class AttributeSerializer implements SerializerInterface
             return $value->value;
         }
 
+        if ($value instanceof \UnitEnum) {
+            // Pure (non-backed) enum: persist by case name.
+            return $value->name;
+        }
+
         if (is_object($value)) {
             $class = new ReflectionClass($value);
             if (!empty($class->getAttributes(Serializable::class))) {
@@ -145,14 +150,33 @@ class AttributeSerializer implements SerializerInterface
             };
         }
 
-        if (is_string($data) || is_int($data)) {
-            if (enum_exists($typeName)) {
-                /** @var class-string<\BackedEnum> $typeName */
-                return $typeName::from($data);
-            }
+        if ((is_string($data) || is_int($data)) && enum_exists($typeName)) {
+            return $this->deserializeEnum($data, $typeName);
         }
 
         return $data;
+    }
+
+    /**
+     * Resolve a serialized enum value back to its case. Backed enums match on
+     * the backing value; pure enums match on the case name. Returns null for
+     * an unknown value rather than throwing, so a stale save never fatals.
+     *
+     * @param class-string<\UnitEnum> $enumClass
+     */
+    private function deserializeEnum(int|string $data, string $enumClass): ?\UnitEnum
+    {
+        $ref = new \ReflectionEnum($enumClass);
+        foreach ($ref->getCases() as $case) {
+            if ($case instanceof \ReflectionEnumBackedCase) {
+                if ($case->getBackingValue() === $data) {
+                    return $case->getValue();
+                }
+            } elseif (is_string($data) && $case->getName() === $data) {
+                return $case->getValue();
+            }
+        }
+        return null;
     }
 
     /**

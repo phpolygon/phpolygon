@@ -19,8 +19,12 @@ php bin/phpolygon prototype:export --out tools/prototype/public/bundle
 # 2. Run the playground.
 cd tools/prototype
 npm install
+npm run gen      # generate the typed component vocabulary from the exported schema
 npm run dev
 ```
+
+`src/generated/` is produced by `npm run gen` (not committed); run it after
+`npm install` and after every `prototype:export`.
 
 Open the dev URL, pick a scene, orbit with the mouse.
 

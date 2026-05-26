@@ -14,6 +14,8 @@ use PHPolygon\Math\Vec4;
 use PHPolygon\Rendering\Color;
 use PHPolygon\Scene\SceneConfig;
 use ReflectionClass;
+use ReflectionEnum;
+use ReflectionEnumBackedCase;
 use ReflectionNamedType;
 use RuntimeException;
 
@@ -249,6 +251,14 @@ class PhpCodeGenerator
             return $value ? 'true' : 'false';
         }
 
+        // Enum-typed param: render the case reference, not the raw scalar.
+        if ($typeName !== null && (is_int($value) || is_string($value)) && enum_exists($typeName)) {
+            $rendered = $this->renderEnum($value, $typeName);
+            if ($rendered !== null) {
+                return $rendered;
+            }
+        }
+
         if (is_int($value)) {
             return (string)$value;
         }
@@ -322,6 +332,29 @@ class PhpCodeGenerator
         $z = $this->renderFloat($this->toFloat($value['z'] ?? $value[2] ?? 0));
         $w = $this->renderFloat($this->toFloat($value['w'] ?? $value[3] ?? 1));
         return "new Quaternion({$x}, {$y}, {$z}, {$w})";
+    }
+
+    /**
+     * Render an enum value as a `ShortName::Case` reference. Backed enums match
+     * on the backing value, pure enums on the case name. Returns null for an
+     * unknown value so the caller falls back to scalar rendering.
+     *
+     * @param class-string<\UnitEnum> $enumClass
+     */
+    private function renderEnum(int|string $value, string $enumClass): ?string
+    {
+        $ref = new ReflectionEnum($enumClass);
+        $short = $this->shortName($enumClass);
+        foreach ($ref->getCases() as $case) {
+            if ($case instanceof ReflectionEnumBackedCase) {
+                if ($case->getBackingValue() === $value) {
+                    return "{$short}::{$case->getName()}";
+                }
+            } elseif (is_string($value) && $case->getName() === $value) {
+                return "{$short}::{$value}";
+            }
+        }
+        return null;
     }
 
     /** @param array<int|string, mixed> $value */
@@ -464,6 +497,8 @@ class PhpCodeGenerator
 
             $typeName = $type->getName();
             if (in_array($typeName, [Vec2::class, Vec3::class, Vec4::class, Quaternion::class, Color::class, Rect::class], true)) {
+                $classes[] = $typeName;
+            } elseif (enum_exists($typeName)) {
                 $classes[] = $typeName;
             }
         }

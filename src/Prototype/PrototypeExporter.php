@@ -71,9 +71,8 @@ final class PrototypeExporter
 
         // --- Meshes ---
         $meshManifest = [];
-        $usedSlugs = [];
         foreach ($meshes as $id => $mesh) {
-            $slug = $this->uniqueSlug($id, $usedSlugs);
+            $slug = $this->meshSlug($id);
             $relative = "meshes/{$slug}.bin";
             $binary = MeshCacheIO::encode($mesh, $id);
             $this->writeFile($outDir . '/' . $relative, $binary);
@@ -144,16 +143,14 @@ final class PrototypeExporter
     }
 
     /**
-     * @param array<string, bool> $used  Slug => true, mutated to track collisions.
+     * Filesystem-safe, collision-free filename stem for a mesh id. The sha1
+     * suffix guarantees uniqueness even when two ids sanitise alike (e.g.
+     * "wall/a" and "wall:a"); the manifest maps the real id back to the file,
+     * so the stem only has to be unique, not reversible.
      */
-    private function uniqueSlug(string $id, array &$used): string
+    private function meshSlug(string $id): string
     {
-        $base = $this->sanitize($id);
-        // Hash suffix guarantees uniqueness even when two ids sanitise alike
-        // (e.g. "wall/a" and "wall:a"); the manifest maps the real id to the file.
-        $slug = $base . '-' . substr(sha1($id), 0, 8);
-        $used[$slug] = true;
-        return $slug;
+        return $this->sanitize($id) . '-' . substr(sha1($id), 0, 8);
     }
 
     private function sanitize(string $value): string
