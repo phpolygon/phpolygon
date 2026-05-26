@@ -79,9 +79,10 @@ Geometry maps to PHPolygon generators: Box/Sphere/Cylinder/Plane/**Torus**
 (coins/rings) / **Octahedron** (gems/stars) → the matching `*Mesh`. Materials →
 `Material`; directional/point lights → light components. What can't map to the
 procedural model is listed under `warnings` rather than dropped:
-`<ambientLight>`/`<hemisphereLight>`/`<spotLight>` (no equivalent component) and
-**`BufferGeometry`** - arbitrary per-vertex geometry, which has no procedural
-generator (importing it would be a baked vertex dump, against "geometry as code").
+`<spotLight>` (no equivalent component yet) and **`BufferGeometry`** - arbitrary
+per-vertex geometry, which has no procedural generator (importing it would be a
+baked vertex dump, against "geometry as code"). Ambient and hemisphere lights
+map to `AmbientLight` (the hemisphere's sky/ground colours are blended).
 
 ## Authoring (Scratchpad)
 

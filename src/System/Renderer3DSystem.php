@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace PHPolygon\System;
 
+use PHPolygon\Component\AmbientLight;
 use PHPolygon\Component\Camera3DComponent;
 use PHPolygon\Component\DirectionalLight;
 use PHPolygon\Component\MeshRenderer;
@@ -18,6 +19,7 @@ use PHPolygon\Math\Mat4;
 use PHPolygon\Math\Vec3;
 use PHPolygon\Rendering\Command\AddPointLight;
 use PHPolygon\Rendering\Command\DrawMesh;
+use PHPolygon\Rendering\Command\SetAmbientLight;
 use PHPolygon\Rendering\Command\SetCamera;
 use PHPolygon\Rendering\Command\SetDirectionalLight;
 use PHPolygon\Rendering\Command\SetGroundWetness;
@@ -110,7 +112,11 @@ class Renderer3DSystem extends AbstractSystem
 
     private function renderCommands(World $world): void
     {
-        // Lights — directional + point, in sync with draws each frame.
+        // Lights — ambient (global), then directional + point, in sync with draws.
+        foreach ($world->query(AmbientLight::class) as $entity) {
+            $light = $entity->get(AmbientLight::class);
+            $this->commandList->add(new SetAmbientLight($light->color, $light->intensity));
+        }
         foreach ($world->query(DirectionalLight::class, Transform3D::class) as $entity) {
             $light = $entity->get(DirectionalLight::class);
             $this->commandList->add(new SetDirectionalLight(

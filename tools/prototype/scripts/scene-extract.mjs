@@ -249,8 +249,23 @@ function runHeadless(src, file) {
       ent.components.push(comp)
       return ent
     }
-    if (obj.isAmbientLight) { warnings.push('AmbientLight - no PHPolygon component (set ambient lighting in code)'); return null }
-    if (obj.isHemisphereLight) { warnings.push('HemisphereLight - not imported (no equivalent component)'); return null }
+    if (obj.isAmbientLight) {
+      const comp = { _class: 'PHPolygon\\Component\\AmbientLight' }
+      if (obj.color) comp.color = { r: round(obj.color.r), g: round(obj.color.g), b: round(obj.color.b), a: 1 }
+      if (typeof obj.intensity === 'number') comp.intensity = round(obj.intensity)
+      return { name: obj.name || nextName('light'), components: [comp] }
+    }
+    if (obj.isHemisphereLight) {
+      // No hemisphere gradient in the forward renderer - realise as ambient
+      // with the sky/ground colours blended.
+      const sky = obj.color
+      const ground = obj.groundColor
+      const blend = (a, b) => (typeof b === 'number' ? (a + b) / 2 : a)
+      const comp = { _class: 'PHPolygon\\Component\\AmbientLight' }
+      if (sky) comp.color = { r: round(blend(sky.r, ground?.r)), g: round(blend(sky.g, ground?.g)), b: round(blend(sky.b, ground?.b)), a: 1 }
+      if (typeof obj.intensity === 'number') comp.intensity = round(obj.intensity)
+      return { name: obj.name || nextName('light'), components: [comp] }
+    }
     return null
   }
 }

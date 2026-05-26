@@ -227,7 +227,7 @@ Either way it maps the subset that corresponds to PHPolygon's procedural model:
 | `<mesh>` / `<group>` + `position` / `rotation` (Euler→Quaternion) / `scale` | imported models (`useGLTF`, `<primitive>`) - violate "geometry as code" |
 | Box / Sphere / Cylinder / Plane / **Torus** / **Octahedron** geometry → the matching `*Mesh` | **`BufferGeometry`** - arbitrary per-vertex geometry has no procedural generator |
 | `<meshStandardMaterial color roughness metalness emissive>` → `Material` | non-hex colours, arbitrary JS |
-| `<directionalLight>` → `DirectionalLight`, `<pointLight>` → `PointLight` | `<ambientLight>` / `<hemisphereLight>` / `<spotLight>` (no component) |
+| directional / point / **ambient** → light components; `<hemisphereLight>` → `AmbientLight` (sky/ground blended) | `<spotLight>` (no component yet) |
 
 ```bash
 cd tools/prototype && npm install
