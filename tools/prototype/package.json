@@ -9,7 +9,8 @@
     "build": "vue-tsc --noEmit && vite build",
     "preview": "vite preview",
     "gen": "node scripts/generate.mjs",
-    "import": "node scripts/r3f-import.mjs"
+    "import": "node scripts/r3f-import.mjs",
+    "test": "node --test scripts/*.test.mjs"
   },
   "dependencies": {
     "@tresjs/cientos": "^4.0.0",
