@@ -40,6 +40,23 @@ then re-run `prototype:export`.
    php bin/phpolygon scene:transpile ~/Downloads/your.scene.json --out src/Scene/Your.php
    ```
 
+## Import an R3F TSX prototype
+
+Have a react-three-fiber `.tsx` (e.g. from Claude Desktop)? Import it into a
+canonical PHP Scene:
+
+```bash
+node scripts/r3f-import.mjs examples/prototype.tsx --out prototype.import.json
+php ../../bin/phpolygon scene:import prototype.import.json --out ../../src/Scene/Prototype.php
+```
+
+The importer maps `<mesh>`/`<group>` + transforms, primitive geometries
+(`boxGeometry`/`sphereGeometry`/`cylinderGeometry`/`planeGeometry`) → the
+matching `*Mesh` generators, and `<meshStandardMaterial>` → `Material`. Anything
+that can't map to PHPolygon's procedural model (imported models, raw buffer
+geometry, lights, arbitrary JS) is listed under `warnings` instead of being
+silently dropped. See `examples/prototype.tsx`.
+
 ## Authoring (Scratchpad)
 
 The "Scratchpad" tab previews `src/playground/scene.ts`, authored with a typed

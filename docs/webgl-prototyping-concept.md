@@ -176,6 +176,37 @@ to the canonical scene JSON.
   explicit entities. Keep heavy procedural generation in hand-written PHP; use
   JSX for layout/composition.
 
+## Importing R3F TSX prototypes
+
+Besides authoring in the playground, an external **react-three-fiber TSX file**
+(e.g. one Claude Desktop produced quickly) can be imported into PHPolygon. This
+is a dev-time import - TSX becomes committed PHP, not loaded at runtime.
+
+```
+prototype.tsx ──(Node: r3f-import.mjs, @babel/parser)──► import.json ──(scene:import)──► PHP Scene
+```
+
+The Node half is needed because PHP can't parse TSX; it maps the R3F subset
+that corresponds to PHPolygon's procedural model:
+
+| Maps cleanly | Reported as a warning (not dropped) |
+|---|---|
+| `<mesh>` / `<group>` + `position` / `rotation` (Euler→Quaternion) / `scale` | imported models (`useGLTF`, `<primitive>`) - violate "geometry as code" |
+| `<boxGeometry args>` → `BoxMesh::generate`, sphere/cylinder/plane likewise | raw `<bufferGeometry>` (no generator) |
+| `<meshStandardMaterial color roughness metalness emissive>` → `Material` | non-hex colours, arbitrary JS, lights (not yet imported) |
+
+```bash
+cd tools/prototype && npm install
+node scripts/r3f-import.mjs examples/prototype.tsx --out prototype.import.json
+php bin/phpolygon scene:import prototype.import.json --out src/Scene/Prototype.php
+```
+
+`scene:import` produces a **self-contained** Scene: it registers the procedural
+meshes (`MeshRegistry::register('box_6x12x5', BoxMesh::generate(6.0, 12.0, 5.0))`)
+and materials in `build()`, then places the entity tree. The PHP half
+(`SceneImportGenerator`) reuses `PhpCodeGenerator`, so the same value-object and
+hierarchy handling applies.
+
 ## Phases and status
 
 | Phase | Content | Status |
