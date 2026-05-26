@@ -277,7 +277,17 @@ function runHeadless(src, file) {
       const comp = { _class: 'PHPolygon\\Component\\DirectionalLight', direction: { x: round(dir.x), y: round(dir.y), z: round(dir.z) } }
       if (obj.color) comp.color = { r: round(obj.color.r), g: round(obj.color.g), b: round(obj.color.b), a: 1 }
       if (typeof obj.intensity === 'number') comp.intensity = round(obj.intensity)
-      return { name: obj.name || nextName('light'), components: [comp] }
+      // Renderer3DSystem queries DirectionalLight WITH Transform3D, so the
+      // entity needs one even though a directional light has no position.
+      const p = new THREE.Vector3()
+      obj.getWorldPosition(p)
+      return {
+        name: obj.name || nextName('light'),
+        components: [
+          { _class: 'PHPolygon\\Component\\Transform3D', position: { x: round(p.x), y: round(p.y), z: round(p.z) } },
+          comp,
+        ],
+      }
     }
     if (obj.isSpotLight) {
       // Position via Transform3D; the cone direction points at the target.
