@@ -193,7 +193,8 @@ that corresponds to PHPolygon's procedural model:
 |---|---|
 | `<mesh>` / `<group>` + `position` / `rotation` (Euler→Quaternion) / `scale` | imported models (`useGLTF`, `<primitive>`) - violate "geometry as code" |
 | `<boxGeometry args>` → `BoxMesh::generate`, sphere/cylinder/plane likewise | raw `<bufferGeometry>` (no generator) |
-| `<meshStandardMaterial color roughness metalness emissive>` → `Material` | non-hex colours, arbitrary JS, lights (not yet imported) |
+| `<meshStandardMaterial color roughness metalness emissive>` → `Material` | non-hex colours, arbitrary JS |
+| `<directionalLight>` → `DirectionalLight`, `<pointLight>` → `PointLight` | `<ambientLight>` (no component), `<spotLight>` / `<hemisphereLight>` |
 
 ```bash
 cd tools/prototype && npm install

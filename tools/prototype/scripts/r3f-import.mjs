@@ -168,7 +168,53 @@ function eulerToQuat(a) {
   }
 }
 
-const LIGHTS = new Set(['ambientLight', 'directionalLight', 'pointLight', 'spotLight', 'hemisphereLight'])
+function hexToRgba(hex) {
+  let h = hex.replace('#', '')
+  if (h.length === 3) h = h.split('').map((c) => c + c).join('')
+  const n = Number.parseInt(h, 16)
+  return { r: ((n >> 16) & 255) / 255, g: ((n >> 8) & 255) / 255, b: (n & 255) / 255, a: 1 }
+}
+
+function normalize3(x, y, z) {
+  const len = Math.hypot(x, y, z)
+  return len < 1e-9 ? [0, -1, 0] : [x / len, y / len, z / len]
+}
+
+function lightColor(el, comp) {
+  const color = getAttr(el, 'color')
+  if (typeof color === 'string') {
+    if (color.startsWith('#')) comp.color = hexToRgba(color)
+    else warnings.push(`light color "${color}" at line ${lineOf(el)} is not a hex value; ignored`)
+  }
+  const intensity = getAttr(el, 'intensity')
+  if (typeof intensity === 'number') comp.intensity = intensity
+}
+
+function directionalLightEntity(el) {
+  const comp = { _class: 'PHPolygon\\Component\\DirectionalLight' }
+  const position = getAttr(el, 'position')
+  if (Array.isArray(position)) {
+    // R3F directional lights point from `position` toward the origin/target.
+    const [x, y, z] = normalize3(-num(position[0], 0), -num(position[1], 0), -num(position[2], 0))
+    comp.direction = { x, y, z }
+  }
+  lightColor(el, comp)
+  return { name: getAttr(el, 'name') || nextName('light'), components: [comp] }
+}
+
+function pointLightEntity(el) {
+  const entity = { name: getAttr(el, 'name') || nextName('light'), components: [] }
+  const position = getAttr(el, 'position')
+  if (Array.isArray(position)) {
+    entity.components.push({ _class: 'PHPolygon\\Component\\Transform3D', position: vec3(position) })
+  }
+  const comp = { _class: 'PHPolygon\\Component\\PointLight' }
+  lightColor(el, comp)
+  const distance = getAttr(el, 'distance')
+  if (typeof distance === 'number' && distance > 0) comp.radius = distance
+  entity.components.push(comp)
+  return entity
+}
 
 function processElement(el) {
   const tag = tagName(el)
@@ -208,12 +254,18 @@ function processElement(el) {
     return entity
   }
 
-  if (LIGHTS.has(tag)) {
-    warnings.push(`<${tag}> at line ${lineOf(el)}: lights are not imported yet`)
+  if (tag === 'directionalLight') return directionalLightEntity(el)
+  if (tag === 'pointLight') return pointLightEntity(el)
+  if (tag === 'ambientLight') {
+    warnings.push(`<ambientLight> at line ${lineOf(el)}: no ambient component - set ambient lighting in code (SetAmbientLight / SceneConfig)`)
+    return null
+  }
+  if (tag === 'spotLight' || tag === 'hemisphereLight') {
+    warnings.push(`<${tag}> at line ${lineOf(el)}: not imported (no equivalent component)`)
     return null
   }
 
-  warnings.push(`<${tag}> at line ${lineOf(el)} is not importable (only mesh/group + primitive geometry/material)`)
+  warnings.push(`<${tag}> at line ${lineOf(el)} is not importable (only mesh/group, primitive geometry/material, directional/point lights)`)
   return null
 }
 

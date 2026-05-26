@@ -52,10 +52,11 @@ php ../../bin/phpolygon scene:import prototype.import.json --out ../../src/Scene
 
 The importer maps `<mesh>`/`<group>` + transforms, primitive geometries
 (`boxGeometry`/`sphereGeometry`/`cylinderGeometry`/`planeGeometry`) → the
-matching `*Mesh` generators, and `<meshStandardMaterial>` → `Material`. Anything
+matching `*Mesh` generators, `<meshStandardMaterial>` → `Material`, and
+`<directionalLight>`/`<pointLight>` → `DirectionalLight`/`PointLight`. Anything
 that can't map to PHPolygon's procedural model (imported models, raw buffer
-geometry, lights, arbitrary JS) is listed under `warnings` instead of being
-silently dropped. See `examples/prototype.tsx`.
+geometry, `<ambientLight>`/`<spotLight>`, arbitrary JS) is listed under
+`warnings` instead of being silently dropped. See `examples/prototype.tsx`.
 
 ## Authoring (Scratchpad)
 

@@ -12,7 +12,8 @@ export default function Prototype() {
   return (
     <Canvas>
       <ambientLight intensity={0.5} />
-      <directionalLight position={[6, 12, 8]} intensity={1.2} />
+      <directionalLight position={[6, 12, 8]} intensity={1.2} color="#fff5e0" />
+      <pointLight name="Lamp" position={[3, 4, 0]} intensity={2.0} distance={15} color="#88ccff" />
 
       <mesh name="Ground" position={[0, 0, 0]} scale={[40, 1, 40]}>
         <planeGeometry args={[1, 1]} />
