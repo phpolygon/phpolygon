@@ -48,6 +48,18 @@ require $autoloader;
 use PHPolygon\Build\BuildConfig;
 use PHPolygon\Build\GameBuilder;
 use PHPolygon\Build\StaticPhpResolver;
+use PHPolygon\Component\MeshRenderer;
+use PHPolygon\Geometry\BoxMesh;
+use PHPolygon\Geometry\CylinderMesh;
+use PHPolygon\Geometry\MeshRegistry;
+use PHPolygon\Geometry\PlaneMesh;
+use PHPolygon\Geometry\SphereMesh;
+use PHPolygon\Prototype\PrototypeExporter;
+use PHPolygon\Prototype\SerializableScanner;
+use PHPolygon\Rendering\Material;
+use PHPolygon\Rendering\MaterialRegistry;
+use PHPolygon\Scene\Scene;
+use PHPolygon\Scene\Transpiler\SceneTranspiler;
 
 // --- Parse CLI arguments ---
 
@@ -73,7 +85,7 @@ while ($i < count($args)) {
         $options['dry-run'] = true;
     } elseif ($arg === '--micro-sfx' && isset($args[$i + 1])) {
         $options['micro-sfx'] = $args[++$i];
-    } elseif ($arg === '--output' && isset($args[$i + 1])) {
+    } elseif (($arg === '--output' || $arg === '--out') && isset($args[$i + 1])) {
         $options['output'] = $args[++$i];
     } elseif ($arg === '-o' && isset($args[$i + 1])) {
         $options['output'] = $args[++$i];
@@ -115,6 +127,16 @@ if ($command === 'editor') {
 if ($command === 'perf:report') {
     $rest = array_values(array_filter($args, fn(string $a): bool => $a !== 'perf:report'));
     perfReport($rest);
+    exit(0);
+}
+
+if ($command === 'prototype:export') {
+    prototypeExport($options['output']);
+    exit(0);
+}
+
+if ($command === 'scene:transpile') {
+    sceneTranspile($platformArg, $options['output']);
     exit(0);
 }
 
@@ -407,11 +429,15 @@ Usage:
   phpolygon build [platform] [options]
   phpolygon editor
   phpolygon perf:report <scenario> [<sha-a> <sha-b>]
+  phpolygon prototype:export [--out DIR]
+  phpolygon scene:transpile <file.scene.json> [--out Scene.php]
 
 Commands:
-  build         Build game for distribution
-  editor        Launch the PHPolygon scene editor
-  perf:report   Diff two benchmark JSON results in benchmarks/results/
+  build              Build game for distribution
+  editor             Launch the PHPolygon scene editor
+  perf:report        Diff two benchmark JSON results in benchmarks/results/
+  prototype:export   Write the static bundle for the WebGL/JSX prototyping playground
+  scene:transpile    Transpile a scene JSON file back to canonical PHP Scene source
 
 Platforms:
   macos-arm64        macOS Apple Silicon
@@ -451,6 +477,10 @@ Examples:
   phpolygon build --php-version 8.4              Build with PHP 8.4 runtime
   phpolygon build --dry-run                      Show config without building
   phpolygon editor                       Launch the scene editor
+  phpolygon prototype:export             Export the WebGL/JSX prototyping bundle to .phpolygon/prototype
+  phpolygon prototype:export --out web   Export the bundle to ./web
+  phpolygon scene:transpile s.json       Print PHP Scene source for s.json
+  phpolygon scene:transpile s.json --out src/Scene/S.php   Write the PHP Scene file
   phpolygon perf:report boxes-1000       Compare last two boxes-1000 results
   phpolygon perf:report boxes-1000 abc123 def456   Compare two specific shas
   phpolygon perf:report boxes-1000 --baseline      Compare latest result vs committed baseline (CI mode)
@@ -661,4 +691,114 @@ function runDiff(string $a, string $b, string $scenario, float $threshold, float
         exit(2);
     }
     echo "OK\n";
+}
+
+/**
+ * Export the static bundle the WebGL/JSX prototyping playground consumes.
+ *
+ * Registers a default primitive mesh palette, runs an optional project
+ * bootstrap (prototype.php in the project root, which may register meshes /
+ * materials and return a list of Scene instances), discovers the engine's
+ * #[Serializable] components, then writes the bundle via PrototypeExporter.
+ * Pure data export - no GPU, no window.
+ */
+function prototypeExport(string $outputOption): void
+{
+    $projectRoot = getcwd() ?: dirname(__DIR__);
+
+    // 1. Default primitive palette - lets a fresh project preview immediately.
+    MeshRegistry::register('box_1x1x1', BoxMesh::generate(1.0, 1.0, 1.0));
+    MeshRegistry::register('sphere_r1', SphereMesh::generate(1.0, 12, 16));
+    MeshRegistry::register('cylinder_r1', CylinderMesh::generate(1.0, 2.0, 16));
+    MeshRegistry::register('plane_1x1', PlaneMesh::generate(1.0, 1.0));
+    MaterialRegistry::register('default', Material::default());
+
+    // 2. Optional project bootstrap. May register more meshes/materials as a
+    //    side effect and `return [new MyScene(), ...]` to export scenes.
+    $scenes = [];
+    $bootstrap = $projectRoot . '/prototype.php';
+    if (is_file($bootstrap)) {
+        echo "  \033[34m→\033[0m Loading prototype.php\n";
+        /** @psalm-suppress UnresolvableInclude */
+        $result = require $bootstrap;
+        if (is_array($result)) {
+            foreach ($result as $item) {
+                if ($item instanceof Scene) {
+                    $scenes[] = $item;
+                }
+            }
+        }
+    }
+
+    // 3. Discover engine components. Resolve src/Component via reflection so it
+    //    works both standalone and when installed under vendor/.
+    $componentFile = (new ReflectionClass(MeshRenderer::class))->getFileName();
+    $components = $componentFile !== false
+        ? SerializableScanner::scan(dirname($componentFile), 'PHPolygon\\Component')
+        : [];
+
+    // 4. Gather everything currently registered.
+    $meshes = [];
+    foreach (MeshRegistry::ids() as $id) {
+        $mesh = MeshRegistry::get($id);
+        if ($mesh !== null) {
+            $meshes[$id] = $mesh;
+        }
+    }
+    $materials = [];
+    foreach (MaterialRegistry::ids() as $id) {
+        $material = MaterialRegistry::get($id);
+        if ($material !== null) {
+            $materials[$id] = $material;
+        }
+    }
+
+    $outDir = $outputOption !== '' ? $outputOption : $projectRoot . '/.phpolygon/prototype';
+
+    echo "\n\033[1mPHPolygon Prototype Export\033[0m\n";
+    echo str_repeat('-', 50) . "\n";
+
+    $manifest = (new PrototypeExporter())->export($outDir, $components, $meshes, $materials, $scenes);
+
+    echo sprintf("  \033[32m✓\033[0m %d components\n", count($components));
+    echo sprintf("  \033[32m✓\033[0m %d meshes\n", count($manifest['meshes']));
+    echo sprintf("  \033[32m✓\033[0m %d materials\n", count($manifest['materialIds']));
+    echo sprintf("  \033[32m✓\033[0m %d scenes\n", count($manifest['scenes']));
+    echo "  Output: {$outDir}\n";
+    echo str_repeat('-', 50) . "\n";
+}
+
+/**
+ * Transpile a scene JSON file (the playground's export, or any
+ * `_version`-tagged scene JSON) back to canonical PHP Scene source. Writes to
+ * --output when given, otherwise prints to stdout.
+ */
+function sceneTranspile(string $input, string $outputOption): void
+{
+    if ($input === '') {
+        fwrite(STDERR, "Usage: phpolygon scene:transpile <file.scene.json> [--output Scene.php]\n");
+        exit(1);
+    }
+    if (!is_file($input)) {
+        fwrite(STDERR, "\033[31mError:\033[0m File not found: {$input}\n");
+        exit(1);
+    }
+
+    try {
+        $php = (new SceneTranspiler())->fromJsonFile($input);
+    } catch (\Throwable $e) {
+        fwrite(STDERR, "\033[31mError:\033[0m {$e->getMessage()}\n");
+        exit(1);
+    }
+
+    if ($outputOption !== '') {
+        if (file_put_contents($outputOption, $php) === false) {
+            fwrite(STDERR, "\033[31mError:\033[0m Failed to write {$outputOption}\n");
+            exit(1);
+        }
+        echo "\033[32m✓\033[0m Wrote {$outputOption}\n";
+        return;
+    }
+
+    echo $php . "\n";
 }
