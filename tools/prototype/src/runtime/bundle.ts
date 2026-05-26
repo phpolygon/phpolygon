@@ -33,6 +33,11 @@ export class Bundle {
     return Object.keys(this.manifest.scenes)
   }
 
+  componentCount(): number {
+    const components = this.schema.components
+    return components && typeof components === 'object' ? Object.keys(components).length : 0
+  }
+
   async loadScene(name: string): Promise<SceneJson> {
     const relative = this.manifest.scenes[name]
     if (!relative) throw new Error(`Unknown scene: ${name}`)

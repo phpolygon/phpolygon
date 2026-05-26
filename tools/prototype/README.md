@@ -36,6 +36,35 @@ then re-run `prototype:export`.
    php bin/phpolygon scene:transpile ~/Downloads/your.scene.json --out src/Scene/Your.php
    ```
 
+## Authoring (Scratchpad)
+
+The "Scratchpad" tab previews `src/playground/scene.ts`, authored with a typed
+declarative builder - the practical Vue/TS realisation of the "JSX-style" idea:
+
+```ts
+import { defineScene, entity } from '../authoring/dsl'
+import { Transform3D, MeshRenderer } from '../generated/builders'
+
+export default defineScene('playground', [
+  entity('Ground', [
+    Transform3D({ position: [0, 0, 0], scale: [40, 1, 40] }),
+    MeshRenderer({ meshId: 'plane_1x1', materialId: 'default' }),
+  ]),
+])
+```
+
+`Transform3D`, `MeshRenderer`, ... are **generated from the engine schema**
+(`npm run gen` reads `public/bundle/schema.json` -> `src/generated/`), so the
+vocabulary and its prop types cannot drift from the engine's components. Editing
+`scene.ts` updates the preview (Vite HMR); **Save scene** writes a
+`.scene.json` (File System Access API, download fallback) to transpile.
+
+Regenerate the vocabulary after an export:
+
+```bash
+npm run gen        # reads public/bundle/schema.json -> src/generated/{components,builders}.ts
+```
+
 ## What's here
 
 | File | Role |
@@ -45,12 +74,14 @@ then re-run `prototype:export`.
 | `src/runtime/bundle.ts` | Loads `manifest.json` / `materials.json` / `schema.json`; fetches mesh buffers lazily. |
 | `src/runtime/sceneBuilder.ts` | Interprets a scene JSON into a Three.js object tree. |
 | `src/components/SceneView.vue` | TresJS canvas: camera, lights, orbit controls, the scene object. |
+| `scripts/generate.mjs` | Codegen: schema.json -> typed prop interfaces, `COMPONENT_META`, builder factories. |
+| `src/authoring/dsl.ts` | `defineScene` / `entity` / `buildComponent` (merges engine defaults, normalises props). |
+| `src/authoring/inputs.ts` | Input helper types + normalisers (tuple/object/hex -> canonical JSON). |
+| `src/authoring/saveScene.ts` | Write-back via File System Access API (download fallback). |
+| `src/playground/scene.ts` | The scratchpad scene. |
 
-## Status / next steps (Phase 3)
+## Next steps
 
-This scaffold renders exported scenes (Phase 2). Still to come:
-- Generated `<Entity>` / `<Transform3D>` / `<MeshRenderer>` TSX components from
-  `schema.json` (the typed authoring vocabulary).
-- A Pinia store where rendering a component also builds the canonical scene
-  JSON (render = build), so live TSX edits export 1:1.
-- Write-back via the File System Access API instead of a download.
+- Literal `<Entity>` / `<Transform3D>` JSX tag components (the vueJsx plugin is
+  already wired) as an alternative to the function-call DSL.
+- A two-way live editor (inspector panel) backed by a reactive store.

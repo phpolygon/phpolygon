@@ -5,19 +5,18 @@ import { OrbitControls } from '@tresjs/cientos'
 import * as THREE from 'three'
 import type { Bundle } from '../runtime/bundle'
 import { buildSceneObject } from '../runtime/sceneBuilder'
+import type { SceneJson } from '../runtime/types'
 
-const props = defineProps<{ bundle: Bundle; sceneName: string }>()
+const props = defineProps<{ bundle: Bundle; scene: SceneJson }>()
 
 const root = ref<THREE.Object3D | null>(null)
 
-async function load(): Promise<void> {
-  root.value = null
-  const scene = await props.bundle.loadScene(props.sceneName)
-  root.value = buildSceneObject(scene, props.bundle)
+function rebuild(): void {
+  root.value = buildSceneObject(props.scene, props.bundle)
 }
 
-watch(() => props.sceneName, load)
-onMounted(load)
+watch(() => props.scene, rebuild, { deep: true })
+onMounted(rebuild)
 </script>
 
 <template>

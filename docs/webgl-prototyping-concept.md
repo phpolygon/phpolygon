@@ -183,9 +183,17 @@ to the canonical scene JSON.
 | 0 | `ComponentSchemaGenerator` + `SerializableScanner` (schema from `#[Serializable]`) | done |
 | 1 | `PrototypeExporter` (mesh buffers + materials + scenes + manifest) | done |
 | 4 | CLI `prototype:export` + `scene:transpile` | done |
-| 2 | WebGL JSON renderer (mesh loader, material mapper, TresJS scene renderer) | scaffolding |
-| 3 | JSX/TSX authoring layer + generated component vocabulary + write-back | scaffolding |
+| 2 | WebGL JSON renderer (mesh loader, material mapper, TresJS scene renderer) | done (scaffold) |
+| 3 | Authoring layer + generated component vocabulary + write-back | done (scaffold) |
 | 5 (optional) | dev bridge for live geometry regen; GLSL->WebGL2 fidelity upgrade | deferred |
+
+Phase 3 is realised as a **typed declarative builder** (`defineScene` / `entity`
++ generated per-component factories), the practical Vue/TS form of the
+"JSX-style" idea, rather than literal `<Entity>` JSX tags. The builder
+vocabulary is generated from `schema.json` (`npm run gen`), so it cannot drift
+from the engine's components; props are normalised and merged with engine
+defaults, and the output transpiles cleanly back to canonical PHP. Literal JSX
+tag components remain a future refinement (the vueJsx plugin is already wired).
 
 Prerequisite bugfixes found and fixed along the way (both directly on this
 path): `AttributeSerializer` did not handle `Quaternion`/`Vec4`, so
