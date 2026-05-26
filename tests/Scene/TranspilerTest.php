@@ -310,6 +310,68 @@ class TranspilerTest extends TestCase
         }
     }
 
+    public function testGeneratedPhpKeepsSiblingChildrenUnderTheSameParent(): void
+    {
+        // Regression: child() and with() both return the child, so chaining a
+        // second ->child() without ->end() nested the second sibling under the
+        // first. Only surfaces with >1 child (the Player/Weapon sample had one).
+        $namespace = 'Proto\\Gen\\H' . bin2hex(random_bytes(5));
+        $data = [
+            '_version' => 1,
+            '_scene' => $namespace . '\\X',
+            'name' => 'hier_scene',
+            'systems' => [],
+            'entities' => [
+                [
+                    'name' => 'Parent',
+                    'components' => [['_class' => Transform2D::class]],
+                    'children' => [
+                        [
+                            'name' => 'ChildA',
+                            'components' => [['_class' => Transform2D::class]],
+                            'children' => [['name' => 'GrandA', 'components' => [['_class' => Transform2D::class]]]],
+                        ],
+                        ['name' => 'ChildB', 'components' => [['_class' => Transform2D::class]]],
+                    ],
+                ],
+            ],
+        ];
+
+        $php = $this->transpiler->fromArray($data);
+
+        $tmp = tempnam(sys_get_temp_dir(), 'phpolygon-hier-') . '.php';
+        file_put_contents($tmp, $php);
+        try {
+            require $tmp;
+            /** @var class-string<Scene> $fqcn */
+            $fqcn = $namespace . '\\HierScene';
+            $scene = new $fqcn();
+
+            $builder = new SceneBuilder();
+            $scene->build($builder);
+
+            $declarations = $builder->getDeclarations();
+            $this->assertCount(1, $declarations);
+
+            $parent = $declarations[0];
+            $this->assertSame('Parent', $parent->getName());
+
+            $childNames = array_map(static fn($c) => $c->getName(), $parent->getChildren());
+            $this->assertEqualsCanonicalizing(['ChildA', 'ChildB'], $childNames, 'both children must hang under Parent');
+
+            foreach ($parent->getChildren() as $child) {
+                if ($child->getName() === 'ChildA') {
+                    $this->assertCount(1, $child->getChildren(), 'ChildA keeps its grandchild');
+                }
+                if ($child->getName() === 'ChildB') {
+                    $this->assertCount(0, $child->getChildren(), 'ChildB must not absorb a sibling');
+                }
+            }
+        } finally {
+            unlink($tmp);
+        }
+    }
+
     public function testRoundtripPreservesStructure(): void
     {
         $scene = new SampleScene();

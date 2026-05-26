@@ -59,6 +59,7 @@ use PHPolygon\Prototype\SerializableScanner;
 use PHPolygon\Rendering\Material;
 use PHPolygon\Rendering\MaterialRegistry;
 use PHPolygon\Scene\Scene;
+use PHPolygon\Scene\Transpiler\SceneImportGenerator;
 use PHPolygon\Scene\Transpiler\SceneTranspiler;
 
 // --- Parse CLI arguments ---
@@ -137,6 +138,11 @@ if ($command === 'prototype:export') {
 
 if ($command === 'scene:transpile') {
     sceneTranspile($platformArg, $options['output']);
+    exit(0);
+}
+
+if ($command === 'scene:import') {
+    sceneImport($platformArg, $options['output']);
     exit(0);
 }
 
@@ -431,6 +437,7 @@ Usage:
   phpolygon perf:report <scenario> [<sha-a> <sha-b>]
   phpolygon prototype:export [--out DIR]
   phpolygon scene:transpile <file.scene.json> [--out Scene.php]
+  phpolygon scene:import <file.import.json> [--out Scene.php]
 
 Commands:
   build              Build game for distribution
@@ -438,6 +445,7 @@ Commands:
   perf:report        Diff two benchmark JSON results in benchmarks/results/
   prototype:export   Write the static bundle for the WebGL/JSX prototyping playground
   scene:transpile    Transpile a scene JSON file back to canonical PHP Scene source
+  scene:import       Generate a self-contained PHP Scene from an R3F-import JSON
 
 Platforms:
   macos-arm64        macOS Apple Silicon
@@ -786,6 +794,55 @@ function sceneTranspile(string $input, string $outputOption): void
 
     try {
         $php = (new SceneTranspiler())->fromJsonFile($input);
+    } catch (\Throwable $e) {
+        fwrite(STDERR, "\033[31mError:\033[0m {$e->getMessage()}\n");
+        exit(1);
+    }
+
+    if ($outputOption !== '') {
+        if (file_put_contents($outputOption, $php) === false) {
+            fwrite(STDERR, "\033[31mError:\033[0m Failed to write {$outputOption}\n");
+            exit(1);
+        }
+        echo "\033[32m✓\033[0m Wrote {$outputOption}\n";
+        return;
+    }
+
+    echo $php . "\n";
+}
+
+/**
+ * Generate a self-contained PHP Scene from an import.json (produced by the
+ * R3F TSX importer). Registers procedural meshes + materials and places the
+ * imported entities. Writes to --output when given, otherwise stdout.
+ */
+function sceneImport(string $input, string $outputOption): void
+{
+    if ($input === '') {
+        fwrite(STDERR, "Usage: phpolygon scene:import <file.import.json> [--out Scene.php]\n");
+        exit(1);
+    }
+    if (!is_file($input)) {
+        fwrite(STDERR, "\033[31mError:\033[0m File not found: {$input}\n");
+        exit(1);
+    }
+
+    $contents = file_get_contents($input);
+    $data = $contents !== false ? json_decode($contents, true) : null;
+    if (!is_array($data)) {
+        fwrite(STDERR, "\033[31mError:\033[0m Invalid import JSON: {$input}\n");
+        exit(1);
+    }
+
+    if (isset($data['warnings']) && is_array($data['warnings']) && $data['warnings'] !== []) {
+        foreach ($data['warnings'] as $warning) {
+            fwrite(STDERR, "\033[33m!\033[0m " . (is_string($warning) ? $warning : json_encode($warning)) . "\n");
+        }
+    }
+
+    try {
+        /** @var array<string, mixed> $data */
+        $php = (new SceneImportGenerator())->generate($data);
     } catch (\Throwable $e) {
         fwrite(STDERR, "\033[31mError:\033[0m {$e->getMessage()}\n");
         exit(1);

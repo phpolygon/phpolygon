@@ -27,8 +27,13 @@ class PhpCodeGenerator
      * Generate PHP Scene source code from a JSON-decoded scene array.
      *
      * @param array<string, mixed> $data
+     * @param string       $buildPrelude Raw PHP statements inserted at the top of
+     *                                   build() (e.g. asset registration for an
+     *                                   imported scene). Already indented.
+     * @param list<string> $extraUses    Extra FQNs to import, for classes the
+     *                                   prelude references (registries, generators).
      */
-    public function generate(array $data): string
+    public function generate(array $data, string $buildPrelude = '', array $extraUses = []): string
     {
         $sceneName = is_string($data['name'] ?? null) ? $data['name'] : '';
         $className = $this->nameToClassName($sceneName);
@@ -44,6 +49,10 @@ class PhpCodeGenerator
 
         // Collect all use statements
         $uses = $this->collectUseStatements($entities, $systems, $config);
+        if ($extraUses !== []) {
+            $uses = array_values(array_unique([...$uses, ...$extraUses]));
+            sort($uses);
+        }
 
         $code = "<?php\n\n";
         $code .= "declare(strict_types=1);\n\n";
@@ -87,6 +96,9 @@ class PhpCodeGenerator
         // build()
         $code .= "    public function build(SceneBuilder \$builder): void\n";
         $code .= "    {\n";
+        if ($buildPrelude !== '') {
+            $code .= rtrim($buildPrelude, "\n") . "\n\n";
+        }
         foreach ($entities as $entity) {
             $code .= $this->generateEntityCode($entity, '        ', '$builder');
             $code .= "\n";
@@ -165,6 +177,12 @@ class PhpCodeGenerator
         foreach ($children as $grandchild) {
             $code .= "\n" . $this->generateChildCode($grandchild, $indent . '    ');
         }
+
+        // Return to the parent declaration so the next sibling ->child() (or the
+        // parent's continued chain) attaches at the right level. child() and
+        // with() both return the child, so without this a second sibling would
+        // nest under the first.
+        $code .= "\n{$indent}->end()";
 
         return $code;
     }
