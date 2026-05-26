@@ -146,6 +146,11 @@ if ($command === 'scene:import') {
     exit(0);
 }
 
+if ($command === 'prototype:scaffold') {
+    prototypeScaffold($options['output']);
+    exit(0);
+}
+
 if ($command !== 'build') {
     fwrite(STDERR, "Unknown command: {$command}\n");
     printUsage();
@@ -435,6 +440,7 @@ Usage:
   phpolygon build [platform] [options]
   phpolygon editor
   phpolygon perf:report <scenario> [<sha-a> <sha-b>]
+  phpolygon prototype:scaffold [--out DIR]
   phpolygon prototype:export [--out DIR]
   phpolygon scene:transpile <file.scene.json> [--out Scene.php]
   phpolygon scene:import <file.import.json> [--out Scene.php]
@@ -443,6 +449,7 @@ Commands:
   build              Build game for distribution
   editor             Launch the PHPolygon scene editor
   perf:report        Diff two benchmark JSON results in benchmarks/results/
+  prototype:scaffold Copy the WebGL/JSX prototyping playground into this project
   prototype:export   Write the static bundle for the WebGL/JSX prototyping playground
   scene:transpile    Transpile a scene JSON file back to canonical PHP Scene source
   scene:import       Generate a self-contained PHP Scene from an R3F-import JSON
@@ -727,7 +734,6 @@ function prototypeExport(string $outputOption): void
     $bootstrap = $projectRoot . '/prototype.php';
     if (is_file($bootstrap)) {
         echo "  \033[34m→\033[0m Loading prototype.php\n";
-        /** @psalm-suppress UnresolvableInclude */
         $result = require $bootstrap;
         if (is_array($result)) {
             foreach ($result as $item) {
@@ -738,12 +744,8 @@ function prototypeExport(string $outputOption): void
         }
     }
 
-    // 3. Discover engine components. Resolve src/Component via reflection so it
-    //    works both standalone and when installed under vendor/.
-    $componentFile = (new ReflectionClass(MeshRenderer::class))->getFileName();
-    $components = $componentFile !== false
-        ? SerializableScanner::scan(dirname($componentFile), 'PHPolygon\\Component')
-        : [];
+    // 3. Discover components: engine + the project's own #[Serializable] ones.
+    $components = discoverComponents($projectRoot);
 
     // 4. Gather everything currently registered.
     $meshes = [];
@@ -809,6 +811,128 @@ function sceneTranspile(string $input, string $outputOption): void
     }
 
     echo $php . "\n";
+}
+
+/**
+ * Discover #[Serializable] components for the schema: the engine's own
+ * (resolved via reflection so it works under vendor/) plus the project's, read
+ * from its composer.json PSR-4 autoload roots and narrowed to actual
+ * components so non-component serializables don't leak into the vocabulary.
+ *
+ * @return list<class-string>
+ */
+function discoverComponents(string $projectRoot): array
+{
+    $components = [];
+
+    $engineFile = (new ReflectionClass(MeshRenderer::class))->getFileName();
+    if ($engineFile !== false) {
+        $components = SerializableScanner::scan(dirname($engineFile), 'PHPolygon\\Component');
+    }
+
+    $composerPath = $projectRoot . '/composer.json';
+    if (is_file($composerPath)) {
+        $composer = json_decode((string) file_get_contents($composerPath), true);
+        $psr4 = is_array($composer) ? ($composer['autoload']['psr-4'] ?? []) : [];
+        if (is_array($psr4)) {
+            foreach ($psr4 as $prefix => $paths) {
+                $prefix = rtrim((string) $prefix, '\\');
+                if ($prefix === 'PHPolygon') {
+                    continue; // the engine itself, already covered above
+                }
+                foreach ((array) $paths as $path) {
+                    $dir = $projectRoot . '/' . rtrim((string) $path, '/');
+                    $components = array_merge(
+                        $components,
+                        SerializableScanner::scan($dir, $prefix, \PHPolygon\ECS\AbstractComponent::class),
+                    );
+                }
+            }
+        }
+    }
+
+    return array_values(array_unique($components));
+}
+
+/**
+ * Copy the playground (the package's tools/prototype) into the game project so
+ * it can be run there, instead of from inside vendor/. Rewires nothing in code
+ * (the app fetches /bundle regardless of location); prints the project-relative
+ * commands to run.
+ */
+function prototypeScaffold(string $outputOption): void
+{
+    $source = dirname(__DIR__) . '/tools/prototype';
+    if (!is_dir($source)) {
+        fwrite(STDERR, "\033[31mError:\033[0m Playground source not found at {$source}\n");
+        exit(1);
+    }
+
+    $projectRoot = getcwd() ?: dirname(__DIR__);
+    $target = $outputOption !== '' ? $outputOption : $projectRoot . '/prototype';
+
+    if (realpath($source) === realpath($target)) {
+        fwrite(STDERR, "\033[31mError:\033[0m Refusing to scaffold onto the source itself.\n");
+        exit(1);
+    }
+    if (is_dir($target)) {
+        fwrite(STDERR, "\033[31mError:\033[0m Target already exists: {$target}\n  Remove it or pass --out <dir>.\n");
+        exit(1);
+    }
+
+    $count = copyTree($source, $target, ['node_modules', 'package-lock.json', 'dist', 'public/bundle']);
+
+    $rel = str_starts_with($target, $projectRoot . '/') ? substr($target, strlen($projectRoot) + 1) : $target;
+
+    echo "\n\033[1mPHPolygon Prototype Playground scaffolded\033[0m\n";
+    echo str_repeat('-', 50) . "\n";
+    echo "  To: {$target}  ({$count} files)\n";
+    echo str_repeat('-', 50) . "\n\n";
+    echo "Next steps (from your project root):\n";
+    echo "  \033[34m1.\033[0m vendor/bin/phpolygon prototype:export --out {$rel}/public/bundle\n";
+    echo "  \033[34m2.\033[0m cd {$rel} && npm install && npm run gen && npm run dev\n\n";
+}
+
+/**
+ * Recursively copy $source into $target, skipping paths (relative to $source,
+ * e.g. "public/bundle") in $exclude. Returns the number of files copied.
+ *
+ * @param list<string> $exclude
+ */
+function copyTree(string $source, string $target, array $exclude = [], string $base = ''): int
+{
+    if (!is_dir($target) && !mkdir($target, 0o775, true) && !is_dir($target)) {
+        fwrite(STDERR, "\033[31mError:\033[0m Failed to create {$target}\n");
+        exit(1);
+    }
+
+    $entries = scandir($source);
+    if ($entries === false) {
+        return 0;
+    }
+
+    $count = 0;
+    foreach ($entries as $entry) {
+        if ($entry === '.' || $entry === '..') {
+            continue;
+        }
+        $rel = $base === '' ? $entry : $base . '/' . $entry;
+        if (in_array($rel, $exclude, true)) {
+            continue;
+        }
+        $src = $source . '/' . $entry;
+        $dst = $target . '/' . $entry;
+        if (is_dir($src)) {
+            $count += copyTree($src, $dst, $exclude, $rel);
+        } elseif (copy($src, $dst)) {
+            $count++;
+        } else {
+            fwrite(STDERR, "\033[31mError:\033[0m Failed to copy {$src}\n");
+            exit(1);
+        }
+    }
+
+    return $count;
 }
 
 /**

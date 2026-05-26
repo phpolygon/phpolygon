@@ -145,6 +145,26 @@ MaterialRegistry::register('brick_wall', Material::color(new Color(0.6, 0.3, 0.2
 return [ new \App\Scene\PhpDistrict() ];
 ```
 
+## In a game project (installed via Composer)
+
+The workflow is meant to run from a game that requires `phpolygon/phpolygon`:
+
+```bash
+vendor/bin/phpolygon prototype:scaffold              # copy the playground into ./prototype
+vendor/bin/phpolygon prototype:export --out prototype/public/bundle
+cd prototype && npm install && npm run gen && npm run dev
+```
+
+- `prototype:scaffold` copies the playground out of the package into the game
+  project (default `./prototype`), so npm tooling and the exported bundle live
+  in the project, not in `vendor/` (where `composer update` would wipe them).
+- `prototype:export` discovers components from **both** the engine and the
+  game's own `composer.json` PSR-4 roots (narrowed to `AbstractComponent`
+  subclasses), so a game's custom `#[Serializable]` components show up in the
+  schema and the authoring vocabulary.
+- `scene:transpile` / `scene:import` are driven by the `_class` in the JSON and
+  reflect at runtime, so game components transpile regardless of namespace.
+
 ## JSX/TSX mapping
 
 `<Entity>` -> entity node, component children -> `components[]`, nested

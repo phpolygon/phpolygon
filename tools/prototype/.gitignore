@@ -1,4 +1,5 @@
 node_modules/
+package-lock.json
 dist/
 public/bundle/
 # Generated from the exported schema by `npm run gen` - regenerated, not tracked

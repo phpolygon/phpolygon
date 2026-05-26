@@ -9,7 +9,21 @@ a structural approximation, not a reference renderer.
 The browser never talks to PHP at runtime. See the full design in
 [`docs/webgl-prototyping-concept.md`](../../docs/webgl-prototyping-concept.md).
 
-## Quick start
+## In a game project
+
+When PHPolygon is a Composer dependency, copy this playground into your project
+instead of running it from `vendor/`:
+
+```bash
+vendor/bin/phpolygon prototype:scaffold     # -> ./prototype
+vendor/bin/phpolygon prototype:export --out prototype/public/bundle
+cd prototype && npm install && npm run gen && npm run dev
+```
+
+`prototype:export` also picks up your game's own `#[Serializable]` components
+(from its `composer.json` PSR-4 roots), so they appear in the typed vocabulary.
+
+## Quick start (engine repo)
 
 ```bash
 # 1. Export the static bundle from your project root into the playground's

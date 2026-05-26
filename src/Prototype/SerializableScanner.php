@@ -23,11 +23,14 @@ use SplFileInfo;
 final class SerializableScanner
 {
     /**
-     * @param string $directory       Absolute path to a PSR-4 root (e.g. src/Component).
-     * @param string $namespacePrefix Namespace that maps to $directory (e.g. PHPolygon\Component).
-     * @return list<class-string>     Sorted, de-duplicated FQNs.
+     * @param string  $directory         Absolute path to a PSR-4 root (e.g. src/Component).
+     * @param string  $namespacePrefix   Namespace that maps to $directory (e.g. PHPolygon\Component).
+     * @param ?string $mustBeSubclassOf  When set, only classes that are subclasses of this
+     *                                   FQN are returned (e.g. AbstractComponent to keep a
+     *                                   broad project src/ scan to actual components).
+     * @return list<class-string>        Sorted, de-duplicated FQNs.
      */
-    public static function scan(string $directory, string $namespacePrefix): array
+    public static function scan(string $directory, string $namespacePrefix, ?string $mustBeSubclassOf = null): array
     {
         if (!is_dir($directory)) {
             return [];
@@ -58,9 +61,13 @@ final class SerializableScanner
             if ($ref->isAbstract() || $ref->isInterface() || $ref->isEnum()) {
                 continue;
             }
-            if ($ref->getAttributes(Serializable::class) !== []) {
-                $found[$class] = true;
+            if ($ref->getAttributes(Serializable::class) === []) {
+                continue;
             }
+            if ($mustBeSubclassOf !== null && !is_subclass_of($class, $mustBeSubclassOf)) {
+                continue;
+            }
+            $found[$class] = true;
         }
 
         $classes = array_keys($found);

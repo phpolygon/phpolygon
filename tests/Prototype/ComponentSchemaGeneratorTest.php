@@ -81,6 +81,20 @@ class ComponentSchemaGeneratorTest extends TestCase
         $this->assertSame([], SerializableScanner::scan('/no/such/dir', 'PHPolygon\\Component'));
     }
 
+    public function testScannerFiltersBySubclass(): void
+    {
+        // Used for project scans: a broad PSR-4 root is narrowed to actual
+        // components so SceneConfig and friends don't leak into the schema.
+        $dir = dirname(__DIR__, 2) . '/src/Component';
+
+        $components = SerializableScanner::scan($dir, 'PHPolygon\\Component', \PHPolygon\ECS\AbstractComponent::class);
+        $this->assertContains(Transform3D::class, $components);
+        $this->assertContains(MeshRenderer::class, $components);
+
+        // A base nothing extends yields nothing.
+        $this->assertSame([], SerializableScanner::scan($dir, 'PHPolygon\\Component', \PHPolygon\Scene\Scene::class));
+    }
+
     /**
      * @param list<array<string, mixed>> $properties
      * @return array<string, array<string, mixed>>
