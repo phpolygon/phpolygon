@@ -103,6 +103,32 @@ class SceneImportGeneratorTest extends TestCase
         }
     }
 
+    public function testBakesRawMeshAsMeshData(): void
+    {
+        // Small custom geometry (e.g. an imported flag triangle) is baked as an
+        // explicit MeshData literal rather than a generator call.
+        $php = (new SceneImportGenerator())->generate([
+            'name' => 'raw_demo',
+            'meshes' => [
+                'flag_tri' => ['raw' => [
+                    'vertices' => [0, 0, 0, -2.2, 0.6, 0, 0, 1.2, 0],
+                    'normals' => [0, 0, 1, 0, 0, 1, 0, 0, 1],
+                    'uvs' => [0, 0, 0, 0, 0, 0],
+                    'indices' => [0, 1, 2],
+                ]],
+            ],
+            'materials' => [],
+            'entities' => [],
+        ]);
+
+        $this->assertStringContainsString(
+            "MeshRegistry::register('flag_tri', new MeshData(vertices: [0.0, 0.0, 0.0, -2.2, 0.6, 0.0, 0.0, 1.2, 0.0]",
+            $php,
+        );
+        $this->assertStringContainsString('indices: [0, 1, 2]', $php);
+        $this->assertStringContainsString('use PHPolygon\\Geometry\\MeshData;', $php);
+    }
+
     public function testIgnoresUnknownGeneratorsAndKeepsEmptyMaterialsValid(): void
     {
         $php = (new SceneImportGenerator())->generate([

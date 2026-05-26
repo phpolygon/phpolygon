@@ -55,6 +55,12 @@ function runHeadless(src, file) {
   let counter = 0
   const nextName = (prefix) => `${prefix}_${counter++}`
 
+  // Custom (non-primitive) geometry under this vertex count is baked as an
+  // explicit MeshData literal - still readable "geometry as code". Above it,
+  // baking would be an opaque vertex dump (a model file in disguise), so we
+  // warn and point back to the procedural path instead.
+  const RAW_VERTEX_LIMIT = 1000
+
   const { code } = transformSync(src, {
     filename: file,
     babelrc: false,
@@ -190,13 +196,48 @@ function runHeadless(src, file) {
     }
   }
 
-  function meshEntity(obj) {
-    const mesh = geometryToMesh(obj.geometry)
-    if (!mesh) {
-      warnings.push(`mesh "${obj.name || '?'}" uses ${obj.geometry?.type || 'unknown/custom geometry'} - not a procedural primitive, skipped`)
+  function resolveMesh(obj) {
+    const prim = geometryToMesh(obj.geometry)
+    if (prim) {
+      meshes[prim.id] = { generator: prim.generator, args: prim.args }
+      return prim.id
+    }
+    const raw = rawMesh(obj.geometry, obj.name)
+    if (raw) {
+      meshes[raw.id] = { raw: raw.data }
+      return raw.id
+    }
+    return null
+  }
+
+  function rawMesh(geometry, name) {
+    const posAttr = geometry?.attributes?.position
+    if (!posAttr) {
+      warnings.push(`mesh "${name || '?'}" uses ${geometry?.type || 'unknown geometry'} with no positions - skipped`)
       return null
     }
-    meshes[mesh.id] = { generator: mesh.generator, args: mesh.args }
+    const vertexCount = posAttr.count
+    if (vertexCount > RAW_VERTEX_LIMIT) {
+      warnings.push(`mesh "${name || '?'}" is custom ${geometry.type} with ${vertexCount} vertices (> ${RAW_VERTEX_LIMIT}) - too large to bake as code; rebuild it as a procedural generator or via the DNA system`)
+      return null
+    }
+    if (!geometry.attributes.normal) geometry.computeVertexNormals()
+    const r5 = (n) => Math.round(n * 1e5) / 1e5
+    const vertices = Array.from(posAttr.array, r5)
+    const normals = geometry.attributes.normal ? Array.from(geometry.attributes.normal.array, r5) : []
+    const uvAttr = geometry.attributes.uv
+    const uvs = uvAttr ? Array.from(uvAttr.array, r5) : new Array(vertexCount * 2).fill(0)
+    const indices = geometry.index ? Array.from(geometry.index.array) : Array.from({ length: vertexCount }, (_, i) => i)
+
+    let h = 5381
+    const s = JSON.stringify([vertices, indices])
+    for (let i = 0; i < s.length; i++) h = ((h * 33) ^ s.charCodeAt(i)) >>> 0
+    return { id: `raw_${h.toString(16).padStart(8, '0')}`, data: { vertices, normals, uvs, indices } }
+  }
+
+  function meshEntity(obj) {
+    const meshId = resolveMesh(obj)
+    if (meshId === null) return null
 
     const pos = new THREE.Vector3(), quat = new THREE.Quaternion(), scl = new THREE.Vector3()
     obj.matrixWorld.decompose(pos, quat, scl)
@@ -210,7 +251,7 @@ function runHeadless(src, file) {
           rotation: { x: round(quat.x), y: round(quat.y), z: round(quat.z), w: round(quat.w) },
           scale: { x: round(scl.x), y: round(scl.y), z: round(scl.z) },
         },
-        { _class: 'PHPolygon\\Component\\MeshRenderer', meshId: mesh.id, materialId: materialOf(obj.material) },
+        { _class: 'PHPolygon\\Component\\MeshRenderer', meshId, materialId: materialOf(obj.material) },
       ],
     }
   }

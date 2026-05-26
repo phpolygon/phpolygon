@@ -225,7 +225,7 @@ Either way it maps the subset that corresponds to PHPolygon's procedural model:
 | Maps cleanly | Reported as a warning (not dropped) |
 |---|---|
 | `<mesh>` / `<group>` + `position` / `rotation` (Euler→Quaternion) / `scale` | imported models (`useGLTF`, `<primitive>`) - violate "geometry as code" |
-| Box / Sphere / Cylinder / Plane / **Torus** / **Octahedron** geometry → the matching `*Mesh` | **`BufferGeometry`** - arbitrary per-vertex geometry has no procedural generator |
+| Box / Sphere / Cylinder / Plane / **Torus** / **Octahedron** geometry → the matching `*Mesh`; small custom geometry (≤ 1000 verts) baked as an explicit `MeshData` | `BufferGeometry` **> 1000 verts** - effectively a model dump; warned with "rebuild procedurally" |
 | `<meshStandardMaterial color roughness metalness emissive>` → `Material` | non-hex colours, arbitrary JS |
 | directional / point / **ambient** → light components; `<hemisphereLight>` → `AmbientLight` (sky/ground blended) | `<spotLight>` (no component yet) |
 

@@ -89,6 +89,18 @@ final class SceneImportGenerator
             if (!is_string($id) || !is_array($spec)) {
                 continue;
             }
+            // Baked custom geometry (small non-primitive mesh) -> explicit MeshData.
+            if (is_array($spec['raw'] ?? null)) {
+                $lines[] = sprintf(
+                    "%sMeshRegistry::register('%s', %s);",
+                    $indent,
+                    $this->escape($id),
+                    $this->renderMeshData($spec['raw']),
+                );
+                $uses[] = 'PHPolygon\\Geometry\\MeshRegistry';
+                $uses[] = 'PHPolygon\\Geometry\\MeshData';
+                continue;
+            }
             $generatorName = is_string($spec['generator'] ?? null) ? $spec['generator'] : null;
             if ($generatorName === null || !isset(self::GENERATOR_ARG_TYPES[$generatorName])) {
                 continue;
@@ -140,6 +152,34 @@ final class SceneImportGenerator
                 : $this->renderFloat($value);
         }
         return implode(', ', $rendered);
+    }
+
+    /**
+     * Render a baked custom mesh as an explicit MeshData literal.
+     *
+     * @param array<mixed> $raw
+     */
+    private function renderMeshData(array $raw): string
+    {
+        return sprintf(
+            'new MeshData(vertices: [%s], normals: [%s], uvs: [%s], indices: [%s])',
+            $this->floatList(is_array($raw['vertices'] ?? null) ? $raw['vertices'] : []),
+            $this->floatList(is_array($raw['normals'] ?? null) ? $raw['normals'] : []),
+            $this->floatList(is_array($raw['uvs'] ?? null) ? $raw['uvs'] : []),
+            $this->intList(is_array($raw['indices'] ?? null) ? $raw['indices'] : []),
+        );
+    }
+
+    /** @param array<mixed> $values */
+    private function floatList(array $values): string
+    {
+        return implode(', ', array_map(fn($v): string => $this->renderFloat($this->toFloat($v)), array_values($values)));
+    }
+
+    /** @param array<mixed> $values */
+    private function intList(array $values): string
+    {
+        return implode(', ', array_map(static fn($v): string => (string) (is_numeric($v) ? (int) $v : 0), array_values($values)));
     }
 
     /**
