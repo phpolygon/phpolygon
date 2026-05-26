@@ -9,6 +9,7 @@ use PHPolygon\Component\Camera3DComponent;
 use PHPolygon\Component\DirectionalLight;
 use PHPolygon\Component\MeshRenderer;
 use PHPolygon\Component\PointLight;
+use PHPolygon\Component\SpotLight;
 use PHPolygon\Component\Transform3D;
 use PHPolygon\Component\Wind;
 use PHPolygon\Component\Weather;
@@ -18,6 +19,7 @@ use PHPolygon\Geometry\MeshRegistry;
 use PHPolygon\Math\Mat4;
 use PHPolygon\Math\Vec3;
 use PHPolygon\Rendering\Command\AddPointLight;
+use PHPolygon\Rendering\Command\AddSpotLight;
 use PHPolygon\Rendering\Command\DrawMesh;
 use PHPolygon\Rendering\Command\SetAmbientLight;
 use PHPolygon\Rendering\Command\SetCamera;
@@ -53,6 +55,13 @@ class Renderer3DSystem extends AbstractSystem
      * avoids wasted command-list allocations and keeps the closest lights.
      */
     public const MAX_POINT_LIGHTS = 8;
+
+    /**
+     * Hard cap on the number of SpotLight commands emitted per frame.
+     * Mirrors {@see MAX_POINT_LIGHTS}: backend shaders only honour the first
+     * few, so trimming to the nearest spots keeps the closest beams.
+     */
+    public const MAX_SPOT_LIGHTS = 8;
 
     /** @var array<string, array{cx:float, cy:float, cz:float, radius:float}> */
     private static array $sphereCache = [];
@@ -174,6 +183,50 @@ class Renderer3DSystem extends AbstractSystem
                 $light->color,
                 $light->intensity,
                 $light->radius,
+            ));
+        }
+
+        // Spot lights — mirror the point-light pipeline exactly: skip dimmed
+        // lights, cull by range against the camera, keep the closest
+        // MAX_SPOT_LIGHTS. Position comes from the entity's Transform3D; the
+        // beam direction comes from the SpotLight component itself.
+        $spotCandidates = [];
+        foreach ($world->query(SpotLight::class, Transform3D::class) as $entity) {
+            $light = $entity->get(SpotLight::class);
+            if ($light->intensity <= 0.001) {
+                continue;
+            }
+            $pos = $entity->get(Transform3D::class)->getWorldPosition();
+            if ($cameraPos !== null) {
+                $dx = $pos->x - $cameraPos->x;
+                $dy = $pos->y - $cameraPos->y;
+                $dz = $pos->z - $cameraPos->z;
+                $distSq = $dx * $dx + $dy * $dy + $dz * $dz;
+                // Same ×4 cushion as point lights so beams stay lit just out
+                // of immediate range when the player turns toward them.
+                if ($distSq > $light->range * $light->range * 4.0) {
+                    continue;
+                }
+            } else {
+                $distSq = 0.0;
+            }
+            $spotCandidates[] = [$distSq, $pos, $light];
+        }
+
+        if (count($spotCandidates) > self::MAX_SPOT_LIGHTS) {
+            usort($spotCandidates, static fn(array $a, array $b): int => $a[0] <=> $b[0]);
+            $spotCandidates = array_slice($spotCandidates, 0, self::MAX_SPOT_LIGHTS);
+        }
+
+        foreach ($spotCandidates as [$distSq, $pos, $light]) {
+            $this->commandList->add(new AddSpotLight(
+                $pos,
+                $light->direction,
+                $light->color,
+                $light->intensity,
+                $light->range,
+                $light->angle,
+                $light->penumbra,
             ));
         }
 

@@ -228,7 +228,7 @@ function runHeadless(src, file) {
   }
 
   function lightEntity(obj) {
-    if (obj.isDirectionalLight || obj.isSpotLight) {
+    if (obj.isDirectionalLight) {
       const dir = new THREE.Vector3()
       const target = obj.target ? obj.target.position : new THREE.Vector3()
       dir.copy(target).sub(obj.position)
@@ -237,6 +237,27 @@ function runHeadless(src, file) {
       if (obj.color) comp.color = { r: round(obj.color.r), g: round(obj.color.g), b: round(obj.color.b), a: 1 }
       if (typeof obj.intensity === 'number') comp.intensity = round(obj.intensity)
       return { name: obj.name || nextName('light'), components: [comp] }
+    }
+    if (obj.isSpotLight) {
+      // Position via Transform3D; the cone direction points at the target.
+      const dir = new THREE.Vector3()
+      const target = obj.target ? obj.target.position : new THREE.Vector3()
+      dir.copy(target).sub(obj.position)
+      if (dir.lengthSq() < 1e-9) dir.set(0, -1, 0); else dir.normalize()
+      const p = new THREE.Vector3()
+      obj.getWorldPosition(p)
+      const ent = {
+        name: obj.name || nextName('light'),
+        components: [{ _class: 'PHPolygon\\Component\\Transform3D', position: { x: round(p.x), y: round(p.y), z: round(p.z) } }],
+      }
+      const comp = { _class: 'PHPolygon\\Component\\SpotLight', direction: { x: round(dir.x), y: round(dir.y), z: round(dir.z) } }
+      if (obj.color) comp.color = { r: round(obj.color.r), g: round(obj.color.g), b: round(obj.color.b), a: 1 }
+      if (typeof obj.intensity === 'number') comp.intensity = round(obj.intensity)
+      if (typeof obj.distance === 'number' && obj.distance > 0) comp.range = round(obj.distance)
+      if (typeof obj.angle === 'number') comp.angle = round(obj.angle)
+      if (typeof obj.penumbra === 'number') comp.penumbra = round(obj.penumbra)
+      ent.components.push(comp)
+      return ent
     }
     if (obj.isPointLight) {
       const p = new THREE.Vector3()

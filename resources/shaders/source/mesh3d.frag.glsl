@@ -32,6 +32,18 @@ struct PointLight {
 uniform PointLight u_point_lights[8];
 uniform int u_point_light_count;
 
+struct SpotLight {
+    vec3 position;
+    vec3 direction;
+    vec3 color;
+    float intensity;
+    float range;
+    float angle;      // cone half-angle (radians)
+    float penumbra;   // soft-edge fraction 0..1
+};
+uniform SpotLight u_spot_lights[8];
+uniform int u_spot_light_count;
+
 uniform vec3 u_albedo;
 uniform vec3 u_emission;
 uniform float u_roughness;
@@ -1415,6 +1427,38 @@ void main() {
             vec3 FP = fresnelSchlick(max(dot(Hp, V), 0.0), F0);
             color += FP * u_point_lights[i].color * u_point_lights[i].intensity
                      * specP * NdotPL * atten;
+        }
+    }
+
+    // Spot lights — point-light falloff multiplied by a cone factor.
+    for (int i = 0; i < u_spot_light_count; i++) {
+        vec3 Ls = u_spot_lights[i].position - v_worldPos;
+        float dist = length(Ls);
+        Ls = normalize(Ls);
+        vec3 Hs = normalize(V + Ls);
+
+        float range = max(u_spot_lights[i].range, 0.001);
+        float atten = clamp(1.0 - (dist * dist) / (range * range), 0.0, 1.0);
+        atten *= atten;
+
+        // Cone factor: smoothstep between the outer (cos(angle)) and inner
+        // (cos(angle * (1 - penumbra))) edges. -Ls points from the light
+        // toward the fragment; comparing against the beam direction.
+        float cosOuter = cos(u_spot_lights[i].angle);
+        float cosInner = cos(u_spot_lights[i].angle * (1.0 - u_spot_lights[i].penumbra));
+        float cd = dot(-Ls, normalize(u_spot_lights[i].direction));
+        float cone = smoothstep(cosOuter, cosInner, cd);
+        atten *= cone;
+
+        float NdotSL = max(dot(N, Ls), 0.0);
+        if (NdotSL > 0.0 && cone > 0.0) {
+            color += albedo * u_spot_lights[i].color * u_spot_lights[i].intensity
+                     * NdotSL * atten * (1.0 - metallic);
+            float NdotHS = max(dot(N, Hs), 0.0);
+            float specS = pow(NdotHS, shininess) * (shininess + 2.0) / 8.0;
+            vec3 FS = fresnelSchlick(max(dot(Hs, V), 0.0), F0);
+            color += FS * u_spot_lights[i].color * u_spot_lights[i].intensity
+                     * specS * NdotSL * atten;
         }
     }
 

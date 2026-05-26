@@ -38,6 +38,21 @@ struct PointLight {
 uniform PointLight u_point_lights[4];
 uniform int u_point_light_count;
 
+// Same packing discipline as PointLight: every vec3 is paired with a trailing
+// float so each member lands on a clean 16-byte boundary that both std140 and
+// HLSL cbuffer packing agree on (SPIRV-Cross rejects ambiguous layouts).
+struct SpotLight {
+    vec3 position;
+    float range;
+    vec3 direction;
+    float angle;      // cone half-angle (radians)
+    vec3 color;
+    float intensity;
+    float penumbra;   // soft-edge fraction 0..1
+};
+uniform SpotLight u_spot_lights[4];
+uniform int u_spot_light_count;
+
 uniform vec3 u_albedo;
 uniform vec3 u_emission;
 uniform float u_roughness;
@@ -1008,6 +1023,32 @@ void main() {
 
             vec3 radiance = u_point_lights[i].color * u_point_lights[i].intensity * atten;
             color += (kD * albedo / 3.14159265 + spec) * radiance * NdotPL;
+        }
+    }
+
+    // Spot lights — point-light falloff multiplied by a cone factor.
+    for (int i = 0; i < u_spot_light_count; i++) {
+        vec3 Ls = u_spot_lights[i].position - v_worldPos;
+        float dist = length(Ls);
+        Ls /= dist;
+        float r = max(u_spot_lights[i].range, 0.001);
+        float atten = clamp(1.0 - dist*dist/(r*r), 0.0, 1.0);
+        atten *= atten;
+
+        float cosOuter = cos(u_spot_lights[i].angle);
+        float cosInner = cos(u_spot_lights[i].angle * (1.0 - u_spot_lights[i].penumbra));
+        float cd = dot(-Ls, normalize(u_spot_lights[i].direction));
+        float cone = smoothstep(cosOuter, cosInner, cd);
+        atten *= cone;
+
+        float NdotSL = max(dot(N, Ls), 0.0);
+        if (NdotSL > 0.0 && cone > 0.0) {
+            vec3 spec = cookTorranceSpecular(N, V, Ls, roughness, F0);
+            vec3 F = fresnelSchlick(max(dot(normalize(V + Ls), V), 0.0), F0);
+            vec3 kD = (1.0 - F) * (1.0 - metallic);
+
+            vec3 radiance = u_spot_lights[i].color * u_spot_lights[i].intensity * atten;
+            color += (kD * albedo / 3.14159265 + spec) * radiance * NdotSL;
         }
     }
 

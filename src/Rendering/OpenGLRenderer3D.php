@@ -10,6 +10,7 @@ use PHPolygon\Geometry\MeshData;
 use PHPolygon\Geometry\MeshRegistry;
 use PHPolygon\Math\Mat4;
 use PHPolygon\Rendering\Command\AddPointLight;
+use PHPolygon\Rendering\Command\AddSpotLight;
 use PHPolygon\Rendering\Command\DrawMesh;
 use PHPolygon\Rendering\Command\DrawMeshInstanced;
 use PHPolygon\Rendering\Command\SetAmbientLight;
@@ -92,6 +93,11 @@ class OpenGLRenderer3D implements Renderer3DInterface
 
     /** @var array<int, array{pos: float[], color: float[], intensity: float, radius: float}> */
     private array $pointLights = [];
+
+    private int $spotLightCount = 0;
+
+    /** @var array<int, array{pos: float[], dir: float[], color: float[], intensity: float, range: float, angle: float, penumbra: float}> */
+    private array $spotLights = [];
 
     private ?string $pendingSkyboxId = null;
 
@@ -177,6 +183,8 @@ class OpenGLRenderer3D implements Renderer3DInterface
         glFrontFace(GL_CCW);
         $this->pointLightCount = 0;
         $this->pointLights     = [];
+        $this->spotLightCount  = 0;
+        $this->spotLights      = [];
 
         // Capture the backbuffer size on entry; setViewport() may have already
         // updated $width/$height to the framebuffer dimensions for this frame.
@@ -296,6 +304,8 @@ class OpenGLRenderer3D implements Renderer3DInterface
         glClear(GL_DEPTH_BUFFER_BIT);
         $this->pointLightCount = 0;
         $this->pointLights     = [];
+        $this->spotLightCount  = 0;
+        $this->spotLights      = [];
         $this->shaderOverride = null;
 
         $defaultProgram = $this->shaderProgramCache['default'];
@@ -429,6 +439,18 @@ class OpenGLRenderer3D implements Renderer3DInterface
                 ];
                 $this->pointLightCount++;
 
+            } elseif ($command instanceof AddSpotLight && $this->spotLightCount < 8) {
+                $this->spotLights[$this->spotLightCount] = [
+                    'pos'       => [$command->position->x, $command->position->y, $command->position->z],
+                    'dir'       => [$command->direction->x, $command->direction->y, $command->direction->z],
+                    'color'     => [$command->color->r, $command->color->g, $command->color->b],
+                    'intensity' => $command->intensity,
+                    'range'     => $command->range,
+                    'angle'     => $command->angle,
+                    'penumbra'  => $command->penumbra,
+                ];
+                $this->spotLightCount++;
+
             } elseif ($command instanceof SetFog) {
                 if ($this->settings->fog) {
                     $this->setUniformVec3('u_fog_color', [$command->color->r, $command->color->g, $command->color->b]);
@@ -484,6 +506,19 @@ class OpenGLRenderer3D implements Renderer3DInterface
             $this->setUniformVec3("u_point_lights[{$i}].color", $pl['color']);
             $this->setUniformFloat("u_point_lights[{$i}].intensity", $pl['intensity']);
             $this->setUniformFloat("u_point_lights[{$i}].radius", $pl['radius']);
+        }
+
+        // Upload spot lights
+        $this->setUniformInt('u_spot_light_count', $this->spotLightCount);
+        for ($i = 0; $i < $this->spotLightCount; $i++) {
+            $sl = $this->spotLights[$i];
+            $this->setUniformVec3("u_spot_lights[{$i}].position", $sl['pos']);
+            $this->setUniformVec3("u_spot_lights[{$i}].direction", $sl['dir']);
+            $this->setUniformVec3("u_spot_lights[{$i}].color", $sl['color']);
+            $this->setUniformFloat("u_spot_lights[{$i}].intensity", $sl['intensity']);
+            $this->setUniformFloat("u_spot_lights[{$i}].range", $sl['range']);
+            $this->setUniformFloat("u_spot_lights[{$i}].angle", $sl['angle']);
+            $this->setUniformFloat("u_spot_lights[{$i}].penumbra", $sl['penumbra']);
         }
 
         // Shadow map pass: render scene depth from sun's perspective
@@ -842,6 +877,17 @@ class OpenGLRenderer3D implements Renderer3DInterface
             $this->setUniformVec3("u_point_lights[{$i}].color", $pl['color']);
             $this->setUniformFloat("u_point_lights[{$i}].intensity", $pl['intensity']);
             $this->setUniformFloat("u_point_lights[{$i}].radius", $pl['radius']);
+        }
+        $this->setUniformInt('u_spot_light_count', $this->spotLightCount);
+        for ($i = 0; $i < $this->spotLightCount; $i++) {
+            $sl = $this->spotLights[$i];
+            $this->setUniformVec3("u_spot_lights[{$i}].position", $sl['pos']);
+            $this->setUniformVec3("u_spot_lights[{$i}].direction", $sl['dir']);
+            $this->setUniformVec3("u_spot_lights[{$i}].color", $sl['color']);
+            $this->setUniformFloat("u_spot_lights[{$i}].intensity", $sl['intensity']);
+            $this->setUniformFloat("u_spot_lights[{$i}].range", $sl['range']);
+            $this->setUniformFloat("u_spot_lights[{$i}].angle", $sl['angle']);
+            $this->setUniformFloat("u_spot_lights[{$i}].penumbra", $sl['penumbra']);
         }
     }
 
