@@ -7,6 +7,7 @@ namespace PHPolygon;
 use PHPolygon\Audio\AudioManager;
 use PHPolygon\Audio\GLFWAudioBackend;
 use PHPolygon\Audio\VioAudioBackend;
+use PHPolygon\Branding\StudioSplashInterface;
 use PHPolygon\ECS\World;
 use PHPolygon\Event\EventDispatcher;
 use PHPolygon\Geometry\MeshCache;
@@ -597,6 +598,25 @@ class Engine
 
         $initFn = $this->onInit;
         if (!$this->headless && !$this->config->skipSplash) {
+            // Engine fonts are needed by every renderer-driven splash phase:
+            // the optional studio splash (StudioSplashInterface implementations
+            // call $renderer2D->setFont(...) on Inter), the engine splash
+            // ("Developed with PHPolygon" caption, task checklist, progress
+            // label), the first-launch calibration overlay, and the F3 perf
+            // HUD. Loading them once here keeps the splash phases unaware of
+            // who else might paint text, and means a second renderer-driven
+            // overlay added later doesn't need to remember to load its own.
+            //
+            // Each loadFont call pumps events between, so the WM ping stays
+            // answered on slow GPUs even though no frame is rendered until
+            // the first splash's fade-in loop below.
+            $this->loadEngineFonts();
+
+            if ($this->config->studioSplash !== null) {
+                self::log('Showing studio splash...');
+                $this->showStudioSplash($this->config->studioSplash);
+                self::log('Studio splash done');
+            }
             self::log('Showing splash screen...');
             $this->showSplashScreen($initFn);
             self::log('Splash screen done');
@@ -1073,14 +1093,8 @@ class Engine
 
         $this->splashFadeAlpha = 1.0;
 
-        // Load engine fonts as the last setup step before the visible splash
-        // animation begins. Done here (not in Engine::run) so the helper
-        // sits next to the only code that actually uses 'regular' / 'semibold'
-        // - the splash itself, the calibration overlay, and the F3 perf HUD.
-        // Each loadFont call pumps events between, so the WM ping stays
-        // answered on slow GPUs even though no frame is rendered until the
-        // fade-in loop below.
-        $this->loadEngineFonts();
+        // Engine fonts are loaded once in Engine::run() before any splash
+        // phase begins (studio + engine), so we don't reload here.
 
         // Phase 1: Fade in. Engine fonts intentionally have no CJK fallback
         // chain - vio's drawTextWithChain iterates every fallback on every
@@ -1156,6 +1170,75 @@ class Engine
         $this->textures->unload('_engine_splash_logo');
         $this->splashLogo = null;
         $this->splashRendererInfo = '';
+    }
+
+    /**
+     * Render an optional studio-branding splash before the engine splash.
+     *
+     * The engine drives the frame lifecycle (begin/clear/swap/poll) and
+     * the skip-input handling; the StudioSplashInterface implementation
+     * only paints into the active frame. Ends when the splash reports
+     * `getDuration()` has elapsed, when the window is requested to close,
+     * or when the user hits ESC / Enter / Space / left-click while the
+     * splash reports `isSkippable()` as true.
+     *
+     * Mirrors the lifecycle of `showSplashScreen()` so the two splashes
+     * feel identical to the player - same poll/swap cadence, same input
+     * handling, same window-close response. We do NOT call onInit during
+     * this phase: it stays on `showSplashScreen()` so games keep using
+     * the engine's task-checklist progress UI for actual init work.
+     */
+    private function showStudioSplash(StudioSplashInterface $splash): void
+    {
+        $duration = max(0.0, $splash->getDuration());
+        if ($duration <= 0.0) {
+            return;
+        }
+
+        $black = new Color(0.0, 0.0, 0.0);
+        $start = microtime(true);
+
+        // Drop any input edges that fired during loadEngineFonts() (each
+        // loadFont pumps events). Without this a player who hits ESC while
+        // the window opens would skip the splash before isSkippable() ever
+        // gets a chance to gate it.
+        $this->input->clearKeyEdges();
+
+        while (!$this->window->shouldClose()) {
+            $elapsed = (float)(microtime(true) - $start);
+            if ($elapsed >= $duration) {
+                break;
+            }
+
+            // Skip-input: only honoured once the splash reports it's in a
+            // skippable phase. Lets implementations protect a short "sting"
+            // at the start of the animation from being killed by a stray
+            // keystroke.
+            if ($splash->isSkippable($elapsed)) {
+                if ($this->input->isKeyPressed(256)   // ESC
+                    || $this->input->isKeyPressed(257) // Enter
+                    || $this->input->isKeyPressed(32)  // Space
+                    || $this->input->isMouseButtonPressed(0)
+                ) {
+                    break;
+                }
+            }
+
+            // Mirror the game-loop pattern: snapshot vio scroll before
+            // beginFrame so scroll deltas survive the frame swap.
+            if ($this->input instanceof \PHPolygon\Runtime\VioInput) {
+                $this->input->snapshotScroll();
+            }
+
+            $this->renderer2D->beginFrame();
+            $this->renderer2D->clear($black);
+            $splash->render($this->renderer2D, $elapsed);
+            $this->renderer2D->endFrame();
+
+            $this->window->swapBuffers();
+            $this->input->endFrame();
+            $this->window->pollEvents();
+        }
     }
 
     /** @var \PHPolygon\Rendering\Texture|null */

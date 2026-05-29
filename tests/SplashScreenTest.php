@@ -33,6 +33,27 @@ class SplashScreenTest extends TestCase
         $this->assertSame(1.0, $config->splashDuration);
     }
 
+    public function testStudioSplashDefaultIsNull(): void
+    {
+        // Studio splash is opt-in. Games that don't supply one get the
+        // engine splash only - same behaviour as before the feature landed.
+        $config = new EngineConfig();
+
+        $this->assertNull($config->studioSplash);
+    }
+
+    public function testStudioSplashCanBeSet(): void
+    {
+        $splash = new class implements \PHPolygon\Branding\StudioSplashInterface {
+            public function getDuration(): float { return 1.0; }
+            public function render(\PHPolygon\Rendering\Renderer2DInterface $r, float $elapsed): void {}
+            public function isSkippable(float $elapsed): bool { return $elapsed >= 0.3; }
+        };
+        $config = new EngineConfig(studioSplash: $splash);
+
+        $this->assertSame($splash, $config->studioSplash);
+    }
+
     public function testHeadlessEngineSkipsSplashAndRuns(): void
     {
         $engine = new Engine(new EngineConfig(headless: true));
