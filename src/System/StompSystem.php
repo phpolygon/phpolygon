@@ -30,7 +30,10 @@ class StompSystem extends AbstractSystem
             $playerTf = $entity->get(Transform3D::class);
             break;
         }
-        if ($playerPc === null || $playerTf === null) {
+        // $playerPc and $playerTf are set together in the loop above. PHPStan
+        // narrows $playerTf to Transform3D through the assignment, so checking
+        // $playerPc is enough to cover the "no player entity at all" case.
+        if ($playerPc === null) {
             return;
         }
         $state = $this->findState($world);

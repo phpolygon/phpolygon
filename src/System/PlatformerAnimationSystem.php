@@ -56,7 +56,10 @@ class PlatformerAnimationSystem extends AbstractSystem
             $playerId = $entity->id;
             break;
         }
-        if ($pc === null || $playerId === null) {
+        // $pc and $playerId are set together in the loop above. PHPStan narrows
+        // $playerId to int through the assignment, so checking $pc is enough to
+        // cover the "no player entity at all" case.
+        if ($pc === null) {
             return;
         }
 
