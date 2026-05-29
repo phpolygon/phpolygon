@@ -744,6 +744,33 @@ $engine = new Engine(new EngineConfig(splashDuration: 1.5));
 - Closing the window during splash exits cleanly
 - `buildRendererInfo()` returns the active backends as a human-readable string
 
+### Studio splash (optional)
+
+Pass a `StudioSplashInterface` implementation via `EngineConfig::$studioSplash`
+to play a studio-branding splash **before** the engine's own splash. The engine
+drives frame lifecycle (begin/clear/swap/poll) and skip-input (ESC / Enter /
+Space / left-click); the implementation only paints into the active frame and
+reports its own `getDuration()` + `isSkippable(elapsed)`. Skipped together with
+the engine splash in headless mode or when `skipSplash: true`.
+
+```php
+$engine = new Engine(new EngineConfig(
+    studioSplash: new MyStudioSplash(),  // implements StudioSplashInterface
+));
+```
+
+Contract (see `src/Branding/StudioSplashInterface.php`):
+- `getDuration(): float` — hard cap, engine ends the splash unconditionally
+  once this many seconds have elapsed
+- `render(Renderer2DInterface $r, float $elapsed): void` — paint one frame.
+  Must NOT call `beginFrame`/`endFrame`/`swapBuffers` — engine owns those.
+- `isSkippable(float $elapsed): bool` — guards a short opening "sting" from
+  being killed by a stray keystroke; once `true`, engine ends on next
+  ESC/Enter/Space/left-click.
+
+Engine fonts (`regular`, `semibold`) are loaded **before** the studio splash
+starts, so implementations can `setFont('semibold')` without warmup concerns.
+
 ### Init progress: single label vs. task checklist
 
 Two compatible ways to surface progress during `onInit`:

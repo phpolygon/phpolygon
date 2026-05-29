@@ -77,5 +77,14 @@ class EngineConfig
          * have profiled and confirmed thrashing.
          */
         public readonly int $textMeasureCacheCap = 4096,
+        /**
+         * Optional studio-branding splash that plays before the engine's own
+         * "Developed with PHPolygon" splash. When set and the engine is not
+         * in headless mode and skipSplash is false, the engine renders this
+         * splash first, then proceeds to the standard splash. Implementations
+         * supply their own duration, animation, and skip-input eligibility -
+         * see \PHPolygon\Branding\StudioSplashInterface.
+         */
+        public readonly ?\PHPolygon\Branding\StudioSplashInterface $studioSplash = null,
     ) {}
 }
