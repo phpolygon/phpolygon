@@ -1,0 +1,8 @@
+node_modules/
+package-lock.json
+dist/
+public/bundle/
+# Generated from the exported schema by `npm run gen` - regenerated, not tracked
+# (embeds engine defaults that include non-deterministic values, e.g. random DNA).
+src/generated/
+*.local

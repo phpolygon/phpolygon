@@ -79,6 +79,7 @@ class Engine
     private bool $running = false;
     private bool $headless;
     private bool $useVio;
+    private bool $fontsLoaded = false;
 
     /**
      * Per-frame stats consumed by the F3 dev overlay and benchmark runner.
@@ -540,10 +541,10 @@ class Engine
             // the persisted preference now that the GL context exists.
             $this->window->setVsync($this->graphics->settings()->vsync);
         }
-        $this->gameLoop->setFpsCap($this->graphics->settings()->fpsCap);
+        $this->applyRenderFpsCap($this->graphics->settings()->fpsCap);
         $this->events->listen(\PHPolygon\Event\GraphicsSettingsChanged::class, function (\PHPolygon\Event\GraphicsSettingsChanged $event): void {
             $this->window->setVsync($event->current->vsync);
-            $this->gameLoop->setFpsCap($event->current->fpsCap);
+            $this->applyRenderFpsCap($event->current->fpsCap);
             $this->textures->applySettings($event->current);
         });
         $this->textures->applySettings($this->graphics->settings());
@@ -583,6 +584,16 @@ class Engine
 
         $fontDir = $this->resolveEngineFontDir();
         self::log('Font dir: ' . ($fontDir ?? 'not found'));
+
+        // When the splash is skipped, nothing else loads the engine fonts, so
+        // renderer2D->drawText() would have no font and every HUD / text draw
+        // would silently render nothing. Load them here. (The splash path loads
+        // them itself, covering the TTF-parse stall behind the splash frame;
+        // loadEngineFonts() is idempotent so the two paths never double-load.)
+        if (!$this->headless && $this->config->skipSplash) {
+            self::log('skipSplash: loading engine fonts up front');
+            $this->loadEngineFonts();
+        }
 
         $initFn = $this->onInit;
         if (!$this->headless && !$this->config->skipSplash) {
@@ -980,16 +991,42 @@ class Engine
      * each. Without inter-font pumping a cold cache can push the cumulative
      * stall over the WM's _NET_WM_PING budget.
      */
+    /**
+     * Apply the render FPS cap. A 0 ("uncapped") preference is floored to the
+     * fixed tick rate, because the 3D scene is drawn on fixed-timestep update
+     * ticks: presenting faster than the tick rate only re-presents stale
+     * (D3D12 flip-model) backbuffers, which flickers during movement. Capping
+     * render to the update rate keeps every present backed by a fresh draw. An
+     * explicit cap (30 / 120 / 144 …) is honoured verbatim, so a game that adds
+     * render interpolation can still opt into higher rates.
+     */
+    private function applyRenderFpsCap(int $preference): void
+    {
+        $this->gameLoop->setFpsCap(
+            $preference > 0 ? $preference : (int) round($this->config->targetTickRate),
+        );
+    }
+
     private function loadEngineFonts(): void
     {
+        // Idempotent: the splash path and the run()-boot path both ask for the
+        // fonts, but the TTF parse + atlas warm-up must only happen once.
+        if ($this->fontsLoaded) return;
+
         $fontDir = $this->resolveEngineFontDir();
         if ($fontDir === null || !is_dir($fontDir)) return;
 
         $this->renderer2D->loadFont('regular',  $fontDir . DIRECTORY_SEPARATOR . 'Inter-Regular.ttf');
         $this->window->pollEvents();
+        $this->renderer2D->setFont('regular');
+        // Mark as loaded the moment 'regular' is registered and selected: that
+        // is the minimum a HUD needs to render. If 'semibold' or the CJK fonts
+        // throw further down (bad TTF, vio OOM during atlas build), a later
+        // retry must not re-register 'regular' a second time.
+        $this->fontsLoaded = true;
+
         $this->renderer2D->loadFont('semibold', $fontDir . DIRECTORY_SEPARATOR . 'Inter-SemiBold.ttf');
         $this->window->pollEvents();
-        $this->renderer2D->setFont('regular');
 
         // CJK fonts: registered here (cheap - vio just stores the path) but
         // the *chain* (addFallbackFont) is set up later by

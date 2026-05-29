@@ -7,9 +7,11 @@ namespace PHPolygon\ECS\Serializer;
 use PHPolygon\ECS\Attribute\Hidden;
 use PHPolygon\ECS\Attribute\Property;
 use PHPolygon\ECS\Attribute\Serializable;
+use PHPolygon\Math\Quaternion;
 use PHPolygon\Math\Rect;
 use PHPolygon\Math\Vec2;
 use PHPolygon\Math\Vec3;
+use PHPolygon\Math\Vec4;
 use PHPolygon\Rendering\Color;
 use ReflectionClass;
 use ReflectionNamedType;
@@ -79,6 +81,14 @@ class AttributeSerializer implements SerializerInterface
             return $value->toArray();
         }
 
+        if ($value instanceof Vec4) {
+            return $value->toArray();
+        }
+
+        if ($value instanceof Quaternion) {
+            return $value->toArray();
+        }
+
         if ($value instanceof Rect) {
             return $value->toArray();
         }
@@ -89,6 +99,11 @@ class AttributeSerializer implements SerializerInterface
 
         if ($value instanceof \BackedEnum) {
             return $value->value;
+        }
+
+        if ($value instanceof \UnitEnum) {
+            // Pure (non-backed) enum: persist by case name.
+            return $value->name;
         }
 
         if (is_object($value)) {
@@ -126,6 +141,8 @@ class AttributeSerializer implements SerializerInterface
             return match ($typeName) {
                 Vec2::class => new Vec2($this->toFloat($data['x'] ?? 0), $this->toFloat($data['y'] ?? 0)),
                 Vec3::class => new Vec3($this->toFloat($data['x'] ?? 0), $this->toFloat($data['y'] ?? 0), $this->toFloat($data['z'] ?? 0)),
+                Vec4::class => new Vec4($this->toFloat($data['x'] ?? 0), $this->toFloat($data['y'] ?? 0), $this->toFloat($data['z'] ?? 0), $this->toFloat($data['w'] ?? 1)),
+                Quaternion::class => new Quaternion($this->toFloat($data['x'] ?? 0), $this->toFloat($data['y'] ?? 0), $this->toFloat($data['z'] ?? 0), $this->toFloat($data['w'] ?? 1)),
                 Rect::class => new Rect($this->toFloat($data['x'] ?? 0), $this->toFloat($data['y'] ?? 0), $this->toFloat($data['width'] ?? 0), $this->toFloat($data['height'] ?? 0)),
                 Color::class => new Color($this->toFloat($data['r'] ?? 0), $this->toFloat($data['g'] ?? 0), $this->toFloat($data['b'] ?? 0), $this->toFloat($data['a'] ?? 1)),
                 'array' => $data,
@@ -133,14 +150,33 @@ class AttributeSerializer implements SerializerInterface
             };
         }
 
-        if (is_string($data) || is_int($data)) {
-            if (enum_exists($typeName)) {
-                /** @var class-string<\BackedEnum> $typeName */
-                return $typeName::from($data);
-            }
+        if ((is_string($data) || is_int($data)) && enum_exists($typeName)) {
+            return $this->deserializeEnum($data, $typeName);
         }
 
         return $data;
+    }
+
+    /**
+     * Resolve a serialized enum value back to its case. Backed enums match on
+     * the backing value; pure enums match on the case name. Returns null for
+     * an unknown value rather than throwing, so a stale save never fatals.
+     *
+     * @param class-string<\UnitEnum> $enumClass
+     */
+    private function deserializeEnum(int|string $data, string $enumClass): ?\UnitEnum
+    {
+        $ref = new \ReflectionEnum($enumClass);
+        foreach ($ref->getCases() as $case) {
+            if ($case instanceof \ReflectionEnumBackedCase) {
+                if ($case->getBackingValue() === $data) {
+                    return $case->getValue();
+                }
+            } elseif (is_string($data) && $case->getName() === $data) {
+                return $case->getValue();
+            }
+        }
+        return null;
     }
 
     /**

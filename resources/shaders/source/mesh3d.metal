@@ -33,6 +33,19 @@ struct PointLight {
     float  radius;
 };
 
+struct SpotLight {
+    packed_float3 position;
+    float  intensity;
+    packed_float3 direction;
+    float  range;
+    packed_float3 color;
+    float  angle;       // cone half-angle (radians)
+    float  penumbra;    // soft-edge fraction 0..1
+    float  _spad0;
+    float  _spad1;
+    float  _spad2;
+};
+
 struct LightingUBO {
     packed_float3 ambient_color;
     float  ambient_intensity;
@@ -145,6 +158,12 @@ struct LightingUBO {
     float  _pad_aabb_b;
 
     PointLight point_lights[8];
+
+    int    spot_light_count;
+    float  _spad_count0;
+    float  _spad_count1;
+    float  _spad_count2;
+    SpotLight spot_lights[8];
 };
 
 // ── Interpolants ──────────────────────────────────────────────────────────────
@@ -1001,7 +1020,11 @@ fragment float4 fragment_mesh3d(
         color += F * light.dir_light_color * light.dir_light_intensity * spec * NdotL;
     }
 
-    for (int i = 0; i < light.point_light_count; i++) {
+    // Clamp the loop bound to the array size: *_light_count is GPU-supplied
+    // and a stale/garbage value would otherwise run the loop for millions of
+    // iterations (and index out of bounds) → GPU hang.
+    int pointCount = min(light.point_light_count, 4);
+    for (int i = 0; i < pointCount; i++) {
         float3 plPos   = light.point_lights[i].position;
         float3 plColor = light.point_lights[i].color;
         float  plInt   = light.point_lights[i].intensity;
@@ -1019,6 +1042,37 @@ fragment float4 fragment_mesh3d(
             float specP = pow(max(dot(N, Hp), 0.0), shininess) * (shininess + 2.0) / 8.0;
             float3 FP   = fresnelSchlick(max(dot(Hp, V), 0.0), F0);
             color += FP * plColor * plInt * specP * NdotPL * atten;
+        }
+    }
+
+    // Spot lights — point-light falloff multiplied by a cone factor.
+    int spotCount = min(light.spot_light_count, 4);
+    for (int i = 0; i < spotCount; i++) {
+        float3 slPos   = light.spot_lights[i].position;
+        float3 slDir   = light.spot_lights[i].direction;
+        float3 slColor = light.spot_lights[i].color;
+        float  slInt   = light.spot_lights[i].intensity;
+        float  slRange = max(light.spot_lights[i].range, 0.001);
+
+        float3 Ls   = slPos - in.world_pos;
+        float  dist = length(Ls);
+        Ls = normalize(Ls);
+        float3 Hs = normalize(V + Ls);
+        float atten = clamp(1.0 - (dist * dist) / (slRange * slRange), 0.0, 1.0);
+        atten *= atten;
+
+        float cosOuter = cos(light.spot_lights[i].angle);
+        float cosInner = cos(light.spot_lights[i].angle * (1.0 - light.spot_lights[i].penumbra));
+        float cd = dot(-Ls, normalize(slDir));
+        float cone = smoothstep(cosOuter, cosInner, cd);
+        atten *= cone;
+
+        float NdotSL = max(dot(N, Ls), 0.0);
+        if (NdotSL > 0.0 && cone > 0.0) {
+            color += albedo * slColor * slInt * NdotSL * atten * (1.0 - metallic);
+            float specS = pow(max(dot(N, Hs), 0.0), shininess) * (shininess + 2.0) / 8.0;
+            float3 FS   = fresnelSchlick(max(dot(Hs, V), 0.0), F0);
+            color += FS * slColor * slInt * specS * NdotSL * atten;
         }
     }
 

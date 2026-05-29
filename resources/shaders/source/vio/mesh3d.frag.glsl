@@ -38,6 +38,21 @@ struct PointLight {
 uniform PointLight u_point_lights[4];
 uniform int u_point_light_count;
 
+// Same packing discipline as PointLight: every vec3 is paired with a trailing
+// float so each member lands on a clean 16-byte boundary that both std140 and
+// HLSL cbuffer packing agree on (SPIRV-Cross rejects ambiguous layouts).
+struct SpotLight {
+    vec3 position;
+    float range;
+    vec3 direction;
+    float angle;      // cone half-angle (radians)
+    vec3 color;
+    float intensity;
+    float penumbra;   // soft-edge fraction 0..1
+};
+uniform SpotLight u_spot_lights[4];
+uniform int u_spot_light_count;
+
 uniform vec3 u_albedo;
 uniform vec3 u_emission;
 uniform float u_roughness;
@@ -955,7 +970,11 @@ void main() {
     float ao = curvatureAO(N, u_ao_strength);
     vec3 color = u_ambient_color * u_ambient_intensity * albedo * kD_ambient * ambientShadow * ao;
 
-    for (int dl = 0; dl < u_dir_light_count; dl++) {
+    // Clamp the loop bound to the array size: u_*_light_count is a GPU
+    // uniform and a stale/garbage value would otherwise run the loop for
+    // millions of iterations (and index out of bounds) → GPU TDR / device hang.
+    int dirCount = min(u_dir_light_count, 4);
+    for (int dl = 0; dl < dirCount; dl++) {
         vec3 dL = normalize(-u_dir_lights[dl].direction);
         float rawNdotL = dot(N, dL);
         float dShadow = (dl == 0) ? shadow : 1.0;
@@ -993,7 +1012,8 @@ void main() {
         }
     }
 
-    for (int i = 0; i < u_point_light_count; i++) {
+    int pointCount = min(u_point_light_count, 4);
+    for (int i = 0; i < pointCount; i++) {
         vec3 Lp = u_point_lights[i].position - v_worldPos;
         float dist = length(Lp);
         Lp /= dist;
@@ -1008,6 +1028,33 @@ void main() {
 
             vec3 radiance = u_point_lights[i].color * u_point_lights[i].intensity * atten;
             color += (kD * albedo / 3.14159265 + spec) * radiance * NdotPL;
+        }
+    }
+
+    // Spot lights — point-light falloff multiplied by a cone factor.
+    int spotCount = min(u_spot_light_count, 4);
+    for (int i = 0; i < spotCount; i++) {
+        vec3 Ls = u_spot_lights[i].position - v_worldPos;
+        float dist = length(Ls);
+        Ls /= dist;
+        float r = max(u_spot_lights[i].range, 0.001);
+        float atten = clamp(1.0 - dist*dist/(r*r), 0.0, 1.0);
+        atten *= atten;
+
+        float cosOuter = cos(u_spot_lights[i].angle);
+        float cosInner = cos(u_spot_lights[i].angle * (1.0 - u_spot_lights[i].penumbra));
+        float cd = dot(-Ls, normalize(u_spot_lights[i].direction));
+        float cone = smoothstep(cosOuter, cosInner, cd);
+        atten *= cone;
+
+        float NdotSL = max(dot(N, Ls), 0.0);
+        if (NdotSL > 0.0 && cone > 0.0) {
+            vec3 spec = cookTorranceSpecular(N, V, Ls, roughness, F0);
+            vec3 F = fresnelSchlick(max(dot(normalize(V + Ls), V), 0.0), F0);
+            vec3 kD = (1.0 - F) * (1.0 - metallic);
+
+            vec3 radiance = u_spot_lights[i].color * u_spot_lights[i].intensity * atten;
+            color += (kD * albedo / 3.14159265 + spec) * radiance * NdotSL;
         }
     }
 

@@ -4,10 +4,12 @@ declare(strict_types=1);
 
 namespace PHPolygon\System;
 
+use PHPolygon\Component\AmbientLight;
 use PHPolygon\Component\Camera3DComponent;
 use PHPolygon\Component\DirectionalLight;
 use PHPolygon\Component\MeshRenderer;
 use PHPolygon\Component\PointLight;
+use PHPolygon\Component\SpotLight;
 use PHPolygon\Component\Transform3D;
 use PHPolygon\Component\Wind;
 use PHPolygon\Component\Weather;
@@ -17,7 +19,9 @@ use PHPolygon\Geometry\MeshRegistry;
 use PHPolygon\Math\Mat4;
 use PHPolygon\Math\Vec3;
 use PHPolygon\Rendering\Command\AddPointLight;
+use PHPolygon\Rendering\Command\AddSpotLight;
 use PHPolygon\Rendering\Command\DrawMesh;
+use PHPolygon\Rendering\Command\SetAmbientLight;
 use PHPolygon\Rendering\Command\SetCamera;
 use PHPolygon\Rendering\Command\SetDirectionalLight;
 use PHPolygon\Rendering\Command\SetGroundWetness;
@@ -52,6 +56,13 @@ class Renderer3DSystem extends AbstractSystem
      */
     public const MAX_POINT_LIGHTS = 8;
 
+    /**
+     * Hard cap on the number of SpotLight commands emitted per frame.
+     * Mirrors {@see MAX_POINT_LIGHTS}: backend shaders only honour the first
+     * few, so trimming to the nearest spots keeps the closest beams.
+     */
+    public const MAX_SPOT_LIGHTS = 8;
+
     /** @var array<string, array{cx:float, cy:float, cz:float, radius:float}> */
     private static array $sphereCache = [];
 
@@ -80,6 +91,20 @@ class Renderer3DSystem extends AbstractSystem
         private readonly Renderer3DInterface $renderer,
         private readonly RenderCommandList $commandList,
     ) {}
+
+    /**
+     * Drop the spatial-bin caches on World::clear(). After clear() the entity
+     * ids restart from 0, so the next createEntity() reuses the same ids;
+     * without resetting $entityBin / $binAabbs the coarse pre-cull associates
+     * fresh meshes with the bin of the previous occupant of that id, producing
+     * ~30 frames of wrong cull decisions until the next rebuildBins() boundary.
+     */
+    public function onWorldClear(World $world): void
+    {
+        $this->binAabbs = [];
+        $this->entityBin = [];
+        $this->frameCount = 0;
+    }
 
     public function update(World $world, float $dt): void
     {
@@ -110,7 +135,11 @@ class Renderer3DSystem extends AbstractSystem
 
     private function renderCommands(World $world): void
     {
-        // Lights — directional + point, in sync with draws each frame.
+        // Lights — ambient (global), then directional + point, in sync with draws.
+        foreach ($world->query(AmbientLight::class) as $entity) {
+            $light = $entity->get(AmbientLight::class);
+            $this->commandList->add(new SetAmbientLight($light->color, $light->intensity));
+        }
         foreach ($world->query(DirectionalLight::class, Transform3D::class) as $entity) {
             $light = $entity->get(DirectionalLight::class);
             $this->commandList->add(new SetDirectionalLight(
@@ -168,6 +197,50 @@ class Renderer3DSystem extends AbstractSystem
                 $light->color,
                 $light->intensity,
                 $light->radius,
+            ));
+        }
+
+        // Spot lights — mirror the point-light pipeline exactly: skip dimmed
+        // lights, cull by range against the camera, keep the closest
+        // MAX_SPOT_LIGHTS. Position comes from the entity's Transform3D; the
+        // beam direction comes from the SpotLight component itself.
+        $spotCandidates = [];
+        foreach ($world->query(SpotLight::class, Transform3D::class) as $entity) {
+            $light = $entity->get(SpotLight::class);
+            if ($light->intensity <= 0.001) {
+                continue;
+            }
+            $pos = $entity->get(Transform3D::class)->getWorldPosition();
+            if ($cameraPos !== null) {
+                $dx = $pos->x - $cameraPos->x;
+                $dy = $pos->y - $cameraPos->y;
+                $dz = $pos->z - $cameraPos->z;
+                $distSq = $dx * $dx + $dy * $dy + $dz * $dz;
+                // Same ×4 cushion as point lights so beams stay lit just out
+                // of immediate range when the player turns toward them.
+                if ($distSq > $light->range * $light->range * 4.0) {
+                    continue;
+                }
+            } else {
+                $distSq = 0.0;
+            }
+            $spotCandidates[] = [$distSq, $pos, $light];
+        }
+
+        if (count($spotCandidates) > self::MAX_SPOT_LIGHTS) {
+            usort($spotCandidates, static fn(array $a, array $b): int => $a[0] <=> $b[0]);
+            $spotCandidates = array_slice($spotCandidates, 0, self::MAX_SPOT_LIGHTS);
+        }
+
+        foreach ($spotCandidates as [$distSq, $pos, $light]) {
+            $this->commandList->add(new AddSpotLight(
+                $pos,
+                $light->direction,
+                $light->color,
+                $light->intensity,
+                $light->range,
+                $light->angle,
+                $light->penumbra,
             ));
         }
 
@@ -234,6 +307,10 @@ class Renderer3DSystem extends AbstractSystem
         foreach ($world->query(MeshRenderer::class, Transform3D::class) as $entity) {
             $mesh = $entity->get(MeshRenderer::class);
             $transform = $entity->get(Transform3D::class);
+
+            if (!$mesh->visible) {
+                continue;
+            }
 
             // Transform3DSystem refreshed worldMatrix earlier in the frame;
             // reusing it here saves two redundant Mat4::trs() rebuilds per
@@ -376,6 +453,9 @@ class Renderer3DSystem extends AbstractSystem
 
         foreach ($world->query(MeshRenderer::class, Transform3D::class) as $entity) {
             $mesh = $entity->get(MeshRenderer::class);
+            if (!$mesh->visible) {
+                continue; // hidden meshes must not inflate a bin AABB
+            }
             $transform = $entity->get(Transform3D::class);
             $tr = $transform->worldMatrix->getTranslation();
             $bx = (int) floor($tr->x / self::BIN_SIZE);

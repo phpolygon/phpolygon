@@ -6,10 +6,16 @@ namespace PHPolygon\Scene\Transpiler;
 
 use PHPolygon\ECS\Attribute\Property;
 use PHPolygon\ECS\Attribute\Serializable;
+use PHPolygon\Math\Quaternion;
+use PHPolygon\Math\Rect;
 use PHPolygon\Math\Vec2;
 use PHPolygon\Math\Vec3;
+use PHPolygon\Math\Vec4;
 use PHPolygon\Rendering\Color;
+use PHPolygon\Scene\SceneConfig;
 use ReflectionClass;
+use ReflectionEnum;
+use ReflectionEnumBackedCase;
 use ReflectionNamedType;
 use RuntimeException;
 
@@ -21,8 +27,13 @@ class PhpCodeGenerator
      * Generate PHP Scene source code from a JSON-decoded scene array.
      *
      * @param array<string, mixed> $data
+     * @param string       $buildPrelude Raw PHP statements inserted at the top of
+     *                                   build() (e.g. asset registration for an
+     *                                   imported scene). Already indented.
+     * @param list<string> $extraUses    Extra FQNs to import, for classes the
+     *                                   prelude references (registries, generators).
      */
-    public function generate(array $data): string
+    public function generate(array $data, string $buildPrelude = '', array $extraUses = []): string
     {
         $sceneName = is_string($data['name'] ?? null) ? $data['name'] : '';
         $className = $this->nameToClassName($sceneName);
@@ -38,6 +49,10 @@ class PhpCodeGenerator
 
         // Collect all use statements
         $uses = $this->collectUseStatements($entities, $systems, $config);
+        if ($extraUses !== []) {
+            $uses = array_values(array_unique([...$uses, ...$extraUses]));
+            sort($uses);
+        }
 
         $code = "<?php\n\n";
         $code .= "declare(strict_types=1);\n\n";
@@ -81,6 +96,9 @@ class PhpCodeGenerator
         // build()
         $code .= "    public function build(SceneBuilder \$builder): void\n";
         $code .= "    {\n";
+        if ($buildPrelude !== '') {
+            $code .= rtrim($buildPrelude, "\n") . "\n\n";
+        }
         foreach ($entities as $entity) {
             $code .= $this->generateEntityCode($entity, '        ', '$builder');
             $code .= "\n";
@@ -160,6 +178,12 @@ class PhpCodeGenerator
             $code .= "\n" . $this->generateChildCode($grandchild, $indent . '    ');
         }
 
+        // Return to the parent declaration so the next sibling ->child() (or the
+        // parent's continued chain) attaches at the right level. child() and
+        // with() both return the child, so without this a second sibling would
+        // nest under the first.
+        $code .= "\n{$indent}->end()";
+
         return $code;
     }
 
@@ -188,14 +212,32 @@ class PhpCodeGenerator
      */
     private function generateConstructorArgs(string $className, array $data): string
     {
-        if (!class_exists($className)) {
-            return '';
+        $parts = [];
+        foreach ($this->renderTypedArgs($className, $data) as $arg) {
+            $parts[] = "{$arg['name']}: {$arg['value']}";
         }
 
-        $ref = new ReflectionClass($className);
-        $constructor = $ref->getConstructor();
+        return implode(', ', $parts);
+    }
+
+    /**
+     * Render named constructor arguments for $className using the reflected
+     * parameter types, so value objects (Vec2/3/4, Quaternion, Color, Rect)
+     * are reconstructed with the correct constructor rather than emitted as a
+     * raw array. Shared by component and SceneConfig generation.
+     *
+     * @param array<string, mixed> $data
+     * @return list<array{name: string, value: string}>
+     */
+    private function renderTypedArgs(string $className, array $data): array
+    {
+        if (!class_exists($className)) {
+            return [];
+        }
+
+        $constructor = (new ReflectionClass($className))->getConstructor();
         if ($constructor === null) {
-            return '';
+            return [];
         }
 
         $args = [];
@@ -205,17 +247,16 @@ class PhpCodeGenerator
                 continue;
             }
 
-            $value = $data[$name];
             $type = $param->getType();
             $typeName = $type instanceof ReflectionNamedType ? $type->getName() : null;
 
-            $rendered = $this->renderValue($value, $typeName);
+            $rendered = $this->renderValue($data[$name], $typeName);
             if ($rendered !== null) {
-                $args[] = "{$name}: {$rendered}";
+                $args[] = ['name' => $name, 'value' => $rendered];
             }
         }
 
-        return implode(', ', $args);
+        return $args;
     }
 
     private function renderValue(mixed $value, ?string $typeName): ?string
@@ -226,6 +267,14 @@ class PhpCodeGenerator
 
         if (is_bool($value)) {
             return $value ? 'true' : 'false';
+        }
+
+        // Enum-typed param: render the case reference, not the raw scalar.
+        if ($typeName !== null && (is_int($value) || is_string($value)) && enum_exists($typeName)) {
+            $rendered = $this->renderEnum($value, $typeName);
+            if ($rendered !== null) {
+                return $rendered;
+            }
         }
 
         if (is_int($value)) {
@@ -245,7 +294,10 @@ class PhpCodeGenerator
             return match ($typeName) {
                 Vec2::class => $this->renderVec2($value),
                 Vec3::class => $this->renderVec3($value),
+                Vec4::class => $this->renderVec4($value),
+                Quaternion::class => $this->renderQuaternion($value),
                 Color::class => $this->renderColor($value),
+                Rect::class => $this->renderRect($value),
                 default => $this->renderArray($value),
             };
         }
@@ -278,6 +330,59 @@ class PhpCodeGenerator
         $b = $this->renderFloat($this->toFloat($value['b'] ?? 1));
         $a = $this->renderFloat($this->toFloat($value['a'] ?? 1));
         return "new Color({$r}, {$g}, {$b}, {$a})";
+    }
+
+    /** @param array<int|string, mixed> $value */
+    private function renderVec4(array $value): string
+    {
+        $x = $this->renderFloat($this->toFloat($value['x'] ?? $value[0] ?? 0));
+        $y = $this->renderFloat($this->toFloat($value['y'] ?? $value[1] ?? 0));
+        $z = $this->renderFloat($this->toFloat($value['z'] ?? $value[2] ?? 0));
+        $w = $this->renderFloat($this->toFloat($value['w'] ?? $value[3] ?? 1));
+        return "new Vec4({$x}, {$y}, {$z}, {$w})";
+    }
+
+    /** @param array<int|string, mixed> $value */
+    private function renderQuaternion(array $value): string
+    {
+        $x = $this->renderFloat($this->toFloat($value['x'] ?? $value[0] ?? 0));
+        $y = $this->renderFloat($this->toFloat($value['y'] ?? $value[1] ?? 0));
+        $z = $this->renderFloat($this->toFloat($value['z'] ?? $value[2] ?? 0));
+        $w = $this->renderFloat($this->toFloat($value['w'] ?? $value[3] ?? 1));
+        return "new Quaternion({$x}, {$y}, {$z}, {$w})";
+    }
+
+    /**
+     * Render an enum value as a `ShortName::Case` reference. Backed enums match
+     * on the backing value, pure enums on the case name. Returns null for an
+     * unknown value so the caller falls back to scalar rendering.
+     *
+     * @param class-string<\UnitEnum> $enumClass
+     */
+    private function renderEnum(int|string $value, string $enumClass): ?string
+    {
+        $ref = new ReflectionEnum($enumClass);
+        $short = $this->shortName($enumClass);
+        foreach ($ref->getCases() as $case) {
+            if ($case instanceof ReflectionEnumBackedCase) {
+                if ($case->getBackingValue() === $value) {
+                    return "{$short}::{$case->getName()}";
+                }
+            } elseif (is_string($value) && $case->getName() === $value) {
+                return "{$short}::{$value}";
+            }
+        }
+        return null;
+    }
+
+    /** @param array<int|string, mixed> $value */
+    private function renderRect(array $value): string
+    {
+        $x = $this->renderFloat($this->toFloat($value['x'] ?? $value[0] ?? 0));
+        $y = $this->renderFloat($this->toFloat($value['y'] ?? $value[1] ?? 0));
+        $w = $this->renderFloat($this->toFloat($value['width'] ?? $value[2] ?? 0));
+        $h = $this->renderFloat($this->toFloat($value['height'] ?? $value[3] ?? 0));
+        return "new Rect({$x}, {$y}, {$w}, {$h})";
     }
 
     private function toFloat(mixed $value): float
@@ -338,6 +443,10 @@ class PhpCodeGenerator
 
         if ($config !== null) {
             $classes[] = 'PHPolygon\\Scene\\SceneConfig';
+            $configClass = isset($config['_class']) && is_string($config['_class'])
+                ? $config['_class']
+                : 'PHPolygon\\Scene\\SceneConfig';
+            $this->collectValueTypeClasses($configClass, $config, $classes);
         }
 
         // Deduplicate and sort
@@ -405,7 +514,9 @@ class PhpCodeGenerator
             }
 
             $typeName = $type->getName();
-            if (in_array($typeName, [Vec2::class, Vec3::class, Color::class], true)) {
+            if (in_array($typeName, [Vec2::class, Vec3::class, Vec4::class, Quaternion::class, Color::class, Rect::class], true)) {
+                $classes[] = $typeName;
+            } elseif (enum_exists($typeName)) {
                 $classes[] = $typeName;
             }
         }
@@ -433,9 +544,14 @@ class PhpCodeGenerator
      */
     private function generateConfigMethod(array $config): ?string
     {
-        // Filter out _class key
-        $fields = array_filter($config, fn($k) => $k !== '_class', ARRAY_FILTER_USE_KEY);
-        if (empty($fields)) {
+        $configClass = isset($config['_class']) && is_string($config['_class'])
+            ? $config['_class']
+            : SceneConfig::class;
+
+        // Reflect SceneConfig's parameter types so clearColor / gravity etc.
+        // are emitted as new Color(...) / new Vec2(...), not raw arrays.
+        $args = $this->renderTypedArgs($configClass, $config);
+        if ($args === []) {
             return null;
         }
 
@@ -443,15 +559,12 @@ class PhpCodeGenerator
         $code .= "    {\n";
         $code .= "        return new SceneConfig(\n";
 
-        $args = [];
-        foreach ($fields as $key => $value) {
-            $rendered = $this->renderValue($value, null);
-            if ($rendered !== null) {
-                $args[] = "            {$key}: {$rendered}";
-            }
+        $lines = [];
+        foreach ($args as $arg) {
+            $lines[] = "            {$arg['name']}: {$arg['value']}";
         }
 
-        $code .= implode(",\n", $args) . ",\n";
+        $code .= implode(",\n", $lines) . ",\n";
         $code .= "        );\n";
         $code .= "    }\n";
 

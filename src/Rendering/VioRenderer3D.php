@@ -9,6 +9,7 @@ use PHPolygon\Geometry\MeshRegistry;
 use PHPolygon\Math\Mat4;
 use PHPolygon\Math\Vec3;
 use PHPolygon\Rendering\Command\AddPointLight;
+use PHPolygon\Rendering\Command\AddSpotLight;
 use PHPolygon\Rendering\Command\DrawMesh;
 use PHPolygon\Rendering\Command\DrawMeshInstanced;
 use PHPolygon\Rendering\Command\SetAmbientLight;
@@ -403,6 +404,7 @@ class VioRenderer3D implements Renderer3DInterface
         $ambientIntensity = 1.0;
         $dirLights = [];
         $pointLights = [];
+        $spotLights = [];
         $fogColor = new Color(0.0, 0.0, 0.0);
         $fogNear = 1000.0;
         $fogFar = 2000.0;
@@ -423,6 +425,8 @@ class VioRenderer3D implements Renderer3DInterface
                 $dirLights[] = $cmd;
             } elseif ($cmd instanceof AddPointLight) {
                 $pointLights[] = $cmd;
+            } elseif ($cmd instanceof AddSpotLight) {
+                $spotLights[] = $cmd;
             } elseif ($cmd instanceof SetFog) {
                 if ($this->settings->fog) {
                     $fogColor = $cmd->color;
@@ -470,6 +474,7 @@ class VioRenderer3D implements Renderer3DInterface
             'ambientIntensity' => $ambientIntensity,
             'dirLights' => $dirLights,
             'pointLights' => $pointLights,
+            'spotLights' => $spotLights,
             'fogColor' => $fogColor,
             'fogNear' => $fogNear,
             'fogFar' => $fogFar,
@@ -514,17 +519,21 @@ class VioRenderer3D implements Renderer3DInterface
         // The fragment shader reconstructs a world-space view ray per pixel
         // from u_sky_inv_vp and evaluates the gradient + sun/moon analytically
         // — no skybox geometry. Opaque geometry overwrites wherever it draws.
+        // Sky / skybox state is STICKY: the most recent SetSky / SetSkybox
+        // persists across frames and is re-drawn every frame, even when no
+        // command is issued this frame. This is required because the colour
+        // buffer is cleared to depth-only and is filled by the sky — and a
+        // game may emit SetSky from onUpdate(), which (under the fixed-timestep
+        // loop) does NOT run on every rendered frame. Without persistence the
+        // sky vanishes on sky-less frames, leaving an unfilled D3D12 flip
+        // backbuffer → background flicker. Mirrors how camera / fog state is
+        // retained between commands.
         if ($this->pendingSky !== null) {
             $this->renderAtmosphericSky($this->pendingSky);
-        }
-        // Legacy cubemap skybox still supported; rendered only if no SetSky
-        // command was issued this frame.
-        if ($this->pendingSky === null
-            && $this->pendingSkyboxId !== null) {
+        } elseif ($this->pendingSkyboxId !== null) {
+            // Legacy cubemap skybox — only when no SetSky has ever been issued.
             $this->renderSkybox($this->pendingSkyboxId);
         }
-        $this->pendingSky = null;
-        $this->pendingSkyboxId = null;
 
         // --- Pass 2: Opaque geometry ---
         $this->bindPipeline('opaque');
@@ -1675,7 +1684,7 @@ class VioRenderer3D implements Renderer3DInterface
     // ----------------------------------------------------------------
 
     /**
-     * @param array{ambientColor: Color, ambientIntensity: float, dirLights: list<SetDirectionalLight>, pointLights: list<AddPointLight>, fogColor: Color, fogNear: float, fogFar: float, waveEnabled: bool, waveAmplitude: float, waveFrequency: float, wavePhase: float} $state
+     * @param array{ambientColor: Color, ambientIntensity: float, dirLights: list<SetDirectionalLight>, pointLights: list<AddPointLight>, spotLights: list<AddSpotLight>, fogColor: Color, fogNear: float, fogFar: float, waveEnabled: bool, waveAmplitude: float, waveFrequency: float, wavePhase: float} $state
      */
     private function uploadFrameUniforms(array $state): void
     {
@@ -1715,6 +1724,19 @@ class VioRenderer3D implements Renderer3DInterface
             vio_set_uniform($this->ctx, "u_point_lights[{$i}].color", [$pl->color->r, $pl->color->g, $pl->color->b]);
             vio_set_uniform($this->ctx, "u_point_lights[{$i}].intensity", $pl->intensity * $piScale);
             vio_set_uniform($this->ctx, "u_point_lights[{$i}].radius", $pl->radius);
+        }
+
+        $spotCount = min(count($state['spotLights']), 4);
+        vio_set_uniform($this->ctx, 'u_spot_light_count', $spotCount);
+        for ($i = 0; $i < $spotCount; $i++) {
+            $sl = $state['spotLights'][$i];
+            vio_set_uniform($this->ctx, "u_spot_lights[{$i}].position", [$sl->position->x, $sl->position->y, $sl->position->z]);
+            vio_set_uniform($this->ctx, "u_spot_lights[{$i}].direction", [$sl->direction->x, $sl->direction->y, $sl->direction->z]);
+            vio_set_uniform($this->ctx, "u_spot_lights[{$i}].color", [$sl->color->r, $sl->color->g, $sl->color->b]);
+            vio_set_uniform($this->ctx, "u_spot_lights[{$i}].intensity", $sl->intensity * $piScale);
+            vio_set_uniform($this->ctx, "u_spot_lights[{$i}].range", $sl->range);
+            vio_set_uniform($this->ctx, "u_spot_lights[{$i}].angle", $sl->angle);
+            vio_set_uniform($this->ctx, "u_spot_lights[{$i}].penumbra", $sl->penumbra);
         }
 
         $fc = $state['fogColor'];

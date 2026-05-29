@@ -8,6 +8,7 @@ use PHPolygon\Geometry\MeshData;
 use PHPolygon\Geometry\MeshRegistry;
 use PHPolygon\Math\Mat4;
 use PHPolygon\Rendering\Command\AddPointLight;
+use PHPolygon\Rendering\Command\AddSpotLight;
 use PHPolygon\Rendering\Command\DrawMesh;
 use PHPolygon\Rendering\Command\DrawMeshInstanced;
 use PHPolygon\Rendering\Command\SetAmbientLight;
@@ -120,6 +121,8 @@ class VulkanRenderer3D implements Renderer3DInterface
     private array $cameraPos = [0.0, 0.0, 0.0];
     /** @var array<int, array{pos: float[], color: float[], intensity: float, radius: float}> */
     private array $pointLights = [];
+    /** @var array<int, array{pos: float[], dir: float[], color: float[], intensity: float, range: float, angle: float, penumbra: float}> */
+    private array $spotLights = [];
 
     /** @var array<string, array{vb: Buffer, vbMem: DeviceMemory, ib: Buffer, ibMem: DeviceMemory, count: int}> */
     private array $meshCache = [];
@@ -127,7 +130,10 @@ class VulkanRenderer3D implements Renderer3DInterface
     private const VERT_SPV         = __DIR__ . '/../../resources/shaders/compiled/mesh3d_vk.vert.spv';
     private const FRAG_SPV         = __DIR__ . '/../../resources/shaders/compiled/mesh3d_vk.frag.spv';
     private const FRAME_UBO_SIZE   = 128;
-    private const LIGHTING_UBO_SIZE = 384;
+    // 384 = header + 8 point-light slots. Spot block adds a 16-byte count slot
+    // plus 8 × 64-byte spot slots = 528 bytes → 912. Must match the
+    // LightingUBO struct in mesh3d_vk.frag.glsl (recompile SPIR-V after edits).
+    private const LIGHTING_UBO_SIZE = 912;
 
     private const VK_PIPELINE_BIND_GRAPHICS    = 0;
     private const VK_SHADER_STAGE_VERTEX       = 1;
@@ -319,6 +325,7 @@ class VulkanRenderer3D implements Renderer3DInterface
     public function beginFrame(): void
     {
         $this->pointLights = [];
+        $this->spotLights = [];
 
         $this->inFlightFence->wait(1_000_000_000);
         $this->inFlightFence->reset();
@@ -494,6 +501,17 @@ class VulkanRenderer3D implements Renderer3DInterface
                     'color'     => [$command->color->r, $command->color->g, $command->color->b],
                     'intensity' => $command->intensity,
                     'radius'    => $command->radius,
+                ];
+
+            } elseif ($command instanceof AddSpotLight && count($this->spotLights) < 8) {
+                $this->spotLights[] = [
+                    'pos'       => [$command->position->x, $command->position->y, $command->position->z],
+                    'dir'       => [$command->direction->x, $command->direction->y, $command->direction->z],
+                    'color'     => [$command->color->r, $command->color->g, $command->color->b],
+                    'intensity' => $command->intensity,
+                    'range'     => $command->range,
+                    'angle'     => $command->angle,
+                    'penumbra'  => $command->penumbra,
                 ];
 
             } elseif ($command instanceof SetFog) {
@@ -827,6 +845,25 @@ class VulkanRenderer3D implements Renderer3DInterface
                 $data .= pack('f4', $pl['color'][0], $pl['color'][1], $pl['color'][2], $pl['radius']);
             } else {
                 $data .= pack('f8', 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+            }
+        }
+        // Spot-light block (mirrors mesh3d_vk.frag.glsl SpotLight[] + count):
+        // count slot, then 8 × 64-byte slots of position+intensity,
+        // direction+range, color+angle, penumbra+pad.
+        $slCount = count($this->spotLights);
+        $data .= pack('l1f3', $slCount, 0.0, 0.0, 0.0);
+        for ($i = 0; $i < 8; $i++) {
+            if ($i < $slCount) {
+                $sl = $this->spotLights[$i];
+                $data .= pack('f4', $sl['pos'][0], $sl['pos'][1], $sl['pos'][2], $sl['intensity']);
+                $data .= pack('f4', $sl['dir'][0], $sl['dir'][1], $sl['dir'][2], $sl['range']);
+                $data .= pack('f4', $sl['color'][0], $sl['color'][1], $sl['color'][2], $sl['angle']);
+                $data .= pack('f4', $sl['penumbra'], 0.0, 0.0, 0.0);
+            } else {
+                $data .= pack('f4', 0.0, 0.0, 0.0, 0.0);
+                $data .= pack('f4', 0.0, 0.0, 0.0, 0.0);
+                $data .= pack('f4', 0.0, 0.0, 0.0, 0.0);
+                $data .= pack('f4', 0.0, 0.0, 0.0, 0.0);
             }
         }
         $this->lightingUboMem->write($data, 0);

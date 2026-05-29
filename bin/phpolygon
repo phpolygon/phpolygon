@@ -48,6 +48,20 @@ require $autoloader;
 use PHPolygon\Build\BuildConfig;
 use PHPolygon\Build\GameBuilder;
 use PHPolygon\Build\StaticPhpResolver;
+use PHPolygon\Component\MeshRenderer;
+use PHPolygon\Geometry\BoxMesh;
+use PHPolygon\Geometry\CylinderMesh;
+use PHPolygon\Geometry\MeshRegistry;
+use PHPolygon\Geometry\PlaneMesh;
+use PHPolygon\Geometry\SphereMesh;
+use PHPolygon\Prototype\PrototypeExporter;
+use PHPolygon\Prototype\SerializableScanner;
+use PHPolygon\Rendering\Material;
+use PHPolygon\Rendering\MaterialRegistry;
+use PHPolygon\Scene\Scene;
+use PHPolygon\Scene\Transpiler\GameEntryGenerator;
+use PHPolygon\Scene\Transpiler\SceneImportGenerator;
+use PHPolygon\Scene\Transpiler\SceneTranspiler;
 
 // --- Parse CLI arguments ---
 
@@ -63,6 +77,7 @@ $options = [
     'php-version' => '8.5',
     'release' => false,
     'ipa' => false,
+    'game' => null, // scene:import game entry: null=auto-scaffold, false=skip, string=force path
 ];
 
 $i = 0;
@@ -71,9 +86,13 @@ while ($i < count($args)) {
 
     if ($arg === '--dry-run') {
         $options['dry-run'] = true;
+    } elseif ($arg === '--game' && isset($args[$i + 1])) {
+        $options['game'] = $args[++$i];
+    } elseif ($arg === '--no-game') {
+        $options['game'] = false;
     } elseif ($arg === '--micro-sfx' && isset($args[$i + 1])) {
         $options['micro-sfx'] = $args[++$i];
-    } elseif ($arg === '--output' && isset($args[$i + 1])) {
+    } elseif (($arg === '--output' || $arg === '--out') && isset($args[$i + 1])) {
         $options['output'] = $args[++$i];
     } elseif ($arg === '-o' && isset($args[$i + 1])) {
         $options['output'] = $args[++$i];
@@ -115,6 +134,26 @@ if ($command === 'editor') {
 if ($command === 'perf:report') {
     $rest = array_values(array_filter($args, fn(string $a): bool => $a !== 'perf:report'));
     perfReport($rest);
+    exit(0);
+}
+
+if ($command === 'prototype:export') {
+    prototypeExport($options['output']);
+    exit(0);
+}
+
+if ($command === 'scene:transpile') {
+    sceneTranspile($platformArg, $options['output']);
+    exit(0);
+}
+
+if ($command === 'scene:import') {
+    sceneImport($platformArg, $options['output'], $options['game']);
+    exit(0);
+}
+
+if ($command === 'prototype:scaffold') {
+    prototypeScaffold($options['output']);
     exit(0);
 }
 
@@ -407,11 +446,19 @@ Usage:
   phpolygon build [platform] [options]
   phpolygon editor
   phpolygon perf:report <scenario> [<sha-a> <sha-b>]
+  phpolygon prototype:scaffold [--out DIR]
+  phpolygon prototype:export [--out DIR]
+  phpolygon scene:transpile <file.scene.json> [--out Scene.php]
+  phpolygon scene:import <file.import.json> [--out Scene.php]
 
 Commands:
-  build         Build game for distribution
-  editor        Launch the PHPolygon scene editor
-  perf:report   Diff two benchmark JSON results in benchmarks/results/
+  build              Build game for distribution
+  editor             Launch the PHPolygon scene editor
+  perf:report        Diff two benchmark JSON results in benchmarks/results/
+  prototype:scaffold Copy the WebGL/JSX prototyping playground into this project
+  prototype:export   Write the static bundle for the WebGL/JSX prototyping playground
+  scene:transpile    Transpile a scene JSON file back to canonical PHP Scene source
+  scene:import       Generate a self-contained PHP Scene from an R3F-import JSON
 
 Platforms:
   macos-arm64        macOS Apple Silicon
@@ -451,6 +498,10 @@ Examples:
   phpolygon build --php-version 8.4              Build with PHP 8.4 runtime
   phpolygon build --dry-run                      Show config without building
   phpolygon editor                       Launch the scene editor
+  phpolygon prototype:export             Export the WebGL/JSX prototyping bundle to .phpolygon/prototype
+  phpolygon prototype:export --out web   Export the bundle to ./web
+  phpolygon scene:transpile s.json       Print PHP Scene source for s.json
+  phpolygon scene:transpile s.json --out src/Scene/S.php   Write the PHP Scene file
   phpolygon perf:report boxes-1000       Compare last two boxes-1000 results
   phpolygon perf:report boxes-1000 abc123 def456   Compare two specific shas
   phpolygon perf:report boxes-1000 --baseline      Compare latest result vs committed baseline (CI mode)
@@ -661,4 +712,299 @@ function runDiff(string $a, string $b, string $scenario, float $threshold, float
         exit(2);
     }
     echo "OK\n";
+}
+
+/**
+ * Export the static bundle the WebGL/JSX prototyping playground consumes.
+ *
+ * Registers a default primitive mesh palette, runs an optional project
+ * bootstrap (prototype.php in the project root, which may register meshes /
+ * materials and return a list of Scene instances), discovers the engine's
+ * #[Serializable] components, then writes the bundle via PrototypeExporter.
+ * Pure data export - no GPU, no window.
+ */
+function prototypeExport(string $outputOption): void
+{
+    $projectRoot = getcwd() ?: dirname(__DIR__);
+
+    // 1. Default primitive palette - lets a fresh project preview immediately.
+    MeshRegistry::register('box_1x1x1', BoxMesh::generate(1.0, 1.0, 1.0));
+    MeshRegistry::register('sphere_r1', SphereMesh::generate(1.0, 12, 16));
+    MeshRegistry::register('cylinder_r1', CylinderMesh::generate(1.0, 2.0, 16));
+    MeshRegistry::register('plane_1x1', PlaneMesh::generate(1.0, 1.0));
+    MaterialRegistry::register('default', Material::default());
+
+    // 2. Optional project bootstrap. May register more meshes/materials as a
+    //    side effect and `return [new MyScene(), ...]` to export scenes.
+    $scenes = [];
+    $bootstrap = $projectRoot . '/prototype.php';
+    if (is_file($bootstrap)) {
+        echo "  \033[34m→\033[0m Loading prototype.php\n";
+        $result = require $bootstrap;
+        if (is_array($result)) {
+            foreach ($result as $item) {
+                if ($item instanceof Scene) {
+                    $scenes[] = $item;
+                }
+            }
+        }
+    }
+
+    // 3. Discover components: engine + the project's own #[Serializable] ones.
+    $components = discoverComponents($projectRoot);
+
+    // 4. Gather everything currently registered.
+    $meshes = [];
+    foreach (MeshRegistry::ids() as $id) {
+        $mesh = MeshRegistry::get($id);
+        if ($mesh !== null) {
+            $meshes[$id] = $mesh;
+        }
+    }
+    $materials = [];
+    foreach (MaterialRegistry::ids() as $id) {
+        $material = MaterialRegistry::get($id);
+        if ($material !== null) {
+            $materials[$id] = $material;
+        }
+    }
+
+    $outDir = $outputOption !== '' ? $outputOption : $projectRoot . '/.phpolygon/prototype';
+
+    echo "\n\033[1mPHPolygon Prototype Export\033[0m\n";
+    echo str_repeat('-', 50) . "\n";
+
+    $manifest = (new PrototypeExporter())->export($outDir, $components, $meshes, $materials, $scenes);
+
+    echo sprintf("  \033[32m✓\033[0m %d components\n", count($components));
+    echo sprintf("  \033[32m✓\033[0m %d meshes\n", count($manifest['meshes']));
+    echo sprintf("  \033[32m✓\033[0m %d materials\n", count($manifest['materialIds']));
+    echo sprintf("  \033[32m✓\033[0m %d scenes\n", count($manifest['scenes']));
+    echo "  Output: {$outDir}\n";
+    echo str_repeat('-', 50) . "\n";
+}
+
+/**
+ * Transpile a scene JSON file (the playground's export, or any
+ * `_version`-tagged scene JSON) back to canonical PHP Scene source. Writes to
+ * --output when given, otherwise prints to stdout.
+ */
+function sceneTranspile(string $input, string $outputOption): void
+{
+    if ($input === '') {
+        fwrite(STDERR, "Usage: phpolygon scene:transpile <file.scene.json> [--output Scene.php]\n");
+        exit(1);
+    }
+    if (!is_file($input)) {
+        fwrite(STDERR, "\033[31mError:\033[0m File not found: {$input}\n");
+        exit(1);
+    }
+
+    try {
+        $php = (new SceneTranspiler())->fromJsonFile($input);
+    } catch (\Throwable $e) {
+        fwrite(STDERR, "\033[31mError:\033[0m {$e->getMessage()}\n");
+        exit(1);
+    }
+
+    if ($outputOption !== '') {
+        if (file_put_contents($outputOption, $php) === false) {
+            fwrite(STDERR, "\033[31mError:\033[0m Failed to write {$outputOption}\n");
+            exit(1);
+        }
+        echo "\033[32m✓\033[0m Wrote {$outputOption}\n";
+        return;
+    }
+
+    echo $php . "\n";
+}
+
+/**
+ * Discover #[Serializable] components for the schema: the engine's own
+ * (resolved via reflection so it works under vendor/) plus the project's, read
+ * from its composer.json PSR-4 autoload roots and narrowed to actual
+ * components so non-component serializables don't leak into the vocabulary.
+ *
+ * @return list<class-string>
+ */
+function discoverComponents(string $projectRoot): array
+{
+    $components = [];
+
+    $engineFile = (new ReflectionClass(MeshRenderer::class))->getFileName();
+    if ($engineFile !== false) {
+        $components = SerializableScanner::scan(dirname($engineFile), 'PHPolygon\\Component');
+    }
+
+    $composerPath = $projectRoot . '/composer.json';
+    if (is_file($composerPath)) {
+        $composer = json_decode((string) file_get_contents($composerPath), true);
+        $psr4 = is_array($composer) ? ($composer['autoload']['psr-4'] ?? []) : [];
+        if (is_array($psr4)) {
+            foreach ($psr4 as $prefix => $paths) {
+                $prefix = rtrim((string) $prefix, '\\');
+                if ($prefix === 'PHPolygon') {
+                    continue; // the engine itself, already covered above
+                }
+                foreach ((array) $paths as $path) {
+                    $dir = $projectRoot . '/' . rtrim((string) $path, '/');
+                    $components = array_merge(
+                        $components,
+                        SerializableScanner::scan($dir, $prefix, \PHPolygon\ECS\AbstractComponent::class),
+                    );
+                }
+            }
+        }
+    }
+
+    return array_values(array_unique($components));
+}
+
+/**
+ * Copy the playground (the package's tools/prototype) into the game project so
+ * it can be run there, instead of from inside vendor/. Rewires nothing in code
+ * (the app fetches /bundle regardless of location); prints the project-relative
+ * commands to run.
+ */
+function prototypeScaffold(string $outputOption): void
+{
+    $source = dirname(__DIR__) . '/tools/prototype';
+    if (!is_dir($source)) {
+        fwrite(STDERR, "\033[31mError:\033[0m Playground source not found at {$source}\n");
+        exit(1);
+    }
+
+    $projectRoot = getcwd() ?: dirname(__DIR__);
+    $target = $outputOption !== '' ? $outputOption : $projectRoot . '/prototype';
+
+    if (realpath($source) === realpath($target)) {
+        fwrite(STDERR, "\033[31mError:\033[0m Refusing to scaffold onto the source itself.\n");
+        exit(1);
+    }
+    if (is_dir($target)) {
+        fwrite(STDERR, "\033[31mError:\033[0m Target already exists: {$target}\n  Remove it or pass --out <dir>.\n");
+        exit(1);
+    }
+
+    $count = copyTree($source, $target, ['node_modules', 'package-lock.json', 'dist', 'public/bundle']);
+
+    $rel = str_starts_with($target, $projectRoot . '/') ? substr($target, strlen($projectRoot) + 1) : $target;
+
+    echo "\n\033[1mPHPolygon Prototype Playground scaffolded\033[0m\n";
+    echo str_repeat('-', 50) . "\n";
+    echo "  To: {$target}  ({$count} files)\n";
+    echo str_repeat('-', 50) . "\n\n";
+    echo "Next steps (from your project root):\n";
+    echo "  \033[34m1.\033[0m vendor/bin/phpolygon prototype:export --out {$rel}/public/bundle\n";
+    echo "  \033[34m2.\033[0m cd {$rel} && npm install && npm run gen && npm run dev\n\n";
+}
+
+/**
+ * Recursively copy $source into $target, skipping paths (relative to $source,
+ * e.g. "public/bundle") in $exclude. Returns the number of files copied.
+ *
+ * @param list<string> $exclude
+ */
+function copyTree(string $source, string $target, array $exclude = [], string $base = ''): int
+{
+    if (!is_dir($target) && !mkdir($target, 0o775, true) && !is_dir($target)) {
+        fwrite(STDERR, "\033[31mError:\033[0m Failed to create {$target}\n");
+        exit(1);
+    }
+
+    $entries = scandir($source);
+    if ($entries === false) {
+        return 0;
+    }
+
+    $count = 0;
+    foreach ($entries as $entry) {
+        if ($entry === '.' || $entry === '..') {
+            continue;
+        }
+        $rel = $base === '' ? $entry : $base . '/' . $entry;
+        if (in_array($rel, $exclude, true)) {
+            continue;
+        }
+        $src = $source . '/' . $entry;
+        $dst = $target . '/' . $entry;
+        if (is_dir($src)) {
+            $count += copyTree($src, $dst, $exclude, $rel);
+        } elseif (copy($src, $dst)) {
+            $count++;
+        } else {
+            fwrite(STDERR, "\033[31mError:\033[0m Failed to copy {$src}\n");
+            exit(1);
+        }
+    }
+
+    return $count;
+}
+
+/**
+ * Generate a self-contained PHP Scene from an import.json (produced by the
+ * R3F TSX importer). Registers procedural meshes + materials and places the
+ * imported entities. Writes to --output when given, otherwise stdout.
+ */
+function sceneImport(string $input, string $outputOption, string|bool|null $gameOption = null): void
+{
+    if ($input === '') {
+        fwrite(STDERR, "Usage: phpolygon scene:import <file.import.json> [--out Scene.php] [--game game.php | --no-game]\n");
+        exit(1);
+    }
+    if (!is_file($input)) {
+        fwrite(STDERR, "\033[31mError:\033[0m File not found: {$input}\n");
+        exit(1);
+    }
+
+    $contents = file_get_contents($input);
+    $data = $contents !== false ? json_decode($contents, true) : null;
+    if (!is_array($data)) {
+        fwrite(STDERR, "\033[31mError:\033[0m Invalid import JSON: {$input}\n");
+        exit(1);
+    }
+
+    if (isset($data['warnings']) && is_array($data['warnings']) && $data['warnings'] !== []) {
+        foreach ($data['warnings'] as $warning) {
+            fwrite(STDERR, "\033[33m!\033[0m " . (is_string($warning) ? $warning : json_encode($warning)) . "\n");
+        }
+    }
+
+    try {
+        /** @var array<string, mixed> $data */
+        $php = (new SceneImportGenerator())->generate($data);
+    } catch (\Throwable $e) {
+        fwrite(STDERR, "\033[31mError:\033[0m {$e->getMessage()}\n");
+        exit(1);
+    }
+
+    if ($outputOption === '') {
+        echo $php . "\n";
+        return;
+    }
+
+    if (file_put_contents($outputOption, $php) === false) {
+        fwrite(STDERR, "\033[31mError:\033[0m Failed to write {$outputOption}\n");
+        exit(1);
+    }
+    echo "\033[32m✓\033[0m Wrote {$outputOption}\n";
+
+    // Also generate a runnable game.php (backend chosen per platform at runtime).
+    // Default: scaffold ./game.php if absent. --game <path> forces; --no-game skips.
+    if ($gameOption === false) {
+        return;
+    }
+    $projectRoot = getcwd() ?: dirname(__DIR__);
+    $gamePath = is_string($gameOption) ? $gameOption : $projectRoot . '/game.php';
+    if (!is_string($gameOption) && is_file($gamePath)) {
+        echo "  \033[34m→\033[0m game.php exists - kept (use --game <path> to overwrite, --no-game to skip)\n";
+        return;
+    }
+    /** @var array<string, mixed> $data */
+    $gameSrc = (new GameEntryGenerator())->generate($data);
+    if (file_put_contents($gamePath, $gameSrc) === false) {
+        fwrite(STDERR, "\033[31mError:\033[0m Failed to write {$gamePath}\n");
+        exit(1);
+    }
+    echo "\033[32m✓\033[0m Generated game entry: {$gamePath}\n";
 }
