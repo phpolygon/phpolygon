@@ -42,6 +42,19 @@ class Transform3DSystem extends AbstractSystem
         }
     }
 
+    /**
+     * Drop the per-entity snapshot when World::clear() runs. After clear() the
+     * id counter restarts from 0, so the next createEntity() hands out the same
+     * ids; without resetting $cache, isDirty() compares fresh transforms
+     * against the snapshot of the previous occupant of that id and skips the
+     * worldMatrix recompute when floats happen to match — children would
+     * render at LOCAL coordinates for one frame after a restart.
+     */
+    public function onWorldClear(World $world): void
+    {
+        $this->cache = [];
+    }
+
     private function updateHierarchy(World $world, int $entityId, Transform3D $transform, bool $parentDirty): void
     {
         $dirty = $parentDirty || $this->isDirty($entityId, $transform);

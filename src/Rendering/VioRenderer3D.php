@@ -519,17 +519,21 @@ class VioRenderer3D implements Renderer3DInterface
         // The fragment shader reconstructs a world-space view ray per pixel
         // from u_sky_inv_vp and evaluates the gradient + sun/moon analytically
         // — no skybox geometry. Opaque geometry overwrites wherever it draws.
+        // Sky / skybox state is STICKY: the most recent SetSky / SetSkybox
+        // persists across frames and is re-drawn every frame, even when no
+        // command is issued this frame. This is required because the colour
+        // buffer is cleared to depth-only and is filled by the sky — and a
+        // game may emit SetSky from onUpdate(), which (under the fixed-timestep
+        // loop) does NOT run on every rendered frame. Without persistence the
+        // sky vanishes on sky-less frames, leaving an unfilled D3D12 flip
+        // backbuffer → background flicker. Mirrors how camera / fog state is
+        // retained between commands.
         if ($this->pendingSky !== null) {
             $this->renderAtmosphericSky($this->pendingSky);
-        }
-        // Legacy cubemap skybox still supported; rendered only if no SetSky
-        // command was issued this frame.
-        if ($this->pendingSky === null
-            && $this->pendingSkyboxId !== null) {
+        } elseif ($this->pendingSkyboxId !== null) {
+            // Legacy cubemap skybox — only when no SetSky has ever been issued.
             $this->renderSkybox($this->pendingSkyboxId);
         }
-        $this->pendingSky = null;
-        $this->pendingSkyboxId = null;
 
         // --- Pass 2: Opaque geometry ---
         $this->bindPipeline('opaque');

@@ -970,7 +970,11 @@ void main() {
     float ao = curvatureAO(N, u_ao_strength);
     vec3 color = u_ambient_color * u_ambient_intensity * albedo * kD_ambient * ambientShadow * ao;
 
-    for (int dl = 0; dl < u_dir_light_count; dl++) {
+    // Clamp the loop bound to the array size: u_*_light_count is a GPU
+    // uniform and a stale/garbage value would otherwise run the loop for
+    // millions of iterations (and index out of bounds) → GPU TDR / device hang.
+    int dirCount = min(u_dir_light_count, 4);
+    for (int dl = 0; dl < dirCount; dl++) {
         vec3 dL = normalize(-u_dir_lights[dl].direction);
         float rawNdotL = dot(N, dL);
         float dShadow = (dl == 0) ? shadow : 1.0;
@@ -1008,7 +1012,8 @@ void main() {
         }
     }
 
-    for (int i = 0; i < u_point_light_count; i++) {
+    int pointCount = min(u_point_light_count, 4);
+    for (int i = 0; i < pointCount; i++) {
         vec3 Lp = u_point_lights[i].position - v_worldPos;
         float dist = length(Lp);
         Lp /= dist;
@@ -1027,7 +1032,8 @@ void main() {
     }
 
     // Spot lights — point-light falloff multiplied by a cone factor.
-    for (int i = 0; i < u_spot_light_count; i++) {
+    int spotCount = min(u_spot_light_count, 4);
+    for (int i = 0; i < spotCount; i++) {
         vec3 Ls = u_spot_lights[i].position - v_worldPos;
         float dist = length(Ls);
         Ls /= dist;

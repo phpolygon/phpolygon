@@ -22,8 +22,38 @@ import presetTypescript from '@babel/preset-typescript'
 import pluginCommonjs from '@babel/plugin-transform-modules-commonjs'
 import * as THREE from 'three'
 import { importR3f } from './r3f-import.mjs'
+import { extractConstants, classify, mapPhysics, buildGameplay } from './gameplay-extract.mjs'
 
 const round = (n) => Math.round(n * 1e5) / 1e5
+
+// Bounding box over geometry-bearing entities, for framing a generated camera
+// in the *static* (non-gameplay) output path. The gameplay path emits its own
+// Camera entity, so it does not need this — but `GameEntryGenerator::generateStatic()`
+// reads `bounds` to position the camera, and silently falls back to a hard-coded
+// (0,8,14) view when missing → off-screen scenes for any non-origin geometry.
+export function computeBounds(entities) {
+  let found = false
+  const min = [Infinity, Infinity, Infinity]
+  const max = [-Infinity, -Infinity, -Infinity]
+  const walk = (list) => {
+    for (const e of list ?? []) {
+      const hasMesh = (e.components ?? []).some((c) => c._class.endsWith('MeshRenderer'))
+      const t = (e.components ?? []).find((c) => c._class.endsWith('Transform3D'))
+      if (hasMesh && t?.position) {
+        found = true
+        const p = [t.position.x, t.position.y, t.position.z]
+        for (let i = 0; i < 3; i++) {
+          if (p[i] < min[i]) min[i] = p[i]
+          if (p[i] > max[i]) max[i] = p[i]
+        }
+      }
+      if (e.children) walk(e.children)
+    }
+  }
+  walk(entities)
+  return found ? { min: min.map(round), max: max.map(round) } : null
+}
+
 const slug = (parts) => parts.map((n) => String(n).replace(/-/g, 'n').replace(/\./g, '_').replace(/[^0-9a-z_]/gi, '')).join('x')
 
 function materialId(props) {
@@ -44,6 +74,34 @@ export function importScene(src, file = 'scene') {
   const headless = runHeadless(src, file)
   // Carry over the declarative warnings (e.g. why nothing matched) for context.
   headless.warnings = [...declarative.warnings.filter((w) => !/not importable/.test(w)), ...headless.warnings]
+
+  // --- Tier 3: gameplay (data-driven) ---
+  // Statically evaluate module-level `const` data and, if any gameplay role is
+  // recognised, annotate/re-parent the headless meshes with the engine's
+  // generic platformer components. Purely procedural games yield no roles and
+  // fall through to the static-only import.
+  try {
+    const { constants, names, playerSpawn } = extractConstants(src)
+    const { roles, picked } = classify(constants, names)
+    const hasGameplay = roles.platforms || roles.pipes || roles.coins || roles.enemies || roles.goal
+    if (hasGameplay) {
+      const physics = mapPhysics(roles.physics)
+      const gp = buildGameplay(roles, headless, physics, playerSpawn)
+      const matched = Object.entries(picked).map(([k, v]) => `${k}=${v}`).join(', ')
+      return {
+        meshes: headless.meshes,
+        materials: headless.materials,
+        entities: gp.entities,
+        systems: gp.systems,
+        warnings: [...headless.warnings, ...gp.warnings, `gameplay matched: ${matched || '(none)'}`],
+        _method: 'headless+gameplay',
+      }
+    }
+  } catch (e) {
+    headless.warnings.push(`gameplay extraction failed: ${e.message}`)
+  }
+
+  stripInternal(headless.entities)
   return headless
 }
 
@@ -163,17 +221,56 @@ function runHeadless(src, file) {
   }
 
   // --- traverse captured scenes ---
+  // Walk the *top-level* children so we can tag each mesh with the top-level
+  // group it belongs to (an internal `_group` marker, stripped before output).
+  // In typical scenes a moving unit (player, enemy) is a THREE.Group, while
+  // static props are added straight to the scene — so the group marker lets
+  // the gameplay pass treat a multi-mesh group as one entity instead of
+  // guessing from positions. The flat entity output is otherwise unchanged.
+  let groupSeq = 0
   for (const scene of scenes) {
     scene.updateMatrixWorld(true)
-    scene.traverse((obj) => {
-      if (obj.isMesh) {
-        const ent = meshEntity(obj)
+    for (const child of scene.children) {
+      if (child.isLight) {
+        const ent = lightEntity(child)
         if (ent) entities.push(ent)
-      } else if (obj.isLight) {
-        const ent = lightEntity(obj)
-        if (ent) entities.push(ent)
+        continue
       }
-    })
+      const meshCount = countMeshes(child)
+      if (meshCount === 0) {
+        // No meshes under this top-level child, but it may still contain
+        // *lights* (e.g. a <lightingRig> group). Descend so they aren't
+        // silently dropped — otherwise the scene imports dark with no warning.
+        child.traverse((obj) => {
+          if (obj.isLight && obj !== child) {
+            const ent = lightEntity(obj)
+            if (ent) entities.push(ent)
+          }
+        })
+        continue
+      }
+
+      if (child.isMesh && meshCount === 1) {
+        // Lone top-level mesh — no group.
+        const ent = meshEntity(child)
+        if (ent) entities.push(ent)
+        continue
+      }
+
+      // A group (or a mesh with sub-meshes): tag every descendant mesh.
+      const gpos = new THREE.Vector3()
+      child.getWorldPosition(gpos)
+      const group = { key: `g${groupSeq++}`, count: meshCount, x: round(gpos.x), y: round(gpos.y), z: round(gpos.z) }
+      child.traverse((obj) => {
+        if (obj.isMesh) {
+          const ent = meshEntity(obj)
+          if (ent) { ent._group = group; entities.push(ent) }
+        } else if (obj.isLight) {
+          const ent = lightEntity(obj)
+          if (ent) entities.push(ent)
+        }
+      })
+    }
   }
   if (scenes.length === 0) warnings.push('no THREE.Scene was constructed - nothing to extract')
 
@@ -345,6 +442,22 @@ function runHeadless(src, file) {
 const num = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : 1)
 const int = (v, d) => (typeof v === 'number' && Number.isFinite(v) ? Math.round(v) : d)
 
+/** Count mesh descendants (inclusive) of a THREE.Object3D. */
+function countMeshes(obj) {
+  let n = 0
+  obj.traverse((o) => { if (o.isMesh) n++ })
+  return n
+}
+
+/** Recursively drop internal-only `_group` markers before output. */
+export function stripInternal(entities) {
+  for (const e of entities ?? []) {
+    delete e._group
+    if (e.children) stripInternal(e.children)
+  }
+  return entities
+}
+
 // --- CLI ---
 import { pathToFileURL } from 'node:url'
 const isMain = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href
@@ -356,11 +469,16 @@ if (isMain) {
     console.error('Usage: node scripts/scene-extract.mjs <file.tsx> [--out file.import.json]')
     process.exit(1)
   }
-  const { meshes, materials, entities, warnings, _method } = importScene(readFileSync(input, 'utf8'), input)
+  const { meshes, materials, entities, warnings, systems, _method } = importScene(readFileSync(input, 'utf8'), input)
   const result = {
     name: basename(input).replace(/\.(t|j)sx?$/, ''),
-    systems: ['PHPolygon\\System\\Camera3DSystem', 'PHPolygon\\System\\Renderer3DSystem'],
+    systems: systems ?? ['PHPolygon\\System\\Camera3DSystem', 'PHPolygon\\System\\Renderer3DSystem'],
     meshes, materials, entities, warnings,
+  }
+  // Static-only output: emit geometry extents so GameEntryGenerator can frame
+  // the camera. Gameplay output already includes a Camera entity, so skip there.
+  if (!systems) {
+    result.bounds = computeBounds(entities)
   }
   const json = JSON.stringify(result, null, 2)
   if (outFile) {

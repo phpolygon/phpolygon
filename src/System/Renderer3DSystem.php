@@ -92,6 +92,20 @@ class Renderer3DSystem extends AbstractSystem
         private readonly RenderCommandList $commandList,
     ) {}
 
+    /**
+     * Drop the spatial-bin caches on World::clear(). After clear() the entity
+     * ids restart from 0, so the next createEntity() reuses the same ids;
+     * without resetting $entityBin / $binAabbs the coarse pre-cull associates
+     * fresh meshes with the bin of the previous occupant of that id, producing
+     * ~30 frames of wrong cull decisions until the next rebuildBins() boundary.
+     */
+    public function onWorldClear(World $world): void
+    {
+        $this->binAabbs = [];
+        $this->entityBin = [];
+        $this->frameCount = 0;
+    }
+
     public function update(World $world, float $dt): void
     {
         $this->wavePhase += $dt;
@@ -294,6 +308,10 @@ class Renderer3DSystem extends AbstractSystem
             $mesh = $entity->get(MeshRenderer::class);
             $transform = $entity->get(Transform3D::class);
 
+            if (!$mesh->visible) {
+                continue;
+            }
+
             // Transform3DSystem refreshed worldMatrix earlier in the frame;
             // reusing it here saves two redundant Mat4::trs() rebuilds per
             // entity per frame — the dominant CPU win at scenes with
@@ -435,6 +453,9 @@ class Renderer3DSystem extends AbstractSystem
 
         foreach ($world->query(MeshRenderer::class, Transform3D::class) as $entity) {
             $mesh = $entity->get(MeshRenderer::class);
+            if (!$mesh->visible) {
+                continue; // hidden meshes must not inflate a bin AABB
+            }
             $transform = $entity->get(Transform3D::class);
             $tr = $transform->worldMatrix->getTranslation();
             $bx = (int) floor($tr->x / self::BIN_SIZE);

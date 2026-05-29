@@ -1020,7 +1020,11 @@ fragment float4 fragment_mesh3d(
         color += F * light.dir_light_color * light.dir_light_intensity * spec * NdotL;
     }
 
-    for (int i = 0; i < light.point_light_count; i++) {
+    // Clamp the loop bound to the array size: *_light_count is GPU-supplied
+    // and a stale/garbage value would otherwise run the loop for millions of
+    // iterations (and index out of bounds) → GPU hang.
+    int pointCount = min(light.point_light_count, 4);
+    for (int i = 0; i < pointCount; i++) {
         float3 plPos   = light.point_lights[i].position;
         float3 plColor = light.point_lights[i].color;
         float  plInt   = light.point_lights[i].intensity;
@@ -1042,7 +1046,8 @@ fragment float4 fragment_mesh3d(
     }
 
     // Spot lights — point-light falloff multiplied by a cone factor.
-    for (int i = 0; i < light.spot_light_count; i++) {
+    int spotCount = min(light.spot_light_count, 4);
+    for (int i = 0; i < spotCount; i++) {
         float3 slPos   = light.spot_lights[i].position;
         float3 slDir   = light.spot_lights[i].direction;
         float3 slColor = light.spot_lights[i].color;

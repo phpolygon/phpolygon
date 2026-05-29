@@ -116,7 +116,11 @@ void main() {
     }
 
     // Point lights
-    for (int i = 0; i < u_point_light_count; i++) {
+    // Clamp the loop bound to the array size: u_*_light_count is a GPU
+    // uniform and a stale/garbage value would otherwise run the loop for
+    // millions of iterations (and index out of bounds) → GPU TDR / device hang.
+    int pointCount = min(u_point_light_count, 4);
+    for (int i = 0; i < pointCount; i++) {
         vec3 Lp   = u_point_lights[i].position - v_worldPos;
         float dist = length(Lp);
         Lp = normalize(Lp);
@@ -136,7 +140,8 @@ void main() {
     }
 
     // Spot lights — point-light falloff multiplied by a cone factor.
-    for (int i = 0; i < u_spot_light_count; i++) {
+    int spotCount = min(u_spot_light_count, 4);
+    for (int i = 0; i < spotCount; i++) {
         vec3 Ls   = u_spot_lights[i].position - v_worldPos;
         float dist = length(Ls);
         Ls = normalize(Ls);

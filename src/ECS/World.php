@@ -320,5 +320,15 @@ class World
         $this->nextEntityId = 0;
         $this->freeList = [];
         $this->entityCache = [];
+
+        // Give every system a chance to drop per-entity-id caches. Without this
+        // hook, caches keyed on int ids associate stale state with whichever
+        // entity next reuses that id (Transform3DSystem's "not dirty" check,
+        // Renderer3DSystem's spatial bin lookup, etc.).
+        foreach ($this->systems as $system) {
+            if ($system instanceof AbstractSystem) {
+                $system->onWorldClear($this);
+            }
+        }
     }
 }

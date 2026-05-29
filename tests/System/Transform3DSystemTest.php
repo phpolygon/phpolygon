@@ -108,6 +108,50 @@ class Transform3DSystemTest extends TestCase
         $this->assertEqualsWithDelta(-5.0, $wp->z, 1e-4);
     }
 
+    public function testWorldClearResetsDirtyCacheSoChildrenRebuildCorrectly(): void
+    {
+        // After World::clear() the entity-id counter restarts from 0. If
+        // Transform3DSystem's per-id snapshot survived, a freshly-built child
+        // with floats matching the snapshot of the previous occupant of that
+        // id would slip past isDirty as "unchanged" — its worldMatrix would
+        // stay at the constructor default (=localMatrix) and the child would
+        // render at LOCAL coordinates instead of parent*local. The
+        // onWorldClear hook on AbstractSystem must drop that snapshot.
+
+        $world = new World();
+        $world->addSystem(new Transform3DSystem());
+
+        $parent = $world->createEntity();
+        $parentT = new Transform3D(new Vec3(10.0, 0.0, 0.0));
+        $parent->attach($parentT);
+
+        $child = $world->createEntity();
+        $childT = new Transform3D(new Vec3(2.0, 0.0, 0.0));
+        $child->attach($childT);
+        $parentT->addChild($childT, $child->id, $parent->id);
+
+        $world->update(0.016);
+        $this->assertEqualsWithDelta(12.0, $childT->getWorldPosition()->x, 1e-5);
+
+        // Rebuild with the SAME ids and SAME floats — the snapshot would match
+        // exactly without the reset, so isDirty would falsely return false.
+        $world->clear();
+
+        $parent2 = $world->createEntity();
+        $parent2T = new Transform3D(new Vec3(10.0, 0.0, 0.0));
+        $parent2->attach($parent2T);
+
+        $child2 = $world->createEntity();
+        $child2T = new Transform3D(new Vec3(2.0, 0.0, 0.0));
+        $child2->attach($child2T);
+        $parent2T->addChild($child2T, $child2->id, $parent2->id);
+
+        $world->update(0.016);
+
+        $this->assertEqualsWithDelta(12.0, $child2T->getWorldPosition()->x, 1e-5,
+            'world->clear() must drop the snapshot so children recompute');
+    }
+
     public function testRemoveChildStopsInheritance(): void
     {
         $world = new World();
