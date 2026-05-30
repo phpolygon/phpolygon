@@ -607,3 +607,370 @@ function meshHalfHeightY(meshId) {
   }
   return 0
 }
+
+// ---- shooter genre (Tier 3, alternative to the platformer path) ------------
+
+/** Engine systems wired by a shooter import, in update order. */
+export const SHOOTER_SYSTEMS = [
+  'PHPolygon\\System\\ShooterControllerSystem',
+  'PHPolygon\\System\\WeaponSystem',
+  'PHPolygon\\System\\SpawnerSystem',
+  'PHPolygon\\System\\MoverSystem',
+  'PHPolygon\\System\\ProjectileSystem',
+  'PHPolygon\\System\\DamageSystem',
+  'PHPolygon\\System\\Transform3DSystem',
+  'PHPolygon\\System\\Camera3DSystem',
+  'PHPolygon\\System\\Renderer3DSystem',
+]
+
+/**
+ * Read an explicit genre declaration from the prototype, if present:
+ *
+ *   export const phpolygon = { genre: 'shooter', mode: 'fps', arenaHalf: 28, ... }
+ *
+ * Declared intent wins over the heuristics below — it is the robust, explicit
+ * path (no guessing from constant names) and lets the prototype override any
+ * scaffold parameter. Returns the evaluated object, or null when absent.
+ *
+ * @param {string} src
+ * @returns {Record<string, any> | null}
+ */
+export function extractDeclaredIntent(src) {
+  let ast
+  try {
+    ast = parse(src, { sourceType: 'module', plugins: ['jsx', 'typescript'] })
+  } catch {
+    return null
+  }
+  for (const node of ast.program.body) {
+    const decl = node.type === 'ExportNamedDeclaration' ? node.declaration : node
+    if (!decl || decl.type !== 'VariableDeclaration') continue
+    for (const d of decl.declarations) {
+      if (d.id.type === 'Identifier' && /^phpolygon$/i.test(d.id.name) && d.init) {
+        const value = evalNode(d.init, {})
+        if (value && typeof value === 'object' && !Array.isArray(value)) return value
+      }
+    }
+  }
+  return null
+}
+
+/**
+ * Recognise an arcade/rail shooter from its module-level world constants. A
+ * shooter is built procedurally (enemies spawned in the loop, not as `const`
+ * arrays), so there is nothing for the platformer classifier to match — instead
+ * we look for the scalar geometry of the play space: lateral bounds, the player
+ * plane and the enemy-spawn plane. Returns the detected config (with sane
+ * fallbacks) so {@link buildShooter} can scaffold the engine shooter layer.
+ *
+ * @param {Record<string, any>} constants
+ * @param {string[]} names
+ */
+export function classifyShooter(constants, names) {
+  const pick = (re) => {
+    for (const n of names) {
+      if (re.test(n) && isNum(constants[n])) return constants[n]
+    }
+    return undefined
+  }
+
+  // Arcade / rail signals: lateral bound, player plane, enemy-spawn plane.
+  const boundX = pick(/bound.*x|^b_?x$|^x_?bound$|limit.*x|half.*width|side.*x/i)
+  const spawnZ = pick(/spawn.*z|^spawn_?z$|enemy.*z|far.*z|^z_?spawn$/i)
+  const playerZ = pick(/player.*z|^player_?z$|ship.*z|^p_?z$|^z_?player$/i)
+  const yMin = pick(/y_?min|min_?y|floor_?y|low_?y/i)
+  const yMax = pick(/y_?max|max_?y|ceil_?y|high_?y|top_?y/i)
+  const yBase = pick(/y_?base|base_?y|mid_?y|start_?y|spawn_?y/i)
+
+  // First-person signals: an eye height, an arena extent, a magazine size.
+  const eyeHeight = pick(/^eye$|eye_?height|^eye_?y$|camera_?height|^cam_?h$/i)
+  const arenaHalf = pick(/^half$|arena.*half|half.*arena|arena_?size|arena_?r|^radius$/i)
+  const magazine = pick(/^mag$|magazine|^clip$|ammo/i)
+
+  const hasSpawn = spawnZ !== undefined
+  const hasPlayer = playerZ !== undefined
+  const hasBound = boundX !== undefined
+  const hasY = yMin !== undefined && yMax !== undefined
+
+  // An eye height plus an arena/magazine is a strong ground-FPS signal.
+  const isFps = eyeHeight !== undefined && (arenaHalf !== undefined || magazine !== undefined)
+  const isArcade = (hasSpawn && hasPlayer) || (hasSpawn && hasBound) || (hasBound && hasY && hasPlayer)
+  const isShooter = isFps || isArcade
+  const mode = isFps ? 'firstPerson' : 'planar'
+
+  return {
+    isShooter,
+    config: {
+      mode,
+      eyeHeight: eyeHeight ?? 1.7,
+      arenaHalf: arenaHalf ?? (hasBound ? boundX : 24),
+      magazine: magazine ?? 0,
+      boundX: boundX ?? (arenaHalf ?? 12),
+      yMin: yMin ?? 2,
+      yMax: yMax ?? 12,
+      yBase: yBase ?? (hasY ? (yMin + yMax) / 2 : 6),
+      playerZ: playerZ ?? 8,
+      spawnZ: spawnZ ?? -60,
+    },
+  }
+}
+
+/**
+ * Scaffold a runnable arcade shooter onto the engine's shooter layer. The
+ * initial-frame meshes (the player ship) become the {@link ShooterController}
+ * player; a {@link Spawner} streams generic enemies from the spawn plane toward
+ * the player; synthetic projectile/enemy assets are registered since the live
+ * versions only exist at runtime in the source. Precise enemy shapes, fire
+ * cadence and patterns are intentionally left to hand-tuning in PHP.
+ *
+ * @param {{boundX:number,yMin:number,yMax:number,yBase:number,playerZ:number,spawnZ:number}} cfg
+ * @param {{entities:any[], meshes:object, materials:object}} headless
+ */
+export function buildShooter(cfg, headless) {
+  return cfg.mode === 'firstPerson' ? buildFps(cfg, headless) : buildArcade(cfg, headless)
+}
+
+/** Arcade / rail shooter: the ship is the player body, enemies fly in on a plane. */
+function buildArcade(cfg, headless) {
+  const warnings = []
+  const meshes = { ...(headless.meshes ?? {}) }
+  const materials = { ...(headless.materials ?? {}) }
+
+  // Live enemies/shots spawn at runtime, so the initial frame has none — give
+  // the Spawner/Weapon registered assets to reference.
+  meshes['shot_default'] = { generator: 'SphereMesh', args: [0.18, 8, 8] }
+  materials['shot_default'] = { albedo: '#9ffcff', emission: '#9ffcff' }
+  meshes['enemy_default'] = { generator: 'OctahedronMesh', args: [0.7] }
+  materials['enemy_default'] = { albedo: '#ff3df0', emission: '#ff3df0' }
+
+  // The player = every initial mesh entity, re-parented under a controller root
+  // at the play plane (positions rebased so the rig hangs under the root).
+  const meshEntities = (headless.entities ?? []).filter(
+    (e) => (e.components ?? []).some((c) => typeof c._class === 'string' && c._class.endsWith('MeshRenderer')),
+  )
+  const reparented = new Set()
+  const spawn = { x: 0, y: cfg.yBase, z: cfg.playerZ }
+  const children = meshEntities.map((m) => {
+    reparented.add(m)
+    return rebase(m, spawn.x, spawn.y, spawn.z)
+  })
+  if (children.length === 0) {
+    warnings.push('shooter: no initial player mesh found — emitting a bodyless player root (add a ship mesh)')
+  }
+
+  const player = {
+    name: 'Player',
+    components: [
+      { _class: C('Transform3D'), position: { x: spawn.x, y: spawn.y, z: spawn.z } },
+      {
+        _class: C('ShooterController'),
+        mode: 'planar',
+        moveSpeed: 0.3,
+        boundsMin: { x: -cfg.boundX, y: cfg.yMin, z: cfg.playerZ },
+        boundsMax: { x: cfg.boundX, y: cfg.yMax, z: cfg.playerZ },
+      },
+      { _class: C('Health'), maxHp: 5, team: 'player', invulnFrames: 30, contactRadius: 0.8 },
+      {
+        _class: C('Weapon'),
+        mode: 'projectile',
+        fireRate: 8,
+        damage: 1,
+        projectileSpeed: 1.6,
+        projectileLifetime: 120,
+        muzzleOffset: { x: 0, y: 0, z: -1.2 },
+        projectileMeshId: 'shot_default',
+        projectileMaterialId: 'shot_default',
+        projectileScale: 1,
+      },
+    ],
+    children: children.length ? children : undefined,
+  }
+
+  const spawner = {
+    name: 'EnemySpawner',
+    components: [
+      { _class: C('Transform3D'), position: { x: 0, y: cfg.yBase, z: cfg.spawnZ } },
+      {
+        _class: C('Spawner'),
+        interval: 50,
+        maxAlive: 8,
+        totalToSpawn: -1,
+        areaMin: { x: -cfg.boundX, y: cfg.yMin, z: cfg.spawnZ },
+        areaMax: { x: cfg.boundX, y: cfg.yMax, z: cfg.spawnZ },
+        enemyMeshId: 'enemy_default',
+        enemyMaterialId: 'enemy_default',
+        enemyScale: 1,
+        enemyHp: 1,
+        enemyVelocity: { x: 0, y: 0, z: 0.6 }, // toward the player plane (+Z)
+        enemyScore: 100,
+        enemyContactDamage: 1,
+      },
+    ],
+  }
+
+  const camera = {
+    name: 'Camera',
+    components: [
+      { _class: C('Transform3D'), position: { x: 0, y: cfg.yBase + 2, z: cfg.playerZ + 10 } },
+      { _class: C('Camera3DComponent'), fov: 60, near: 0.1, far: 600, active: true },
+    ],
+  }
+
+  const gameState = { name: 'GameState', components: [{ _class: C('ShooterGameState'), lives: 3 }] }
+
+  // Top level = original non-mesh entities (lights, etc.) + the generated roots.
+  const topLevel = (headless.entities ?? []).filter((e) => !reparented.has(e))
+  const entities = [...topLevel, player, spawner, camera, gameState]
+  stripGroupMarkers(entities)
+
+  return {
+    meshes,
+    materials,
+    entities,
+    systems: SHOOTER_SYSTEMS,
+    warnings: [
+      ...warnings,
+      `shooter scaffold (arcade): bounds +/-${cfg.boundX} x [${cfg.yMin}..${cfg.yMax}], play z=${cfg.playerZ}, spawn z=${cfg.spawnZ}`,
+    ],
+  }
+}
+
+/**
+ * First-person shooter: the player IS the camera (no body) standing in the
+ * arena that the initial-frame meshes form; a hitscan weapon fires along the
+ * look direction and the {@link Spawner} streams homing enemies that close in
+ * from around the arena. The arena scenery is kept as top-level entities.
+ *
+ * @param {{eyeHeight:number,arenaHalf:number}} cfg
+ * @param {{entities:any[], meshes:object, materials:object}} headless
+ */
+function buildFps(cfg, headless) {
+  const meshes = { ...(headless.meshes ?? {}) }
+  const materials = { ...(headless.materials ?? {}) }
+  // The extracted floor plane is replaced by a flat arena_floor below; drop its
+  // now-unused registration so it doesn't linger in the generated scene.
+  for (const id of Object.keys(meshes)) {
+    if (id.startsWith('plane_')) delete meshes[id]
+  }
+  meshes['shot_default'] = { generator: 'SphereMesh', args: [0.14, 6, 6] }
+  materials['shot_default'] = { albedo: '#fff2a0', emission: '#fff2a0' }
+  meshes['enemy_default'] = { generator: 'OctahedronMesh', args: [0.8] }
+  materials['enemy_default'] = { albedo: '#ff3355', emission: '#ff3355' }
+
+  const eye = cfg.eyeHeight
+  const half = cfg.arenaHalf
+
+  // Guaranteed flat floor. PHPolygon's PlaneMesh is already horizontal (XZ,
+  // +Y normal), so it is emitted flat at y=0. A three.js PlaneGeometry lies in
+  // XY and carries a -90deg X rotation to lie flat; baking that onto the
+  // already-horizontal PlaneMesh would stand it upright — so the extracted
+  // plane scenery is dropped below and replaced by this.
+  meshes['arena_floor'] = { generator: 'PlaneMesh', args: [half * 2, half * 2] }
+  materials['arena_floor'] = { albedo: '#1a0b3a', roughness: 0.9 }
+  const floor = {
+    name: 'ArenaFloor',
+    components: [
+      { _class: C('Transform3D'), position: { x: 0, y: 0, z: 0 } },
+      { _class: C('MeshRenderer'), meshId: 'arena_floor', materialId: 'arena_floor' },
+    ],
+  }
+
+  // First-person weapon viewmodel — a simple gun parented to the camera, sitting
+  // lower-right. The muzzle is at the barrel tip so shots leave the gun.
+  meshes['fps_gun_body'] = { generator: 'BoxMesh', args: [0.12, 0.16, 0.5] }
+  meshes['fps_gun_barrel'] = { generator: 'BoxMesh', args: [0.06, 0.06, 0.45] }
+  materials['fps_gun'] = { albedo: '#20233a', roughness: 0.4, metallic: 0.6 }
+  materials['fps_gun_glow'] = { albedo: '#33ecff', emission: '#33ecff' }
+  const gunX = 0.34
+  const gunY = -0.28
+  const gun = [
+    { name: 'GunBody', components: [
+      { _class: C('Transform3D'), position: { x: gunX, y: gunY, z: -0.55 } },
+      { _class: C('MeshRenderer'), meshId: 'fps_gun_body', materialId: 'fps_gun' },
+    ] },
+    { name: 'GunBarrel', components: [
+      { _class: C('Transform3D'), position: { x: gunX, y: gunY + 0.03, z: -0.95 } },
+      { _class: C('MeshRenderer'), meshId: 'fps_gun_barrel', materialId: 'fps_gun_glow' },
+    ] },
+  ]
+
+  // The player origin sits at eye level (no body, no eyeOffset), so the camera,
+  // gun and projectile muzzle all share that point.
+  const player = {
+    name: 'Player',
+    components: [
+      { _class: C('Transform3D'), position: { x: 0, y: eye, z: 0 } },
+      { _class: C('Camera3DComponent'), fov: 78, near: 0.05, far: Math.max(400, half * 6), active: true },
+      {
+        _class: C('ShooterController'),
+        mode: 'firstPerson',
+        moveSpeed: 0.18,
+        eyeHeight: 0, // origin already at eye level
+        sensitivity: 0.0024,
+        boundsMin: { x: -half, y: 0, z: -half },
+        boundsMax: { x: half, y: 0, z: half },
+      },
+      { _class: C('Health'), maxHp: 100, team: 'player', invulnFrames: 18, contactRadius: 0.6 },
+      {
+        // Projectile mode (not hitscan) so the tracer is visible — firing reads
+        // clearly and matches the source's bright shots.
+        _class: C('Weapon'),
+        mode: 'projectile',
+        fireRate: 9,
+        damage: 34,
+        projectileSpeed: 3.0,
+        projectileLifetime: 45,
+        muzzleOffset: { x: gunX, y: gunY + 0.03, z: -1.15 },
+        projectileMeshId: 'shot_default',
+        projectileMaterialId: 'shot_default',
+        projectileScale: 1,
+      },
+    ],
+    children: gun,
+  }
+
+  const spawner = {
+    name: 'EnemySpawner',
+    components: [
+      { _class: C('Transform3D'), position: { x: 0, y: eye, z: 0 } },
+      {
+        _class: C('Spawner'),
+        interval: 55,
+        maxAlive: 6,
+        totalToSpawn: -1,
+        areaMin: { x: -half * 0.9, y: eye, z: -half * 0.9 },
+        areaMax: { x: half * 0.9, y: eye, z: half * 0.9 },
+        enemyMeshId: 'enemy_default',
+        enemyMaterialId: 'enemy_default',
+        enemyScale: 1.1,
+        enemyHp: 50,
+        enemyVelocity: { x: 0, y: 0, z: 0.25 },
+        enemyHomingRate: 0.04, // steer toward the player each tick
+        enemyScore: 100,
+        enemyContactDamage: 8,
+      },
+    ],
+  }
+
+  const gameState = { name: 'GameState', components: [{ _class: C('ShooterGameState'), lives: 1 }] }
+
+  // Keep arena scenery (walls, pillars) but drop the mis-oriented extracted
+  // floor plane(s) — the flat floor above replaces them.
+  const scenery = (headless.entities ?? []).filter((e) => {
+    const mr = (e.components ?? []).find(
+      (c) => typeof c._class === 'string' && c._class.endsWith('MeshRenderer'),
+    )
+    return !(mr && typeof mr.meshId === 'string' && mr.meshId.startsWith('plane_'))
+  })
+
+  const entities = [floor, ...scenery, player, spawner, gameState]
+  stripGroupMarkers(entities)
+
+  return {
+    meshes,
+    materials,
+    entities,
+    systems: SHOOTER_SYSTEMS,
+    warnings: [`shooter scaffold (first-person): eye=${eye}, arena half=${half}, gun viewmodel, homing enemies`],
+  }
+}

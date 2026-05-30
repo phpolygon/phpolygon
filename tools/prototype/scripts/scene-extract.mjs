@@ -22,7 +22,7 @@ import presetTypescript from '@babel/preset-typescript'
 import pluginCommonjs from '@babel/plugin-transform-modules-commonjs'
 import * as THREE from 'three'
 import { importR3f } from './r3f-import.mjs'
-import { extractConstants, classify, mapPhysics, buildGameplay } from './gameplay-extract.mjs'
+import { extractConstants, classify, mapPhysics, buildGameplay, classifyShooter, buildShooter, extractDeclaredIntent } from './gameplay-extract.mjs'
 
 const round = (n) => Math.round(n * 1e5) / 1e5
 
@@ -82,6 +82,38 @@ export function importScene(src, file = 'scene') {
   // fall through to the static-only import.
   try {
     const { constants, names, playerSpawn } = extractConstants(src)
+    const declared = extractDeclaredIntent(src)
+
+    // Resolve shooter intent. An explicit `export const phpolygon = { genre,
+    // mode, ... }` declaration wins (robust, no guessing, overrides any scaffold
+    // parameter); otherwise fall back to the world-constant heuristic — unless
+    // the prototype explicitly declared a different genre.
+    let shooterCfg = null
+    if (declared && declared.genre === 'shooter') {
+      shooterCfg = { ...classifyShooter(constants, names).config, ...declared }
+      if (declared.mode === 'fps') shooterCfg.mode = 'firstPerson'
+      else if (declared.mode === 'arcade') shooterCfg.mode = 'planar'
+    } else if (!declared || declared.genre === undefined) {
+      const auto = classifyShooter(constants, names)
+      if (auto.isShooter) shooterCfg = auto.config
+    }
+
+    if (shooterCfg) {
+      const sp = buildShooter(shooterCfg, headless)
+      return {
+        meshes: sp.meshes,
+        materials: sp.materials,
+        entities: sp.entities,
+        systems: sp.systems,
+        warnings: [
+          ...headless.warnings,
+          ...sp.warnings,
+          declared ? 'genre: declared via `export const phpolygon`' : 'genre: auto-detected (shooter)',
+        ],
+        _method: declared ? 'declared+shooter' : 'headless+shooter',
+      }
+    }
+
     const { roles, picked } = classify(constants, names)
     const hasGameplay = roles.platforms || roles.pipes || roles.coins || roles.enemies || roles.goal
     if (hasGameplay) {

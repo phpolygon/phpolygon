@@ -152,6 +152,11 @@ if ($command === 'scene:import') {
     exit(0);
 }
 
+if ($command === 'prototype:import') {
+    prototypeImport($platformArg, $options['output'], $options['game']);
+    exit(0);
+}
+
 if ($command === 'prototype:scaffold') {
     prototypeScaffold($options['output']);
     exit(0);
@@ -450,6 +455,7 @@ Usage:
   phpolygon prototype:export [--out DIR]
   phpolygon scene:transpile <file.scene.json> [--out Scene.php]
   phpolygon scene:import <file.import.json> [--out Scene.php]
+  phpolygon prototype:import <file.tsx|file.jsx> [--out Scene.php]
 
 Commands:
   build              Build game for distribution
@@ -459,6 +465,7 @@ Commands:
   prototype:export   Write the static bundle for the WebGL/JSX prototyping playground
   scene:transpile    Transpile a scene JSON file back to canonical PHP Scene source
   scene:import       Generate a self-contained PHP Scene from an R3F-import JSON
+  prototype:import   Import a TSX/JSX prototype (R3F / imperative Three.js / gameplay) straight to a PHP Scene
 
 Platforms:
   macos-arm64        macOS Apple Silicon
@@ -502,6 +509,7 @@ Examples:
   phpolygon prototype:export --out web   Export the bundle to ./web
   phpolygon scene:transpile s.json       Print PHP Scene source for s.json
   phpolygon scene:transpile s.json --out src/Scene/S.php   Write the PHP Scene file
+  phpolygon prototype:import shooter.tsx --out src/Scene/Shooter.php   Import TSX/JSX → PHP Scene in one step
   phpolygon perf:report boxes-1000       Compare last two boxes-1000 results
   phpolygon perf:report boxes-1000 abc123 def456   Compare two specific shas
   phpolygon perf:report boxes-1000 --baseline      Compare latest result vs committed baseline (CI mode)
@@ -964,6 +972,98 @@ function sceneImport(string $input, string $outputOption, string|bool|null $game
         exit(1);
     }
 
+    /** @var array<string, mixed> $data */
+    emitImportedScene($data, $outputOption, $gameOption);
+}
+
+/**
+ * One-step TSX/JSX → PHP Scene import. Runs the layered scene importer (Node)
+ * on a `.tsx`/`.jsx` file to produce the import bundle in memory, then feeds it
+ * through the same generators as scene:import — no intermediate `*.import.json`
+ * on disk.
+ *
+ * The importer is `scene-extract.mjs` (preferred), which covers three tiers:
+ *   1. declarative react-three-fiber JSX (static parse),
+ *   2. imperative Three.js (executes the file with a mocked React + patched
+ *      THREE, then traverses the built scene graph),
+ *   3. data-driven gameplay (platforms/coins/enemies/goal) annotation.
+ * Falls back to `r3f-import.mjs` (tier 1 only) when scene-extract isn't found.
+ *
+ * Needs Node plus the prototype's deps (run `npm install` in prototype/ once).
+ *
+ * Tier 2 EXECUTES the input file — only import code you trust.
+ */
+function prototypeImport(string $input, string $outputOption, string|bool|null $gameOption = null): void
+{
+    if ($input === '') {
+        fwrite(STDERR, "Usage: phpolygon prototype:import <file.tsx|file.jsx> [--out Scene.php] [--game game.php | --no-game]\n");
+        exit(1);
+    }
+    if (!is_file($input)) {
+        fwrite(STDERR, "\033[31mError:\033[0m File not found: {$input}\n");
+        exit(1);
+    }
+
+    $projectRoot = getcwd() ?: dirname(__DIR__);
+
+    // Prefer the project's scaffolded importer (its node_modules carries the
+    // deps); fall back to the engine's own copy under tools/. scene-extract
+    // (layered: declarative + imperative + gameplay) is preferred over the
+    // declarative-only r3f-import.
+    $searchDirs = [
+        $projectRoot . '/prototype/scripts',
+        dirname(__DIR__) . '/tools/prototype/scripts',
+    ];
+    $script = null;
+    foreach (['scene-extract.mjs', 'r3f-import.mjs'] as $name) {
+        foreach ($searchDirs as $dir) {
+            if (is_file($dir . '/' . $name)) {
+                $script = $dir . '/' . $name;
+                break 2;
+            }
+        }
+    }
+    if ($script === null) {
+        fwrite(STDERR, "\033[31mError:\033[0m Scene importer not found. Run 'phpolygon prototype:scaffold' first.\n");
+        exit(1);
+    }
+
+    echo "  \033[34m→\033[0m Parsing {$input} via " . basename($script) . "\n";
+    $json = runNode([$script, $input]);
+    $data = json_decode($json, true);
+    if (!is_array($data)) {
+        fwrite(STDERR, "\033[31mError:\033[0m R3F importer produced no valid JSON.\n");
+        exit(1);
+    }
+
+    /** @var array<string, mixed> $data */
+    emitImportedScene($data, $outputOption, $gameOption);
+}
+
+/**
+ * Shared tail for scene:import and prototype:import: run the import bundle
+ * through the generators, write the Scene (or print to stdout when no --out),
+ * surface the importer's warnings, and scaffold game.php unless suppressed.
+ *
+ * @param array<string, mixed> $data
+ */
+function emitImportedScene(array $data, string $outputOption, string|bool|null $gameOption): void
+{
+    // When writing to a file, the generated class name must match the file
+    // name for PSR-4 autoloading — and the scaffolded game.php must reference
+    // that same class. Both generators derive the class from $data['name']
+    // (StudlyCase), so align name with the --out basename:
+    //   --out src/Scene/Shooter.php  →  class Shooter  →  use App\Scene\Shooter
+    // Without this the class follows the input file name (e.g. neon_shooter_3d
+    // → NeonShooter3d) and never autoloads from Shooter.php. Name the output
+    // file like a PSR-4 class (PascalCase) so StudlyCase is a no-op.
+    if ($outputOption !== '') {
+        $base = preg_replace('/\.php$/i', '', basename($outputOption));
+        if (is_string($base) && $base !== '') {
+            $data['name'] = $base;
+        }
+    }
+
     if (isset($data['warnings']) && is_array($data['warnings']) && $data['warnings'] !== []) {
         foreach ($data['warnings'] as $warning) {
             fwrite(STDERR, "\033[33m!\033[0m " . (is_string($warning) ? $warning : json_encode($warning)) . "\n");
@@ -971,7 +1071,6 @@ function sceneImport(string $input, string $outputOption, string|bool|null $game
     }
 
     try {
-        /** @var array<string, mixed> $data */
         $php = (new SceneImportGenerator())->generate($data);
     } catch (\Throwable $e) {
         fwrite(STDERR, "\033[31mError:\033[0m {$e->getMessage()}\n");
@@ -1000,11 +1099,49 @@ function sceneImport(string $input, string $outputOption, string|bool|null $game
         echo "  \033[34m→\033[0m game.php exists - kept (use --game <path> to overwrite, --no-game to skip)\n";
         return;
     }
-    /** @var array<string, mixed> $data */
     $gameSrc = (new GameEntryGenerator())->generate($data);
     if (file_put_contents($gamePath, $gameSrc) === false) {
         fwrite(STDERR, "\033[31mError:\033[0m Failed to write {$gamePath}\n");
         exit(1);
     }
     echo "\033[32m✓\033[0m Generated game entry: {$gamePath}\n";
+}
+
+/**
+ * Run `node <args...>` and return its captured stdout. The importer streams
+ * progress + per-element warnings to stderr (passed through to the user) and
+ * writes the JSON bundle to stdout. Exits with a helpful hint when Node is
+ * missing or its dependencies (@babel/parser) aren't installed.
+ *
+ * @param list<string> $args
+ */
+function runNode(array $args): string
+{
+    $descriptors = [
+        0 => ['pipe', 'r'],
+        1 => ['pipe', 'w'],
+        2 => ['pipe', 'w'],
+    ];
+    $process = @proc_open(array_merge(['node'], $args), $descriptors, $pipes);
+    if (!is_resource($process)) {
+        fwrite(STDERR, "\033[31mError:\033[0m Could not launch Node. Is it installed and on PATH?\n");
+        exit(1);
+    }
+    fclose($pipes[0]);
+    $stdout = stream_get_contents($pipes[1]) ?: '';
+    $stderr = stream_get_contents($pipes[2]) ?: '';
+    fclose($pipes[1]);
+    fclose($pipes[2]);
+    $exit = proc_close($process);
+
+    if ($stderr !== '') {
+        fwrite(STDERR, $stderr);
+    }
+    if ($exit !== 0) {
+        if (str_contains($stderr, '@babel/parser') || str_contains($stderr, 'ERR_MODULE_NOT_FOUND')) {
+            fwrite(STDERR, "\n\033[33mHint:\033[0m the importer needs its Node deps. Run:\n  cd prototype && npm install\n");
+        }
+        exit($exit);
+    }
+    return $stdout;
 }
