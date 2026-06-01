@@ -65,5 +65,17 @@ class EngineConfig
          * @var class-string<\PHPolygon\Scene\Scene>|null
          */
         public readonly ?string $benchmarkScene = null,
+        /**
+         * Upper bound on the in-memory vio_text_measure() memoization map kept
+         * by VioRenderer2D. Hot-path UI text (date/money/counters) feeds new
+         * keys every frame; without a cap the map grew unbounded and triggered
+         * GC/hashtable-resize stalls (see v0.17.2 perf regression fix).
+         *
+         * A FIFO eviction policy drops the oldest entry once the cap is hit.
+         * 4096 comfortably fits a panel-rich HUD's stable strings; tune lower
+         * if you target very memory-constrained devices, higher only if you
+         * have profiled and confirmed thrashing.
+         */
+        public readonly int $textMeasureCacheCap = 4096,
     ) {}
 }

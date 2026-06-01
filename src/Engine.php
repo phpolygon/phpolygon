@@ -239,7 +239,10 @@ class Engine
 
         if ($engine->useVio && $engine->window instanceof VioWindow) {
             $engine->window->initialize($engine->input);
-            $engine->renderer2D = new VioRenderer2D($engine->window->getContext());
+            $engine->renderer2D = new VioRenderer2D(
+                $engine->window->getContext(),
+                $config->textMeasureCacheCap,
+            );
         } elseif ($engine->input instanceof Input) {
             $engine->window->initialize($engine->input);
             $engine->renderer2D = new Renderer2D($engine->window);
@@ -560,7 +563,7 @@ class Engine
         if (!$this->headless && $this->useVio && $this->window instanceof VioWindow) {
             $vioCtx = $this->window->getContext();
 
-            $vioRenderer = new VioRenderer2D($vioCtx);
+            $vioRenderer = new VioRenderer2D($vioCtx, $this->config->textMeasureCacheCap);
             $this->renderer2D = $vioRenderer;
 
             $vioTextures = new VioTextureManager($vioCtx, $this->config->assetsPath);
