@@ -21,6 +21,7 @@ use PHPolygon\Runtime\PerfProfiler;
 final class PerfOverlay
 {
     private const KEY_F3 = 292;
+    private const KEY_V = 86;
     private const PANEL_WIDTH = 280.0;
     private const PADDING = 8.0;
     private const LINE_HEIGHT = 14.0;
@@ -28,9 +29,14 @@ final class PerfOverlay
     private const HEADER_FONT_SIZE = 13.0;
 
     private bool $visible = false;
+    private bool $verbose = false;
+    private readonly ?DevMonitorPanel $monitorPanel;
 
-    public function __construct(private readonly Engine $engine)
-    {
+    public function __construct(
+        private readonly Engine $engine,
+        bool $devMonitor = false,
+    ) {
+        $this->monitorPanel = $devMonitor ? new DevMonitorPanel($engine) : null;
     }
 
     public function isVisible(): bool
@@ -46,17 +52,31 @@ final class PerfOverlay
     /**
      * Read input and toggle visibility on F3 press. Call once per render
      * frame, after game render so the overlay sits on top.
+     *
+     * When the engine was constructed with devMonitor=true the V key
+     * toggles between the compact F3 view and the expanded DevMonitorPanel.
      */
     public function tickInput(InputInterface $input): void
     {
         if ($input->isKeyPressed(self::KEY_F3)) {
             $this->visible = !$this->visible;
         }
+        if ($this->monitorPanel !== null && $input->isKeyPressed(self::KEY_V)) {
+            $this->verbose = !$this->verbose;
+            if ($this->verbose) {
+                $this->visible = true;
+            }
+        }
     }
 
     public function render(Renderer2DInterface $r): void
     {
         if (!$this->visible) {
+            return;
+        }
+
+        if ($this->verbose && $this->monitorPanel !== null) {
+            $this->monitorPanel->render($r);
             return;
         }
 

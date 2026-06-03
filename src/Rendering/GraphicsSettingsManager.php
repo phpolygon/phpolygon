@@ -7,9 +7,11 @@ namespace PHPolygon\Rendering;
 use PHPolygon\Engine;
 use PHPolygon\Event\EventDispatcher;
 use PHPolygon\Event\GraphicsSettingsChanged;
+use PHPolygon\Event\TargetFpsChanged;
 use PHPolygon\Rendering\Quality\BenchmarkResult;
 use PHPolygon\Rendering\Quality\GraphicsAutoTuner;
 use PHPolygon\Rendering\Quality\QualityMode;
+use PHPolygon\Runtime\ThermalProfile;
 use PHPolygon\Scene\Scene;
 
 /**
@@ -35,6 +37,16 @@ class GraphicsSettingsManager
     private bool $recommendRecalibration = false;
     private ?Engine $engine = null;
     private ?EventDispatcher $events = null;
+    /**
+     * Persisted marker that ThermalMonitor's initial hardware ceiling has
+     * already been applied to this save file. Stored under the top-level
+     * "thermalHint" key in graphics.json so it survives settings rewrites.
+     *
+     * Once set, applyInitialCeiling() is a no-op - the user is free to raise
+     * targetFps in the options panel without the engine clobbering it on
+     * the next boot.
+     */
+    private ?string $thermalHint = null;
 
     public function __construct(
         string $path = 'saves/graphics.json',
@@ -75,6 +87,72 @@ class GraphicsSettingsManager
     public function setTargetFps(float $fps): void
     {
         $this->update(fn(GraphicsSettings $s): GraphicsSettings => $s->with(targetFps: max(15.0, $fps)));
+    }
+
+    /**
+     * Non-persisting targetFps change for runtime-driven adjustments such
+     * as the ThermalMonitor's pressure reactions. Applies the value to the
+     * active renderer and emits both GraphicsSettingsChanged and
+     * TargetFpsChanged, but never touches graphics.json - we don't want a
+     * temporary throttle reaction to become the player's permanent setting.
+     *
+     * No-op when the new value matches the current targetFps. Source/reason
+     * are forwarded to the TargetFpsChanged event for telemetry.
+     */
+    public function setRuntimeTargetFps(float $fps, string $source, string $reason): void
+    {
+        $fps = max(15.0, $fps);
+        $previous = $this->settings;
+        if (abs($previous->targetFps - $fps) < 0.5) {
+            return;
+        }
+        $next = $previous->with(targetFps: $fps);
+        $this->settings = $next;
+        $this->applyToRenderer();
+        $this->events?->dispatch(new GraphicsSettingsChanged(previous: $previous, current: $next));
+        $this->events?->dispatch(new TargetFpsChanged(
+            previous: $previous->targetFps,
+            current: $next->targetFps,
+            source: $source,
+            reason: $reason,
+        ));
+    }
+
+    /**
+     * One-shot ceiling applied at first launch on known throttle-prone
+     * hardware (e.g. 2018/2019 15" MBP i9). Lowers targetFps to $maxFps if
+     * the current value exceeds it and persists a thermalHint marker so
+     * subsequent boots leave the player's setting alone.
+     *
+     * No-op when:
+     *   - $maxFps is null (hardware has no recommended ceiling)
+     *   - thermalHint is already set in graphics.json
+     *   - current targetFps is already at or below $maxFps
+     */
+    public function applyInitialCeiling(?float $maxFps, ThermalProfile $profile): void
+    {
+        if ($maxFps === null) {
+            return;
+        }
+        if ($this->thermalHint !== null) {
+            return;
+        }
+        $hint = $profile->value;
+        if ($this->settings->targetFps <= $maxFps + 0.5) {
+            // No change needed, but still record the hint so we don't keep
+            // re-evaluating on every boot.
+            $this->thermalHint = $hint;
+            $this->save();
+            return;
+        }
+        $this->update(fn(GraphicsSettings $s): GraphicsSettings => $s->with(targetFps: $maxFps));
+        $this->thermalHint = $hint;
+        $this->save();
+    }
+
+    public function thermalHint(): ?string
+    {
+        return $this->thermalHint;
     }
 
     /**
@@ -170,6 +248,11 @@ class GraphicsSettingsManager
         if ($savedFingerprint !== '' && $savedFingerprint !== $this->hardwareFingerprint) {
             $this->recommendRecalibration = true;
         }
+
+        $hint = $decoded['thermalHint'] ?? null;
+        if (is_string($hint) && $hint !== '') {
+            $this->thermalHint = $hint;
+        }
     }
 
     public function save(): void
@@ -179,6 +262,9 @@ class GraphicsSettingsManager
             'hardwareFingerprint' => $this->hardwareFingerprint,
             'settings' => $this->settings->toJson(),
         ];
+        if ($this->thermalHint !== null) {
+            $payload['thermalHint'] = $this->thermalHint;
+        }
         $dir = dirname($this->path);
         if (!is_dir($dir)) {
             @mkdir($dir, 0755, true);

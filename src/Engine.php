@@ -27,6 +27,9 @@ use PHPolygon\Rendering\VioRenderer3D;
 use PHPolygon\Rendering\VioTextureManager;
 use PHPolygon\Rendering\Quality\AdaptiveQualityController;
 use PHPolygon\Rendering\Quality\QualityMode;
+use PHPolygon\Rendering\Quality\ThermalMonitor;
+use PHPolygon\Rendering\Quality\ThermalSourceFrametime;
+use PHPolygon\Rendering\Quality\ThermalSourceOs;
 use PHPolygon\Rendering\Renderer2D;
 use PHPolygon\Rendering\Renderer2DInterface;
 use PHPolygon\Rendering\RenderCommandList;
@@ -35,7 +38,10 @@ use PHPolygon\Rendering\ShaderManager;
 use PHPolygon\Rendering\TextureManager;
 use PHPolygon\Testing\NullTextureManager;
 use PHPolygon\Runtime\Clock;
+use PHPolygon\Runtime\DevLogger;
 use PHPolygon\Runtime\GameLoop;
+use PHPolygon\Runtime\HardwareProfile;
+use PHPolygon\Runtime\HardwareProfiler;
 use PHPolygon\Runtime\Input;
 use PHPolygon\Runtime\InputInterface;
 use PHPolygon\Runtime\NullWindow;
@@ -73,6 +79,9 @@ class Engine
     public readonly ShaderManager $shaders;
     public readonly GraphicsSettingsManager $graphics;
     public ?AdaptiveQualityController $adaptiveQuality = null;
+    public readonly ?ThermalMonitor $thermalMonitor;
+    public readonly HardwareProfile $hardware;
+    public readonly ?DevLogger $devLogger;
     public readonly ThreadScheduler|NullThreadScheduler $scheduler;
 
     public readonly ?PerfOverlay $perfOverlay;
@@ -194,6 +203,40 @@ class Engine
         $this->graphics->bindEngine($this);
         $this->adaptiveQuality = new AdaptiveQualityController($this);
 
+        $this->hardware = (new HardwareProfiler())->detect($this->headless);
+        self::log('Hardware: ' . $this->hardware->describe());
+
+        // CLI flag pickup. Two sources are supported so the flag works
+        // both in packaged PHAR builds (the stub pre-defines the
+        // constants in PharBuilder::generateStub) and in direct
+        // `php game.php --dev-monitor` runs during development.
+        $cliFlags = self::detectCliDevFlags();
+        $effectiveDevMode = $config->devMode
+            || defined('PHPOLYGON_CLI_DEV')
+            || $cliFlags['dev'];
+        $effectiveDevMonitor = $config->devMonitor
+            || defined('PHPOLYGON_CLI_DEV_MONITOR')
+            || $cliFlags['monitor'];
+        $this->devLogger = $effectiveDevMode
+            ? new DevLogger($config->devLogPath, alsoStdout: !$this->headless)
+            : null;
+        $this->devLogger?->logHardwareProfile($this->hardware);
+
+        if ($config->autoThermalManagement && !$this->headless) {
+            $sources = [new ThermalSourceFrametime()];
+            if (PHP_OS_FAMILY === 'Darwin' && function_exists('vio_thermal_state')) {
+                $sources[] = new ThermalSourceOs();
+            }
+            $this->thermalMonitor = new ThermalMonitor(
+                engine: $this,
+                profile: $this->hardware,
+                sources: $sources,
+                log: $this->devLogger,
+            );
+        } else {
+            $this->thermalMonitor = null;
+        }
+
         if ($this->headless) {
             $this->window = new NullWindow($config->width, $config->height, $config->title);
             $this->renderer2D = new NullRenderer2D($config->width, $config->height);
@@ -220,9 +263,9 @@ class Engine
 
         self::log('Window: ' . get_class($this->window));
 
-        $this->perfOverlay = $config->devMode ? new PerfOverlay($this) : null;
+        $this->perfOverlay = $effectiveDevMode ? new PerfOverlay($this, devMonitor: $effectiveDevMonitor) : null;
         if ($this->perfOverlay !== null) {
-            self::log('PerfOverlay enabled (F3 to toggle)');
+            self::log('PerfOverlay enabled (F3 to toggle' . ($effectiveDevMonitor ? ', V for monitor' : '') . ')');
         }
 
         Facade::setEngine($this);
@@ -545,10 +588,10 @@ class Engine
             // the persisted preference now that the GL context exists.
             $this->window->setVsync($this->graphics->settings()->vsync);
         }
-        $this->applyRenderFpsCap($this->graphics->settings()->fpsCap);
+        $this->applyRenderFpsCap($this->graphics->settings());
         $this->events->listen(\PHPolygon\Event\GraphicsSettingsChanged::class, function (\PHPolygon\Event\GraphicsSettingsChanged $event): void {
             $this->window->setVsync($event->current->vsync);
-            $this->applyRenderFpsCap($event->current->fpsCap);
+            $this->applyRenderFpsCap($event->current);
             $this->textures->applySettings($event->current);
         });
         $this->textures->applySettings($this->graphics->settings());
@@ -636,6 +679,26 @@ class Engine
                 }
             }
             self::log('onInit callback done');
+        }
+
+        // Hardware-aware targetFps ceiling: on known throttle-prone Macs
+        // (e.g. 2018/2019 15" MBP i9) lower the calibration target so the
+        // auto-tuner picks quality tiers that hold up under sustained load.
+        // No-op when the hardware has no recommended ceiling, when a
+        // thermalHint is already persisted, or when autoThermalManagement
+        // is disabled.
+        if ($this->config->autoThermalManagement && !$this->headless) {
+            $ceiling = $this->hardware->targetFpsCeiling();
+            if ($ceiling !== null) {
+                $this->graphics->applyInitialCeiling($ceiling, $this->hardware->thermalProfile);
+                if ($this->devLogger !== null) {
+                    $this->devLogger->logMessage(sprintf(
+                        'Hardware ceiling: targetFps capped at %.0f for profile %s',
+                        $ceiling,
+                        $this->hardware->thermalProfile->value,
+                    ));
+                }
+            }
         }
 
         // First-launch graphics calibration: runs after onInit so games have
@@ -828,9 +891,66 @@ class Engine
 
         $this->lastGcDelta = PerfProfiler::gcDelta();
 
+        // Run thermal monitoring first so any targetFps adjustment is in
+        // place before the adaptive quality controller evaluates against
+        // the new budget. No-op when autoThermalManagement is disabled.
+        $this->thermalMonitor?->tick($elapsedMs);
+
         // Drive the adaptive quality controller. It is a no-op unless the
         // player has switched to QualityMode::Adaptive.
         $this->adaptiveQuality?->tick($elapsedMs);
+
+        if ($this->devLogger !== null && $this->thermalMonitor !== null) {
+            $frametimeSource = self::findFrametimeSource($this->thermalMonitor->sources());
+            if ($frametimeSource !== null && $frametimeSource->sampleCount() >= 60) {
+                $p95 = $frametimeSource->lastP95Ms();
+                $target = $this->graphics->settings()->targetFps;
+                $budget = 1000.0 / max(1.0, $target);
+                $this->devLogger->logFrameTime($p95, $budget, $target);
+            }
+        }
+    }
+
+    /**
+     * Inspect $_SERVER['argv'] for the engine's dev CLI flags. Mirrors the
+     * detection in PharBuilder::generateStub so direct `php game.php` runs
+     * get the same behaviour as packaged builds.
+     *
+     * @return array{dev: bool, monitor: bool}
+     */
+    private static function detectCliDevFlags(): array
+    {
+        $argv = $_SERVER['argv'] ?? [];
+        if (!is_array($argv)) {
+            return ['dev' => false, 'monitor' => false];
+        }
+        $dev = false;
+        $monitor = false;
+        foreach ($argv as $arg) {
+            if (!is_string($arg)) {
+                continue;
+            }
+            if ($arg === '--dev') {
+                $dev = true;
+            } elseif ($arg === '--dev-monitor' || $arg === '--dev=monitor') {
+                $dev = true;
+                $monitor = true;
+            }
+        }
+        return ['dev' => $dev, 'monitor' => $monitor];
+    }
+
+    /**
+     * @param list<\PHPolygon\Rendering\Quality\ThermalSourceInterface> $sources
+     */
+    private static function findFrametimeSource(array $sources): ?\PHPolygon\Rendering\Quality\ThermalSourceFrametime
+    {
+        foreach ($sources as $src) {
+            if ($src instanceof \PHPolygon\Rendering\Quality\ThermalSourceFrametime) {
+                return $src;
+            }
+        }
+        return null;
     }
 
     public function getConfig(): EngineConfig
@@ -1015,19 +1135,27 @@ class Engine
      * stall over the WM's _NET_WM_PING budget.
      */
     /**
-     * Apply the render FPS cap. A 0 ("uncapped") preference is floored to the
-     * fixed tick rate, because the 3D scene is drawn on fixed-timestep update
-     * ticks: presenting faster than the tick rate only re-presents stale
-     * (D3D12 flip-model) backbuffers, which flickers during movement. Capping
-     * render to the update rate keeps every present backed by a fresh draw. An
-     * explicit cap (30 / 120 / 144 …) is honoured verbatim, so a game that adds
-     * render interpolation can still opt into higher rates.
+     * Apply the render FPS cap. The effective cap is the most restrictive of:
+     *
+     *   1. The player's explicit `fpsCap` (30 / 60 / 120 / 144), when > 0.
+     *   2. The engine's `targetFps` - the soft target the AdaptiveQualityController
+     *      and ThermalMonitor steer towards. When the monitor lowers targetFps in
+     *      response to thermal pressure, the render rate drops with it; we don't
+     *      want to keep burning frames the user can't see.
+     *   3. The fixed `targetTickRate`. Rendering faster than the world updates
+     *      only re-presents stale (D3D12 flip-model) backbuffers, which flickers
+     *      during movement. Games that add render interpolation can opt into
+     *      higher rates by setting an explicit `fpsCap`.
      */
-    private function applyRenderFpsCap(int $preference): void
+    private function applyRenderFpsCap(\PHPolygon\Rendering\GraphicsSettings $settings): void
     {
-        $this->gameLoop->setFpsCap(
-            $preference > 0 ? $preference : (int) round($this->config->targetTickRate),
-        );
+        $tickRate = (float) $this->config->targetTickRate;
+        if ($settings->fpsCap > 0) {
+            $cap = (float) $settings->fpsCap;
+        } else {
+            $cap = min($settings->targetFps, $tickRate);
+        }
+        $this->gameLoop->setFpsCap((int) round(max(1.0, $cap)));
     }
 
     private function loadEngineFonts(): void

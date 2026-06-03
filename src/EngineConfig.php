@@ -86,5 +86,30 @@ class EngineConfig
          * see \PHPolygon\Branding\StudioSplashInterface.
          */
         public readonly ?\PHPolygon\Branding\StudioSplashInterface $studioSplash = null,
+        /**
+         * Enable the ThermalMonitor: per-frame pressure aggregation from
+         * NSProcessInfo (macOS) and a universal frametime guard. Adjusts
+         * targetFps at runtime to keep the CPU/GPU out of thermal throttling
+         * on i9-class Intel Macs and any other system where sustained
+         * frame-time overshoot indicates a thermal problem.
+         *
+         * Set to false to disable both the first-launch hardware ceiling and
+         * the runtime monitor.
+         */
+        public readonly bool $autoThermalManagement = true,
+        /**
+         * When true and devMode is also active, the PerfOverlay swaps its
+         * compact F3 readout for an expanded hardware-monitoring panel
+         * (HardwareProfile, thermal source, p95 frametime, targetFps history)
+         * toggled via the V key. Also activated by passing --dev-monitor or
+         * --dev=monitor on the command line of a packaged game.
+         */
+        public readonly bool $devMonitor = false,
+        /**
+         * Filesystem path for the developer log written when devMode is
+         * active. Relative paths resolve against the CWD at engine startup.
+         * Append-only; rotation is left to the developer.
+         */
+        public readonly string $devLogPath = 'saves/dev.log',
     ) {}
 }

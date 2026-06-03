@@ -186,6 +186,19 @@ define('PHPOLYGON_PATH_RESOURCES', $resourceBase . DS . 'resources');
 define('PHPOLYGON_PATH_SAVES', $resourceBase . DS . 'saves');
 define('PHPOLYGON_PATH_MODS', $resourceBase . DS . 'mods');
 
+// CLI flags: --dev enables EngineConfig::$devMode (logging + F3 overlay).
+// --dev-monitor (or --dev=monitor) implies --dev and switches the F3
+// overlay into the expanded hardware-monitor panel.
+foreach ($_SERVER['argv'] ?? [] as $__arg) {
+    if ($__arg === '--dev') {
+        define('PHPOLYGON_CLI_DEV', true);
+    } elseif ($__arg === '--dev-monitor' || $__arg === '--dev=monitor') {
+        if (!defined('PHPOLYGON_CLI_DEV')) define('PHPOLYGON_CLI_DEV', true);
+        define('PHPOLYGON_CLI_DEV_MONITOR', true);
+    }
+}
+unset($__arg);
+
 $__engineLog("Resource base: " . $resourceBase);
 $__engineLog("PHAR base: " . $pharBase);
 

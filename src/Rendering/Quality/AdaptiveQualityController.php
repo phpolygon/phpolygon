@@ -54,6 +54,7 @@ final class AdaptiveQualityController
     private float $lastAdjustmentAt = 0.0;
     private float $stableSinceAt = 0.0;
     private float $vetoedUntil = 0.0;
+    private float $lastDowngradeAt = 0.0;
 
     public function __construct(
         private readonly Engine $engine,
@@ -139,6 +140,7 @@ final class AdaptiveQualityController
         if ($next === null) {
             return;
         }
+        $this->lastDowngradeAt = microtime(true);
         $this->dispatchOrApply($current, $next, $reason);
     }
 
@@ -177,5 +179,16 @@ final class AdaptiveQualityController
     public function getSamples(): array
     {
         return $this->samples;
+    }
+
+    /**
+     * Wall-clock timestamp of the last quality downgrade (microtime(true)).
+     * 0.0 when no downgrade has happened in this session. Read by
+     * ThermalMonitor to lock its targetFps ramp-up while AQC is still
+     * actively reacting - prevents the two controllers from fighting.
+     */
+    public function lastDowngradeAt(): float
+    {
+        return $this->lastDowngradeAt;
     }
 }
