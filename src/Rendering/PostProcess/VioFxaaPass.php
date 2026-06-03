@@ -82,9 +82,9 @@ final class VioFxaaPass
     {
         // VIO_SHADER_GLSL_RAW is OpenGL passthrough; on Metal/Vulkan/D3D vio
         // transpiles via VIO_SHADER_GLSL. Mirror VioRenderer3D::compileShader().
-        $format = vio_backend_name($this->ctx) === 'opengl'
-            ? VIO_SHADER_GLSL_RAW
-            : VIO_SHADER_GLSL;
+        $format = \PHPolygon\Rendering\BackendConventions::forBackend(
+            vio_backend_name($this->ctx)
+        )->shaderSourceFormat();
 
         $vertSrc = @file_get_contents(self::SHADER_DIR . 'fxaa.vert.glsl');
         $fragSrc = @file_get_contents(self::SHADER_DIR . 'fxaa.frag.glsl');

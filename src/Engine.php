@@ -1649,6 +1649,17 @@ class Engine
         return 'unknown';
     }
 
+    /**
+     * Per-backend rendering conventions (depth range, render-target Y origin,
+     * shader source format) for the active GPU backend. Use this instead of
+     * hand-rolling `vio_backend_name(...) === 'opengl'` checks so a single place
+     * owns each convention. See {@see \PHPolygon\Rendering\BackendConventions}.
+     */
+    public function backendConventions(): \PHPolygon\Rendering\BackendConventions
+    {
+        return \PHPolygon\Rendering\BackendConventions::forBackend($this->getVioBackendName());
+    }
+
     private function shutdown(): void
     {
         self::log('Shutting down...');

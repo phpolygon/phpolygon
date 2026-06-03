@@ -22,6 +22,7 @@ use PHPolygon\Rendering\Command\SetSkybox;
 use PHPolygon\Rendering\Command\SetWaveAnimation;
 use PHPolygon\Rendering\Command\SetWind;
 use PHPolygon\Rendering\PostProcess\VioFxaaPass;
+use PHPolygon\Rendering\PostProcess\VioShadowDebugPass;
 use PHPolygon\Rendering\Quality\AntiAliasing;
 use VioContext;
 use VioCubemap;
@@ -156,6 +157,9 @@ class VioRenderer3D implements Renderer3DInterface
     /** Lazy FXAA post-process pass. Allocated when AntiAliasing == Fxaa. */
     private ?VioFxaaPass $fxaaPass = null;
 
+    /** Lazy shadow-map raw-depth debug blit. Allocated when PHPOLYGON_DEBUG_SHADOWMAP=1. */
+    private ?VioShadowDebugPass $shadowDebugPass = null;
+
     /**
      * True when the current frame is being rendered into the offscreen target
      * rather than directly into the backbuffer. Set by beginFrame(), read by
@@ -166,6 +170,8 @@ class VioRenderer3D implements Renderer3DInterface
     /** Backbuffer resolution captured at frame start (for blit destination). */
     private int $backbufferWidth = 0;
     private int $backbufferHeight = 0;
+
+    private ?BackendConventions $conventions = null;
 
     public function __construct(
         private readonly VioContext $ctx,
@@ -180,6 +186,15 @@ class VioRenderer3D implements Renderer3DInterface
         $this->initShadowMap();
         $this->initSkyboxMesh();
         $this->initPostProcess();
+    }
+
+    /**
+     * Rendering conventions for the active vio backend. Cached — the backend
+     * cannot change for the lifetime of a context.
+     */
+    private function conventions(): BackendConventions
+    {
+        return $this->conventions ??= BackendConventions::forBackend(vio_backend_name($this->ctx));
     }
 
     public function applySettings(GraphicsSettings $settings): void
@@ -362,7 +377,56 @@ class VioRenderer3D implements Renderer3DInterface
     public function endFrame(): void
     {
         $this->presentOffscreenIfActive();
+        $this->renderShadowMapDebug();
         vio_draw_3d($this->ctx);
+    }
+
+    /**
+     * Debug overlay (env PHPOLYGON_DEBUG_SHADOWMAP=1): blit each CSM cascade's
+     * RAW stored depth into a tile across the top-left of the screen, using a
+     * plain sampler2D (no PCF comparison). See {@see VioShadowDebugPass}. This
+     * shows what the shadow map actually STORES, as opposed to the in-game disc
+     * which is the comparison RESULT — the two answer different questions.
+     */
+    private function renderShadowMapDebug(): void
+    {
+        if (getenv('PHPOLYGON_DEBUG_SHADOWMAP') !== '1') {
+            return;
+        }
+        $quad = $this->screenQuad;
+        if ($quad === null || empty($this->cascadeShadowTargets)) {
+            return;
+        }
+        $this->shadowDebugPass ??= new VioShadowDebugPass($this->ctx);
+
+        $w = max(1, $this->backbufferWidth);
+        $h = max(1, $this->backbufferHeight);
+
+        // Square tiles in a row along the top edge. Placement is done in the
+        // vertex shader via an NDC scale/offset (the fullscreen quad spans 2
+        // NDC units = the full backbuffer; scale = tilePx / dimPx).
+        $tilePx = (int) max(160, min(280, (int) ($w / 5)));
+        $padPx  = 8;
+        $scaleX = $tilePx / $w;
+        $scaleY = $tilePx / $h;
+
+        $i = 0;
+        foreach ($this->cascadeShadowTargets as $target) {
+            if ($target === null) {
+                continue;
+            }
+            $tex = vio_render_target_texture($target);
+            if ($tex === false || $tex === null) {
+                continue;
+            }
+            // Tile centre in pixels (top-left origin), then to NDC.
+            $cx = $padPx + $tilePx / 2 + $i * ($tilePx + $padPx);
+            $cy = $padPx + $tilePx / 2;
+            $offsetX = $cx / $w * 2.0 - 1.0;
+            $offsetY = 1.0 - $cy / $h * 2.0;
+            $this->shadowDebugPass->draw($tex, $quad, [$scaleX, $scaleY, $offsetX, $offsetY]);
+            $i++;
+        }
     }
 
     public function clear(Color $color): void
@@ -718,9 +782,7 @@ class VioRenderer3D implements Renderer3DInterface
         // must transpile GLSL → SPIR-V → MSL, which is what VIO_SHADER_GLSL
         // selects. Without this branch, pipeline creation silently fails on
         // Metal and the screen stays at the layer's default (white).
-        $format = vio_backend_name($this->ctx) === 'opengl'
-            ? VIO_SHADER_GLSL_RAW
-            : VIO_SHADER_GLSL;
+        $format = $this->conventions()->shaderSourceFormat();
 
         $shader = vio_shader($this->ctx, [
             'vertex' => $vertSrc,
@@ -1036,27 +1098,20 @@ class VioRenderer3D implements Renderer3DInterface
             return;
         }
 
-        $backend = vio_backend_name($this->ctx);
-        // CSM "dark disc" fix (D3D12): the shadow map is RENDERED with the
-        // un-flipped GL-convention light matrix (renderShadowPass submits the
-        // same kind of matrix the colour pass uses, and vio applies its own
-        // D3D12 clip-Y / NDC-z conversion internally — the colour pass proves
-        // that path is correct). Manually negating clip-Y here, on the SAMPLE
-        // matrix only, mirrored the V lookup relative to how the depth was
-        // stored (v_sample = 1 - v_render). On cascade 0 — a tight, camera-
-        // centred box over near-planar ground — every fragment then compared
-        // its depth against the mirror-image texel, which on a smooth depth
-        // gradient is reliably nearer the light, so the PCF compare returned 0
-        // everywhere: the uniform dark circle that followed the player.
+        // Render-target Y convention for the CSM SAMPLE matrix, owned centrally
+        // by BackendConventions (true for D3D11/D3D12, false for OpenGL where a
+        // flip would mirror the V lookup and break GL shadows). The matching
+        // RENDER matrix in renderShadowPass is left un-flipped; both must agree.
         //
-        // Fix: sample with the SAME matrix the map was rendered with, letting
-        // vio apply its single consistent D3D12 convention to both render and
-        // sample (exactly as it does for the colour pass). If shadows instead
-        // come out vertically MIRRORED after this change (disc gone but shadows
-        // on the wrong side / offset in Y), the real convention is the opposite
-        // and the flip belongs on the RENDER matrix in renderShadowPass, not
-        // here — flip this back to true to confirm that diagnosis.
-        $flipY = true;
+        // NOTE (CSM "dark disc", D3D12, UNRESOLVED): on D3D12 a uniform dark
+        // circle still follows the camera in cascade 0 regardless of this flag —
+        // flipping it true→false only mirrors the artefact, it does not remove
+        // it, so the Y axis is NOT the root cause. The remaining suspect is the
+        // depth-compare convention (stored depth vs the `*0.5+0.5` reference in
+        // mesh3d.frag.glsl sampleCascade) under vio's HLSL depth fixup. See the
+        // MS CSM reference: map render and lookup must share one exact
+        // clip/texel/depth convention.
+        $flipY = $this->conventions()->flipRenderTargetClipY();
 
         // Texture units chosen to match the OpenGL CSM budget. Length
         // must equal CASCADE_ORTHO_SIZES; if the cascade count is ever
