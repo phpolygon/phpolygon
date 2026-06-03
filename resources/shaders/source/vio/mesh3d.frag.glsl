@@ -162,12 +162,6 @@ float sampleCascade(sampler2DShadow map, mat4 lightSpace, vec3 worldPos, vec3 N)
     float bias = mix(0.005, 0.001, NdotL);
     float s = 0.0;
     float ts = 1.0 / 2048.0;
-    // GL-convention LEQUAL compare against the stored depth. The dark-disc
-    // bug was NOT a reverse-Z / inverted-compare issue (the CSM diagnostic
-    // disc read BLACK, not RED): the cascade-0 map was simply unpopulated
-    // over open ground because the shadow pass front-face-culled the
-    // single-sided terrain. Fixed in the shadow pipeline (VIO_CULL_NONE),
-    // so this sampling path is unchanged from the GL baseline.
     float rd = pc.z - bias;
     for (int x = -1; x <= 1; x++)
         for (int y = -1; y <= 1; y++)

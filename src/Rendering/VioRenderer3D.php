@@ -1139,10 +1139,23 @@ class VioRenderer3D implements Renderer3DInterface
             vio_set_uniform($this->ctx, "u_csm_matrix_{$cIdx}", $lsm);
             vio_set_uniform($this->ctx, "u_csm_far_{$cIdx}",    $orthoSize);
 
-            // Cascade 0 also drives the legacy single-map uniforms so any
-            // legacy shader path still works.
+            // Cascade 0 also drives the legacy single-map uniforms (u_shadow_map)
+            // used by cloud-shadow paths. CSM "dark disc" ROOT CAUSE + FIX:
+            // u_shadow_map must NOT share cascade 0's texture unit. mesh3d.frag
+            // declares u_shadow_map and u_csm_map_0 as separate samplers, which
+            // map to distinct fixed registers on the typed-register backends
+            // (D3D11/D3D12/Metal/Vulkan). OpenGL happily lets two samplers alias
+            // one texture unit, but on D3D12 binding unit 6 resolves to only ONE
+            // register, leaving u_csm_map_0's register unbound -> cascade 0
+            // sampled an empty SRV (reads 0) -> every fragment within the
+            // cascade-0 radius compared "occluded" -> the camera-following dark
+            // disc. (It was never a Y-flip / reverse-Z / clip-convention issue;
+            // those only mirrored or shifted the artefact.) Bind the same depth
+            // texture to its own distinct unit so both samplers get a register.
             if ($cIdx === 0) {
-                vio_set_uniform($this->ctx, 'u_shadow_map', $unit);
+                $legacyUnit = 7;
+                vio_bind_texture($this->ctx, $tex, $legacyUnit);
+                vio_set_uniform($this->ctx, 'u_shadow_map', $legacyUnit);
                 vio_set_uniform($this->ctx, 'u_light_space_matrix', $lsm);
             }
         }
