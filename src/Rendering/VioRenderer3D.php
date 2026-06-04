@@ -1008,10 +1008,9 @@ class VioRenderer3D implements Renderer3DInterface
      * for both passes. (Math-identical to the combined form on GL.)
      *
      * NOTE: this split was once suspected of causing the cascade-0 "dark disc"
-     * on D3D12, but the CSM diagnostic falsified that: the disc was the shadow
-     * pass front-face-culling the single-sided terrain so cascade 0 stayed at
-     * its near clear value over open ground. Fixed in bindShadowPipeline()
-     * (VIO_CULL_NONE). The split is retained because it is the cleaner form.
+     * on D3D12. It was not — the disc was u_shadow_map sharing cascade 0's
+     * texture unit (see uploadShadowUniforms). The split is retained because it
+     * is the cleaner form.
      *
      * @return array{0: Mat4, 1: Mat4} [projection, view]
      */
@@ -1041,12 +1040,12 @@ class VioRenderer3D implements Renderer3DInterface
         // Size the light frustum to THIS cascade. The old code put the light
         // a fixed 80 units back and used the same [0.5, 200] depth slab for
         // every cascade — so the small near cascade (s=15, a 30 m box) packed
-        // its depth comparison into a 200 m range, making the fragment-shader
-        // bias map to a ~1 m world offset. That blanketed cascade 0's ~15 m
-        // radius (the disc around the camera) in a constant dark shadow term.
-        // Backing the light off by the cascade extent + caster headroom and
-        // bracketing near/far to the cascade restores a sane bias-to-world
-        // ratio without changing the (fixed) per-cascade ortho footprint.
+        // its depth comparison into a 200 m range, collapsing bias-to-world
+        // resolution. Backing the light off by the cascade extent + caster
+        // headroom and bracketing near/far to the cascade restores a sane
+        // bias-to-world ratio without changing the (fixed) per-cascade ortho
+        // footprint. (This is a quality improvement, not the dark-disc fix —
+        // that was a texture-unit binding bug; see uploadShadowUniforms.)
         $casterHeadroom = max(30.0, $s); // room for tall casters above the box
         $backoff = $s + $casterHeadroom;
         $lightPos = new Vec3(
@@ -1102,15 +1101,10 @@ class VioRenderer3D implements Renderer3DInterface
         // by BackendConventions (true for D3D11/D3D12, false for OpenGL where a
         // flip would mirror the V lookup and break GL shadows). The matching
         // RENDER matrix in renderShadowPass is left un-flipped; both must agree.
-        //
-        // NOTE (CSM "dark disc", D3D12, UNRESOLVED): on D3D12 a uniform dark
-        // circle still follows the camera in cascade 0 regardless of this flag —
-        // flipping it true→false only mirrors the artefact, it does not remove
-        // it, so the Y axis is NOT the root cause. The remaining suspect is the
-        // depth-compare convention (stored depth vs the `*0.5+0.5` reference in
-        // mesh3d.frag.glsl sampleCascade) under vio's HLSL depth fixup. See the
-        // MS CSM reference: map render and lookup must share one exact
-        // clip/texel/depth convention.
+        // This flag is correct as-is: with the cascade SRV binding fixed below,
+        // cascades 1/2 (and now 0) sample correctly on D3D12 with flipY=true.
+        // (The former "dark disc" was NOT a Y/clip convention bug — it was
+        // u_shadow_map sharing cascade 0's texture unit; see the cIdx===0 block.)
         $flipY = $this->conventions()->flipRenderTargetClipY();
 
         // Texture units chosen to match the OpenGL CSM budget. Length
@@ -1191,25 +1185,20 @@ class VioRenderer3D implements Renderer3DInterface
         if (!isset($this->pipelineCache[$key])) {
             $shader = $this->shaderCache['shadow'];
 
-            // CSM "dark disc" fix (D3D12): use VIO_CULL_NONE, not VIO_CULL_FRONT.
+            // Use VIO_CULL_NONE, not VIO_CULL_FRONT. Front-face culling is the
+            // classic "render back faces into the shadow map" peter-panning
+            // trick, but it only works for CLOSED, double-sided geometry. Our
+            // procedural GROUND / terrain is a single-sided up-facing surface —
+            // front-face culling would discard it entirely so it never writes
+            // depth into the shadow map. CULL_NONE makes the ground write its
+            // true depth, so its own fragments compare lit; acne is held off by
+            // the depth_bias / slope_scaled_depth_bias below plus the shader's
+            // NdotL bias.
             //
-            // Front-face culling is the classic "render back faces into the
-            // shadow map" peter-panning trick, but it only works for CLOSED,
-            // double-sided geometry. Our procedural GROUND / terrain is a
-            // single-sided up-facing surface — front-face culling discards it
-            // entirely, so it never writes depth into the cascade-0 map.
-            //
-            // That open-ground texels-stay-unwritten state is invisible on GL
-            // (GL clears depth to 1.0/far -> "no occluder" -> lit) but produces
-            // the dark disc on D3D12: vio clears the depth-only target to
-            // 0.0/near, so an unwritten texel reads as "occluder at the light"
-            // -> everything over open ground is in shadow. The CSM diagnostic
-            // confirmed this: the cascade-0 disc read BLACK (stored depth ~near
-            // everywhere) — i.e. cleared-to-near + ground never written.
-            //
-            // VIO_CULL_NONE makes the ground write its true depth, so its own
-            // fragments compare lit. Acne is held off by the depth_bias /
-            // slope_scaled_depth_bias below plus the shader's NdotL bias.
+            // (This was once mis-attributed as the D3D12 "dark disc" fix. It is
+            // not — the disc was u_shadow_map sharing cascade 0's texture unit,
+            // fixed in uploadShadowUniforms. CULL_NONE remains the correct cull
+            // mode for single-sided casters regardless.)
             //
             // REVERT: restore 'cull_mode' => VIO_CULL_FRONT to go back to the
             // back-face-only shadow pass (the prior baseline).
