@@ -33,12 +33,20 @@ class Transform3DSystem extends AbstractSystem
     {
         // First pass: process root entities (no parent). updateHierarchy
         // recurses into children so each entity is touched exactly once.
-        foreach ($world->query(Transform3D::class) as $entity) {
-            $transform = $entity->get(Transform3D::class);
+        //
+        // Direct pool iteration (not query()): the island has thousands of
+        // Transform3D entities and this runs every fixed-timestep tick, so the
+        // per-entity generator resume + Entity wrap + get() indirection was a
+        // measurable steady-state cost. componentPool() hands back the raw
+        // [id => Transform3D] map; behaviour is identical (same roots, same
+        // recursion).
+        /** @var array<int, Transform3D> $pool */
+        $pool = $world->componentPool(Transform3D::class);
+        foreach ($pool as $id => $transform) {
             if ($transform->parentEntityId !== null) {
                 continue;
             }
-            $this->updateHierarchy($world, $entity->id, $transform, parentDirty: false);
+            $this->updateHierarchy($world, $id, $transform, parentDirty: false);
         }
     }
 

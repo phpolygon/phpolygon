@@ -69,8 +69,23 @@ class RigidBody3DSystem extends AbstractSystem
         // 4-6. Broadphase → Narrowphase → Solve (body-vs-body)
         $collisions = $this->detectAndSolveBodyCollisions($bodies);
 
-        // 7. Dynamic vs static colliders
-        $this->resolveStaticCollisions($world, $bodies);
+        // 7. Dynamic vs static colliders — only when a dynamic body is actually
+        // awake. resolveStaticCollisions skips sleeping bodies in its inner loop
+        // anyway, so when none are awake the whole pass — including the
+        // island-wide static-collider scan it does up front — is pure waste.
+        // This matters because a settled object (e.g. a fallen coconut) keeps
+        // its RigidBody3D forever, which would otherwise re-scan every static
+        // collider every tick for the rest of the session.
+        $hasAwakeDynamic = false;
+        foreach ($bodies as $body) {
+            if ($body['rigid']->bodyType === BodyType::Dynamic && !$body['rigid']->isSleeping) {
+                $hasAwakeDynamic = true;
+                break;
+            }
+        }
+        if ($hasAwakeDynamic) {
+            $this->resolveStaticCollisions($world, $bodies);
+        }
 
         // 8. Character push
         $this->characterPush($world, $bodies, $dt);

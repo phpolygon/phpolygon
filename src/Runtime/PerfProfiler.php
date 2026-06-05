@@ -23,6 +23,13 @@ final class PerfProfiler
     private const BACKEND_NONE = 0;
     private const BACKEND_SPX = 1;
     private const BACKEND_EXCIMER = 2;
+    /**
+     * Native backend: accumulate begin()/end() sections via hrtime only, with
+     * no external profiling extension. Activated by PHPOLYGON_PROFILE=1. This
+     * is what powers the built-in PerfOverlay's per-system breakdown on
+     * platforms where SPX/Excimer are unavailable (e.g. Windows).
+     */
+    private const BACKEND_NATIVE = 3;
 
     private static int $backend = -1;
 
@@ -191,6 +198,8 @@ final class PerfProfiler
             self::$backend = self::BACKEND_SPX;
         } elseif (\extension_loaded('excimer') && \getenv('PHPOLYGON_EXCIMER') === '1') {
             self::$backend = self::BACKEND_EXCIMER;
+        } elseif (\getenv('PHPOLYGON_PROFILE') === '1') {
+            self::$backend = self::BACKEND_NATIVE;
         } else {
             self::$backend = self::BACKEND_NONE;
         }

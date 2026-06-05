@@ -759,12 +759,16 @@ class Engine
                         $this->input->snapshotScroll();
                     }
                     PerfProfiler::begin('render2d.frame');
+                    PerfProfiler::begin('render2d.begin');
                     $this->renderer2D->beginFrame();
+                    PerfProfiler::end();
 
                     $this->world->render();
 
                     if ($this->onRender !== null) {
+                        PerfProfiler::begin('render2d.onRender');
                         ($this->onRender)($this, $interpolation);
+                        PerfProfiler::end();
                     }
 
                     if ($this->renderer3D !== null) {
@@ -828,12 +832,16 @@ class Engine
                         $this->input->snapshotScroll();
                     }
                     PerfProfiler::begin('render2d.frame');
+                    PerfProfiler::begin('render2d.begin');
                     $this->renderer2D->beginFrame();
+                    PerfProfiler::end();
 
                     $this->world->render();
 
                     if ($this->onRender !== null) {
+                        PerfProfiler::begin('render2d.onRender');
                         ($this->onRender)($this, $interpolation);
+                        PerfProfiler::end();
                     }
 
                     if ($this->renderer3D !== null) {

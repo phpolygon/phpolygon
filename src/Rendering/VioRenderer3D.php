@@ -137,6 +137,14 @@ class VioRenderer3D implements Renderer3DInterface
      */
     private array $meshAabbCache = [];
 
+    /**
+     * Per-material "does this cast a shadow?" cache (hoists the sky_/sun_/…
+     * prefix test out of the 3×-per-frame shadow cascade loop).
+     *
+     * @var array<string, bool>
+     */
+    private array $castsShadowCache = [];
+
     private ?VioTextureManager $textureManager = null;
 
     /**
@@ -917,6 +925,57 @@ class VioRenderer3D implements Renderer3DInterface
         }
 
         // CSM: render the scene once per cascade into its own target.
+        //
+        // Conservative per-cascade culling. Each cascade's ortho box is centred
+        // on $shadowCenter (the camera) and spans ±orthoSize in the two axes
+        // perpendicular to the light. A caster only needs drawing into a cascade
+        // if it lies within that lateral footprint, so we cull casters whose
+        // centre is laterally (perpendicular to the light) farther than
+        // orthoSize + radius + margin. We cull ONLY laterally — never along the
+        // light axis, so occluders in front of the box still cast — and never
+        // cull casters bigger than the cascade (ground/water planes). The near
+        // cascade (15u) then skips almost every far building when looking across
+        // the dense city centre, which is the view-dependent cost.
+        //
+        // Pre-pass (once, not per-cascade): filter to shadow casters and
+        // precompute each non-instanced caster's world-space bounding sphere.
+        $cull = false;
+        $lx = 0.0; $ly = 0.0; $lz = 0.0;
+        $scx = 0.0; $scy = 0.0; $scz = 0.0;
+        if ($shadowCenter !== null) {
+            $llen = sqrt($lightDir->x * $lightDir->x + $lightDir->y * $lightDir->y + $lightDir->z * $lightDir->z);
+            if ($llen > 1e-6) {
+                $lx = $lightDir->x / $llen;
+                $ly = $lightDir->y / $llen;
+                $lz = $lightDir->z / $llen;
+                $scx = $shadowCenter->x;
+                $scy = $shadowCenter->y;
+                $scz = $shadowCenter->z;
+                $cull = true;
+            }
+        }
+
+        /** @var list<array{0: DrawMesh, 1: float, 2: float, 3: float, 4: float}> $casters */
+        $casters = [];
+        /** @var list<array{0: DrawMeshInstanced, 1: Material}> $instancedCasters */
+        $instancedCasters = [];
+        foreach ($commandList->getCommands() as $cmd) {
+            if ($cmd instanceof DrawMesh) {
+                $mat = MaterialRegistry::get($cmd->materialId);
+                if ($mat === null || $mat->alpha < 0.9 || !$this->castsShadow($cmd->materialId)) {
+                    continue;
+                }
+                [$cx, $cy, $cz, $r] = $this->worldMeshSphere($cmd->meshId, $cmd->modelMatrix);
+                $casters[] = [$cmd, $cx, $cy, $cz, $r];
+            } elseif ($cmd instanceof DrawMeshInstanced) {
+                $mat = MaterialRegistry::get($cmd->materialId);
+                if ($mat === null || $mat->alpha < 0.9 || !$this->castsShadow($cmd->materialId)) {
+                    continue;
+                }
+                $instancedCasters[] = [$cmd, $mat];
+            }
+        }
+
         $this->cascadeLightSpaceMatrices = [];
         foreach (self::CASCADE_ORTHO_SIZES as $cIdx => $orthoSize) {
             $target = $this->cascadeShadowTargets[$cIdx] ?? null;
@@ -937,44 +996,40 @@ class VioRenderer3D implements Renderer3DInterface
             vio_set_uniform($this->ctx, 'u_view', $lightView->toArray());
             vio_set_uniform($this->ctx, 'u_projection', $lightProj->toArray());
 
-            foreach ($commandList->getCommands() as $cmd) {
-                if ($cmd instanceof DrawMesh) {
-                    $mat = MaterialRegistry::get($cmd->materialId);
-                    if ($mat === null || $mat->alpha < 0.9) {
-                        continue;
+            // Lateral cull limit margin: covers the texel-snap offset of the box
+            // centre plus the sphere-from-AABB approximation. Generous on purpose
+            // (over-keeping only costs a draw; under-keeping would drop a shadow).
+            $margin = $orthoSize * 0.15 + 2.0;
+
+            foreach ($casters as [$cmd, $cx, $cy, $cz, $r]) {
+                if ($cull && $r < $orthoSize) {
+                    $dx = $cx - $scx; $dy = $cy - $scy; $dz = $cz - $scz;
+                    $along = $dx * $lx + $dy * $ly + $dz * $lz;
+                    $px = $dx - $along * $lx;
+                    $py = $dy - $along * $ly;
+                    $pz = $dz - $along * $lz;
+                    $lim = $orthoSize + $r + $margin;
+                    if (($px * $px + $py * $py + $pz * $pz) > $lim * $lim) {
+                        continue; // laterally outside this cascade's shadow box
                     }
-                    $matId = $cmd->materialId;
-                    if (str_starts_with($matId, 'sky_') || str_starts_with($matId, 'sun_')
-                        || str_starts_with($matId, 'moon_') || str_starts_with($matId, 'cloud_')
-                        || $matId === 'precipitation') {
-                        continue;
-                    }
-                    $mesh = $this->uploadMesh($cmd->meshId);
-                    if ($mesh === null) {
-                        continue;
-                    }
-                    vio_set_uniform($this->ctx, 'u_model', $cmd->modelMatrix->toArray());
-                    vio_set_uniform($this->ctx, 'u_use_instancing', 0);
-                    vio_draw($this->ctx, $mesh);
-                } elseif ($cmd instanceof DrawMeshInstanced) {
-                    $mat = MaterialRegistry::get($cmd->materialId);
-                    if ($mat === null || $mat->alpha < 0.9) {
-                        continue;
-                    }
-                    $matId = $cmd->materialId;
-                    if (str_starts_with($matId, 'sky_') || str_starts_with($matId, 'sun_')
-                        || str_starts_with($matId, 'moon_') || str_starts_with($matId, 'cloud_')
-                        || $matId === 'precipitation') {
-                        continue;
-                    }
-                    $mesh = $this->uploadMesh($cmd->meshId);
-                    if ($mesh === null) {
-                        continue;
-                    }
-                    [$flatMatrices, $instanceCount] = $this->resolveInstanceData($cmd->meshId, $mat, $cmd);
-                    vio_set_uniform($this->ctx, 'u_use_instancing', 1);
-                    vio_draw_instanced($this->ctx, $mesh, $flatMatrices, $instanceCount);
                 }
+                $mesh = $this->uploadMesh($cmd->meshId);
+                if ($mesh === null) {
+                    continue;
+                }
+                vio_set_uniform($this->ctx, 'u_model', $cmd->modelMatrix->toArray());
+                vio_set_uniform($this->ctx, 'u_use_instancing', 0);
+                vio_draw($this->ctx, $mesh);
+            }
+
+            foreach ($instancedCasters as [$cmd, $mat]) {
+                $mesh = $this->uploadMesh($cmd->meshId);
+                if ($mesh === null) {
+                    continue;
+                }
+                [$flatMatrices, $instanceCount] = $this->resolveInstanceData($cmd->meshId, $mat, $cmd);
+                vio_set_uniform($this->ctx, 'u_use_instancing', 1);
+                vio_draw_instanced($this->ctx, $mesh, $flatMatrices, $instanceCount);
             }
         }
 
@@ -1667,6 +1722,54 @@ class VioRenderer3D implements Renderer3DInterface
         ];
         $this->meshAabbCache[$meshId] = $aabb;
         return $aabb;
+    }
+
+    /**
+     * World-space bounding sphere [cx, cy, cz, radius] for a mesh under a model
+     * matrix, derived from the cached local AABB. Used for conservative
+     * shadow-cascade culling.
+     *
+     * @return array{0: float, 1: float, 2: float, 3: float}
+     */
+    private function worldMeshSphere(string $meshId, Mat4 $modelMatrix): array
+    {
+        $aabb = $this->meshAabb($meshId);
+        $min = $aabb['min'];
+        $max = $aabb['max'];
+        $ex = ($max[0] - $min[0]) * 0.5;
+        $ey = ($max[1] - $min[1]) * 0.5;
+        $ez = ($max[2] - $min[2]) * 0.5;
+        $localR = sqrt($ex * $ex + $ey * $ey + $ez * $ez);
+
+        $center = $modelMatrix->transformPoint(new Vec3(
+            ($min[0] + $max[0]) * 0.5,
+            ($min[1] + $max[1]) * 0.5,
+            ($min[2] + $max[2]) * 0.5,
+        ));
+
+        // Largest axis scale from the matrix basis columns (column-major).
+        $m = $modelMatrix->toArray();
+        $s0 = $m[0] * $m[0] + $m[1] * $m[1] + $m[2] * $m[2];
+        $s1 = $m[4] * $m[4] + $m[5] * $m[5] + $m[6] * $m[6];
+        $s2 = $m[8] * $m[8] + $m[9] * $m[9] + $m[10] * $m[10];
+        $maxScale = sqrt(max($s0, $s1, $s2));
+
+        return [$center->x, $center->y, $center->z, $localR * $maxScale];
+    }
+
+    /**
+     * Whether a material casts shadows (everything except sky / sun / moon /
+     * cloud / precipitation). Cached per material id.
+     */
+    private function castsShadow(string $materialId): bool
+    {
+        return $this->castsShadowCache[$materialId] ??= !(
+            str_starts_with($materialId, 'sky_')
+            || str_starts_with($materialId, 'sun_')
+            || str_starts_with($materialId, 'moon_')
+            || str_starts_with($materialId, 'cloud_')
+            || $materialId === 'precipitation'
+        );
     }
 
     private function applyMaterial(Material $material, string $materialId = ''): void

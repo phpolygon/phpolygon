@@ -83,7 +83,7 @@ final class PerfOverlay
         $stats = $this->computeFrameStats();
         $sections = $this->topSections(8);
 
-        $lineCount = 5 + ($sections === [] ? 0 : 1 + count($sections));
+        $lineCount = 6 + ($sections === [] ? 0 : 1 + count($sections));
         $height = self::PADDING * 2 + self::LINE_HEIGHT * ($lineCount + 1);
 
         $bg = new Color(0.0, 0.0, 0.0, 0.72);
@@ -113,7 +113,10 @@ final class PerfOverlay
         $r->drawText(\sprintf('Frame:  %6.2f ms', $stats['frameMs']), $cx, $cy, self::FONT_SIZE, $frameColor);
         $cy += self::LINE_HEIGHT;
 
-        $r->drawText(\sprintf('p95:    %6.2f ms', $stats['p95Ms']), $cx, $cy, self::FONT_SIZE, $textDim);
+        $r->drawText(\sprintf('Render: %6.2f ms', $stats['renderMs']), $cx, $cy, self::FONT_SIZE, $textDim);
+        $cy += self::LINE_HEIGHT;
+
+        $r->drawText(\sprintf('r-p95:  %6.2f ms', $stats['p95Ms']), $cx, $cy, self::FONT_SIZE, $textDim);
         $cy += self::LINE_HEIGHT;
 
         $gc = $this->engine->lastGcDelta;
@@ -152,27 +155,34 @@ final class PerfOverlay
     }
 
     /**
-     * @return array{fps:float, frameMs:float, p95Ms:float}
+     * @return array{fps:float, frameMs:float, p95Ms:float, renderMs:float}
      */
     private function computeFrameStats(): array
     {
+        // TRUE full-frame fps: GameLoop measures the whole frame interval
+        // (update ticks + render + throttle/vsync), unlike Engine::frameTimesMs
+        // which brackets ONLY the render callback. The latter overstates the
+        // frame rate whenever the fixed-timestep loop runs several update ticks
+        // per render frame — so the headline fps/frameMs come from GameLoop and
+        // the render-only average is shown separately as 'Render'.
+        $trueFps = $this->engine->gameLoop->getAverageFps();
+        $trueFrameMs = $trueFps > 0.0 ? 1000.0 / $trueFps : 0.0;
+
         $times = $this->engine->frameTimesMs;
         if ($times === []) {
-            return ['fps' => 0.0, 'frameMs' => 0.0, 'p95Ms' => 0.0];
+            return ['fps' => $trueFps, 'frameMs' => $trueFrameMs, 'p95Ms' => 0.0, 'renderMs' => 0.0];
         }
 
         $count = count($times);
-        $latest = $times[$count - 1];
         $sum = \array_sum($times);
-        $avg = $sum / $count;
-        $fps = $avg > 0.0 ? 1000.0 / $avg : 0.0;
+        $renderMs = $sum / $count;
 
         $sorted = $times;
         \sort($sorted);
         $p95Index = (int) \floor(0.95 * ($count - 1));
         $p95 = $sorted[$p95Index];
 
-        return ['fps' => $fps, 'frameMs' => $latest, 'p95Ms' => $p95];
+        return ['fps' => $trueFps, 'frameMs' => $trueFrameMs, 'p95Ms' => $p95, 'renderMs' => $renderMs];
     }
 
     /**

@@ -129,22 +129,26 @@ final class PerfOverlayTest extends TestCase
         self::assertSame(0.0, $stats['p95Ms']);
     }
 
-    public function testComputeFrameStatsDerivesFpsFromAverage(): void
+    public function testComputeFrameStatsDerivesRenderMsFromAverage(): void
     {
-        // 10 ms per frame -> 100 fps average. Latest sample is the last
-        // entry in the ring buffer.
+        // frameTimesMs is the RENDER-ONLY buffer; it now drives the 'renderMs'
+        // and render-p95 fields. The headline fps/frameMs come from
+        // GameLoop::getAverageFps() (the TRUE full-frame interval incl. update
+        // ticks), which is 0.0 on a headless engine that never ran the loop.
         $this->engine->frameTimesMs = [10.0, 10.0, 10.0, 10.0, 12.0];
         $stats = $this->invokeComputeFrameStats();
 
         self::assertEqualsWithDelta(
-            1000.0 / ((10.0 + 10.0 + 10.0 + 10.0 + 12.0) / 5),
-            $stats['fps'],
+            (10.0 + 10.0 + 10.0 + 10.0 + 12.0) / 5,
+            $stats['renderMs'],
             0.01,
+            'renderMs is the average of the render-only frameTimesMs buffer.',
         );
-        self::assertSame(12.0, $stats['frameMs']);
         // p95 of 5 samples picks index floor(0.95 * 4) = 3 in the sorted array
         // -> sorted = [10, 10, 10, 10, 12], idx 3 = 10.
         self::assertSame(10.0, $stats['p95Ms']);
+        // Headline fps now comes from GameLoop (true frame time), not this buffer.
+        self::assertSame($this->engine->gameLoop->getAverageFps(), $stats['fps']);
     }
 
     public function testTopSectionsSortsByTotalNsAndRespectsLimit(): void
@@ -181,12 +185,12 @@ final class PerfOverlayTest extends TestCase
     }
 
     /**
-     * @return array{fps:float, frameMs:float, p95Ms:float}
+     * @return array{fps:float, frameMs:float, p95Ms:float, renderMs:float}
      */
     private function invokeComputeFrameStats(): array
     {
         $rm = new \ReflectionMethod($this->overlay, 'computeFrameStats');
-        /** @var array{fps:float, frameMs:float, p95Ms:float} $result */
+        /** @var array{fps:float, frameMs:float, p95Ms:float, renderMs:float} $result */
         $result = $rm->invoke($this->overlay);
         return $result;
     }

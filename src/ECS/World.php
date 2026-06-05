@@ -213,6 +213,19 @@ class World
         return array_keys($this->components[$componentClass] ?? []);
     }
 
+    /**
+     * Direct read access to a component pool, keyed by entity id. Lets hot
+     * single-component systems iterate without the per-entity generator +
+     * Entity-wrapper + get() overhead of query(). The returned array must be
+     * treated as read-only structure (mutate the components, not the array).
+     *
+     * @return array<int, ComponentInterface>
+     */
+    public function componentPool(string $componentClass): array
+    {
+        return $this->components[$componentClass] ?? [];
+    }
+
     // --- Queries ---
 
     /**

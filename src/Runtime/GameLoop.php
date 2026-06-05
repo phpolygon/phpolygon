@@ -68,11 +68,16 @@ class GameLoop
             $currentTime = $frameStart;
             $elapsed = $currentTime - $previousTime;
             $previousTime = $currentTime;
-            $lag += $elapsed;
 
-            // Record frame time
+            // Record the real inter-frame time for FPS stats, before clamping.
             $this->frameTimeSamples[$this->sampleIndex] = $elapsed / 1_000_000_000.0;
             $this->sampleIndex = ($this->sampleIndex + 1) % $this->sampleCount;
+
+            // Spiral-of-death guard (1/2): clamp one frame's contribution to the
+            // accumulator. A one-off stall — asset streaming, window drag/resize,
+            // a debugger pause, the world-build splash — would otherwise inject a
+            // backlog the catch-up loop below amplifies into a multi-frame freeze.
+            $lag += min($elapsed, $this->timestepNs * $this->maxUpdatesPerFrame);
 
             // Fixed-timestep updates
             $tickCount = 0;
@@ -80,6 +85,15 @@ class GameLoop
                 $update($fixedDt);
                 $lag -= $this->timestepNs;
                 $tickCount++;
+            }
+
+            // Spiral-of-death guard (2/2): if the catch-up budget is exhausted and
+            // we are still behind, the sim cannot track real time. Discard the
+            // backlog instead of carrying it forward (which compounds the slowdown
+            // every frame). Under sustained overload the simulation slows slightly
+            // — far better than a runaway freeze. Also keeps interpolation in [0,1].
+            if ($lag > $this->timestepNs) {
+                $lag = $this->timestepNs;
             }
 
             // Render with interpolation factor
@@ -162,11 +176,14 @@ class GameLoop
             $currentTime = $frameStart;
             $elapsed = $currentTime - $previousTime;
             $previousTime = $currentTime;
-            $lag += $elapsed;
 
-            // Record frame time
+            // Record the real inter-frame time for FPS stats, before clamping.
             $this->frameTimeSamples[$this->sampleIndex] = $elapsed / 1_000_000_000.0;
             $this->sampleIndex = ($this->sampleIndex + 1) % $this->sampleCount;
+
+            // Spiral-of-death guard (1/2): see run(). Clamp one frame's
+            // contribution so a one-off stall cannot inject a multi-tick backlog.
+            $lag += min($elapsed, $this->timestepNs * $this->maxUpdatesPerFrame);
 
             // Fixed-timestep updates
             $tickCount = 0;
@@ -182,6 +199,12 @@ class GameLoop
 
                 // 4. Receive thread results and apply
                 $recvAndApply();
+            }
+
+            // Spiral-of-death guard (2/2): see run(). Discard backlog we cannot
+            // catch up on rather than compounding it into the next frame.
+            if ($lag > $this->timestepNs) {
+                $lag = $this->timestepNs;
             }
 
             // 3. Render with interpolation

@@ -160,8 +160,12 @@ class VioRenderer2D implements Renderer2DInterface
 
     public function endFrame(): void
     {
+        \PHPolygon\Runtime\PerfProfiler::begin('render2d.draw2d');
         vio_draw_2d($this->ctx);
+        \PHPolygon\Runtime\PerfProfiler::end();
+        \PHPolygon\Runtime\PerfProfiler::begin('render2d.vio_end');
         vio_end($this->ctx);
+        \PHPolygon\Runtime\PerfProfiler::end();
 
         // In warm-render mode, unbind so the swapchain is the default target
         // again — if endOffscreenFrame() never runs (callback never invoked

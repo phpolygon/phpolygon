@@ -23,6 +23,9 @@ use PHPolygon\Rendering\MaterialRegistry;
 class PrecipitationSystem extends AbstractSystem
 {
     private float $time = 0.0;
+    /** Tracks active->inactive transitions so particles are hidden exactly once. */
+    private bool $wasActive = false;
+
     public function update(World $world, float $dt): void
     {
         $this->time += $dt;
@@ -44,6 +47,23 @@ class PrecipitationSystem extends AbstractSystem
         if ($weather === null || $playerPos === null) return;
 
         $isActive = $weather->rainIntensity > 0.05 || $weather->snowIntensity > 0.05 || $weather->sandstormIntensity > 0.05;
+
+        if (!$isActive) {
+            // Clear weather (the normal island state): skip the per-tick
+            // whole-scene MeshRenderer scan entirely. Particles spawn hidden at
+            // y=-100, so they only need re-hiding ONCE on an active->inactive
+            // transition (e.g. a storm ending) — not every tick forever.
+            if ($this->wasActive) {
+                foreach ($world->query(MeshRenderer::class, Transform3D::class) as $entity) {
+                    if ($entity->get(MeshRenderer::class)->materialId === 'precipitation') {
+                        $entity->get(Transform3D::class)->position = new Vec3(0, -100, 0);
+                    }
+                }
+                $this->wasActive = false;
+            }
+            return;
+        }
+        $this->wasActive = true;
 
         // Update precipitation material based on type
         if ($weather->rainIntensity > 0.05) {
@@ -86,12 +106,6 @@ class PrecipitationSystem extends AbstractSystem
             if ($mesh->materialId !== 'precipitation') continue;
 
             $transform = $entity->get(Transform3D::class);
-
-            if (!$isActive) {
-                // Hide particles below world
-                $transform->position = new Vec3(0, -100, 0);
-                continue;
-            }
 
             // Pseudo-random offset per particle (deterministic from index)
             $seed = $particleIndex * 73.37;

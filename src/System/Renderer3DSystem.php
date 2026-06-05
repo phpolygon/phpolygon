@@ -125,10 +125,22 @@ class Renderer3DSystem extends AbstractSystem
 
     public function render(World $world): void
     {
+        // Build the draw command list (ECS iteration + frustum cull) ...
         PerfProfiler::begin('render3d.build_commands');
         try {
             $this->renderCommands($world);
         } finally {
+            PerfProfiler::end();
+        }
+        // ... then submit it to the GPU. Splitting these two spans separates
+        // the CPU command-build cost from the per-draw submit/shadow-pass cost
+        // (which previously hid inside 'build_commands' and masked the real
+        // hot path — the per-surviving-draw uniform uploads in VioRenderer3D).
+        PerfProfiler::begin('render3d.vio_submit');
+        try {
+            $this->renderer->render($this->commandList);
+        } finally {
+            $this->commandList->clear();
             PerfProfiler::end();
         }
     }
@@ -395,9 +407,8 @@ class Renderer3DSystem extends AbstractSystem
                 $this->commandList->add($draw);
             }
         }
-
-        $this->renderer->render($this->commandList);
-        $this->commandList->clear();
+        // Submission + clear moved to render() so the GPU-submit cost is timed
+        // under its own 'render3d.vio_submit' span, separate from this build pass.
     }
 
     /**
