@@ -422,7 +422,14 @@ vec3 computeWater(vec3 N, vec3 V, vec3 L, out float alphaOut, out float roughOut
     float fresnel = pow(1.0 - NdotV, 5.0);
     fresnel = mix(0.02, 1.0, fresnel);
 
-    float depth = clamp(max(0.0, -8.0 - v_worldPos.z) / 70.0, 0.0, 1.0);
+    // RADIAL depth/shore from the island centre (origin), NOT a fixed Z line.
+    // The old `-8 - z` depth + `shoreEdge`-by-z faded the water to ZERO alpha
+    // across the entire north/west half of the island (invisible — "half the
+    // island not in the sea", with the seabed showing through). Radial distance
+    // gives a correct shoreline and open water all the way around. Tutorial
+    // Island is centred at the world origin; ~98 m shore radius, ~70 m to depth.
+    float r = length(v_worldPos.xz);
+    float depth = clamp((r - 98.0) / 70.0, 0.0, 1.0);
 
     vec3 waterColor = mix(vec3(0.15, 0.55, 0.50), vec3(0.02, 0.08, 0.15), depth);
 
@@ -436,8 +443,8 @@ vec3 computeWater(vec3 N, vec3 V, vec3 L, out float alphaOut, out float roughOut
     float specWater = pow(max(dot(N, normalize(V + L)), 0.0), 512.0);
     finalColor += u_dir_light_color * u_dir_light_intensity * specWater * 2.0;
 
-    // Shore foam — multi-layered, animated, finer grain
-    float shoreDepth = clamp(max(0.0, -5.0 - v_worldPos.z) / 6.0, 0.0, 1.0);
+    // Shore foam — multi-layered, animated, finer grain (radial shoreline)
+    float shoreDepth = clamp((r - 98.0) / 8.0, 0.0, 1.0);
     float foamLine = smoothstep(0.15, 0.0, shoreDepth);
     float foamNoise = noise(v_worldPos.xz * 15.0 + u_time * 0.3) * 0.5
                     + noise(v_worldPos.xz * 30.0 - u_time * 0.5) * 0.3
@@ -453,8 +460,8 @@ vec3 computeWater(vec3 N, vec3 V, vec3 L, out float alphaOut, out float roughOut
     alphaOut = mix(0.15, 0.95, smoothstep(0.0, 0.4, depth));
     alphaOut = mix(alphaOut, 1.0, foam * 0.6);
 
-    // Fade out at shore edge (where water meets sand) based on world Z
-    float shoreEdge = smoothstep(-5.0, -7.0, v_worldPos.z);
+    // Fade the water in just past the radial shoreline (where it meets sand).
+    float shoreEdge = smoothstep(92.0, 100.0, r);
     alphaOut *= shoreEdge;
 
     roughOut = mix(0.02, 0.08, foam);

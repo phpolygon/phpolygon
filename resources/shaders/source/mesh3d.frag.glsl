@@ -543,9 +543,14 @@ vec3 computeWater(vec3 N, vec3 V, vec3 L, out float alphaOut, out float roughOut
     float fresnel = pow(1.0 - NdotV, 5.0);
     fresnel = mix(0.02, 1.0, fresnel); // water F0 ≈ 0.02
 
-    // Depth-based coloring
-    float depth = max(0.0, -8.0 - v_worldPos.z) / 70.0; // 0 at shore, 1 at deep
-    depth = clamp(depth, 0.0, 1.0);
+    // Depth-based coloring. Use RADIAL distance from the island centre (world
+    // origin), not a fixed Z line: the old `-8 - z` assumed one south-facing
+    // shore, so the entire north/west half of the island read as shallow water
+    // + shore foam ("half the island not in the sea"). Radial distance gives a
+    // proper shallow ring at the coastline all the way around. Tutorial Island
+    // is centred at the origin (~100 m shore radius, ~70 m to full depth);
+    // far-offset water like CodeCity simply reads as deep, which is fine.
+    float depth = clamp((length(v_worldPos.xz) - 100.0) / 70.0, 0.0, 1.0);
 
     vec3 shallowColor = vec3(0.15, 0.55, 0.50);  // turquoise
     vec3 deepColor    = vec3(0.02, 0.08, 0.15);   // dark navy
