@@ -63,6 +63,17 @@ class Renderer3DSystem extends AbstractSystem
      */
     public const MAX_SPOT_LIGHTS = 8;
 
+    /**
+     * Screen-size LOD. Beyond MIN_LOD_DISTANCE, an entity whose projected size
+     * (world bounding radius / distance to camera) falls below MIN_SCREEN_RATIO
+     * is skipped: a sub-pixel detail costs a full per-draw FFI submit for no
+     * visible gain. Within MIN_LOD_DISTANCE nothing is size-culled, so there is
+     * no pop-in where the player actually stands; only the swarm of distant
+     * window / trim / prop details that bloat wide vistas drops out.
+     */
+    private const MIN_LOD_DISTANCE = 45.0;
+    private const MIN_SCREEN_RATIO = 0.004;
+
     /** @var array<string, array{cx:float, cy:float, cz:float, radius:float}> */
     private static array $sphereCache = [];
 
@@ -83,6 +94,10 @@ class Renderer3DSystem extends AbstractSystem
     private const BIN_REBUILD_INTERVAL = 30;
 
     private int $frameCount = 0;
+
+    /** Throttle counters for the env-gated [LIGHTS]/[DRAWS] debug dumps. */
+    private int $lightDebugFrame = 0;
+    private int $drawDebugFrame = 0;
 
     private float $wavePhase = 0.0;
     private float $snowCover = 0.0;
@@ -210,8 +225,7 @@ class Renderer3DSystem extends AbstractSystem
         }
 
         if (\getenv('PHPOLYGON_LIGHT_DEBUG') === '1') {
-            static $lightDebugFrame = 0;
-            if ($lightDebugFrame++ % 60 === 0) {
+            if ($this->lightDebugFrame++ % 60 === 0) {
                 $msg = '[LIGHTS] emitted=' . count($candidates);
                 foreach ($candidates as [$d, $p, $l]) {
                     $msg .= \sprintf(' (%.0f,%.0f,%.0f i=%.1f r=%.0f)', $p->x, $p->y, $p->z, $l->intensity, $l->radius);
@@ -323,6 +337,7 @@ class Renderer3DSystem extends AbstractSystem
         // transparent materials with a warning instead.
         /** @var list<array{0: float, 1: DrawMesh}> $transparentDraws */
         $transparentDraws = [];
+        $drawnOpaque = 0;
 
         foreach ($world->query(MeshRenderer::class, Transform3D::class) as $entity) {
             $mesh = $entity->get(MeshRenderer::class);
@@ -387,6 +402,21 @@ class Renderer3DSystem extends AbstractSystem
                     if ($cull) {
                         continue;
                     }
+
+                    // Screen-size LOD: drop far entities that project to a
+                    // sub-pixel sliver. Reuses the world centre + radius the
+                    // frustum test already computed.
+                    if ($cameraPos !== null) {
+                        $cdx = $tx - $cameraPos->x;
+                        $cdy = $ty - $cameraPos->y;
+                        $cdz = $tz - $cameraPos->z;
+                        $camDistSq = $cdx * $cdx + $cdy * $cdy + $cdz * $cdz;
+                        if ($camDistSq > self::MIN_LOD_DISTANCE * self::MIN_LOD_DISTANCE
+                            && $worldRadius * $worldRadius
+                                < self::MIN_SCREEN_RATIO * self::MIN_SCREEN_RATIO * $camDistSq) {
+                            continue;
+                        }
+                    }
                 }
             }
 
@@ -404,6 +434,7 @@ class Renderer3DSystem extends AbstractSystem
                 $transparentDraws[] = [$distSq, $draw];
             } else {
                 $this->commandList->add($draw);
+                $drawnOpaque++;
             }
         }
 
@@ -413,6 +444,17 @@ class Renderer3DSystem extends AbstractSystem
             usort($transparentDraws, static fn(array $a, array $b): int => $b[0] <=> $a[0]);
             foreach ($transparentDraws as [, $draw]) {
                 $this->commandList->add($draw);
+            }
+        }
+
+        if (\getenv('PHPOLYGON_DRAW_DEBUG') === '1') {
+            if ($this->drawDebugFrame++ % 60 === 0) {
+                \fwrite(\STDERR, \sprintf(
+                    "[DRAWS] mesh=%d (opaque=%d transparent=%d)\n",
+                    $drawnOpaque + count($transparentDraws),
+                    $drawnOpaque,
+                    count($transparentDraws),
+                ));
             }
         }
         // Submission + clear moved to render() so the GPU-submit cost is timed
