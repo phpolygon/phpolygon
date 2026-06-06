@@ -224,7 +224,12 @@ class Engine
 
         if ($config->autoThermalManagement && !$this->headless) {
             $sources = [new ThermalSourceFrametime()];
-            if (PHP_OS_FAMILY === 'Darwin' && function_exists('vio_thermal_state')) {
+            // Real hardware thermal sensor wherever php-vio can read one:
+            // macOS NSProcessInfo, Linux sysfs thermal zones (CPU+GPU), Windows
+            // NVIDIA NVAPI GPU temp (with an ACPI-WMI fallback). Returns Unknown
+            // (→ frametime guard) on platforms/GPUs without a sensor, so it is
+            // safe to register on every platform.
+            if (function_exists('vio_thermal_state')) {
                 $sources[] = new ThermalSourceOs();
             }
             $this->thermalMonitor = new ThermalMonitor(

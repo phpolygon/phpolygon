@@ -7,13 +7,15 @@ namespace PHPolygon\Rendering\Quality;
 use PHPolygon\Runtime\ThermalState;
 
 /**
- * Reads NSProcessInfo.thermalState via php-vio's vio_thermal_state() helper.
- * macOS-only - on any other platform (and when the vio build doesn't ship
- * the helper) every poll returns Unknown so the ThermalMonitor falls back
- * to the frametime guard.
+ * Reads a real hardware thermal level via php-vio's vio_thermal_state(), which
+ * is cross-platform: macOS NSProcessInfo.thermalState (whole system), Linux
+ * /sys/class/thermal zones (hottest of CPU/GPU/…), and Windows NVIDIA NVAPI GPU
+ * temperature (with an ACPI-WMI fallback). On a platform/GPU without a readable
+ * sensor every poll returns Unknown, so the ThermalMonitor falls back to the
+ * frametime guard.
  *
- * The OS API performs IPC under the hood and reflects whole-system heat
- * including other apps, so we poll at ~1 Hz rather than every frame.
+ * The read can perform IPC / driver calls under the hood and reflects
+ * whole-system heat, so we poll at ~1 Hz rather than every frame.
  */
 final class ThermalSourceOs implements ThermalSourceInterface
 {
@@ -42,7 +44,7 @@ final class ThermalSourceOs implements ThermalSourceInterface
 
     public function name(): string
     {
-        return 'thermal_macos';
+        return 'thermal_os';
     }
 
     public function update(float $frameTimeMs, float $nowSeconds, float $currentTargetFps): PressureSignal
