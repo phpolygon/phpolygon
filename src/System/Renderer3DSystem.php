@@ -186,12 +186,9 @@ class Renderer3DSystem extends AbstractSystem
                 $dy = $pos->y - $cameraPos->y;
                 $dz = $pos->z - $cameraPos->z;
                 $distSq = $dx * $dx + $dy * $dy + $dz * $dz;
-                // Cull lights whose influence sphere can't reach the camera.
-                // Generous cushion (×4) so lights remain visible just out of
-                // immediate range when the player turns toward them.
-                if ($distSq > $light->radius * $light->radius * 4.0) {
-                    continue;
-                }
+                // NOTE: distance-to-camera cull temporarily REMOVED to verify it
+                // was suppressing the cargo-plane interior lights. distSq is still
+                // computed below to keep the closest-MAX_POINT_LIGHTS selection.
             } else {
                 $distSq = 0.0;
             }
@@ -210,6 +207,17 @@ class Renderer3DSystem extends AbstractSystem
                 $light->intensity,
                 $light->radius,
             ));
+        }
+
+        if (\getenv('PHPOLYGON_LIGHT_DEBUG') === '1') {
+            static $lightDebugFrame = 0;
+            if ($lightDebugFrame++ % 60 === 0) {
+                $msg = '[LIGHTS] emitted=' . count($candidates);
+                foreach ($candidates as [$d, $p, $l]) {
+                    $msg .= \sprintf(' (%.0f,%.0f,%.0f i=%.1f r=%.0f)', $p->x, $p->y, $p->z, $l->intensity, $l->radius);
+                }
+                \fwrite(\STDERR, $msg . "\n");
+            }
         }
 
         // Spot lights — mirror the point-light pipeline exactly: skip dimmed

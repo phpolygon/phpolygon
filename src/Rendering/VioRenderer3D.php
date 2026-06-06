@@ -1943,10 +1943,27 @@ class VioRenderer3D implements Renderer3DInterface
             vio_set_uniform($this->ctx, "u_dir_lights[{$i}].intensity", $dl->intensity * $piScale);
         }
 
-        $ptCount = min(count($state['pointLights']), 4);
+        // The shader supports 8 point lights, but a scene can register many more
+        // (street lamps, props, the cargo-plane interior, …). Upload the 8
+        // NEAREST to the camera so close lights — e.g. the plane the player is
+        // riding during the intro — always win instead of being dropped by
+        // command order.
+        $pointLights = $state['pointLights'];
+        if (count($pointLights) > 8) {
+            $cam = $this->currentViewMatrix->inverse()->getTranslation();
+            $cx = $cam->x;
+            $cy = $cam->y;
+            $cz = $cam->z;
+            usort($pointLights, static function (AddPointLight $a, AddPointLight $b) use ($cx, $cy, $cz): int {
+                $da = ($a->position->x - $cx) ** 2 + ($a->position->y - $cy) ** 2 + ($a->position->z - $cz) ** 2;
+                $db = ($b->position->x - $cx) ** 2 + ($b->position->y - $cy) ** 2 + ($b->position->z - $cz) ** 2;
+                return $da <=> $db;
+            });
+        }
+        $ptCount = min(count($pointLights), 8);
         vio_set_uniform($this->ctx, 'u_point_light_count', $ptCount);
         for ($i = 0; $i < $ptCount; $i++) {
-            $pl = $state['pointLights'][$i];
+            $pl = $pointLights[$i];
             vio_set_uniform($this->ctx, "u_point_lights[{$i}].position", [$pl->position->x, $pl->position->y, $pl->position->z]);
             vio_set_uniform($this->ctx, "u_point_lights[{$i}].color", [$pl->color->r, $pl->color->g, $pl->color->b]);
             vio_set_uniform($this->ctx, "u_point_lights[{$i}].intensity", $pl->intensity * $piScale);
