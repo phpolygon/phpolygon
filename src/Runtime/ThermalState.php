@@ -7,8 +7,10 @@ namespace PHPolygon\Runtime;
 use PHPolygon\Rendering\Quality\PressureSignal;
 
 /**
- * Raw value returned by the OS-level thermal API on macOS via vio_thermal_state().
- * Maps 1:1 to NSProcessInfoThermalState. Other platforms always report Unknown.
+ * Real hardware thermal level read via php-vio's vio_thermal_state(): macOS
+ * NSProcessInfo.thermalState, Linux sysfs thermal zones, Windows NVIDIA NVAPI
+ * (with an ACPI-WMI fallback). Platforms/GPUs without a readable sensor report
+ * Unknown. The level names map 1:1 to NSProcessInfoThermalState.
  */
 enum ThermalState: string
 {
@@ -20,10 +22,20 @@ enum ThermalState: string
 
     /**
      * Query the active vio extension. Returns Unknown when vio_thermal_state()
-     * isn't available (older php-vio build, vio not loaded, non-macOS host).
+     * isn't available (older php-vio build, vio not loaded, no sensor).
+     *
+     * PHPOLYGON_THERMAL_FORCE (nominal|fair|serious|critical) overrides the read
+     * for development/testing of the thermal response without heating the device.
      */
     public static function fromVio(): self
     {
+        $forced = getenv('PHPOLYGON_THERMAL_FORCE');
+        if ($forced !== false) {
+            $state = self::tryFrom($forced);
+            if ($state !== null) {
+                return $state;
+            }
+        }
         if (!function_exists('vio_thermal_state')) {
             return self::Unknown;
         }

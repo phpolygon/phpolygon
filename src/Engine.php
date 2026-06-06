@@ -913,6 +913,14 @@ class Engine
         // player has switched to QualityMode::Adaptive.
         $this->adaptiveQuality?->tick($elapsedMs);
 
+        // Re-apply the render cap each frame so a real thermal throttle — or its
+        // recovery — takes effect even when targetFps itself didn't move (e.g.
+        // the frametime guard had already lowered it). Cheap: a few comparisons
+        // + a setFpsCap. Only runs when thermal management is active.
+        if ($this->thermalMonitor !== null) {
+            $this->applyRenderFpsCap($this->graphics->settings());
+        }
+
         if ($this->devLogger !== null && $this->thermalMonitor !== null) {
             $frametimeSource = self::findFrametimeSource($this->thermalMonitor->sources());
             if ($frametimeSource !== null && $frametimeSource->sampleCount() >= 60) {
@@ -1168,7 +1176,38 @@ class Engine
         } else {
             $cap = min($settings->targetFps, $tickRate);
         }
+        // Real hardware thermal throttle: under genuine heat (a real OS/GPU
+        // sensor, NOT the frametime guard) drop the render rate below the
+        // player's cap so the device can cool down — restored on recovery.
+        $thermalCeiling = $this->realThermalFpsCeiling();
+        if ($thermalCeiling > 0.0 && $thermalCeiling < $cap) {
+            $cap = $thermalCeiling;
+        }
         $this->gameLoop->setFpsCap((int) round(max(1.0, $cap)));
+    }
+
+    /**
+     * Render-rate ceiling imposed by a REAL hardware thermal sensor under
+     * genuine heat (Serious / Critical). The frametime guard is deliberately
+     * excluded: it fires on any slow frame — not actual heat — so it must never
+     * pin the player's chosen FPS (it adapts quality instead). 0.0 = no cap.
+     */
+    private function realThermalFpsCeiling(): float
+    {
+        if ($this->thermalMonitor === null) {
+            return 0.0;
+        }
+        foreach ($this->thermalMonitor->sources() as $source) {
+            if (!$source instanceof ThermalSourceOs) {
+                continue;
+            }
+            return match ($source->lastState()) {
+                \PHPolygon\Runtime\ThermalState::Critical => 30.0,
+                \PHPolygon\Runtime\ThermalState::Serious  => 45.0,
+                default                                   => 0.0,
+            };
+        }
+        return 0.0;
     }
 
     private function loadEngineFonts(): void
