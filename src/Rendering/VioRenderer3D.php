@@ -420,13 +420,7 @@ class VioRenderer3D implements Renderer3DInterface
 
         $i = 0;
         foreach ($this->cascadeShadowTargets as $target) {
-            if ($target === null) {
-                continue;
-            }
             $tex = vio_render_target_texture($target);
-            if ($tex === false || $tex === null) {
-                continue;
-            }
             // Tile centre in pixels (top-left origin), then to NDC.
             $cx = $padPx + $tilePx / 2 + $i * ($tilePx + $padPx);
             $cy = $padPx + $tilePx / 2;
@@ -1037,21 +1031,6 @@ class VioRenderer3D implements Renderer3DInterface
 
         // Cascade 0 also fills the legacy single-map slot for cloud-shadow paths.
         return true;
-    }
-
-    /**
-     * Build the shadow-pass light-space matrix.
-     *
-     * When a $cameraTarget is supplied the shadow frustum is centred on it
-     * and texel-snapped to the shadow-map grid - both prerequisites for
-     * stable open-world shadows. Without these the shadow box stays
-     * pinned to the world origin and shimmering edges appear as the
-     * camera moves continuously.
-     */
-    private function computeLightSpaceMatrix(Vec3 $sunDirection, ?Vec3 $cameraTarget = null, ?float $orthoSize = null): Mat4
-    {
-        [$proj, $view] = $this->computeLightProjView($sunDirection, $cameraTarget, $orthoSize);
-        return $proj->multiply($view);
     }
 
     /**

@@ -51,7 +51,7 @@ class WeaponSystem extends AbstractSystem
             }
 
             $health = $entity->tryGet(Health::class);
-            $team = $health?->team ?? Team::Player;
+            $team = $health->team ?? Team::Player;
 
             $pos = $tf->position;
             $forward = $tf->rotation->rotateVec3(new Vec3(0.0, 0.0, -1.0));
