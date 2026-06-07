@@ -45,6 +45,15 @@ function vio_backend_name(VioContext $ctx): string {}
 /** @return list<string> */
 function vio_backends(): array {}
 
+/**
+ * Host thermal state. macOS / iOS read NSProcessInfo.thermalState
+ * and return one of "nominal", "fair", "serious", "critical";
+ * every other host returns "unknown". The string return type (not a
+ * literal union) lets the caller's tryFrom() fallback stay defensive
+ * in case future vio builds add new states.
+ */
+function vio_thermal_state(): string {}
+
 // ----------------------------------------------------------------
 // Cursor
 // ----------------------------------------------------------------
