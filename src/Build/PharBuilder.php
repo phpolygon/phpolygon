@@ -314,11 +314,17 @@ STUB_END;
             }
 
             $target = $dst . '/' . $relPath;
-            if ($item->isDir()) {
+            $source = $item->getRealPath() ?: $item->getPathname();
+            // A symlink/junction to a directory (e.g. a Composer path-repo dep
+            // on Windows) can be surfaced by the iterator as a non-dir entry,
+            // which would hand copy() a directory and emit a warning. Treat
+            // anything that resolves to a directory as one (FOLLOW_SYMLINKS
+            // recurses its children separately).
+            if ($item->isDir() || is_dir($source)) {
                 @mkdir($target, 0755, true);
             } else {
                 @mkdir(dirname($target), 0755, true);
-                copy($item->getRealPath() ?: $item->getPathname(), $target);
+                copy($source, $target);
             }
         }
     }
