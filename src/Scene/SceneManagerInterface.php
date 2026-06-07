@@ -27,6 +27,16 @@ interface SceneManagerInterface
      */
     public function loadScene(string $name, LoadMode $mode = LoadMode::Single): void;
 
+    /**
+     * Progressive variant of loadScene(): drives the scene's buildProgressive()
+     * generator, re-yielding each build phase so the caller can render a frame
+     * between phases. The load is complete once the returned generator is
+     * exhausted. Same lifecycle/events as loadScene() otherwise.
+     *
+     * @return \Generator<int, mixed, mixed, void>
+     */
+    public function loadSceneProgressive(string $name, LoadMode $mode = LoadMode::Single): \Generator;
+
     /** Unload a scene, removing its entities and systems. */
     public function unloadScene(string $name): void;
 

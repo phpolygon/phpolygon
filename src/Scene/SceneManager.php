@@ -98,6 +98,73 @@ class SceneManager implements SceneManagerInterface
         $events->dispatch(new SceneLoaded($name, $scene));
     }
 
+    /**
+     * Progressive variant of loadScene(): identical events, unload,
+     * instantiation, system registration, persistent tracking, onLoad and
+     * activation — but it drives the scene's buildProgressive() generator and
+     * re-yields each value it produces, so the caller can render a frame
+     * between build phases. materialize() (and everything after) runs once the
+     * scene generator completes. The whole load is finished when this
+     * generator is exhausted (no longer valid).
+     *
+     * @return \Generator<int, mixed, mixed, void>
+     */
+    public function loadSceneProgressive(string $name, LoadMode $mode = LoadMode::Single): \Generator
+    {
+        if (!isset($this->registry[$name])) {
+            throw new RuntimeException("Scene '{$name}' is not registered");
+        }
+
+        $events = $this->engine->events;
+        $world = $this->engine->world;
+
+        $events->dispatch(new SceneLoading($name));
+
+        if ($mode === LoadMode::Single) {
+            $this->unloadAllScenes();
+        }
+
+        // Instantiate scene
+        $sceneClass = $this->registry[$name];
+        $scene = new $sceneClass();
+
+        // Register scene systems
+        $systems = [];
+        foreach ($scene->getSystems() as $systemClass) {
+            $system = new $systemClass();
+            $world->addSystem($system);
+            $systems[] = $system;
+        }
+        $this->sceneSystems[$name] = $systems;
+
+        // Build entities phase by phase, re-yielding each phase to the caller.
+        $builder = new SceneBuilder();
+        foreach ($scene->buildProgressive($builder) as $phase) {
+            yield $phase;
+        }
+
+        // Materialize entities (single heavy step) once the build completes.
+        $entityMap = $builder->materialize($world);
+        $this->sceneEntities[$name] = $entityMap;
+
+        // Track persistent entities
+        foreach ($builder->getDeclarations() as $decl) {
+            if ($decl->isPersistent() && isset($entityMap[$decl->getName()])) {
+                $this->persistentEntities[$entityMap[$decl->getName()]] = true;
+            }
+        }
+
+        $this->loaded[$name] = $scene;
+        $scene->onLoad($this->engine);
+
+        // Activate if single mode or first scene
+        if ($mode === LoadMode::Single || $this->activeScene === null) {
+            $this->setActiveScene($name);
+        }
+
+        $events->dispatch(new SceneLoaded($name, $scene));
+    }
+
     public function unloadScene(string $name): void
     {
         if (!isset($this->loaded[$name])) {
