@@ -253,6 +253,7 @@ class Engine
                 $config->vsync,
                 $config->resizable,
                 $config->vioBackend,
+                $effectiveDevMode,
             );
         } else {
             $noApi = $config->is3D && in_array($config->renderBackend3D, ['vulkan', 'metal'], true);

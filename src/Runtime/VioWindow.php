@@ -13,6 +13,7 @@ class VioWindow extends Window
     private bool $vioFullscreen = false;
     private bool $vioBorderless = false;
     private string $backend;
+    private bool $debug;
 
     public function __construct(
         int $width,
@@ -21,9 +22,11 @@ class VioWindow extends Window
         bool $vsync = true,
         bool $resizable = true,
         string $backend = 'auto',
+        bool $debug = false,
     ) {
         parent::__construct($width, $height, $title, $vsync, $resizable);
         $this->backend = $backend;
+        $this->debug = $debug;
     }
 
     public function initialize(InputInterface $input): void
@@ -36,7 +39,11 @@ class VioWindow extends Window
             'title'   => $this->title,
             'vsync'   => $this->vsync,
             'samples' => 4,
-            'debug'   => 1,
+            // Only request the graphics-API debug/validation layer in dev mode
+            // (--dev / --dev-monitor or EngineConfig::$devMode). In shipping
+            // builds the D3D12/Vulkan validation layer adds overhead and spams
+            // the log with benign hints; Engine threads $effectiveDevMode here.
+            'debug'   => $this->debug ? 1 : 0,
         ];
 
         // Try the requested backend first; on failure, walk a platform-aware
