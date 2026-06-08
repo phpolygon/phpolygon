@@ -61,6 +61,11 @@ class UIContext
     /** Whether any widget was hovered this frame */
     private bool $anyHovered = false;
 
+    /** Id of the leaf widget hovered this frame ('' = none). Tracked alongside
+     *  $anyHovered through begin/end region nesting so callers can detect
+     *  per-widget hover-enter (e.g. for hover SFX). */
+    private string $hoveredWidget = '';
+
     /** @var list<\Closure> Deferred overlay draws (dropdowns) — rendered last for correct z-order */
     private array $deferredOverlays = [];
 
@@ -122,6 +127,7 @@ class UIContext
             'w' => $this->regionWidth,
             'flow' => $this->flow,
             'hovered' => $this->anyHovered,
+            'hoveredWidget' => $this->hoveredWidget,
         ];
 
         $this->cursorX = $x;
@@ -129,6 +135,7 @@ class UIContext
         $this->regionWidth = $width;
         $this->flow = $flow;
         $this->anyHovered = false;
+        $this->hoveredWidget = '';
         $this->renderer->setFont($this->style->fontName);
         $this->renderer->setTextAlign(\PHPolygon\Rendering\TextAlign::LEFT | \PHPolygon\Rendering\TextAlign::TOP);
     }
@@ -141,6 +148,7 @@ class UIContext
     public function end(): void
     {
         $wasHovered = $this->anyHovered;
+        $childHoveredWidget = $this->hoveredWidget;
 
         if (count($this->layoutStack) > 0) {
             $prev = array_pop($this->layoutStack);
@@ -148,8 +156,10 @@ class UIContext
             $this->cursorY = $prev['y'];
             $this->regionWidth = $prev['w'];
             $this->flow = $prev['flow'];
-            // Propagate hover state to parent
+            // Propagate hover state to parent: a hovered child wins, otherwise
+            // keep whatever the parent region already had hovered.
             $this->anyHovered = $prev['hovered'] || $wasHovered;
+            $this->hoveredWidget = $wasHovered ? $childHoveredWidget : $prev['hoveredWidget'];
         }
 
     }
@@ -230,7 +240,7 @@ class UIContext
         $pressing = false;
 
         if ($hovered) {
-            $this->anyHovered = true;
+            $this->anyHovered = true; $this->hoveredWidget = $id;
 
             if ($this->input->isMouseButtonDown(0)) {
                 $this->activeWidget = $id;
@@ -275,7 +285,7 @@ class UIContext
 
         $hovered = $this->isHovered($fullRect);
         if ($hovered) {
-            $this->anyHovered = true;
+            $this->anyHovered = true; $this->hoveredWidget = $id;
             if ($this->input->isMouseButtonReleased(0)) {
                 $value = !$value;
             }
@@ -337,7 +347,7 @@ class UIContext
 
         $hovered = $this->isHovered($barRect);
         if ($hovered) {
-            $this->anyHovered = true;
+            $this->anyHovered = true; $this->hoveredWidget = $id;
         }
 
         if (!$this->input->isMouseButtonDown(0)) {
@@ -417,7 +427,7 @@ class UIContext
 
         $hovered = $this->isHovered($fieldRect);
         if ($hovered) {
-            $this->anyHovered = true;
+            $this->anyHovered = true; $this->hoveredWidget = $id;
         }
 
         $focused = $this->focusedTextField === $id;
@@ -529,7 +539,7 @@ class UIContext
 
         $hovered = $this->isHovered($fieldRect);
         if ($hovered) {
-            $this->anyHovered = true;
+            $this->anyHovered = true; $this->hoveredWidget = $id;
         }
 
         $focused = $this->focusedTextField === $id;
@@ -710,7 +720,7 @@ class UIContext
         $hovered = $this->isHovered($fieldRect);
 
         if ($hovered) {
-            $this->anyHovered = true;
+            $this->anyHovered = true; $this->hoveredWidget = $id;
             if ($this->input->isMouseButtonReleased(0)) {
                 $this->openDropdown = $isOpen ? '' : $id;
                 $isOpen = !$isOpen;
@@ -750,7 +760,7 @@ class UIContext
 
             $listHovered = $this->isHovered($listRect);
             if ($listHovered) {
-                $this->anyHovered = true;
+                $this->anyHovered = true; $this->hoveredWidget = $id;
             }
 
             // Mouse wheel scrolling
@@ -770,7 +780,7 @@ class UIContext
                 if ($i >= $totalCount) break;
                 $optRect = new Rect($fieldRect->x, $listY + $vi * $rowH, $w, $rowH);
                 if ($this->isHovered($optRect)) {
-                    $this->anyHovered = true;
+                    $this->anyHovered = true; $this->hoveredWidget = $id;
                     $hoveredItem = $vi;
                     if ($this->input->isMouseButtonReleased(0)) {
                         $selectedIndex = $i;
@@ -942,6 +952,16 @@ class UIContext
     public function isAnyHovered(): bool
     {
         return $this->anyHovered;
+    }
+
+    /**
+     * Id of the leaf widget currently hovered, or '' when none. Lets callers
+     * detect per-widget hover-enter across frames (e.g. to play a hover SFX
+     * each time the cursor moves onto a different widget).
+     */
+    public function hoveredWidgetId(): string
+    {
+        return $this->hoveredWidget;
     }
 
     /**
