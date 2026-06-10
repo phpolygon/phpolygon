@@ -51,6 +51,9 @@ final class VioFxaaPass
         int $sourceWidth,
         int $sourceHeight,
         VioMesh $screenQuad,
+        ?VioTexture $bloomTexture = null,
+        float $bloomIntensity = 0.0,
+        ?array $post = null,
     ): void {
         if (!$this->initialised) {
             $this->initialise();
@@ -67,6 +70,32 @@ final class VioFxaaPass
         vio_bind_texture($this->ctx, $inputTexture, 0);
         vio_set_uniform($this->ctx, 'u_color_texture', 0);
         vio_set_uniform($this->ctx, 'u_inverse_resolution', [$invW, $invH]);
+
+        // Additive bloom composited in the same pass (0 intensity → shader skips).
+        if ($bloomTexture !== null && $bloomIntensity > 0.0) {
+            vio_bind_texture($this->ctx, $bloomTexture, 1);
+            vio_set_uniform($this->ctx, 'u_bloom', 1);
+            vio_set_uniform($this->ctx, 'u_bloom_intensity', $bloomIntensity);
+        } else {
+            vio_set_uniform($this->ctx, 'u_bloom_intensity', 0.0);
+        }
+
+        // Full-screen finishing (colour grade + vignette). Always set — the
+        // shader's gamma uniform must never be 0 (→ pow blows up → black).
+        // Null = identity (Neutral grade, no vignette).
+        $p = $post ?? [];
+        vio_set_uniform($this->ctx, 'u_grade_lift',       $p['lift']       ?? [0.0, 0.0, 0.0]);
+        vio_set_uniform($this->ctx, 'u_grade_gamma',      $p['gamma']      ?? [1.0, 1.0, 1.0]);
+        vio_set_uniform($this->ctx, 'u_grade_gain',       $p['gain']       ?? [1.0, 1.0, 1.0]);
+        vio_set_uniform($this->ctx, 'u_grade_saturation', $p['saturation'] ?? 1.0);
+        vio_set_uniform($this->ctx, 'u_vignette_intensity', $p['vignette'] ?? 0.0);
+        vio_set_uniform($this->ctx, 'u_viewport_size',    $p['viewport']   ?? [0.0, 0.0]);
+
+        // HDR resolve: when the offscreen scene was FP16 linear, FXAA's
+        // finishPost() applies exposure + ACES tonemap + gamma after bloom and
+        // before grade/vignette. Off → LDR behaviour, unchanged.
+        vio_set_uniform($this->ctx, 'u_hdr_resolve', $p['hdr']      ?? 0);
+        vio_set_uniform($this->ctx, 'u_exposure',    $p['exposure'] ?? 1.0);
 
         vio_draw($this->ctx, $screenQuad);
     }

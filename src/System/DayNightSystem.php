@@ -9,6 +9,7 @@ use PHPolygon\Component\Camera3DComponent;
 use PHPolygon\Component\DayNightCycle;
 use PHPolygon\Component\DirectionalLight;
 use PHPolygon\Component\MeshRenderer;
+use PHPolygon\Component\Season;
 use PHPolygon\Component\Transform3D;
 use PHPolygon\Component\Weather;
 use PHPolygon\Component\Wind;
@@ -159,17 +160,44 @@ class DayNightSystem extends AbstractSystem
         $cycle = $this->cachedCycle;
         if ($cycle === null) return;
 
+        // Seasonal sun: add the Season's axial tilt (±15° summer/winter) to the
+        // sun elevation so the whole arc shifts — higher in 'summer', lower in
+        // 'winter'. Used everywhere below (direction, day/night blend, moon
+        // visibility, horizon fade) so the sun visibly follows the season
+        // instead of staying put while the foliage recolours.
+        $seasonTilt = 0.0;
+        foreach ($world->query(Season::class) as $seasonEntity) {
+            $seasonTilt = $seasonEntity->get(Season::class)->axialTilt;
+            break;
+        }
+        $sunElev = $cycle->getSunElevation() + $seasonTilt;
+
+        // Cloud coverage drives how many clouds the sky shows; storminess
+        // (rain/snow/thunder) drives how DARK they are + how much they globally
+        // dim the scene. Fair-weather clouds stay white and only cast local
+        // moving shadow patches (mesh cloudShadow); storms darken everything.
+        $overcast = $cycle->cloudDarkening;
+        $fogDensity = 0.0;
+        $cloudDarkness = 0.0;
+        foreach ($world->query(Weather::class) as $weatherEntity) {
+            $weather = $weatherEntity->get(Weather::class);
+            $overcast = max($overcast, $weather->cloudCoverage);
+            $fogDensity = max($fogDensity, $weather->fogDensity);
+            $cloudDarkness = max($weather->rainIntensity, $weather->snowIntensity, $weather->stormIntensity);
+            break;
+        }
+
         $t = $cycle->timeOfDay;
 
         // --- Sun direction ---
-        $elevRad = deg2rad($cycle->getSunElevation());
+        $elevRad = deg2rad($sunElev);
         $azimRad = $t * 2.0 * M_PI;
         $sunDirX = -cos($elevRad) * sin($azimRad);
         $sunDirY = -sin($elevRad);
         $sunDirZ = -cos($elevRad) * cos($azimRad);
 
         // Pre-compute moon brightness (needed for moonlight directional light)
-        $moonBright = max(0.0, min(1.0, -$cycle->getSunElevation() / 20.0));
+        $moonBright = max(0.0, min(1.0, -$sunElev / 20.0));
         $moonPhase = $cycle->getMoonPhase();
         $phaseBrightness = 0.3 + 0.7 * (1.0 - abs(cos($moonPhase * M_PI)));
         $moonBright *= $phaseBrightness;
@@ -180,7 +208,7 @@ class DayNightSystem extends AbstractSystem
         // Atmospheric path length correction (Mie/Rayleigh approximation):
         // Low sun = long atmospheric path = blue scattered away, red/orange remains.
         // High sun = short path = full spectrum = white.
-        $elevation = max(0.0, $cycle->getSunElevation());
+        $elevation = max(0.0, $sunElev);
         if ($elevation > 0.0 && $elevation < 25.0 && $sunColor['intensity'] > 0.0) {
             // Normalized path factor: 1.0 at horizon, 0.0 at 25°+
             $pathFactor = 1.0 - min(1.0, $elevation / 25.0);
@@ -192,7 +220,19 @@ class DayNightSystem extends AbstractSystem
         }
 
         // At night, the moon acts as a weak directional light (reflected sunlight).
-        $sunIntensityFinal = $sunColor['intensity'] * (1.0 - $cycle->cloudDarkening);
+        $sunIntensityFinal = $sunColor['intensity']
+            * (1.0 - $cycle->cloudDarkening)        // cycle's mild base haze
+            * (1.0 - $cloudDarkness * 0.6);          // storms darken the whole scene
+
+        // The sun stops lighting the world as it crosses the horizon — below it,
+        // only moonlight remains. The time-keyed intensity alone lingers a few
+        // degrees past sunset (the world stayed sun-lit too long); this elevation
+        // gate fades the sun out across [-1°, 2.5°] so the moon→sun handoff
+        // happens right at the horizon. Drives the moonBlend below + sky glow.
+        $elev = $sunElev;
+        $horizonFade = max(0.0, min(1.0, ($elev + 1.0) / 3.5));
+        $horizonFade = $horizonFade * $horizonFade * (3.0 - 2.0 * $horizonFade); // smoothstep
+        $sunIntensityFinal *= $horizonFade;
 
         // Smooth blend between sunlight and moonlight.
         // moonBlend: 0 = full sun, 1 = full moon.
@@ -236,14 +276,14 @@ class DayNightSystem extends AbstractSystem
         $sunWorldX = -$sunDirX * $sunRadius;
         $sunWorldY = -$sunDirY * $sunRadius;
         $sunWorldZ = -$sunDirZ * $sunRadius;
-        $sunVisible = $cycle->getSunElevation() > -10.0;
+        $sunVisible = $sunElev > -10.0;
 
         // --- Moon direction (opposite to sun) ---
         $moonRadius = 280.0;
         $moonX = $sunDirX * $moonRadius;
         $moonY = $sunDirY * $moonRadius;
         $moonZ = $sunDirZ * $moonRadius;
-        $moonVisible = $cycle->getSunElevation() < 5.0; // Moon visible when sun is low/below horizon
+        $moonVisible = $sunElev < 5.0; // Moon visible when sun is low/below horizon
 
         // moonBright already computed above (with phase)
 
@@ -386,7 +426,7 @@ class DayNightSystem extends AbstractSystem
         $lowSun = max(0.0, 1.0 - $cycle->getSunHeight());
         $sunSize = 0.018 + $lowSun * 0.020;
         $sunGlowSize = 0.15 + $lowSun * 0.25;
-        $sunGlowIntensity = ($lowSun * 0.45 + 0.25) * max(0.1, $sunColor['intensity']);
+        $sunGlowIntensity = ($lowSun * 0.45 + 0.25) * max(0.1, $sunColor['intensity']) * $horizonFade;
 
         // Direction FROM surface TOWARD the sun (opposite of light travel direction).
         $skySunDir = $sunVisible
@@ -399,15 +439,8 @@ class DayNightSystem extends AbstractSystem
         // Pull atmosphere state from Weather + Atmosphere + Wind components
         // if present, otherwise fall back to the DayNightCycle's cached
         // cloudDarkening value so the system still works in minimal scenes.
-        $cloudCover = $cycle->cloudDarkening;
-        $fogDensity = 0.0;
-        foreach ($world->query(Weather::class) as $entity) {
-            $w = $entity->get(Weather::class);
-            $cloudCover = max($cloudCover, $w->cloudCoverage);
-            // fogDensity is already a storm/humidity derived value in [0,1].
-            $fogDensity = max($fogDensity, $w->fogDensity);
-            break;
-        }
+        // $overcast + $fogDensity were computed up top (they also dim the sun).
+        $cloudCover = $overcast;
 
         $cloudAltitude = 45.0;
         foreach ($world->query(Atmosphere::class) as $entity) {
@@ -432,7 +465,7 @@ class DayNightSystem extends AbstractSystem
                 min(1.0, $sunColor['g'] + 0.05),
                 min(1.0, $sunColor['b'] + 0.05),
             ),
-            sunIntensity: $sunVisible ? $sunColor['intensity'] : 0.0,
+            sunIntensity: $sunVisible ? $sunColor['intensity'] * $horizonFade : 0.0,
             zenithColor: $zenithColor,
             horizonColor: $horizonMuted,
             groundColor: $groundColor,
@@ -448,6 +481,7 @@ class DayNightSystem extends AbstractSystem
             cloudWindSpeed: $windSpeed,
             cloudWindDirection: new Vec3(1.0, 0.0, 0.2),
             fogDensity: $fogDensity,
+            cloudDarkness: $cloudDarkness,
             starBrightness: $cycle->isDaytime() ? 0.0 : 0.9 * $moonBright,
             time: $this->skyTime,
         ));

@@ -6,6 +6,74 @@ out vec4 frag_color;
 uniform sampler2D u_color_texture;
 uniform vec2      u_inverse_resolution;
 
+// Additive bloom composited in the same pass (u_bloom_intensity == 0 → off).
+uniform sampler2D u_bloom;
+uniform float     u_bloom_intensity;
+
+// HDR resolve (FP16 offscreen path): when 1 the colour texture holds LINEAR HDR;
+// bloom is added in linear and exposure + ACES tonemap + gamma run BEFORE grade.
+// When 0 the texture is display-referred LDR and behaviour is unchanged (no
+// tonemap; bloom added post-tonemap). Mirrors passthrough_blit.frag.glsl.
+uniform int   u_hdr_resolve;
+uniform float u_exposure;
+
+// Full-screen finishing — colour grade + vignette applied to the FINAL image
+// (geometry + sky + bloom), so they cover the whole frame uniformly. Neutral
+// grade (lift 0, gamma 1, gain 1, saturation 1) + vignette 0 = identity.
+uniform vec3  u_grade_lift;
+uniform vec3  u_grade_gamma;
+uniform vec3  u_grade_gain;
+uniform float u_grade_saturation;
+uniform float u_vignette_intensity;
+uniform vec2  u_viewport_size;
+
+// ACES filmic tonemap (Narkowicz) — matches mesh3d.frag / passthrough_blit so
+// the HDR resolve reproduces the inline-tonemap geometry response exactly.
+vec3 toneMapACES(vec3 x) {
+    const float a = 2.51;
+    const float b = 0.03;
+    const float c = 2.43;
+    const float d = 0.59;
+    const float e = 0.14;
+    return clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.0, 1.0);
+}
+
+vec3 addBloom(vec3 c) {
+    if (u_bloom_intensity <= 0.0) return c;
+    return c + texture(u_bloom, v_uv).rgb * u_bloom_intensity;
+}
+
+vec3 applyColorGrade(vec3 color) {
+    color = color + u_grade_lift;
+    vec3 gammaSafe = max(u_grade_gamma, vec3(1e-3)); // guard div-by-zero → black
+    color = pow(max(color, vec3(0.0)), vec3(1.0) / gammaSafe);
+    color = color * u_grade_gain;
+    float luma = dot(color, vec3(0.2126, 0.7152, 0.0722));
+    return mix(vec3(luma), color, u_grade_saturation);
+}
+
+vec3 applyVignette(vec3 color) {
+    if (u_vignette_intensity <= 0.0 || u_viewport_size.x <= 0.0) return color;
+    vec2 uv = gl_FragCoord.xy / u_viewport_size;
+    float v = smoothstep(0.45, 0.85, length(uv - 0.5));
+    return color * (1.0 - v * u_vignette_intensity);
+}
+
+// Finish the resolved FXAA colour. HDR: add bloom (linear) → exposure → ACES →
+// gamma → grade → vignette. LDR (legacy/non-D3D): add bloom (display) → grade →
+// vignette, unchanged. The order keeps bloom + tonemap in linear before the
+// display-space grade/vignette.
+vec3 finishPost(vec3 c) {
+    if (u_hdr_resolve == 1) {
+        c = addBloom(c);
+        c *= u_exposure;
+        c = toneMapACES(c);
+        c = pow(c, vec3(1.0 / 2.2));
+        return applyVignette(applyColorGrade(c));
+    }
+    return applyVignette(applyColorGrade(addBloom(c)));
+}
+
 const float FXAA_EDGE_THRESHOLD     = 0.166;
 const float FXAA_EDGE_THRESHOLD_MIN = 0.0833;
 const float FXAA_SUBPIX_CAP         = 0.75;
@@ -36,7 +104,7 @@ void main() {
     float range   = lumaMax - lumaMin;
 
     if (range < max(FXAA_EDGE_THRESHOLD_MIN, lumaMax * FXAA_EDGE_THRESHOLD)) {
-        frag_color = vec4(rgbM, 1.0);
+        frag_color = vec4(finishPost(rgbM), 1.0);
         return;
     }
 
@@ -133,5 +201,5 @@ void main() {
     if (horizontal) finalUv.y += finalOffset * stepLength;
     else            finalUv.x += finalOffset * stepLength;
 
-    frag_color = vec4(texture(u_color_texture, finalUv).rgb, 1.0);
+    frag_color = vec4(finishPost(texture(u_color_texture, finalUv).rgb), 1.0);
 }

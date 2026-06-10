@@ -603,6 +603,62 @@ vec3 computeWater(vec3 N, vec3 V, vec3 L, out float alphaOut, out float roughOut
 }
 
 // ================================================================
+//  Procedural Pool / Fountain Water (proc_mode 11)
+//  Small raised basins (fountains, ponds). Same wave-normal shimmer + fresnel
+//  sky reflection + sun specular as the ocean, but NO radial depth/shoreline/
+//  foam — that model is the ocean's (centred at the island origin) and would
+//  blank out water near the centre (e.g. a plaza fountain at r≈40 m).
+// ================================================================
+
+vec3 computePoolWater(vec3 N, vec3 V, vec3 L, out float alphaOut, out float roughOut) {
+    // Three ripple layers — coarse swell + chop + fine sparkle.
+    vec2 uv1 = v_worldPos.xz * 1.8  + u_time * vec2(0.05, 0.04);
+    vec2 uv2 = v_worldPos.xz * 5.0  + u_time * vec2(-0.06, 0.08);
+    vec2 uv3 = v_worldPos.xz * 11.0 + u_time * vec2(0.09, -0.07);
+
+    float eps = 0.05;
+    float h1a = fbm(uv1, 3); float h1b = fbm(uv1 + vec2(eps,0), 3); float h1c = fbm(uv1 + vec2(0,eps), 3);
+    float h2a = noise(uv2);  float h2b = noise(uv2 + vec2(eps,0));  float h2c = noise(uv2 + vec2(0,eps));
+    float h3a = noise(uv3);  float h3b = noise(uv3 + vec2(eps,0));  float h3c = noise(uv3 + vec2(0,eps));
+
+    vec3 waveNormal = vec3(0.0, 1.0, 0.0);
+    waveNormal.x += (h1a - h1b) * 1.4 + (h2a - h2b) * 0.6 + (h3a - h3b) * 0.25;
+    waveNormal.z += (h1a - h1c) * 1.4 + (h2a - h2c) * 0.6 + (h3a - h3c) * 0.25;
+    waveNormal = normalize(waveNormal);
+
+    N = normalize(N + waveNormal * vec3(1.0, 0.0, 1.0));
+
+    float NdotV = max(dot(N, V), 0.0);
+    float fresnel = mix(0.04, 1.0, pow(1.0 - NdotV, 5.0));
+
+    vec3 floorColor = vec3(0.04, 0.16, 0.18);
+    vec3 bodyColor  = vec3(0.10, 0.42, 0.48);
+    vec3 waterColor = mix(floorColor, bodyColor, fresnel);
+
+    vec3 R = reflect(-V, N);
+    float skyBlend = clamp(R.y * 2.0, 0.0, 1.0);
+    vec3 reflectColor = mix(u_horizon_color, u_sky_color, skyBlend);
+    reflectColor = mix(reflectColor, u_dir_light_color, pow(max(dot(R, L), 0.0), 256.0) * 2.0);
+
+    vec3 finalColor = mix(waterColor, reflectColor, fresnel);
+
+    vec3 H = normalize(V + L);
+    float specTight = pow(max(dot(N, H), 0.0), 600.0);
+    float specSoft  = pow(max(dot(N, H), 0.0), 80.0) * 0.25;
+    finalColor += u_dir_light_color * u_dir_light_intensity * (specTight * 2.5 + specSoft);
+
+    float cs1 = noise(v_worldPos.xz * 6.0 + u_time * 0.6);
+    float cs2 = noise(v_worldPos.xz * 6.0 - u_time * 0.45 + 23.0);
+    float caustic = pow(max(0.0, 1.0 - abs(cs1 - cs2) * 2.5), 3.0);
+    finalColor += vec3(0.12, 0.22, 0.20) * caustic * (1.0 - fresnel);
+
+    alphaOut = mix(0.45, 0.95, fresnel);
+    roughOut = 0.03;
+
+    return finalColor;
+}
+
+// ================================================================
 //  Procedural Rock
 // ================================================================
 
@@ -1316,6 +1372,18 @@ void main() {
 
         // Gamma, no fog
         frag_color = vec4(finalize(litColor), 1.0);
+        return;
+
+    } else if (u_proc_mode == 11) {
+        // Pool / fountain water — clear basin water, no ocean shoreline fade.
+        albedo = computePoolWater(N, V, L, alpha, roughness);
+
+        float fogDist = length(v_worldPos - u_camera_pos);
+        float fogFactor = clamp((fogDist - u_fog_near) / (u_fog_far - u_fog_near), 0.0, 1.0);
+        fogFactor = 1.0 - exp(-fogFactor * fogFactor * 3.0);
+        vec3 color = mix(albedo, u_fog_color, fogFactor);
+        color = finalize(color);
+        frag_color = vec4(color, alpha);
         return;
 
     } else if (u_proc_mode == 10) {

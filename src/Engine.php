@@ -109,6 +109,15 @@ class Engine
     private const FRAME_HISTORY = 120;
     private int $lastFrameStartNs = 0;
 
+    /**
+     * Fixed-timestep render interpolation factor [0,1] for the current frame:
+     * how far the render sits between the previous and latest update tick.
+     * Set by the game loop's render callback before world->render() runs, so
+     * systems (e.g. Camera3DSystem) can interpolate transforms and stay smooth
+     * when the render rate exceeds the update rate (144 fps render / 60 Hz sim).
+     */
+    public float $renderInterpolation = 1.0;
+
     /** @var callable|null */
     private $onUpdate = null;
 
@@ -747,6 +756,7 @@ class Engine
                 },
                 render: function (float $interpolation) use ($nativeBackend) {
                     PerfProfiler::begin('engine.render');
+                    $this->renderInterpolation = $interpolation;
                     $this->beginFrameStats();
 
                     // Sync viewport to framebuffer every frame — handles Retina HiDPI and window resize
@@ -820,6 +830,7 @@ class Engine
                 },
                 render: function (float $interpolation) use ($nativeBackend) {
                     PerfProfiler::begin('engine.render');
+                    $this->renderInterpolation = $interpolation;
                     $this->beginFrameStats();
 
                     // Sync viewport to framebuffer every frame — handles Retina HiDPI and window resize

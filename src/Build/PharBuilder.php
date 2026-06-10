@@ -296,7 +296,11 @@ STUB_END;
         $srcLen = strlen($src);
         /** @var \SplFileInfo $item */
         foreach ($iterator as $item) {
-            $relPath = substr($item->getPathname(), $srcLen + 1);
+            // Normalise to '/' — on Windows getPathname() returns backslashes,
+            // so explode('/') below would not split path segments and the
+            // exclude match (e.g. '**/tests') would silently miss, bloating the
+            // PHAR with test/vendor junk on Windows builds.
+            $relPath = str_replace('\\', '/', substr($item->getPathname(), $srcLen + 1));
 
             // Check if any path segment matches an exclude pattern
             $skip = false;
@@ -314,11 +318,24 @@ STUB_END;
             }
 
             $target = $dst . '/' . $relPath;
+            $source = $item->getRealPath() ?: $item->getPathname();
             if ($item->isDir()) {
                 @mkdir($target, 0755, true);
+            } elseif (is_dir($source)) {
+                // A symlink/junction to a directory the iterator won't descend
+                // into — a Composer path-repo dependency (e.g. the engine, which
+                // appears as a junction on Windows). Without this its sources
+                // never reach the PHAR (the classic "Class PHPolygon\Engine not
+                // found" at runtime). Copy its real tree, skipping the dev
+                // checkout's VCS/build junk and its own (already-flattened) vendor.
+                $depExcludes = array_merge($excludePatterns, [
+                    '**/.git', '**/.github', '**/.idea',
+                    '**/node_modules', '**/vendor', '**/build', '**/dist',
+                ]);
+                $this->copyDirectoryFiltered($source, $target, $depExcludes);
             } else {
                 @mkdir(dirname($target), 0755, true);
-                copy($item->getRealPath() ?: $item->getPathname(), $target);
+                copy($source, $target);
             }
         }
     }

@@ -95,12 +95,17 @@ class LocaleManager
             throw new \RuntimeException("Translation directory not found: {$directory}");
         }
 
-        // Normalize path separators for cross-platform glob() compatibility
-        $normalizedDir = str_replace('\\', '/', $directory);
-        $files = glob($normalizedDir . '/*.json');
-        if ($files === false) {
-            return;
+        // Use DirectoryIterator, not glob(): glob() does not support the phar://
+        // stream wrapper, so a bundled PHAR/.exe would silently load no
+        // translations. DirectoryIterator works on real dirs AND inside a phar
+        // (where paths must use '/', so no DIRECTORY_SEPARATOR juggling here).
+        $files = [];
+        foreach (new \DirectoryIterator($directory) as $entry) {
+            if ($entry->isFile() && strtolower($entry->getExtension()) === 'json') {
+                $files[] = $entry->getPathname();
+            }
         }
+        sort($files);
         foreach ($files as $file) {
             $locale = pathinfo($file, PATHINFO_FILENAME);
             $this->loadFile($locale, $file);

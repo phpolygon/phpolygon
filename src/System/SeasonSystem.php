@@ -55,8 +55,10 @@ class SeasonSystem extends AbstractSystem
 
             $t = $season->yearProgress;
 
-            // Compute axial tilt: sin curve, +15° at summer, -15° at winter
-            $season->axialTilt = sin(($t - 0.25) * 2.0 * M_PI) * 15.0;
+            // Axial tilt: +15° at summer (t=0.25), -15° at winter (t=0.75),
+            // 0° at spring/autumn. (cos, not sin — the old sin was phase-shifted
+            // so it peaked in autumn; now the sun arc matches the actual season.)
+            $season->axialTilt = cos(($t - 0.25) * 2.0 * M_PI) * 15.0;
 
             // Compute base temperature and humidity from seasonal curve
             $climate = self::interpolateClimate(self::TEMP_KEYS, $t);
