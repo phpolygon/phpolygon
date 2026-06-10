@@ -315,13 +315,20 @@ STUB_END;
 
             $target = $dst . '/' . $relPath;
             $source = $item->getRealPath() ?: $item->getPathname();
-            // A symlink/junction to a directory (e.g. a Composer path-repo dep
-            // on Windows) can be surfaced by the iterator as a non-dir entry,
-            // which would hand copy() a directory and emit a warning. Treat
-            // anything that resolves to a directory as one (FOLLOW_SYMLINKS
-            // recurses its children separately).
-            if ($item->isDir() || is_dir($source)) {
+            if ($item->isDir()) {
                 @mkdir($target, 0755, true);
+            } elseif (is_dir($source)) {
+                // A symlink/junction to a directory the iterator won't descend
+                // into — a Composer path-repo dependency (e.g. the engine, which
+                // appears as a junction on Windows). Without this its sources
+                // never reach the PHAR (the classic "Class PHPolygon\Engine not
+                // found" at runtime). Copy its real tree, skipping the dev
+                // checkout's VCS/build junk and its own (already-flattened) vendor.
+                $depExcludes = array_merge($excludePatterns, [
+                    '**/.git', '**/.github', '**/.idea',
+                    '**/node_modules', '**/vendor', '**/build', '**/dist',
+                ]);
+                $this->copyDirectoryFiltered($source, $target, $depExcludes);
             } else {
                 @mkdir(dirname($target), 0755, true);
                 copy($source, $target);
