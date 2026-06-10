@@ -73,12 +73,14 @@ class Renderer3DSystem extends AbstractSystem
      * that bloat wide vistas drops out.
      *
      * Both are live-tunable without a rebuild so the FPS/pop sweet spot can be
-     * dialled in: PHPOLYGON_LOD_RATIO (default 0.009) and PHPOLYGON_LOD_NEAR
+     * dialled in: PHPOLYGON_LOD_RATIO (default 0.004) and PHPOLYGON_LOD_NEAR
      * (default 45). A larger ratio culls more aggressively (higher FPS, more
      * pop); a smaller near distance starts culling closer to the camera.
+     * The defaults match the historical built-in behaviour (no surprise
+     * culling) — set the env vars to opt into more aggressive distance LOD.
      */
     private const DEFAULT_LOD_NEAR  = 45.0;
-    private const DEFAULT_LOD_RATIO = 0.009;
+    private const DEFAULT_LOD_RATIO = 0.004;
 
     private readonly float $lodNearDistance;
     private readonly float $minScreenRatio;
