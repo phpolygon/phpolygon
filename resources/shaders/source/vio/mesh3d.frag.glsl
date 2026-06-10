@@ -72,6 +72,11 @@ uniform float u_wetness;
 uniform vec3  u_subsurface_color;
 uniform float u_subsurface_strength;
 uniform float u_ssr_intensity;
+// 1 when the real ray-marched SSR pass owns reflections this frame (VIO/D3D12,
+// HDR path). When 1 the forward wetness SURROGATE below is suppressed so the two
+// don't double-apply; when 0 (tier Off, or non-D3D / non-HDR) the surrogate is
+// the only reflection cue and stays active. Mirrors u_ssao_enabled.
+uniform int   u_ssr_enabled;
 uniform int   u_volumetric_fog;
 uniform float u_ao_strength;
 uniform vec3  u_grade_lift;
@@ -117,6 +122,22 @@ uniform int u_csm_count;
 // Texture
 uniform int u_has_albedo_texture;
 uniform sampler2D u_albedo_texture;
+
+// Screen-space ambient occlusion (real depth+normal SSAO; see ssao.frag.glsl).
+// u_ssao_map is the SECOND regular sampler declared after u_albedo_texture, so
+// SPIRV-Cross assigns it HLSL register t1 (regular samplers count 0,1,2..; the
+// depth/shadow samplers above occupy t4..t7). The renderer binds the blurred
+// AO texture (or a 1x1 white texture when AO is disabled) at the GL slot wired
+// to this sampler — never left unbound, which would read as an empty SRV on
+// D3D12 (the classic dark-disc failure mode). u_ssao_enabled gates the sample
+// so behaviour is unchanged at Off/Low/downgraded tiers.
+uniform int u_ssao_enabled;
+uniform sampler2D u_ssao_map;
+// Retained for ABI/uniform-reflection stability (the renderer still uploads it)
+// but NO LONGER read: the AO map is sampled directly by normalised gl_FragCoord
+// with no v flip — see the AO sample site for why a per-backend flip here was
+// wrong (it double-counted postprocess.vert's pre-flip).
+uniform float u_ssao_uv_flip_y;
 
 out vec4 frag_color;
 
@@ -330,7 +351,12 @@ vec3 volumetricScatter(vec3 worldPos) {
     float step = marchLen / float(STEPS);
     vec3 sunDir = normalize(-u_dir_lights[0].direction);
     float cosTheta = dot(rayDir, sunDir);
-    float phase = 0.5 + pow(max(cosTheta, 0.0), 6.0) * 4.0;
+    // Strongly forward-biased phase: a TINY omnidirectional floor (0.08) so the
+    // effect is a sun-facing godray, not a uniform haze. The old 0.5 floor
+    // scattered equally in every direction, adding a flat ~1+ additive white
+    // wash over the whole frame ("alles blass"). The high-power lobe keeps the
+    // visible scattering concentrated around the sun direction.
+    float phase = 0.08 + pow(max(cosTheta, 0.0), 7.0) * 4.0;
     vec3 scatter = vec3(0.0);
     float transmittance = 1.0;
     for (int i = 0; i < STEPS; i++) {
@@ -340,7 +366,10 @@ vec3 volumetricScatter(vec3 worldPos) {
         scatter += inscatter * transmittance * step;
         transmittance *= exp(-density * step);
     }
-    return scatter;
+    // Scale + cap the integrated in-scatter. The raw march integrates to ~1+
+    // (a full white wash); 0.3× brings the away-from-sun haze down to a faint
+    // tint while the cap keeps the sun-facing godray from blowing out.
+    return min(scatter * 0.3, vec3(0.25));
 }
 
 vec3 applyColorGrading(vec3 color) {
@@ -1102,9 +1131,13 @@ void main() {
         metallic  = clamp(metallic  + wear.z * t, 0.0,  1.0);
     }
 
-    // Per-material wetness (SSR surrogate). Up-facing fragments get a
-    // smoother + darker + brighter-IBL pass to read as wet/polished.
-    if (u_wetness > 0.0) {
+    // Per-material wetness (SSR SURROGATE). Up-facing fragments get a smoother +
+    // darker + brighter-IBL pass to read as wet/polished. This is the FALLBACK:
+    // it runs only when the real ray-marched SSR pass is OFF (u_ssr_enabled==0 —
+    // tier Off, or a non-D3D / non-HDR path). When the real pass owns reflections
+    // it composites the actual reflected scene into the HDR buffer afterwards, so
+    // suppressing the surrogate here prevents double-darkening the same surface.
+    if (u_wetness > 0.0 && u_ssr_enabled == 0) {
         float upMask = clamp(dot(N, vec3(0.0, 1.0, 0.0)) * 1.4 - 0.2, 0.0, 1.0);
         float w = u_wetness * upMask;
         roughness = mix(roughness, max(roughness * 0.25, 0.04), w);
@@ -1136,7 +1169,36 @@ void main() {
     float ambientShadow = mix(1.0, mix(0.5, 1.0, shadow), clamp(primaryIntensity, 0.0, 1.0) * cloudSh);
     vec3 F_ambient = fresnelSchlick(NdotV, F0);
     vec3 kD_ambient = (1.0 - F_ambient) * (1.0 - metallic);
-    float ao = curvatureAO(N, u_ao_strength);
+    // Ambient occlusion. When real depth+normal SSAO is active it OWNS the AO and
+    // the cheap curvature surrogate is DROPPED: curvatureAO is a screen-space
+    // normal-derivative (dFdx/dFdy of N), which spikes at every geometry edge and
+    // draws dark outlines around objects — the "Umrisse" artifact. Real SSAO gives
+    // the soft contact shadows without that edge ringing, so we use it alone. The
+    // curvature path stays only as the fallback when SSAO is off (Off/Low tier or
+    // non-D3D backend).
+    //
+    // Sampling the AO map: it is a screen-space render target that was PRODUCED by
+    // the fullscreen SSAO/blur passes (postprocess.vert, whose quad UV.v is
+    // pre-flipped so those passes reconcile NDC-up vs the RT's top-left texel
+    // origin) and therefore stored in the SAME orientation as every other
+    // offscreen RT — i.e. the texel at (gl_FragCoord.xy / viewport) already holds
+    // this fragment's AO. So we index it directly by normalised gl_FragCoord with
+    // NO per-backend v flip. An earlier flip (sUV.y = 1 - sUV.y when
+    // u_ssao_uv_flip_y < 0) DOUBLE-counted the orientation: the pre-flip in
+    // postprocess.vert already did the reconciliation when the AO was written, so
+    // re-flipping here applied the AO vertically mirrored (the "Umrisse"
+    // outline-seam artifact). Verified empirically on D3D12 (raw-AO viz A/B): with
+    // the flip the palm/lamp AO floated offset from its caster; without it the AO
+    // sits on the geometry. On GL u_ssao_uv_flip_y is +1 so the old code already
+    // did NOT flip — this change is a no-op there and only removes the wrong D3D
+    // branch. u_ssao_uv_flip_y is now unused by this shader.
+    float ao;
+    if (u_ssao_enabled == 1) {
+        vec2 sUV = gl_FragCoord.xy / u_viewport_size;
+        ao = clamp(texture(u_ssao_map, sUV).r, 0.0, 1.0);
+    } else {
+        ao = curvatureAO(N, u_ao_strength);
+    }
     vec3 color = u_ambient_color * u_ambient_intensity * albedo * kD_ambient * ambientShadow * ao;
 
     // Clamp the loop bound to the array size: u_*_light_count is a GPU

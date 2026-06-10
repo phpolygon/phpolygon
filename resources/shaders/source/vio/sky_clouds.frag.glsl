@@ -18,7 +18,20 @@ uniform float u_cloud_wind_speed;
 uniform vec2  u_cloud_wind_dir;
 uniform float u_cloud_darkness;  // 0 = white cumulus, 1 = dark rain/thunder/snow
 uniform float u_time;
+// HDR scene path: clouds alpha-blend over the linear sky, so linearise the
+// cloud colour so it composites against the tonemapped resolve correctly.
+uniform int u_linear_output;
 out vec4 frag_color;
+
+vec3 invToneMapInvGamma(vec3 displayColor) {
+    vec3 y = pow(clamp(displayColor, 0.0, 0.9965), vec3(2.2));
+    const float a = 2.51, b = 0.03, c = 2.43, d = 0.59, e = 0.14;
+    vec3 A = c * y - a;
+    vec3 B = d * y - b;
+    vec3 C = e * y;
+    vec3 sq = sqrt(max(B * B - 4.0 * A * C, 0.0));
+    return max((-B - sq) / (2.0 * A), 0.0);
+}
 
 const float SLAB_THICK  = 30.0;
 const int   STEPS       = 24;   // view-ray march
@@ -122,5 +135,8 @@ void main() {
     float opacity = 1.0 - transmittance;
     vec3  cloudColor = scatter / max(opacity, 0.0001);
     float alpha = opacity * smoothstep(0.02, 0.22, dir.y);
+    if (u_linear_output == 1) {
+        cloudColor = invToneMapInvGamma(cloudColor);
+    }
     frag_color = vec4(cloudColor, alpha);
 }

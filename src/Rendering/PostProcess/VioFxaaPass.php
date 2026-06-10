@@ -91,6 +91,12 @@ final class VioFxaaPass
         vio_set_uniform($this->ctx, 'u_vignette_intensity', $p['vignette'] ?? 0.0);
         vio_set_uniform($this->ctx, 'u_viewport_size',    $p['viewport']   ?? [0.0, 0.0]);
 
+        // HDR resolve: when the offscreen scene was FP16 linear, FXAA's
+        // finishPost() applies exposure + ACES tonemap + gamma after bloom and
+        // before grade/vignette. Off → LDR behaviour, unchanged.
+        vio_set_uniform($this->ctx, 'u_hdr_resolve', $p['hdr']      ?? 0);
+        vio_set_uniform($this->ctx, 'u_exposure',    $p['exposure'] ?? 1.0);
+
         vio_draw($this->ctx, $screenQuad);
     }
 

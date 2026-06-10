@@ -10,6 +10,13 @@ uniform vec2      u_inverse_resolution;
 uniform sampler2D u_bloom;
 uniform float     u_bloom_intensity;
 
+// HDR resolve (FP16 offscreen path): when 1 the colour texture holds LINEAR HDR;
+// bloom is added in linear and exposure + ACES tonemap + gamma run BEFORE grade.
+// When 0 the texture is display-referred LDR and behaviour is unchanged (no
+// tonemap; bloom added post-tonemap). Mirrors passthrough_blit.frag.glsl.
+uniform int   u_hdr_resolve;
+uniform float u_exposure;
+
 // Full-screen finishing — colour grade + vignette applied to the FINAL image
 // (geometry + sky + bloom), so they cover the whole frame uniformly. Neutral
 // grade (lift 0, gamma 1, gain 1, saturation 1) + vignette 0 = identity.
@@ -19,6 +26,17 @@ uniform vec3  u_grade_gain;
 uniform float u_grade_saturation;
 uniform float u_vignette_intensity;
 uniform vec2  u_viewport_size;
+
+// ACES filmic tonemap (Narkowicz) — matches mesh3d.frag / passthrough_blit so
+// the HDR resolve reproduces the inline-tonemap geometry response exactly.
+vec3 toneMapACES(vec3 x) {
+    const float a = 2.51;
+    const float b = 0.03;
+    const float c = 2.43;
+    const float d = 0.59;
+    const float e = 0.14;
+    return clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.0, 1.0);
+}
 
 vec3 addBloom(vec3 c) {
     if (u_bloom_intensity <= 0.0) return c;
@@ -41,8 +59,18 @@ vec3 applyVignette(vec3 color) {
     return color * (1.0 - v * u_vignette_intensity);
 }
 
-// bloom → grade → vignette, in that order, on the resolved FXAA colour.
+// Finish the resolved FXAA colour. HDR: add bloom (linear) → exposure → ACES →
+// gamma → grade → vignette. LDR (legacy/non-D3D): add bloom (display) → grade →
+// vignette, unchanged. The order keeps bloom + tonemap in linear before the
+// display-space grade/vignette.
 vec3 finishPost(vec3 c) {
+    if (u_hdr_resolve == 1) {
+        c = addBloom(c);
+        c *= u_exposure;
+        c = toneMapACES(c);
+        c = pow(c, vec3(1.0 / 2.2));
+        return applyVignette(applyColorGrade(c));
+    }
     return applyVignette(applyColorGrade(addBloom(c)));
 }
 

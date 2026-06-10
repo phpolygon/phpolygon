@@ -58,6 +58,15 @@ class UIContext
     /** @var array<string, int> Scroll offset per dropdown ID */
     private array $dropdownScrollOffset = [];
 
+    /** @var array<string, float> Vertical scroll offset (pixels) per scroll-region ID */
+    private array $scrollRegionOffset = [];
+
+    /**
+     * @var list<array{x: float, y: float, w: float, h: float, content: float, offset: float}>
+     * Active beginScroll regions (for nested support + scrollbar draw on endScroll).
+     */
+    private array $scrollStack = [];
+
     /** Whether any widget was hovered this frame */
     private bool $anyHovered = false;
 
@@ -152,6 +161,119 @@ class UIContext
             $this->anyHovered = $prev['hovered'] || $wasHovered;
         }
 
+    }
+
+    /**
+     * Begin a vertically scrolling region of fixed size at (x, y, width, height).
+     *
+     * Clips drawing to the region (pushScissor) and shifts all content drawn
+     * before the matching {@see endScroll()} up by a per-id scroll offset, so a
+     * tall column of immediate-mode widgets becomes a scrollable list. The
+     * offset is advanced/retreated by the mouse wheel while the cursor is over
+     * the region and clamped to [0, max(0, contentHeight - height)].
+     *
+     * Internally this opens a layout region (like {@see begin()}) at the shifted
+     * y, so widgets flow exactly as in a normal column — call the usual widget
+     * methods between begin/endScroll. A scrollbar is drawn on the right edge by
+     * {@see endScroll()} when the content is taller than the region.
+     *
+     * Dropdowns work inside the region: their expanded overlay is deferred to
+     * {@see flushOverlays()} (drawn after, on top, unclipped) and is captured at
+     * its already-scrolled screen position, so it anchors correctly to the field.
+     *
+     * @param string $contentHeight Estimated total height of the content; use
+     *                              {@see estimateContentHeight()} or sum control
+     *                              heights manually (controls * rowHeight() + spacings).
+     */
+    public function beginScroll(string $id, float $x, float $y, float $width, float $height, float $contentHeight): void
+    {
+        $maxOffset = max(0.0, $contentHeight - $height);
+        $offset = $this->scrollRegionOffset[$id] ?? 0.0;
+
+        // Mouse-wheel scroll while hovering the region.
+        $regionHovered = false;
+        if ($maxOffset > 0.0) {
+            $regionRect = new Rect($x, $y, $width, $height);
+            if ($this->isHovered($regionRect)) {
+                $regionHovered = true;
+                $scrollY = $this->input->getScrollY();
+                if (abs($scrollY) > 0.001) {
+                    // Wheel up (positive) scrolls content up toward the top.
+                    $offset -= $scrollY * $this->style->fontSize * 2.0;
+                }
+            }
+        }
+        $offset = max(0.0, min($offset, $maxOffset));
+        $this->scrollRegionOffset[$id] = $offset;
+
+        $this->scrollStack[] = [
+            'x' => $x, 'y' => $y, 'w' => $width, 'h' => $height,
+            'content' => $contentHeight, 'offset' => $offset,
+        ];
+
+        // Clip in physical (screen) coordinates so it matches the renderer's
+        // 2D space; the layout/cursor work in virtual coordinates.
+        $this->renderer->pushScissor(
+            $x * $this->contentScale + $this->viewportOffsetX,
+            $y * $this->contentScale + $this->viewportOffsetY,
+            $width * $this->contentScale,
+            $height * $this->contentScale,
+        );
+
+        // Open a layout region shifted up by the scroll offset so content flows
+        // from (y - offset). begin() pushes the current cursor state for us and
+        // resets anyHovered, so flag the region hover after it.
+        $this->begin($x, $y - $offset, $width);
+        if ($regionHovered) {
+            $this->anyHovered = true;
+        }
+    }
+
+    /**
+     * End the current {@see beginScroll()} region: draw the scrollbar (when the
+     * content overflows), close the layout region, and pop the scissor clip.
+     */
+    public function endScroll(): void
+    {
+        $region = array_pop($this->scrollStack);
+        $this->end();
+
+        if ($region !== null) {
+            $contentH = $region['content'];
+            $viewH = $region['h'];
+            $maxOffset = max(0.0, $contentH - $viewH);
+            if ($maxOffset > 0.0 && $contentH > 0.0) {
+                $s = $this->style;
+                $barW = 4.0;
+                $barX = $region['x'] + $region['w'] - $barW - 2.0;
+                $thumbH = max(20.0, $viewH * ($viewH / $contentH));
+                $t = $region['offset'] / $maxOffset;
+                $thumbY = $region['y'] + ($viewH - $thumbH) * $t;
+                $this->renderer->drawRoundedRect($barX, $thumbY, $barW, $thumbH, 2.0, $s->textColor->withAlpha(0.35));
+            }
+        }
+
+        $this->renderer->popScissor();
+    }
+
+    /**
+     * Convenience estimator for {@see beginScroll()}'s $contentHeight: a stack
+     * of $rows uniform control rows plus the inter-row item spacing. Mixed
+     * layouts (sliders are taller than labels) should sum control heights
+     * directly instead — see {@see rowHeight()}.
+     */
+    public function estimateContentHeight(int $rows, float $extraSpacing = 0.0): float
+    {
+        return $rows * $this->rowHeight() + max(0, $rows - 1) * $this->style->itemSpacing + $extraSpacing;
+    }
+
+    /**
+     * Height of one standard single-line control row (label / dropdown / button /
+     * checkbox), excluding inter-row item spacing.
+     */
+    public function rowHeight(): float
+    {
+        return $this->style->fontSize + $this->style->padding * 2;
     }
 
     // ── Widgets ──────────────────────────────────────────────────
@@ -958,6 +1080,22 @@ class UIContext
     public function getCursorY(): float
     {
         return $this->cursorY;
+    }
+
+    /**
+     * Get the current cursor X position (useful for custom layouts).
+     */
+    public function getCursorX(): float
+    {
+        return $this->cursorX;
+    }
+
+    /**
+     * Current layout region width (useful for custom layouts inside a region).
+     */
+    public function getRegionWidth(): float
+    {
+        return $this->regionWidth;
     }
 
     public function setCursorPosition(float $x, float $y): void

@@ -33,6 +33,14 @@ final class VioOffscreenTarget
     private int $width = 0;
     private int $height = 0;
     private int $samples = 1;
+    /**
+     * When true the colour attachment is allocated FP16 (RGBA16F) so the scene
+     * can be rendered in unclamped linear HDR (tonemapped on resolve). Forwarded
+     * to vio_render_target as ['hdr' => true]. On D3D12 the matching scene PSOs
+     * must also be created with 'hdr' => true (the PSO RTV format must equal the
+     * bound target's format). Default false keeps the legacy RGBA8 target.
+     */
+    private bool $hdr = false;
 
     private ?VioRenderTarget $target = null;
     private bool $allocated = false;
@@ -66,7 +74,7 @@ final class VioOffscreenTarget
      * lifetime, the new target is allocated single-sampled and `samples()`
      * returns 1.
      */
-    public function resize(int $width, int $height, int $samples = 1): void
+    public function resize(int $width, int $height, int $samples = 1, bool $hdr = false): void
     {
         $width   = max(1, $width);
         $height  = max(1, $height);
@@ -77,7 +85,9 @@ final class VioOffscreenTarget
             $samples = 1;
         }
 
-        if ($this->allocated && $this->width === $width && $this->height === $height && $this->samples === $samples) {
+        if ($this->allocated
+            && $this->width === $width && $this->height === $height
+            && $this->samples === $samples && $this->hdr === $hdr) {
             return;
         }
 
@@ -86,16 +96,17 @@ final class VioOffscreenTarget
         $this->width   = $width;
         $this->height  = $height;
         $this->samples = $samples;
+        $this->hdr     = $hdr;
 
         // Try MSAA first when requested. vio gives no feature query, so we
         // probe by attempting allocation - on failure we fall back to a
         // single-sample target and remember the rejection.
         if ($samples > 1) {
-            $msaa = vio_render_target($this->ctx, [
-                'width'   => $width,
-                'height'  => $height,
-                'samples' => $samples,
-            ]);
+            $msaaCfg = ['width' => $width, 'height' => $height, 'samples' => $samples];
+            if ($hdr) {
+                $msaaCfg['hdr'] = true;
+            }
+            $msaa = vio_render_target($this->ctx, $msaaCfg);
 
             if ($msaa !== false) {
                 $this->target         = $msaa;
@@ -110,10 +121,12 @@ final class VioOffscreenTarget
             fwrite(STDERR, "[VioOffscreenTarget] MSAA samples={$samples} rejected by vio - falling back to single-sample target.\n");
         }
 
-        $rt = vio_render_target($this->ctx, [
-            'width'  => $width,
-            'height' => $height,
-        ]);
+        $cfg = ['width' => $width, 'height' => $height];
+        if ($hdr) {
+            // FP16 colour attachment for unclamped linear-HDR scene rendering.
+            $cfg['hdr'] = true;
+        }
+        $rt = vio_render_target($this->ctx, $cfg);
 
         if ($rt === false) {
             $this->allocated = false;
@@ -122,6 +135,12 @@ final class VioOffscreenTarget
 
         $this->target    = $rt;
         $this->allocated = true;
+    }
+
+    /** Whether the colour attachment is FP16 (linear-HDR scene target). */
+    public function isHdr(): bool
+    {
+        return $this->hdr;
     }
 
     /**

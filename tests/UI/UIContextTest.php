@@ -54,8 +54,8 @@ class UIContextTest extends TestCase
             public function drawSprite(Texture $texture, ?Rect $srcRegion, float $x, float $y, float $w, float $h, float $opacity = 1.0): void {}
             public function pushTransform(Mat3 $matrix): void {}
             public function popTransform(): void {}
-            public function pushScissor(float $x, float $y, float $w, float $h): void {}
-            public function popScissor(): void {}
+            public function pushScissor(float $x, float $y, float $w, float $h): void { $this->record('pushScissor', func_get_args()); }
+            public function popScissor(): void { $this->record('popScissor', []); }
             public function loadFont(string $name, string $path): void {}
             public function setFont(string $name): void {}
             public function setTextAlign(int $align): void {}
@@ -276,5 +276,75 @@ class UIContextTest extends TestCase
 
         $textCalls = array_filter($this->drawCalls, fn($c) => $c['method'] === 'drawText');
         $this->assertNotEmpty($textCalls);
+    }
+
+    public function testBeginScrollPushesAndEndScrollPopsScissor(): void
+    {
+        $this->ctx->beginScroll('sc1', 10.0, 20.0, 300.0, 200.0, 500.0);
+        $this->ctx->label('Item');
+        $this->ctx->endScroll();
+
+        $push = array_values(array_filter($this->drawCalls, fn($c) => $c['method'] === 'pushScissor'));
+        $pop = array_values(array_filter($this->drawCalls, fn($c) => $c['method'] === 'popScissor'));
+        $this->assertCount(1, $push, 'beginScroll pushes exactly one scissor');
+        $this->assertCount(1, $pop, 'endScroll pops exactly one scissor');
+        // Clip rect matches the region (offset 0, scale 1).
+        $this->assertEquals([10.0, 20.0, 300.0, 200.0], $push[0]['args']);
+    }
+
+    public function testScrollOffsetClampsToContentMinusHeight(): void
+    {
+        // Hover the region and wheel down hard; offset must clamp to maxOffset.
+        $this->input->handleCursorPosEvent(100.0, 100.0);
+        $this->input->handleScrollEvent(0.0, -100.0); // big downward wheel
+
+        $this->ctx->beginScroll('sc2', 10.0, 20.0, 300.0, 200.0, 500.0);
+        // maxOffset = 500 - 200 = 300. Content drawn at y = 20 - offset.
+        $drawnY = $this->ctx->getCursorY();
+        $this->ctx->endScroll();
+
+        // Cursor started at regionY (20) minus clamped offset (300) => -280.
+        $this->assertEqualsWithDelta(20.0 - 300.0, $drawnY, 0.001);
+    }
+
+    public function testScrollOffsetNeverNegative(): void
+    {
+        // Wheel up while already at the top must not push offset below zero.
+        $this->input->handleCursorPosEvent(100.0, 100.0);
+        $this->input->handleScrollEvent(0.0, 100.0); // big upward wheel
+
+        $this->ctx->beginScroll('sc3', 10.0, 20.0, 300.0, 200.0, 500.0);
+        $drawnY = $this->ctx->getCursorY();
+        $this->ctx->endScroll();
+
+        // Offset clamped to 0 → content draws at the region's top (y = 20).
+        $this->assertEqualsWithDelta(20.0, $drawnY, 0.001);
+    }
+
+    public function testNoScrollbarWhenContentFits(): void
+    {
+        // contentHeight <= height → no overflow, no scrollbar thumb drawn.
+        $before = count($this->drawCalls);
+        $this->ctx->beginScroll('sc4', 10.0, 20.0, 300.0, 200.0, 150.0);
+        $this->ctx->endScroll();
+
+        $rounded = array_filter(
+            array_slice($this->drawCalls, $before),
+            fn($c) => $c['method'] === 'drawRoundedRect',
+        );
+        $this->assertCount(0, $rounded, 'no scrollbar thumb when content fits');
+    }
+
+    public function testScrollbarDrawnWhenContentOverflows(): void
+    {
+        $before = count($this->drawCalls);
+        $this->ctx->beginScroll('sc5', 10.0, 20.0, 300.0, 200.0, 800.0);
+        $this->ctx->endScroll();
+
+        $rounded = array_filter(
+            array_slice($this->drawCalls, $before),
+            fn($c) => $c['method'] === 'drawRoundedRect',
+        );
+        $this->assertNotEmpty($rounded, 'scrollbar thumb drawn when content overflows');
     }
 }
