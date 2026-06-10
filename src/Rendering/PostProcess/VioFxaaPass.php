@@ -45,6 +45,8 @@ final class VioFxaaPass
      * `$inputTexture` must be the colour texture of the offscreen target;
      * `$sourceWidth`/`$sourceHeight` are its pixel dimensions (for the
      * `1/resolution` uniform).
+     *
+     * @param array{lift: list<float>, gamma: list<float>, gain: list<float>, saturation: float, vignette: float, viewport: list<float>, hdr: int, exposure: float}|null $post
      */
     public function apply(
         VioTexture $inputTexture,

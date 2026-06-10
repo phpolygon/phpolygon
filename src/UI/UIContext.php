@@ -33,7 +33,7 @@ class UIContext
     /** Current flow direction: 'vertical' or 'horizontal' */
     private string $flow = 'vertical';
 
-    /** @var list<array{x: float, y: float, w: float, flow: string, hovered: bool}> Layout stack for nested begin/end pairs */
+    /** @var list<array{x: float, y: float, w: float, flow: string, hovered: bool, hoveredWidget: string}> Layout stack for nested begin/end pairs */
     private array $layoutStack = [];
 
     /** Tracks the active (pressed) widget ID */
@@ -191,7 +191,7 @@ class UIContext
      * {@see flushOverlays()} (drawn after, on top, unclipped) and is captured at
      * its already-scrolled screen position, so it anchors correctly to the field.
      *
-     * @param string $contentHeight Estimated total height of the content; use
+     * @param float $contentHeight Estimated total height of the content; use
      *                              {@see estimateContentHeight()} or sum control
      *                              heights manually (controls * rowHeight() + spacings).
      */

@@ -536,7 +536,7 @@ class VioRenderer3D implements Renderer3DInterface
      * composited image (geometry + sky + bloom) so they cover everything
      * uniformly — the mesh shader no longer bakes them per-fragment.
      *
-     * @return array{lift: float[], gamma: float[], gain: float[], saturation: float, vignette: float, viewport: float[]}
+     * @return array{lift: list<float>, gamma: list<float>, gain: list<float>, saturation: float, vignette: float, viewport: list<float>, hdr: int, exposure: float}
      */
     private function postFinishParams(): array
     {
@@ -546,7 +546,7 @@ class VioRenderer3D implements Renderer3DInterface
             'gamma'      => $g['gamma'],
             'gain'       => $g['gain'],
             'saturation' => $g['saturation'],
-            'vignette'   => $this->settings->vignetteIntensity,
+            'vignette'   => (float) $this->settings->vignetteIntensity,
             'viewport'   => [(float) $this->backbufferWidth, (float) $this->backbufferHeight],
             // HDR resolve: when the offscreen scene was FP16 linear, the resolve
             // pass (passthrough/fxaa) must add bloom in linear, then exposure +
@@ -557,7 +557,11 @@ class VioRenderer3D implements Renderer3DInterface
         ];
     }
 
-    /** Upload the {@see postFinishParams} onto the currently bound present shader. */
+    /**
+     * Upload the {@see postFinishParams} onto the currently bound present shader.
+     *
+     * @param array{lift: list<float>, gamma: list<float>, gain: list<float>, saturation: float, vignette: float, viewport: list<float>, hdr: int, exposure: float} $post
+     */
     private function setPostFinishUniforms(array $post): void
     {
         vio_set_uniform($this->ctx, 'u_grade_lift', $post['lift']);
@@ -566,8 +570,8 @@ class VioRenderer3D implements Renderer3DInterface
         vio_set_uniform($this->ctx, 'u_grade_saturation', $post['saturation']);
         vio_set_uniform($this->ctx, 'u_vignette_intensity', $post['vignette']);
         vio_set_uniform($this->ctx, 'u_viewport_size', $post['viewport']);
-        vio_set_uniform($this->ctx, 'u_hdr_resolve', $post['hdr'] ?? 0);
-        vio_set_uniform($this->ctx, 'u_exposure', $post['exposure'] ?? 1.0);
+        vio_set_uniform($this->ctx, 'u_hdr_resolve', $post['hdr']);
+        vio_set_uniform($this->ctx, 'u_exposure', $post['exposure']);
     }
 
     /**
@@ -1461,6 +1465,9 @@ class VioRenderer3D implements Renderer3DInterface
      * Mirrors the shadow pass's "bind my own target, draw, unbind" structure so
      * the caller can run it between the shadow pass and the scene-target bind.
      * Sets $this->ssaoActiveThisFrame for uploadSsaoUniforms() to consume.
+     *
+     * @param list<object>                                                      $commands   same command list as the forward pass
+     * @param array{waveAmplitude: float, waveFrequency: float, wavePhase: float} $frameState frame-global lighting/fog/wave state (only the wave keys are read here)
      */
     private function renderSsaoPass(array $commands, array $frameState): void
     {
@@ -1470,10 +1477,16 @@ class VioRenderer3D implements Renderer3DInterface
         // + blur sub-passes below run only when SSAO itself is enabled; SSR reads
         // the same G-buffer in renderSsrPass() after the scene draws.
         if (!$this->gbufferNeededThisFrame()
+            || $this->currentViewMatrix === null
             || $this->currentProjectionMatrix === null
             || $this->screenQuad === null) {
             return;
         }
+
+        // Capture nullable matrices locally so the intervening method calls
+        // (ensureSsaoTargets / bindGbufferPipeline) don't re-widen them to null.
+        $viewMatrix = $this->currentViewMatrix;
+        $projMatrix = $this->currentProjectionMatrix;
 
         $this->ensureSsaoTargets();
         $gbuffer = $this->gbufferTarget;
@@ -1495,8 +1508,8 @@ class VioRenderer3D implements Renderer3DInterface
         vio_viewport($this->ctx, 0, 0, $fullW, $fullH);
         vio_clear($this->ctx, 0, 0, 0, 0);
         $this->bindGbufferPipeline();
-        vio_set_uniform($this->ctx, 'u_view', $this->currentViewMatrix->toArray());
-        vio_set_uniform($this->ctx, 'u_projection', $this->currentProjectionMatrix->toArray());
+        vio_set_uniform($this->ctx, 'u_view', $viewMatrix->toArray());
+        vio_set_uniform($this->ctx, 'u_projection', $projMatrix->toArray());
         vio_set_uniform($this->ctx, 'u_time', $this->globalTime);
         // Frame-global vertex-animation state (water swell + wind). These come
         // from the SetWaveAnimation / SetWind commands, not per-material — set
@@ -1561,6 +1574,15 @@ class VioRenderer3D implements Renderer3DInterface
         int $halfW,
         int $halfH,
     ): void {
+        // Re-assert the invariants the caller (renderSsaoPass) already checked so
+        // the matrix/quad uses below are statically non-null.
+        if ($this->currentProjectionMatrix === null || $this->screenQuad === null) {
+            return;
+        }
+        // Capture locally so the bindPostProcessPipeline() calls below don't
+        // re-widen the nullable property/matrix in PHPStan's view.
+        $screenQuad = $this->screenQuad;
+
         // --- 2. SSAO (half-res) -----------------------------------------------
         $proj = $this->currentProjectionMatrix->toArray(); // column-major
         $proj00 = $proj[0];  // projection[0][0]
@@ -1585,7 +1607,7 @@ class VioRenderer3D implements Renderer3DInterface
         vio_set_uniform($this->ctx, 'u_bias', 0.025);
         vio_set_uniform($this->ctx, 'u_intensity', $tier->ssaoIntensity());
         vio_set_uniform($this->ctx, 'u_power', $tier->ssaoPower());
-        vio_draw($this->ctx, $this->screenQuad);
+        vio_draw($this->ctx, $screenQuad);
         vio_unbind_render_target($this->ctx);
 
         // --- 3. Blur (half-res): 4x4 box to remove the rotation noise ----------
@@ -1596,7 +1618,7 @@ class VioRenderer3D implements Renderer3DInterface
         vio_bind_texture($this->ctx, vio_render_target_texture($ssao), 0);
         vio_set_uniform($this->ctx, 'u_source', 0);
         vio_set_uniform($this->ctx, 'u_texel', [1.0 / $halfW, 1.0 / $halfH]);
-        vio_draw($this->ctx, $this->screenQuad);
+        vio_draw($this->ctx, $screenQuad);
         vio_unbind_render_target($this->ctx);
 
         $this->ssaoActiveThisFrame = true;
@@ -1614,6 +1636,8 @@ class VioRenderer3D implements Renderer3DInterface
      * Depth write must be ON so a later water fragment doesn't lose to nothing,
      * but the opaque depth is preserved (no clear). bindGbufferPipeline already
      * uses depth_test=true; that pipeline writes depth, which is what we want.
+     *
+     * @param list<object> $commands same command list as the forward pass
      */
     private function appendReflectiveTransparentToGbuffer(
         array $commands,
@@ -1621,6 +1645,14 @@ class VioRenderer3D implements Renderer3DInterface
         int $fullW,
         int $fullH,
     ): void {
+        if ($this->currentViewMatrix === null || $this->currentProjectionMatrix === null) {
+            return;
+        }
+        // Capture locally: the bindGbufferPipeline() call below would otherwise
+        // re-widen the nullable matrix properties in PHPStan's view.
+        $viewMatrix = $this->currentViewMatrix;
+        $projMatrix = $this->currentProjectionMatrix;
+
         // Collect water draws first so we can skip the whole pass (and its
         // bind/unbind) when the scene has no reflective transparent surface.
         $waterDraws = [];
@@ -1653,8 +1685,8 @@ class VioRenderer3D implements Renderer3DInterface
         vio_bind_render_target($this->ctx, $gbuffer);
         vio_viewport($this->ctx, 0, 0, $fullW, $fullH);
         $this->bindGbufferPipeline();
-        vio_set_uniform($this->ctx, 'u_view', $this->currentViewMatrix->toArray());
-        vio_set_uniform($this->ctx, 'u_projection', $this->currentProjectionMatrix->toArray());
+        vio_set_uniform($this->ctx, 'u_view', $viewMatrix->toArray());
+        vio_set_uniform($this->ctx, 'u_projection', $projMatrix->toArray());
         vio_set_uniform($this->ctx, 'u_rain_wetness', $this->rainWetness);
 
         foreach ($waterDraws as [$cmd, $material]) {
@@ -1701,6 +1733,13 @@ class VioRenderer3D implements Renderer3DInterface
             return;
         }
 
+        // Capture nullable properties locally: the intervening method calls below
+        // (ensureSsrTarget / bindPostProcessPipeline / …) would otherwise re-widen
+        // the properties back to nullable in PHPStan's view.
+        $offscreen   = $this->offscreenTarget;
+        $screenQuad  = $this->screenQuad;
+        $projMatrix  = $this->currentProjectionMatrix;
+
         $gbuffer = $this->gbufferTarget;
         if ($gbuffer === null) {
             return; // G-buffer wasn't built (backend refused an RT)
@@ -1711,7 +1750,7 @@ class VioRenderer3D implements Renderer3DInterface
             return;
         }
 
-        $sceneTex = $this->offscreenTarget->texture();
+        $sceneTex = $offscreen->texture();
         if ($sceneTex === null) {
             return;
         }
@@ -1719,7 +1758,7 @@ class VioRenderer3D implements Renderer3DInterface
         $w = max(1, $this->ssrWidth);
         $h = max(1, $this->ssrHeight);
 
-        $proj   = $this->currentProjectionMatrix->toArray();
+        $proj   = $projMatrix->toArray();
         $proj00 = $proj[0];
         $proj11 = $proj[5];
         // Same UV.v <-> view +Y reconciliation the SSAO pass uses.
@@ -1730,7 +1769,7 @@ class VioRenderer3D implements Renderer3DInterface
         // The scene offscreen target is bound on entry; unbind so its colour can
         // be sampled as an SRV (reading + writing the same target is illegal on
         // D3D12). The composite below re-binds it.
-        $this->offscreenTarget->unbind();
+        $offscreen->unbind();
 
         vio_bind_render_target($this->ctx, $ssr);
         vio_viewport($this->ctx, 0, 0, $w, $h);
@@ -1749,7 +1788,7 @@ class VioRenderer3D implements Renderer3DInterface
         vio_set_uniform($this->ctx, 'u_thickness', $tier->rayThickness());
         vio_set_uniform($this->ctx, 'u_max_dist', $tier->maxDistance());
         vio_set_uniform($this->ctx, 'u_strength', $tier->intensity());
-        vio_draw($this->ctx, $this->screenQuad);
+        vio_draw($this->ctx, $screenQuad);
         vio_unbind_render_target($this->ctx);
 
         // --- 2. Composite: alpha-blend the reflection over the scene ----------
@@ -1757,13 +1796,13 @@ class VioRenderer3D implements Renderer3DInterface
         // VIO_BLEND_ALPHA: scene' = ssr.rgb*ssr.a + scene*(1-ssr.a). Reads the
         // SEPARATE ssr target (SRV) while writing the scene target (RTV) — no
         // hazard. Stays in linear HDR space so reflected highlights bloom.
-        $this->offscreenTarget->bindForDraw();
+        $offscreen->bindForDraw();
         vio_viewport($this->ctx, 0, 0,
-            $this->offscreenTarget->width(), $this->offscreenTarget->height());
+            $offscreen->width(), $offscreen->height());
         $this->bindSsrCompositePipeline();
         vio_bind_texture($this->ctx, vio_render_target_texture($ssr), 0);
         vio_set_uniform($this->ctx, 'u_ssr', 0);
-        vio_draw($this->ctx, $this->screenQuad);
+        vio_draw($this->ctx, $screenQuad);
         // Leave the offscreen target bound — render() already finished its draws
         // and presentOffscreenIfActive() will unbind + resolve it.
     }
