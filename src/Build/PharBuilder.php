@@ -296,7 +296,11 @@ STUB_END;
         $srcLen = strlen($src);
         /** @var \SplFileInfo $item */
         foreach ($iterator as $item) {
-            $relPath = substr($item->getPathname(), $srcLen + 1);
+            // Normalise to '/' — on Windows getPathname() returns backslashes,
+            // so explode('/') below would not split path segments and the
+            // exclude match (e.g. '**/tests') would silently miss, bloating the
+            // PHAR with test/vendor junk on Windows builds.
+            $relPath = str_replace('\\', '/', substr($item->getPathname(), $srcLen + 1));
 
             // Check if any path segment matches an exclude pattern
             $skip = false;
