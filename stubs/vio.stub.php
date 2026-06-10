@@ -29,6 +29,7 @@ const VIO_CULL_FRONT = 2;
 const VIO_CULL_NONE = 0;
 const VIO_BLEND_NONE = 0;
 const VIO_BLEND_ALPHA = 1;
+const VIO_BLEND_ADDITIVE = 2;
 const VIO_DEPTH_LEQUAL = 1;
 const VIO_DEPTH_LESS = 0;
 const VIO_FLOAT2 = 2;
