@@ -64,15 +64,24 @@ class Renderer3DSystem extends AbstractSystem
     public const MAX_SPOT_LIGHTS = 8;
 
     /**
-     * Screen-size LOD. Beyond MIN_LOD_DISTANCE, an entity whose projected size
-     * (world bounding radius / distance to camera) falls below MIN_SCREEN_RATIO
-     * is skipped: a sub-pixel detail costs a full per-draw FFI submit for no
-     * visible gain. Within MIN_LOD_DISTANCE nothing is size-culled, so there is
-     * no pop-in where the player actually stands; only the swarm of distant
-     * window / trim / prop details that bloat wide vistas drops out.
+     * Screen-size LOD. Beyond {@see $lodNearDistance}, an entity whose projected
+     * size (world bounding radius / distance to camera) falls below
+     * {@see $minScreenRatio} is skipped: a tiny far detail costs a full per-draw
+     * FFI submit + uniform upload for no visible gain. Within the near distance
+     * nothing is size-culled, so there is no pop-in where the player actually
+     * stands; only the swarm of distant window / trim / prop / frond details
+     * that bloat wide vistas drops out.
+     *
+     * Both are live-tunable without a rebuild so the FPS/pop sweet spot can be
+     * dialled in: PHPOLYGON_LOD_RATIO (default 0.009) and PHPOLYGON_LOD_NEAR
+     * (default 45). A larger ratio culls more aggressively (higher FPS, more
+     * pop); a smaller near distance starts culling closer to the camera.
      */
-    private const MIN_LOD_DISTANCE = 45.0;
-    private const MIN_SCREEN_RATIO = 0.004;
+    private const DEFAULT_LOD_NEAR  = 45.0;
+    private const DEFAULT_LOD_RATIO = 0.009;
+
+    private readonly float $lodNearDistance;
+    private readonly float $minScreenRatio;
 
     /** @var array<string, array{cx:float, cy:float, cz:float, radius:float}> */
     private static array $sphereCache = [];
@@ -105,7 +114,14 @@ class Renderer3DSystem extends AbstractSystem
     public function __construct(
         private readonly Renderer3DInterface $renderer,
         private readonly RenderCommandList $commandList,
-    ) {}
+    ) {
+        $ratio = getenv('PHPOLYGON_LOD_RATIO');
+        $this->minScreenRatio = ($ratio !== false && is_numeric($ratio))
+            ? (float) $ratio : self::DEFAULT_LOD_RATIO;
+        $near = getenv('PHPOLYGON_LOD_NEAR');
+        $this->lodNearDistance = ($near !== false && is_numeric($near))
+            ? (float) $near : self::DEFAULT_LOD_NEAR;
+    }
 
     /**
      * Drop the spatial-bin caches on World::clear(). After clear() the entity
@@ -411,9 +427,9 @@ class Renderer3DSystem extends AbstractSystem
                         $cdy = $ty - $cameraPos->y;
                         $cdz = $tz - $cameraPos->z;
                         $camDistSq = $cdx * $cdx + $cdy * $cdy + $cdz * $cdz;
-                        if ($camDistSq > self::MIN_LOD_DISTANCE * self::MIN_LOD_DISTANCE
+                        if ($camDistSq > $this->lodNearDistance * $this->lodNearDistance
                             && $worldRadius * $worldRadius
-                                < self::MIN_SCREEN_RATIO * self::MIN_SCREEN_RATIO * $camDistSq) {
+                                < $this->minScreenRatio * $this->minScreenRatio * $camDistSq) {
                             continue;
                         }
                     }

@@ -396,6 +396,61 @@ static float3 computeWater(VertexOut in, float3 N_in, float3 V, float3 L,
     return finalColor;
 }
 
+// Pool / fountain water (proc_mode 11): small raised basins. Same wave-normal
+// shimmer + fresnel sky reflection + sun specular as the ocean, but NO depth/
+// shoreline/foam (that is the ocean's model and would mis-render small basins
+// near the island centre).
+static float3 computePoolWater(VertexOut in, float3 N_in, float3 V, float3 L,
+                               float time, float3 sky_color, float3 horizon_color,
+                               float3 dir_light_color, float dir_light_intensity,
+                               thread float& alphaOut, thread float& roughOut,
+                               thread float3& N_out) {
+    float2 uv1 = in.world_pos.xz * 1.8  + time * float2(0.05, 0.04);
+    float2 uv2 = in.world_pos.xz * 5.0  + time * float2(-0.06, 0.08);
+    float2 uv3 = in.world_pos.xz * 11.0 + time * float2(0.09, -0.07);
+
+    float eps = 0.05;
+    float h1a = fbm(uv1, 3); float h1b = fbm(uv1 + float2(eps, 0), 3); float h1c = fbm(uv1 + float2(0, eps), 3);
+    float h2a = vnoise(uv2); float h2b = vnoise(uv2 + float2(eps, 0)); float h2c = vnoise(uv2 + float2(0, eps));
+    float h3a = vnoise(uv3); float h3b = vnoise(uv3 + float2(eps, 0)); float h3c = vnoise(uv3 + float2(0, eps));
+
+    float3 waveNormal = float3(0.0, 1.0, 0.0);
+    waveNormal.x += (h1a - h1b) * 1.4 + (h2a - h2b) * 0.6 + (h3a - h3b) * 0.25;
+    waveNormal.z += (h1a - h1c) * 1.4 + (h2a - h2c) * 0.6 + (h3a - h3c) * 0.25;
+    waveNormal = normalize(waveNormal);
+
+    float3 N = normalize(N_in + waveNormal * float3(1.0, 0.0, 1.0));
+    N_out = N;
+
+    float NdotV = max(dot(N, V), 0.0);
+    float fresnel = mix(0.04, 1.0, pow(1.0 - NdotV, 5.0));
+
+    float3 floorColor = float3(0.04, 0.16, 0.18);
+    float3 bodyColor  = float3(0.10, 0.42, 0.48);
+    float3 waterColor = mix(floorColor, bodyColor, fresnel);
+
+    float3 R = reflect(-V, N);
+    float skyBlend = clamp(R.y * 2.0, 0.0, 1.0);
+    float3 reflectColor = mix(horizon_color, sky_color, skyBlend);
+    reflectColor = mix(reflectColor, dir_light_color, pow(max(dot(R, L), 0.0), 256.0) * 2.0);
+
+    float3 finalColor = mix(waterColor, reflectColor, fresnel);
+
+    float3 Hw = normalize(V + L);
+    float specTight = pow(max(dot(N, Hw), 0.0), 600.0);
+    float specSoft  = pow(max(dot(N, Hw), 0.0), 80.0) * 0.25;
+    finalColor += dir_light_color * dir_light_intensity * (specTight * 2.5 + specSoft);
+
+    float cs1 = vnoise(in.world_pos.xz * 6.0 + time * 0.6);
+    float cs2 = vnoise(in.world_pos.xz * 6.0 - time * 0.45 + 23.0);
+    float caustic = pow(max(0.0, 1.0 - abs(cs1 - cs2) * 2.5), 3.0);
+    finalColor += float3(0.12, 0.22, 0.20) * caustic * (1.0 - fresnel);
+
+    alphaOut = mix(0.45, 0.95, fresnel);
+    roughOut = 0.03;
+    return finalColor;
+}
+
 static float3 computeRock(float3 N, float3 worldPos, float3 baseAlbedo, thread float& roughOut) {
     float3 p = worldPos * 2.5;
     float n1 = fbm(p.xz, 4);
@@ -904,6 +959,17 @@ fragment float4 fragment_mesh3d(
                               light.dir_light_color, light.dir_light_intensity,
                               alpha, roughness, Nw);
         // Fog
+        float fogDist   = length(in.world_pos - light.camera_pos);
+        float fogFactor = clamp((fogDist - light.fog_near) / (light.fog_far - light.fog_near), 0.0, 1.0);
+        fogFactor = 1.0 - exp(-fogFactor * fogFactor * 3.0);
+        float3 color = mix(albedo, light.fog_color, fogFactor);
+        return float4(finalizeColor(color, light, in.position.xy), alpha);
+    }
+    if (proc == 11) {
+        float3 Nw = N;
+        albedo = computePoolWater(in, N, V, L, light.time, light.sky_color, light.horizon_color,
+                                  light.dir_light_color, light.dir_light_intensity,
+                                  alpha, roughness, Nw);
         float fogDist   = length(in.world_pos - light.camera_pos);
         float fogFactor = clamp((fogDist - light.fog_near) / (light.fog_far - light.fog_near), 0.0, 1.0);
         fogFactor = 1.0 - exp(-fogFactor * fogFactor * 3.0);

@@ -149,6 +149,75 @@ float fbm3(vec2 p) {
 }
 
 // ================================================================
+//  Volumetric cloud shadow — mirrors sky_clouds.frag's density field so the
+//  shadow patches on the ground line up with the clouds drifting overhead.
+// ================================================================
+
+uniform float u_cloud_cover;
+uniform float u_cloud_altitude;
+uniform float u_cloud_density;
+uniform float u_cloud_wind_speed;
+uniform vec2  u_cloud_wind_dir;
+uniform float u_cloud_time;   // = sky pass's u_time, so shadows track the clouds
+
+float cloudHash13(vec3 p) {
+    p = fract(p * 0.1031);
+    p += dot(p, p.yzx + 33.33);
+    return fract((p.x + p.y) * p.z);
+}
+
+float cloudVnoise3(vec3 p) {
+    vec3 i = floor(p);
+    vec3 f = fract(p);
+    f = f * f * (3.0 - 2.0 * f);
+    float n000 = cloudHash13(i),               n100 = cloudHash13(i + vec3(1, 0, 0));
+    float n010 = cloudHash13(i + vec3(0,1,0)), n110 = cloudHash13(i + vec3(1, 1, 0));
+    float n001 = cloudHash13(i + vec3(0,0,1)), n101 = cloudHash13(i + vec3(1, 0, 1));
+    float n011 = cloudHash13(i + vec3(0,1,1)), n111 = cloudHash13(i + vec3(1, 1, 1));
+    return mix(mix(mix(n000, n100, f.x), mix(n010, n110, f.x), f.y),
+               mix(mix(n001, n101, f.x), mix(n011, n111, f.x), f.y), f.z);
+}
+
+float cloudFbm3(vec3 p) {
+    float total = 0.0, amp = 0.5;
+    for (int i = 0; i < 4; i++) { total += cloudVnoise3(p) * amp; p *= 2.03; amp *= 0.5; }
+    return total;
+}
+
+float cloudDensityAt(vec3 p) {
+    float h = (p.y - u_cloud_altitude) / 30.0;   // SLAB_THICK matches the sky pass
+    if (h < 0.0 || h > 1.0) return 0.0;
+    float vGrad = smoothstep(0.0, 0.18, h) * smoothstep(1.0, 0.55, h);
+    vec3 wp = p * 0.0026;
+    wp.xz += u_cloud_wind_dir * (u_cloud_time * u_cloud_wind_speed * 0.0026);
+    float n = cloudFbm3(wp);
+    float cov = 1.0 - u_cloud_cover * 0.9;
+    return smoothstep(cov, cov + 0.22, n) * vGrad * u_cloud_density;
+}
+
+// Sun transmittance through the cloud slab from a world point (1 = unshadowed,
+// → 0 fully under a cloud). Marches a few steps toward the directional light.
+float cloudShadow(vec3 worldPos) {
+    if (u_cloud_cover <= 0.0) return 1.0;
+    vec3 L = normalize(-u_dir_light_direction); // toward the light source
+    if (L.y <= 0.05) return 1.0;                 // light at/below the horizon
+    float base = u_cloud_altitude;
+    float top  = base + 30.0;
+    float tEnter = max((base - worldPos.y) / L.y, 0.0);
+    float tExit  = (top - worldPos.y) / L.y;
+    if (tExit <= tEnter) return 1.0;
+    float stepLen = (tExit - tEnter) / 5.0;
+    float dens = 0.0;
+    for (int i = 0; i < 5; i++) {
+        dens += cloudDensityAt(worldPos + L * (tEnter + (float(i) + 0.5) * stepLen));
+    }
+    // Soften (×0.6) and floor at 0.3: a fair-weather cloud passing overhead dims
+    // the direct sun but never blacks the world out — the bright sky still fills
+    // via ambient. Storm darkness is applied globally from the weather instead.
+    return clamp(exp(-dens * stepLen * 0.6), 0.0, 1.0);
+}
+
+// ================================================================
 //  Shadow
 // ================================================================
 
@@ -228,8 +297,12 @@ float curvatureAO(vec3 N, float strength) {
     vec3 ddxN = dFdx(N);
     vec3 ddyN = dFdy(N);
     float curvature = length(ddxN) + length(ddyN);
-    float occlusion = smoothstep(0.0, 0.4, curvature);
-    return clamp(1.0 - occlusion * strength, 0.0, 1.0);
+    // Gentler than before: only strong curvature occludes (0.4→0.7 threshold),
+    // the effect is damped (×0.7) and floored at 0.5 so high-frequency geometry
+    // (rocks, foliage) can't black out — the old curve drove bumpy rock surfaces
+    // to ~0 at AO=High and read as "too dark stones".
+    float occlusion = smoothstep(0.05, 0.7, curvature);
+    return clamp(1.0 - occlusion * strength * 0.7, 0.5, 1.0);
 }
 
 // ACES filmic tonemap (Narkowicz). Matches the tonemap post-process so
@@ -295,10 +368,11 @@ vec3 applyVignette(vec3 color) {
 vec4 outputColor(vec3 color, float alpha) {
     color = max(color, vec3(0.0));
     if (u_linear_output == 0) {
-        color = applyColorGrading(color);
+        // Tonemap + gamma only. Colour grade + vignette moved to the present
+        // pass (fxaa/passthrough) so they cover the whole frame — including the
+        // sky — uniformly, instead of being baked per geometry fragment here.
         color = toneMapACES(color);
         color = pow(color, vec3(1.0 / 2.2));
-        color = applyVignette(color);
     }
     return vec4(color, alpha);
 }
@@ -436,12 +510,26 @@ vec3 computeWater(vec3 N, vec3 V, vec3 L, out float alphaOut, out float roughOut
     vec3 R = reflect(-V, N);
     float skyBlend = clamp(R.y * 2.0, 0.0, 1.0);
     vec3 reflectColor = mix(u_horizon_color, u_sky_color, skyBlend);
-    reflectColor = mix(reflectColor, u_dir_light_color, pow(max(dot(R, L), 0.0), 256.0) * 2.0);
+
+    // Sun reflection on the water. As the sun lowers, the rough surface spreads
+    // its reflection into a broad, vertically-stretched glitter path (the "sun
+    // road") rather than a single dot: narrow along the sun's azimuth, long
+    // along its elevation, and wider the lower the sun sits.
+    float sunLow = 1.0 - clamp(L.y * 3.0, 0.0, 1.0);   // 0 = high sun, 1 = horizon
+    vec3  dRL    = R - L;
+    float roadW  = mix(0.0015, 0.012, sunLow);          // azimuth width
+    float roadL  = mix(0.040,  0.300, sunLow);          // elevation length
+    float road   = exp(-(dRL.x * dRL.x + dRL.z * dRL.z) / roadW)
+                 * exp(-(dRL.y * dRL.y) / roadL);
+    float core   = pow(max(dot(R, L), 0.0), 200.0);     // tight bright sun core
+    float sunRefl = clamp(core * 2.0 + road * (0.5 + 1.2 * sunLow), 0.0, 1.0);
+    reflectColor = mix(reflectColor, u_dir_light_color, sunRefl);
 
     vec3 finalColor = mix(waterColor, reflectColor, fresnel);
 
-    float specWater = pow(max(dot(N, normalize(V + L)), 0.0), 512.0);
-    finalColor += u_dir_light_color * u_dir_light_intensity * specWater * 2.0;
+    // Broad soft sheen so the lit water isn't *only* the road.
+    float specWater = pow(max(dot(N, normalize(V + L)), 0.0), 160.0);
+    finalColor += u_dir_light_color * u_dir_light_intensity * specWater * 1.2;
 
     // Shore foam — multi-layered, animated, finer grain (radial shoreline)
     float shoreDepth = clamp((r - 98.0) / 8.0, 0.0, 1.0);
@@ -465,6 +553,70 @@ vec3 computeWater(vec3 N, vec3 V, vec3 L, out float alphaOut, out float roughOut
     alphaOut *= shoreEdge;
 
     roughOut = mix(0.02, 0.08, foam);
+
+    return finalColor;
+}
+
+// ================================================================
+//  Procedural Pool / Fountain Water (proc_mode 11)
+//  Small raised basins (fountains, ponds). Shares the ocean's wave-normal
+//  shimmer, fresnel sky reflection and sun specular, but deliberately has
+//  NO radial depth/shoreline/foam — that model is the OCEAN's (centred at
+//  the island origin) and would blank out any water near the centre, e.g.
+//  the plaza fountain at r≈40 m. Finer ripples suit a small surface.
+// ================================================================
+
+vec3 computePoolWater(vec3 N, vec3 V, vec3 L, out float alphaOut, out float roughOut) {
+    // Three ripple layers — coarse swell + chop + fine sparkle — for a lively
+    // small-scale surface suited to a basin.
+    vec2 uv1 = v_worldPos.xz * 1.8  + u_time * vec2(0.05, 0.04);
+    vec2 uv2 = v_worldPos.xz * 5.0  + u_time * vec2(-0.06, 0.08);
+    vec2 uv3 = v_worldPos.xz * 11.0 + u_time * vec2(0.09, -0.07);
+
+    float eps = 0.05;
+    float h1a = fbm2(uv1); float h1b = fbm2(uv1 + vec2(eps,0)); float h1c = fbm2(uv1 + vec2(0,eps));
+    float h2a = noise(uv2); float h2b = noise(uv2 + vec2(eps,0)); float h2c = noise(uv2 + vec2(0,eps));
+    float h3a = noise(uv3); float h3b = noise(uv3 + vec2(eps,0)); float h3c = noise(uv3 + vec2(0,eps));
+
+    vec3 waveNormal = vec3(0.0, 1.0, 0.0);
+    waveNormal.x += (h1a - h1b) * 1.4 + (h2a - h2b) * 0.6 + (h3a - h3b) * 0.25;
+    waveNormal.z += (h1a - h1c) * 1.4 + (h2a - h2c) * 0.6 + (h3a - h3c) * 0.25;
+    waveNormal = normalize(waveNormal);
+
+    N = normalize(N + waveNormal * vec3(1.0, 0.0, 1.0));
+
+    float NdotV = max(dot(N, V), 0.0);
+    float fresnel = mix(0.04, 1.0, pow(1.0 - NdotV, 5.0));
+
+    // Clear shallow water over a dark wet basin floor: top-down shows the floor,
+    // grazing angles pick up the body tint and the sky reflection.
+    vec3 floorColor = vec3(0.04, 0.16, 0.18);
+    vec3 bodyColor  = vec3(0.10, 0.42, 0.48);
+    vec3 waterColor = mix(floorColor, bodyColor, fresnel);
+
+    vec3 R = reflect(-V, N);
+    float skyBlend = clamp(R.y * 2.0, 0.0, 1.0);
+    vec3 reflectColor = mix(u_horizon_color, u_sky_color, skyBlend);
+    reflectColor = mix(reflectColor, u_dir_light_color, pow(max(dot(R, L), 0.0), 256.0) * 2.0);
+
+    vec3 finalColor = mix(waterColor, reflectColor, fresnel);
+
+    // Sun glints: a tight sparkle the ripples break up, plus a softer sheen.
+    vec3 H = normalize(V + L);
+    float specTight = pow(max(dot(N, H), 0.0), 600.0);
+    float specSoft  = pow(max(dot(N, H), 0.0), 80.0) * 0.25;
+    finalColor += u_dir_light_color * u_dir_light_intensity * (specTight * 2.5 + specSoft);
+
+    // Caustic shimmer — animated bright filaments, like focused sunlight on the
+    // basin floor; strongest where the water is clearest (viewed top-down).
+    float cs1 = noise(v_worldPos.xz * 6.0 + u_time * 0.6);
+    float cs2 = noise(v_worldPos.xz * 6.0 - u_time * 0.45 + 23.0);
+    float caustic = pow(max(0.0, 1.0 - abs(cs1 - cs2) * 2.5), 3.0);
+    finalColor += vec3(0.12, 0.22, 0.20) * caustic * (1.0 - fresnel);
+
+    // See-through from above (floor visible), reflective at grazing angles.
+    alphaOut = mix(0.45, 0.95, fresnel);
+    roughOut = 0.03;
 
     return finalColor;
 }
@@ -909,6 +1061,13 @@ void main() {
         vec3 mc = vec3(0.85, 0.87, 0.92) * (1.0 - smoothstep(0.42, 0.55, crater) * 0.25);
         frag_color = outputColor(mc * illum + vec3(0.02, 0.025, 0.04) * (1.0 - illum), 1.0);
         return;
+    } else if (u_proc_mode == 11) {
+        // Pool / fountain water — clear basin water, no ocean shoreline fade.
+        albedo = computePoolWater(N, V, L, alpha, roughness);
+        float fd = length(v_worldPos - u_camera_pos);
+        float ff = clamp((fd - u_fog_near) / (u_fog_far - u_fog_near), 0.0, 1.0);
+        frag_color = outputColor(mix(albedo, u_fog_color, 1.0 - exp(-ff*ff*3.0)), alpha);
+        return;
     } else if (u_proc_mode == 10) {
         // Carpaint: metallic flake micro-normal + per-fragment colour wash.
         float nse = noise(v_worldPos.xz * 0.4);
@@ -969,9 +1128,12 @@ void main() {
     vec3 F0 = mix(vec3(0.04), albedo, metallic);
     float NdotV = max(dot(N, V), 0.001);
     float shadow = calcShadow(v_lightSpacePos, N);
+    // Volumetric cloud shadow: dims the primary (sun) light where a cloud blocks
+    // it, so the clouds drifting overhead cast moving shadow patches on the world.
+    float cloudSh = cloudShadow(v_worldPos);
 
     float primaryIntensity = u_dir_light_count > 0 ? u_dir_lights[0].intensity : 0.0;
-    float ambientShadow = mix(1.0, mix(0.5, 1.0, shadow), clamp(primaryIntensity, 0.0, 1.0));
+    float ambientShadow = mix(1.0, mix(0.5, 1.0, shadow), clamp(primaryIntensity, 0.0, 1.0) * cloudSh);
     vec3 F_ambient = fresnelSchlick(NdotV, F0);
     vec3 kD_ambient = (1.0 - F_ambient) * (1.0 - metallic);
     float ao = curvatureAO(N, u_ao_strength);
@@ -984,8 +1146,13 @@ void main() {
     for (int dl = 0; dl < dirCount; dl++) {
         vec3 dL = normalize(-u_dir_lights[dl].direction);
         float rawNdotL = dot(N, dL);
-        float dShadow = (dl == 0) ? shadow : 1.0;
+        // When a cloud blocks the sun the sharp shadow must vanish (the light is
+        // re-scattered as soft diffuse): fade the shadow map toward 1.0 as cloud
+        // cover rises, and dim the direct beam only mildly — so the world stays
+        // lit but shadowless under a cloud rather than going black.
+        float dShadow = (dl == 0) ? mix(1.0, shadow, cloudSh) : 1.0;
         vec3 radiance = u_dir_lights[dl].color * u_dir_lights[dl].intensity;
+        if (dl == 0) radiance *= mix(0.7, 1.0, cloudSh);
 
         if (u_subsurface_strength > 0.0) {
             // Skin path: wrap-diffuse extends light past the terminator,

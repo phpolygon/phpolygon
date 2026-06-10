@@ -47,6 +47,9 @@ final class SetSky
         public readonly Vec3 $cloudWindDirection = new Vec3(1.0, 0.0, 0.2),
         /** 0..1 — horizon haze density (more = thicker, lower visibility). */
         public readonly float $fogDensity = 0.0,
+        /** 0..1 — storm darkening: 0 = white fair-weather cumulus, 1 = dark
+         *  rain/thunder/snow clouds. Driven by the Weather precipitation state. */
+        public readonly float $cloudDarkness = 0.0,
         /** 0..1 — brightness of the starfield. 0 = no stars. */
         public readonly float $starBrightness = 0.0,
         /** Game-world time accumulator for cloud drift animation. */

@@ -85,8 +85,13 @@ class VioRenderer3D implements Renderer3DInterface
     private ?VioMesh $screenQuad = null;
     private bool $enableHdr = false;
     private float $bloomIntensity = 0.35;
-    private float $bloomThreshold = 1.0;
+    // Threshold tuned for the tonemapped LDR offscreen (bright pixels ≈ 1.0):
+    // lights, the sun disc, water/metal highlights glow; the rest stays dark.
+    private float $bloomThreshold = 0.6;
     private float $exposure = 1.8;
+    /** Current half-res bloom-target dimensions (rebuilt on backbuffer resize). */
+    private int $bloomWidth = 0;
+    private int $bloomHeight = 0;
 
     // Shadow map
     private ?VioRenderTarget $shadowTarget = null;
@@ -311,13 +316,24 @@ class VioRenderer3D implements Renderer3DInterface
 
     private function offscreenIsActive(): bool
     {
-        // Phase 1.5 offscreen pipeline on Vio/D3D11 renders black after the
-        // FXAA blit even though vio_render_target_texture no longer crashes
-        // (see the SRV-wrapper cache fix in php-vio's php_vio.c). Disabling
-        // the pipeline here keeps the 3D pass writing directly to the
-        // swapchain until the present-side FXAA path is debugged.
-        // Trade-off: no FXAA, no render-scale, no TAA on Vio backends.
-        return false;
+        // The render-scale + AA offscreen pipeline. It was hard-disabled for a
+        // long time because the present blit rendered black — the real cause was
+        // a php-vio bug: vio_pipeline built the vertex input layout from shader
+        // reflection WITHOUT sorting by location, so postprocess.vert's
+        // (a_uv@loc1, a_position@loc0) got swapped offsets and the fullscreen
+        // quad collapsed to a point. Fixed in php-vio (sort by location) plus the
+        // screenQuad UV V-flip, so the pipeline is correct now and runs whenever
+        // AA or render-scale actually need an intermediate target. Escape hatch:
+        // PHPOLYGON_VIO_OFFSCREEN=0 forces the legacy direct-to-swapchain path.
+        if (getenv('PHPOLYGON_VIO_OFFSCREEN') === '0') {
+            return false;
+        }
+        // Any effect that needs an intermediate scene texture forces the
+        // offscreen path: FXAA/TAA, render-scale, or bloom (which extracts from
+        // the rendered scene). Each is individually toggleable via GraphicsSettings.
+        return $this->settings->antiAliasing !== AntiAliasing::Off
+            || $this->settings->renderScale !== 1.0
+            || $this->settings->bloom;
     }
 
     /**
@@ -351,18 +367,143 @@ class VioRenderer3D implements Renderer3DInterface
 
         // Unbind the offscreen target so subsequent draws hit the swapchain.
         $target->unbind();
+
+        // Bloom (GraphicsSettings::$bloom): extract + blur the bright pixels of
+        // the rendered scene; the present shader adds the glow back. Runs while
+        // the offscreen colour is in shader-resource state (just unbound), and
+        // leaves the swapchain bound for the present pass below.
+        $bloomTex = $this->settings->bloom ? $this->renderBloom($sceneTex, $quad) : null;
+        $post = $this->postFinishParams();
+
         vio_viewport($this->ctx, 0, 0, $this->backbufferWidth, $this->backbufferHeight);
 
         if ($this->settings->antiAliasing === AntiAliasing::Fxaa && $this->fxaaPass !== null) {
-            $this->fxaaPass->apply($sceneTex, $target->width(), $target->height(), $quad);
+            $this->fxaaPass->apply(
+                $sceneTex, $target->width(), $target->height(), $quad,
+                $bloomTex, $this->bloomIntensity, $post,
+            );
         } else {
             $this->bindPostProcessPipeline('passthrough_blit');
             vio_bind_texture($this->ctx, $sceneTex, 0);
             vio_set_uniform($this->ctx, 'u_source', 0);
+            if ($bloomTex !== null) {
+                vio_bind_texture($this->ctx, $bloomTex, 1);
+                vio_set_uniform($this->ctx, 'u_bloom', 1);
+                vio_set_uniform($this->ctx, 'u_bloom_intensity', $this->bloomIntensity);
+            } else {
+                vio_set_uniform($this->ctx, 'u_bloom_intensity', 0.0);
+            }
+            $this->setPostFinishUniforms($post);
             vio_draw($this->ctx, $quad);
         }
 
         $this->offscreenActive = false;
+    }
+
+    /**
+     * Colour-grade + vignette parameters for the final present pass, from
+     * GraphicsSettings. Grade and vignette are applied full-screen on the
+     * composited image (geometry + sky + bloom) so they cover everything
+     * uniformly — the mesh shader no longer bakes them per-fragment.
+     *
+     * @return array{lift: float[], gamma: float[], gain: float[], saturation: float, vignette: float, viewport: float[]}
+     */
+    private function postFinishParams(): array
+    {
+        $g = $this->settings->colorGrading->params();
+        return [
+            'lift'       => $g['lift'],
+            'gamma'      => $g['gamma'],
+            'gain'       => $g['gain'],
+            'saturation' => $g['saturation'],
+            'vignette'   => $this->settings->vignetteIntensity,
+            'viewport'   => [(float) $this->backbufferWidth, (float) $this->backbufferHeight],
+        ];
+    }
+
+    /** Upload the {@see postFinishParams} onto the currently bound present shader. */
+    private function setPostFinishUniforms(array $post): void
+    {
+        vio_set_uniform($this->ctx, 'u_grade_lift', $post['lift']);
+        vio_set_uniform($this->ctx, 'u_grade_gamma', $post['gamma']);
+        vio_set_uniform($this->ctx, 'u_grade_gain', $post['gain']);
+        vio_set_uniform($this->ctx, 'u_grade_saturation', $post['saturation']);
+        vio_set_uniform($this->ctx, 'u_vignette_intensity', $post['vignette']);
+        vio_set_uniform($this->ctx, 'u_viewport_size', $post['viewport']);
+    }
+
+    /**
+     * Extract + two-pass-blur the bright pixels of the (tonemapped LDR) scene
+     * into a half-res bloom buffer, returning the blurred texture for the
+     * present pass to add. Returns null when the bloom targets are unavailable.
+     * Leaves the swapchain bound (the final vio_unbind_render_target restores it).
+     */
+    private function renderBloom(VioTexture $sceneTex, VioMesh $quad): ?VioTexture
+    {
+        $this->ensureBloomTargets();
+        $extract = $this->bloomExtractTarget;
+        $ping = $this->bloomPingTarget;
+        $pong = $this->bloomPongTarget;
+        if ($extract === null || $ping === null || $pong === null) {
+            return null;
+        }
+        $bw = max(1, $this->bloomWidth);
+        $bh = max(1, $this->bloomHeight);
+
+        // Bright-pass extract: scene → extract.
+        vio_bind_render_target($this->ctx, $extract);
+        vio_viewport($this->ctx, 0, 0, $bw, $bh);
+        vio_clear($this->ctx, 0, 0, 0, 1);
+        $this->bindPostProcessPipeline('bloom_extract');
+        vio_bind_texture($this->ctx, $sceneTex, 0);
+        vio_set_uniform($this->ctx, 'u_scene', 0);
+        vio_set_uniform($this->ctx, 'u_threshold', $this->bloomThreshold);
+        vio_draw($this->ctx, $quad);
+        vio_unbind_render_target($this->ctx);
+
+        // Horizontal blur: extract → ping.
+        vio_bind_render_target($this->ctx, $ping);
+        vio_viewport($this->ctx, 0, 0, $bw, $bh);
+        vio_clear($this->ctx, 0, 0, 0, 1);
+        $this->bindPostProcessPipeline('bloom_blur');
+        vio_bind_texture($this->ctx, vio_render_target_texture($extract), 0);
+        vio_set_uniform($this->ctx, 'u_source', 0);
+        vio_set_uniform($this->ctx, 'u_direction', [1.0 / $bw, 0.0]);
+        vio_draw($this->ctx, $quad);
+        vio_unbind_render_target($this->ctx);
+
+        // Vertical blur: ping → pong.
+        vio_bind_render_target($this->ctx, $pong);
+        vio_viewport($this->ctx, 0, 0, $bw, $bh);
+        vio_clear($this->ctx, 0, 0, 0, 1);
+        $this->bindPostProcessPipeline('bloom_blur');
+        vio_bind_texture($this->ctx, vio_render_target_texture($ping), 0);
+        vio_set_uniform($this->ctx, 'u_source', 0);
+        vio_set_uniform($this->ctx, 'u_direction', [0.0, 1.0 / $bh]);
+        vio_draw($this->ctx, $quad);
+        vio_unbind_render_target($this->ctx);
+
+        return vio_render_target_texture($pong);
+    }
+
+    /**
+     * (Re)allocate the half-res bloom targets to match the current backbuffer.
+     * initPostProcess() creates them at the splash resolution, so they must be
+     * rebuilt once the real window size is known and whenever it changes.
+     */
+    private function ensureBloomTargets(): void
+    {
+        $bw = max(1, (int)($this->backbufferWidth / 2));
+        $bh = max(1, (int)($this->backbufferHeight / 2));
+        if ($this->bloomExtractTarget !== null
+            && $this->bloomWidth === $bw && $this->bloomHeight === $bh) {
+            return;
+        }
+        $this->bloomExtractTarget = vio_render_target($this->ctx, ['width' => $bw, 'height' => $bh]) ?: null;
+        $this->bloomPingTarget    = vio_render_target($this->ctx, ['width' => $bw, 'height' => $bh]) ?: null;
+        $this->bloomPongTarget    = vio_render_target($this->ctx, ['width' => $bw, 'height' => $bh]) ?: null;
+        $this->bloomWidth  = $bw;
+        $this->bloomHeight = $bh;
     }
 
     public function beginFrame(): void
@@ -725,7 +866,14 @@ class VioRenderer3D implements Renderer3DInterface
         $this->compileShaderFromFiles('depth',      'depth.vert.glsl',      'depth.frag.glsl');
         $this->compileShaderFromFiles('normals',    'normals.vert.glsl',    'normals.frag.glsl');
         $this->compileShaderFromFiles('skybox',     'skybox.vert.glsl',     'skybox.frag.glsl');
-        $this->compileShaderFromFiles('atmosphere', 'atmosphere.vert.glsl', 'atmosphere.frag.glsl');
+        // Atmosphere split into one layered pass per element (each toggleable +
+        // independently editable). All share atmosphere.vert (emits v_ndc).
+        $this->compileShaderFromFiles('sky_gradient', 'atmosphere.vert.glsl', 'sky_gradient.frag.glsl');
+        $this->compileShaderFromFiles('sky_sun',      'atmosphere.vert.glsl', 'sky_sun.frag.glsl');
+        $this->compileShaderFromFiles('sky_moon',     'atmosphere.vert.glsl', 'sky_moon.frag.glsl');
+        $this->compileShaderFromFiles('sky_stars',    'atmosphere.vert.glsl', 'sky_stars.frag.glsl');
+        $this->compileShaderFromFiles('sky_clouds',   'atmosphere.vert.glsl', 'sky_clouds.frag.glsl');
+        $this->compileShaderFromFiles('sky_haze',     'atmosphere.vert.glsl', 'sky_haze.frag.glsl');
     }
 
     private function initPostProcess(): void
@@ -745,12 +893,19 @@ class VioRenderer3D implements Renderer3DInterface
         $this->bloomPingTarget = vio_render_target($this->ctx, ['width' => $bw, 'height' => $bh]) ?: null;
         $this->bloomPongTarget = vio_render_target($this->ctx, ['width' => $bw, 'height' => $bh]) ?: null;
 
+        // UV.v is FLIPPED relative to the NDC position: on the php-vio backends
+        // (D3D12/D3D11/Vulkan/Metal) the render-target texel origin is top-left
+        // while NDC +Y is up, so sampling an offscreen-rendered texture with the
+        // naive mapping comes out vertically mirrored. Flipping v here once makes
+        // every fullscreen pass that samples an RT (present blit, FXAA, bloom)
+        // render upright. The atmospheric sky reconstructs its ray from NDC, not
+        // v_uv, so it is unaffected.
         $this->screenQuad = vio_mesh($this->ctx, [
             'vertices' => [
-                -1, -1, 0,  0, 0,
-                 1, -1, 0,  1, 0,
-                 1,  1, 0,  1, 1,
-                -1,  1, 0,  0, 1,
+                -1, -1, 0,  0, 1,
+                 1, -1, 0,  1, 1,
+                 1,  1, 0,  1, 0,
+                -1,  1, 0,  0, 0,
             ],
             'indices' => [0, 1, 2, 0, 2, 3],
             'layout' => [VIO_FLOAT3, VIO_FLOAT2],
@@ -1370,66 +1525,112 @@ class VioRenderer3D implements Renderer3DInterface
         ]);
         // GL convention: gl_Position = projection * view * worldPos, so
         // the clip→world mapping we need is inverse(projection * rotView).
-        // Mat4::multiply is standard math: $a->multiply($b) returns a * b.
-        $vp = $projMatrix->multiply($rotView);
-        $invVP = $vp->inverse();
-
-        $this->bindAtmospherePipeline();
-
-        vio_set_uniform($this->ctx, 'u_sky_inv_vp', $invVP->toArray());
+        $invVP = $projMatrix->multiply($rotView)->inverse()->toArray();
 
         $camPos = $this->cameraPosition ?? new Vec3(0.0, 0.0, 0.0);
-        vio_set_uniform($this->ctx, 'u_camera_pos', [$camPos->x, $camPos->y, $camPos->z]);
-
         $sunDir = $sky->sunDirection;
-        vio_set_uniform($this->ctx, 'u_sun_direction', [$sunDir->x, $sunDir->y, $sunDir->z]);
-        vio_set_uniform($this->ctx, 'u_sun_color', [$sky->sunColor->r, $sky->sunColor->g, $sky->sunColor->b]);
-        vio_set_uniform($this->ctx, 'u_sun_intensity', $sky->sunIntensity);
 
+        // The sky is composited as one layered fullscreen pass per element: the
+        // gradient writes opaque, then sun/moon/stars ADD light and clouds/haze
+        // alpha-blend on top. Each element is skipped entirely when its driving
+        // value is zero, so an "off" element costs nothing — and each lives in
+        // its own shader (sky_*.frag.glsl), editable/toggleable on its own.
+
+        // 1. Base gradient (opaque) — always.
+        $this->bindSkyPipeline('sky_gradient', VIO_BLEND_NONE);
+        vio_set_uniform($this->ctx, 'u_sky_inv_vp', $invVP);
         vio_set_uniform($this->ctx, 'u_zenith_color', [$sky->zenithColor->r, $sky->zenithColor->g, $sky->zenithColor->b]);
         vio_set_uniform($this->ctx, 'u_horizon_color', [$sky->horizonColor->r, $sky->horizonColor->g, $sky->horizonColor->b]);
         vio_set_uniform($this->ctx, 'u_ground_color', [$sky->groundColor->r, $sky->groundColor->g, $sky->groundColor->b]);
-
-        vio_set_uniform($this->ctx, 'u_sun_size', $sky->sunSize);
-        vio_set_uniform($this->ctx, 'u_sun_glow_size', $sky->sunGlowSize);
-        vio_set_uniform($this->ctx, 'u_sun_glow_intensity', $sky->sunGlowIntensity);
-
-        $moonDir = $sky->moonDirection ?? new Vec3(0.0, -1.0, 0.0);
-        vio_set_uniform($this->ctx, 'u_moon_direction', [$moonDir->x, $moonDir->y, $moonDir->z]);
-        vio_set_uniform($this->ctx, 'u_moon_color', [$sky->moonColor->r, $sky->moonColor->g, $sky->moonColor->b]);
-        vio_set_uniform($this->ctx, 'u_moon_intensity', $sky->moonIntensity);
-
-        vio_set_uniform($this->ctx, 'u_star_brightness', $sky->starBrightness);
-
-        // Clouds + horizon haze
-        vio_set_uniform($this->ctx, 'u_cloud_cover', $sky->cloudCover);
-        vio_set_uniform($this->ctx, 'u_cloud_altitude', $sky->cloudAltitude);
-        vio_set_uniform($this->ctx, 'u_cloud_density', $sky->cloudDensity);
-        vio_set_uniform($this->ctx, 'u_cloud_wind_speed', $sky->cloudWindSpeed);
-
-        // Normalise wind direction in the XZ plane so clouds drift in world space.
-        $wd = $sky->cloudWindDirection;
-        $wl = sqrt($wd->x * $wd->x + $wd->z * $wd->z);
-        $wx = $wl > 1e-6 ? $wd->x / $wl : 1.0;
-        $wz = $wl > 1e-6 ? $wd->z / $wl : 0.0;
-        vio_set_uniform($this->ctx, 'u_cloud_wind_dir', [$wx, $wz]);
-
-        vio_set_uniform($this->ctx, 'u_fog_density', $sky->fogDensity);
-        vio_set_uniform($this->ctx, 'u_time', $sky->time);
-
         vio_draw($this->ctx, $quad);
+
+        // 2. Sun (additive).
+        if ($sky->sunIntensity > 0.0) {
+            $this->bindSkyPipeline('sky_sun', VIO_BLEND_ADDITIVE);
+            vio_set_uniform($this->ctx, 'u_sky_inv_vp', $invVP);
+            vio_set_uniform($this->ctx, 'u_sun_direction', [$sunDir->x, $sunDir->y, $sunDir->z]);
+            vio_set_uniform($this->ctx, 'u_sun_color', [$sky->sunColor->r, $sky->sunColor->g, $sky->sunColor->b]);
+            vio_set_uniform($this->ctx, 'u_sun_intensity', $sky->sunIntensity);
+            vio_set_uniform($this->ctx, 'u_sun_size', $sky->sunSize);
+            vio_set_uniform($this->ctx, 'u_sun_glow_size', $sky->sunGlowSize);
+            vio_set_uniform($this->ctx, 'u_sun_glow_intensity', $sky->sunGlowIntensity);
+            vio_draw($this->ctx, $quad);
+        }
+
+        // 3. Moon (additive).
+        if ($sky->moonIntensity > 0.0) {
+            $moonDir = $sky->moonDirection ?? new Vec3(0.0, -1.0, 0.0);
+            $this->bindSkyPipeline('sky_moon', VIO_BLEND_ADDITIVE);
+            vio_set_uniform($this->ctx, 'u_sky_inv_vp', $invVP);
+            vio_set_uniform($this->ctx, 'u_moon_direction', [$moonDir->x, $moonDir->y, $moonDir->z]);
+            vio_set_uniform($this->ctx, 'u_moon_color', [$sky->moonColor->r, $sky->moonColor->g, $sky->moonColor->b]);
+            vio_set_uniform($this->ctx, 'u_moon_intensity', $sky->moonIntensity);
+            vio_set_uniform($this->ctx, 'u_sun_size', $sky->sunSize);
+            vio_set_uniform($this->ctx, 'u_sun_glow_size', $sky->sunGlowSize);
+            vio_draw($this->ctx, $quad);
+        }
+
+        // 4. Stars (additive).
+        if ($sky->starBrightness > 0.0) {
+            $this->bindSkyPipeline('sky_stars', VIO_BLEND_ADDITIVE);
+            vio_set_uniform($this->ctx, 'u_sky_inv_vp', $invVP);
+            vio_set_uniform($this->ctx, 'u_star_brightness', $sky->starBrightness);
+            vio_draw($this->ctx, $quad);
+        }
+
+        // 5. Clouds (alpha).
+        if ($sky->cloudCover > 0.0) {
+            // Normalise wind direction in the XZ plane so clouds drift in world space.
+            $wd = $sky->cloudWindDirection;
+            $wl = sqrt($wd->x * $wd->x + $wd->z * $wd->z);
+            $wx = $wl > 1e-6 ? $wd->x / $wl : 1.0;
+            $wz = $wl > 1e-6 ? $wd->z / $wl : 0.0;
+
+            $this->bindSkyPipeline('sky_clouds', VIO_BLEND_ALPHA);
+            vio_set_uniform($this->ctx, 'u_sky_inv_vp', $invVP);
+            vio_set_uniform($this->ctx, 'u_camera_pos', [$camPos->x, $camPos->y, $camPos->z]);
+            vio_set_uniform($this->ctx, 'u_sun_direction', [$sunDir->x, $sunDir->y, $sunDir->z]);
+            vio_set_uniform($this->ctx, 'u_sun_color', [$sky->sunColor->r, $sky->sunColor->g, $sky->sunColor->b]);
+            vio_set_uniform($this->ctx, 'u_sun_intensity', $sky->sunIntensity);
+            vio_set_uniform($this->ctx, 'u_cloud_cover', $sky->cloudCover);
+            vio_set_uniform($this->ctx, 'u_cloud_altitude', $sky->cloudAltitude);
+            vio_set_uniform($this->ctx, 'u_cloud_density', $sky->cloudDensity);
+            vio_set_uniform($this->ctx, 'u_cloud_wind_speed', $sky->cloudWindSpeed);
+            vio_set_uniform($this->ctx, 'u_cloud_wind_dir', [$wx, $wz]);
+            vio_set_uniform($this->ctx, 'u_cloud_darkness', $sky->cloudDarkness);
+            vio_set_uniform($this->ctx, 'u_time', $sky->time);
+            vio_draw($this->ctx, $quad);
+        }
+
+        // 6. Horizon haze (alpha).
+        if ($sky->fogDensity > 0.0) {
+            $this->bindSkyPipeline('sky_haze', VIO_BLEND_ALPHA);
+            vio_set_uniform($this->ctx, 'u_sky_inv_vp', $invVP);
+            vio_set_uniform($this->ctx, 'u_horizon_color', [$sky->horizonColor->r, $sky->horizonColor->g, $sky->horizonColor->b]);
+            vio_set_uniform($this->ctx, 'u_fog_density', $sky->fogDensity);
+            vio_draw($this->ctx, $quad);
+        }
     }
 
-    private function bindAtmospherePipeline(): void
+    /**
+     * Bind a sky-element pipeline (cached per shader id + blend). Every sky pass
+     * is a fullscreen quad with depth-test off; only the blend mode differs —
+     * NONE for the opaque gradient, ADDITIVE for emissive elements (sun/moon/
+     * stars), ALPHA for clouds/haze.
+     */
+    private function bindSkyPipeline(string $shaderId, int $blend): void
     {
-        $key = 'atmosphere:atmosphere';
+        $key = 'sky:' . $shaderId;
         if (!isset($this->pipelineCache[$key])) {
-            $shader = $this->shaderCache['atmosphere'];
+            $shader = $this->shaderCache[$shaderId] ?? null;
+            if ($shader === null) {
+                return;
+            }
             $pipeline = vio_pipeline($this->ctx, [
                 'shader' => $shader,
                 'depth_test' => false,
                 'cull_mode' => VIO_CULL_NONE,
-                'blend' => VIO_BLEND_NONE,
+                'blend' => $blend,
             ]);
             if ($pipeline === false) {
                 return;
@@ -1827,6 +2028,7 @@ class VioRenderer3D implements Renderer3DInterface
 
         $mode = match (true) {
             str_starts_with($prefix, 'sand_terrain') => 1,
+            str_starts_with($prefix, 'pool_water') => 11,
             str_starts_with($prefix, 'water_') => 2,
             str_starts_with($prefix, 'rock') => 3,
             str_starts_with($prefix, 'palm_trunk') => 4,
@@ -1969,6 +2171,25 @@ class VioRenderer3D implements Renderer3DInterface
 
         vio_set_uniform($this->ctx, 'u_time', $this->globalTime);
         vio_set_uniform($this->ctx, 'u_ao_strength', $this->settings->ambientOcclusion->strength());
+
+        // Cloud-shadow uniforms: the mesh samples the SAME cloud density field
+        // toward the sun (sky_clouds.frag mirror) so the volumetric clouds cast
+        // moving shadow patches on the world. cover 0 → cloudShadow() no-ops.
+        $sky = $this->pendingSky;
+        if ($sky !== null) {
+            $wd = $sky->cloudWindDirection;
+            $wl = sqrt($wd->x * $wd->x + $wd->z * $wd->z);
+            vio_set_uniform($this->ctx, 'u_cloud_cover', $sky->cloudCover);
+            vio_set_uniform($this->ctx, 'u_cloud_altitude', $sky->cloudAltitude);
+            vio_set_uniform($this->ctx, 'u_cloud_density', $sky->cloudDensity);
+            vio_set_uniform($this->ctx, 'u_cloud_wind_speed', $sky->cloudWindSpeed);
+            vio_set_uniform($this->ctx, 'u_cloud_wind_dir',
+                [$wl > 1e-6 ? $wd->x / $wl : 1.0, $wl > 1e-6 ? $wd->z / $wl : 0.0]);
+            // Same time base as the sky cloud pass so shadow patches track the clouds.
+            vio_set_uniform($this->ctx, 'u_cloud_time', $sky->time);
+        } else {
+            vio_set_uniform($this->ctx, 'u_cloud_cover', 0.0);
+        }
 
         // Color grading + vignette per-frame.
         $grade = $this->settings->colorGrading->params();

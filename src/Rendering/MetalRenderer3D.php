@@ -672,6 +672,7 @@ class MetalRenderer3D implements Renderer3DInterface
 
         $mode = match (true) {
             str_starts_with($prefix, 'sand_terrain')   => 1,
+            str_starts_with($prefix, 'pool_water')     => 11,
             str_starts_with($prefix, 'water_')         => 2,
             str_starts_with($prefix, 'rock')           => 3,
             str_starts_with($prefix, 'palm_trunk')     => 4,
