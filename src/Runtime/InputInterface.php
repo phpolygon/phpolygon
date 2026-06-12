@@ -53,7 +53,13 @@ interface InputInterface
     /** @return list<string> UTF-8 characters typed this frame. */
     public function getCharsTyped(): array;
 
-    /** All characters typed this frame as a single concatenated string. */
+    /**
+     * All characters typed this frame as a single concatenated string.
+     * CONSUMES the buffer: the first caller per frame gets the text, later
+     * calls return '' — so fixed-timestep catch-up ticks (several update
+     * calls per rendered frame) can't read the same characters twice.
+     * Use getCharsTyped() for a non-consuming render-phase read.
+     */
     public function getTextInput(): string;
 
     /**

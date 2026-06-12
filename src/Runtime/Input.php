@@ -162,10 +162,14 @@ class Input implements InputInterface
 
     /**
      * Get typed characters as a single concatenated string.
+     * Consumes the buffer (see VioInput::getTextInput()) so fixed-timestep
+     * catch-up ticks don't read the same characters twice.
      */
     public function getTextInput(): string
     {
-        return implode('', $this->charBuffer);
+        $text = implode('', $this->charBuffer);
+        $this->charBuffer = [];
+        return $text;
     }
 
     /** Desktop has a physical keyboard; no on-screen keyboard / soft backspaces. */

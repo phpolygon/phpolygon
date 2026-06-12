@@ -194,7 +194,15 @@ class VioInput implements InputInterface
 
     public function getTextInput(): string
     {
-        return implode('', $this->charBuffer);
+        // Consume on read (same semantics as isKeyPressed): the fixed-timestep
+        // loop can run several update ticks per rendered frame, but the char
+        // buffer is only refilled/cleared once per frame — a non-consuming
+        // read would hand the SAME characters to every catch-up tick (typed
+        // text doubles whenever the game renders below the tick rate).
+        // getCharsTyped() stays non-consuming for the render-phase UI.
+        $text = implode('', $this->charBuffer);
+        $this->charBuffer = [];
+        return $text;
     }
 
     public function suppress(int $frames = 0, float $seconds = 0.0): void
