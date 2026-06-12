@@ -3121,8 +3121,10 @@ class VioRenderer3D implements Renderer3DInterface
         // Cloud-shadow uniforms: the mesh samples the SAME cloud density field
         // toward the sun (sky_clouds.frag mirror) so the volumetric clouds cast
         // moving shadow patches on the world. cover 0 → cloudShadow() no-ops.
+        // The cloudShadows graphics setting gates ONLY this mesh-side path —
+        // the sky pass keeps its clouds; they just stop dimming the world.
         $sky = $this->pendingSky;
-        if ($sky !== null) {
+        if ($sky !== null && $this->settings->cloudShadows) {
             $wd = $sky->cloudWindDirection;
             $wl = sqrt($wd->x * $wd->x + $wd->z * $wd->z);
             vio_set_uniform($this->ctx, 'u_cloud_cover', $sky->cloudCover);
