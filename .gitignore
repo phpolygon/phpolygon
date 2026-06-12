@@ -10,3 +10,4 @@ composer.lock
 /benchmarks/results/
 /game.log
 /.phpbench/
+/saves/
