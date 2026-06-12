@@ -325,7 +325,10 @@ class Renderer3DSystem extends AbstractSystem
 
         // Camera3DSystem already pushed a SetCamera with the active view +
         // projection matrices. Pull the most recent one and derive 6 planes.
-        $planes = $this->extractFrustumPlanes();
+        // PHPOLYGON_NO_CULL=1 disables frustum/bin/LOD culling entirely
+        // (diagnostic: a constant draw count isolates backend buffer-growth
+        // glitches from cull-driven draw-count swings).
+        $planes = getenv('PHPOLYGON_NO_CULL') === '1' ? null : $this->extractFrustumPlanes();
 
         // Coarse spatial bin culling. We bin entities into a 2D X-Z grid and
         // test each bin's AABB against the frustum once per frame; entities
