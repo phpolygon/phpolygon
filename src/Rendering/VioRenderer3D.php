@@ -75,6 +75,18 @@ class VioRenderer3D implements Renderer3DInterface
     private ?Vec3 $cameraPosition = null;
 
     private float $globalTime = 0.0;
+
+    // ── Flash-hunt diagnostics (PHPOLYGON_FLASH_DEBUG=1) ──────────────
+    private ?bool $flashDbg = null;
+    /** @var array<string, float|int> previous frame's uniform signature */
+    private array $flashDbgPrev = [];
+    private bool $flashDbgHadShadow = false;
+    private int $flashDbgCasters = -1;
+
+    private function flashDbgEnabled(): bool
+    {
+        return $this->flashDbg ??= (getenv('PHPOLYGON_FLASH_DEBUG') === '1');
+    }
     private float $snowCover = 0.0;
 
     // Post-processing
@@ -772,7 +784,7 @@ class VioRenderer3D implements Renderer3DInterface
 
         // --- Pass 1: Collect state ---
         $ambientColor = new Color(0.1, 0.1, 0.1);
-        $ambientIntensity = 1.0;
+        $ambientIntensity = M_PI; // fallback matches the pre-2026-06 premultiplied brightness
         $dirLights = [];
         $pointLights = [];
         $spotLights = [];
@@ -857,6 +869,13 @@ class VioRenderer3D implements Renderer3DInterface
 
         // --- Shadow pass ---
         $hasShadowMap = $this->renderShadowPass($commandList, $dirLights);
+        if ($this->flashDbgEnabled() && $hasShadowMap !== $this->flashDbgHadShadow) {
+            fprintf(STDERR, "[flashdbg] %s  shadow pass flipped: %s -> %s\n",
+                date('H:i:s'),
+                $this->flashDbgHadShadow ? 'ON' : 'OFF',
+                $hasShadowMap ? 'ON' : 'OFF');
+            $this->flashDbgHadShadow = $hasShadowMap;
+        }
 
         // --- SSAO G-buffer + occlusion + blur pass ---
         // Runs only when the AO tier wants real SSAO and the backend supports it
@@ -1341,6 +1360,31 @@ class VioRenderer3D implements Renderer3DInterface
                 }
                 $instancedCasters[] = [$cmd, $mat];
             }
+        }
+
+        if ($this->flashDbgEnabled()) {
+            $n = count($casters) + count($instancedCasters);
+            // Camera forward (world space) from the inverse view: where is the
+            // player LOOKING? fwdY ≈ -1 straight down, +1 straight up.
+            $fwdY = 0.0;
+            if ($this->currentViewMatrix !== null) {
+                $inv = $this->currentViewMatrix->inverse();
+                $eye = $inv->transformPoint(new \PHPolygon\Math\Vec3(0.0, 0.0, 0.0));
+                $ahead = $inv->transformPoint(new \PHPolygon\Math\Vec3(0.0, 0.0, -1.0));
+                $fwdY = $ahead->y - $eye->y;
+            }
+            if ($this->flashDbgCasters >= 0 && abs($n - $this->flashDbgCasters) > max(10, (int) ($this->flashDbgCasters * 0.5))) {
+                fprintf(STDERR, "[flashdbg] %s  shadow caster count jump: %d -> %d (fwdY %.2f)\n",
+                    date('H:i:s'), $this->flashDbgCasters, $n, $fwdY);
+            }
+            // The smoking gun for a cull glitch: almost no casters while the
+            // player is clearly looking DOWN at the world. Normal play never
+            // produces this — looking down means terrain+buildings in view.
+            if ($n < 60 && $fwdY < -0.35) {
+                fprintf(STDERR, "[flashdbg] %s  !! LOW casters (%d) while looking DOWN (fwdY %.2f)\n",
+                    date('H:i:s'), $n, $fwdY);
+            }
+            $this->flashDbgCasters = $n;
         }
 
         $this->cascadeLightSpaceMatrices = [];
@@ -2960,6 +3004,9 @@ class VioRenderer3D implements Renderer3DInterface
     private function uploadFrameUniforms(array $state): void
     {
         if ($this->currentViewMatrix === null || $this->currentProjectionMatrix === null) {
+            if ($this->flashDbgEnabled()) {
+                fprintf(STDERR, "[flashdbg] uploadFrameUniforms SKIPPED — no view/projection matrix this frame\n");
+            }
             return;
         }
         vio_set_uniform($this->ctx, 'u_view', $this->currentViewMatrix->toArray());
@@ -2978,10 +3025,43 @@ class VioRenderer3D implements Renderer3DInterface
         $ac = $state['ambientColor'];
         $ai = $state['ambientIntensity'];
         $piScale = M_PI; // compensate Lambertian /π in Cook-Torrance BRDF
-        vio_set_uniform($this->ctx, 'u_ambient_color', [$ac->r * $ai * $piScale, $ac->g * $ai * $piScale, $ac->b * $ai * $piScale]);
+        // Raw color + scaled intensity; the shader multiplies them ONCE
+        // (color × intensity). Premultiplying the color here too would apply
+        // intensity and π quadratically — ambient dimming (night, storms)
+        // would respond as intensity² instead of linearly.
+        vio_set_uniform($this->ctx, 'u_ambient_color', [$ac->r, $ac->g, $ac->b]);
         vio_set_uniform($this->ctx, 'u_ambient_intensity', $ai * $piScale);
 
         $dirCount = min(count($state['dirLights']), 4);
+
+        // Flash-hunt diagnostic (PHPOLYGON_FLASH_DEBUG=1): these per-frame
+        // values should only ever drift slowly. A step change in ONE frame is
+        // exactly the kind of glitch that reads as a dark/bright flash, so log
+        // old -> new whenever something jumps.
+        if ($this->flashDbgEnabled()) {
+            $d0 = $state['dirLights'][0] ?? null;
+            $sig = [
+                'dirCount'  => $dirCount,
+                'intensity' => $d0?->intensity ?? -1.0,
+                'dirY'      => $d0?->direction->y ?? 0.0,
+                'ambient'   => $ai,
+                'cloudCov'  => $this->pendingSky?->cloudCover ?? -1.0,
+            ];
+            $p = $this->flashDbgPrev;
+            if ($p !== []) {
+                $jumps = [];
+                if ($sig['dirCount'] !== $p['dirCount'])                  $jumps[] = sprintf('dirCount %d->%d', $p['dirCount'], $sig['dirCount']);
+                if (abs($sig['intensity'] - $p['intensity']) > 0.25)      $jumps[] = sprintf('sunIntensity %.3f->%.3f', $p['intensity'], $sig['intensity']);
+                if (abs($sig['dirY'] - $p['dirY']) > 0.05)                $jumps[] = sprintf('sunDirY %.3f->%.3f', $p['dirY'], $sig['dirY']);
+                if (abs($sig['ambient'] - $p['ambient']) > 0.05)          $jumps[] = sprintf('ambient %.3f->%.3f', $p['ambient'], $sig['ambient']);
+                if (abs($sig['cloudCov'] - $p['cloudCov']) > 0.05)        $jumps[] = sprintf('cloudCover %.3f->%.3f', $p['cloudCov'], $sig['cloudCov']);
+                if ($jumps !== []) {
+                    fprintf(STDERR, "[flashdbg] %s  frame-uniform jump: %s\n", date('H:i:s'), implode(', ', $jumps));
+                }
+            }
+            $this->flashDbgPrev = $sig;
+        }
+
         vio_set_uniform($this->ctx, 'u_dir_light_count', $dirCount);
         for ($i = 0; $i < $dirCount; $i++) {
             $dl = $state['dirLights'][$i];

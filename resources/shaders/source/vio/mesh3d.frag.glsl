@@ -232,10 +232,12 @@ float cloudShadow(vec3 worldPos) {
     for (int i = 0; i < 5; i++) {
         dens += cloudDensityAt(worldPos + L * (tEnter + (float(i) + 0.5) * stepLen));
     }
-    // Soften (×0.6) and floor at 0.3: a fair-weather cloud passing overhead dims
-    // the direct sun but never blacks the world out — the bright sky still fills
-    // via ambient. Storm darkness is applied globally from the weather instead.
-    return clamp(exp(-dens * stepLen * 0.6), 0.0, 1.0);
+    // Extinction: 1 = clear path to the sun, → 0 fully under a cloud. The
+    // consumer floors the direct beam (it never reaches 0), so a passing cloud
+    // dims the world without blacking it out — the bright sky still fills via
+    // ambient. Storm darkness is applied globally instead. ×1.2 extinction so
+    // even thin clouds register as a visible dimming sweep.
+    return clamp(exp(-dens * stepLen * 1.2), 0.0, 1.0);
 }
 
 // ================================================================
@@ -486,7 +488,7 @@ vec3 computeSand(vec3 N, vec3 V, vec3 L, out float roughOut) {
         float puddleMask = smoothstep(0.52, 0.68, puddleNoise)
                          * smoothstep(0.35, 0.85, wetness);
         // Reflective puddle colour: picks up ambient + sunlight on surface.
-        vec3 puddleColor = u_ambient_color * 0.6
+        vec3 puddleColor = u_ambient_color * u_ambient_intensity * 0.6
                          + u_dir_lights[0].color * u_dir_lights[0].intensity * 0.25
                          + vec3(0.04, 0.07, 0.09);
         sandColor = mix(sandColor, puddleColor, puddleMask * 0.75);
@@ -1214,7 +1216,10 @@ void main() {
         // lit but shadowless under a cloud rather than going black.
         float dShadow = (dl == 0) ? mix(1.0, shadow, cloudSh) : 1.0;
         vec3 radiance = u_dir_lights[dl].color * u_dir_lights[dl].intensity;
-        if (dl == 0) radiance *= mix(0.7, 1.0, cloudSh);
+        // Under a thick cloud the direct beam nearly vanishes (floor 0.1)
+        // while ambient keeps the scene readable — tuned in-game: the strong
+        // sweep is what makes passing clouds readable as weather.
+        if (dl == 0) radiance *= mix(0.1, 1.0, cloudSh);
 
         if (u_subsurface_strength > 0.0) {
             // Skin path: wrap-diffuse extends light past the terminator,

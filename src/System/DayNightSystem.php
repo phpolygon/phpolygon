@@ -63,23 +63,27 @@ class DayNightSystem extends AbstractSystem
     ];
 
     // ── Ambient light ramp ───────────────────────────────────────────
+    // Intensities are tuned for the LINEAR ambient pipeline (effective
+    // ambient = color · intensity · π). They were converted from the old
+    // quadratic-bug era via i_new = i_old² · π, so the rendered look is
+    // unchanged — the values just look smaller than the historic ones.
     /** @var array<int, array{time: float, r: float, g: float, b: float, intensity: float}> */
     private const AMBIENT_KEYS = [
-        ['time' => 0.0,  'r' => 0.03, 'g' => 0.06, 'b' => 0.14, 'intensity' => 0.04],  // midnight — deep blue
-        ['time' => 0.15, 'r' => 0.03, 'g' => 0.06, 'b' => 0.14, 'intensity' => 0.04],  // late night
-        ['time' => 0.17, 'r' => 0.06, 'g' => 0.07, 'b' => 0.18, 'intensity' => 0.05],  // astro. twilight
-        ['time' => 0.19, 'r' => 0.15, 'g' => 0.12, 'b' => 0.25, 'intensity' => 0.07],  // nautical twi.
-        ['time' => 0.22, 'r' => 0.35, 'g' => 0.22, 'b' => 0.32, 'intensity' => 0.10],  // civil twilight
-        ['time' => 0.25, 'r' => 0.70, 'g' => 0.50, 'b' => 0.38, 'intensity' => 0.14],  // sunrise
-        ['time' => 0.32, 'r' => 0.72, 'g' => 0.78, 'b' => 0.88, 'intensity' => 0.22],  // morning
-        ['time' => 0.50, 'r' => 0.78, 'g' => 0.86, 'b' => 0.94, 'intensity' => 0.28],  // noon
-        ['time' => 0.68, 'r' => 0.78, 'g' => 0.86, 'b' => 0.94, 'intensity' => 0.25],  // afternoon
-        ['time' => 0.75, 'r' => 0.60, 'g' => 0.35, 'b' => 0.22, 'intensity' => 0.14],  // sunset
-        ['time' => 0.77, 'r' => 0.30, 'g' => 0.15, 'b' => 0.25, 'intensity' => 0.09],  // civil dusk
-        ['time' => 0.82, 'r' => 0.12, 'g' => 0.08, 'b' => 0.20, 'intensity' => 0.06],  // nautical dusk
-        ['time' => 0.85, 'r' => 0.05, 'g' => 0.06, 'b' => 0.16, 'intensity' => 0.04],  // astro. dusk
-        ['time' => 0.88, 'r' => 0.03, 'g' => 0.06, 'b' => 0.14, 'intensity' => 0.04],  // night
-        ['time' => 1.0,  'r' => 0.03, 'g' => 0.06, 'b' => 0.14, 'intensity' => 0.04],  // wrap
+        ['time' => 0.0,  'r' => 0.03, 'g' => 0.06, 'b' => 0.14, 'intensity' => 0.005],  // midnight — deep blue
+        ['time' => 0.15, 'r' => 0.03, 'g' => 0.06, 'b' => 0.14, 'intensity' => 0.005],  // late night
+        ['time' => 0.17, 'r' => 0.06, 'g' => 0.07, 'b' => 0.18, 'intensity' => 0.008],  // astro. twilight
+        ['time' => 0.19, 'r' => 0.15, 'g' => 0.12, 'b' => 0.25, 'intensity' => 0.015],  // nautical twi.
+        ['time' => 0.22, 'r' => 0.35, 'g' => 0.22, 'b' => 0.32, 'intensity' => 0.031],  // civil twilight
+        ['time' => 0.25, 'r' => 0.70, 'g' => 0.50, 'b' => 0.38, 'intensity' => 0.062],  // sunrise
+        ['time' => 0.32, 'r' => 0.72, 'g' => 0.78, 'b' => 0.88, 'intensity' => 0.152],  // morning
+        ['time' => 0.50, 'r' => 0.78, 'g' => 0.86, 'b' => 0.94, 'intensity' => 0.246],  // noon
+        ['time' => 0.68, 'r' => 0.78, 'g' => 0.86, 'b' => 0.94, 'intensity' => 0.196],  // afternoon
+        ['time' => 0.75, 'r' => 0.60, 'g' => 0.35, 'b' => 0.22, 'intensity' => 0.062],  // sunset
+        ['time' => 0.77, 'r' => 0.30, 'g' => 0.15, 'b' => 0.25, 'intensity' => 0.025],  // civil dusk
+        ['time' => 0.82, 'r' => 0.12, 'g' => 0.08, 'b' => 0.20, 'intensity' => 0.011],  // nautical dusk
+        ['time' => 0.85, 'r' => 0.05, 'g' => 0.06, 'b' => 0.16, 'intensity' => 0.005],  // astro. dusk
+        ['time' => 0.88, 'r' => 0.03, 'g' => 0.06, 'b' => 0.14, 'intensity' => 0.005],  // night
+        ['time' => 1.0,  'r' => 0.03, 'g' => 0.06, 'b' => 0.14, 'intensity' => 0.005],  // wrap
     ];
 
     // ── Sky zenith emission ──────────────────────────────────────────
@@ -136,7 +140,11 @@ class DayNightSystem extends AbstractSystem
 
     public function update(World $world, float $dt): void
     {
-        $this->skyTime += $dt;
+        // Clamp the cloud-clock step: a frame hitch must not teleport the
+        // cloud field, or the cloud-shadow patches (and the sky) jump a
+        // visible step in one frame — reads as a brightness flash on the
+        // terrain. Clouds simply advance slower during a hitch instead.
+        $this->skyTime += min($dt, 0.05);
         foreach ($world->query(DayNightCycle::class) as $entity) {
             $this->cachedCycle = $entity->get(DayNightCycle::class);
             break;
@@ -173,9 +181,10 @@ class DayNightSystem extends AbstractSystem
         $sunElev = $cycle->getSunElevation() + $seasonTilt;
 
         // Cloud coverage drives how many clouds the sky shows; storminess
-        // (rain/snow/thunder) drives how DARK they are + how much they globally
-        // dim the scene. Fair-weather clouds stay white and only cast local
-        // moving shadow patches (mesh cloudShadow); storms darken everything.
+        // (rain/snow/thunder) drives how DARK they are. Both dim the scene:
+        // overcast scatters the direct sun away, storm clouds swallow most of
+        // what is left. ($cycle->cloudDarkening folds in as a manual override
+        // for scenes without a Weather entity.)
         $overcast = $cycle->cloudDarkening;
         $fogDensity = 0.0;
         $cloudDarkness = 0.0;
@@ -186,6 +195,12 @@ class DayNightSystem extends AbstractSystem
             $cloudDarkness = max($weather->rainIntensity, $weather->snowIntensity, $weather->stormIntensity);
             break;
         }
+
+        // Scene-wide cloud dimming, applied to sun, moon AND ambient below.
+        // Direct light loses more than ambient — an overcast sky is diffuse
+        // gray, not dark, so the ambient floor keeps the scene readable.
+        $directCloudDim = (1.0 - $overcast * 0.45) * (1.0 - $cloudDarkness * 0.6);
+        $ambientCloudDim = 1.0 - min(0.65, $overcast * 0.25 + $cloudDarkness * 0.35);
 
         $t = $cycle->timeOfDay;
 
@@ -220,9 +235,7 @@ class DayNightSystem extends AbstractSystem
         }
 
         // At night, the moon acts as a weak directional light (reflected sunlight).
-        $sunIntensityFinal = $sunColor['intensity']
-            * (1.0 - $cycle->cloudDarkening)        // cycle's mild base haze
-            * (1.0 - $cloudDarkness * 0.6);          // storms darken the whole scene
+        $sunIntensityFinal = $sunColor['intensity'] * $directCloudDim;
 
         // The sun stops lighting the world as it crosses the horizon — below it,
         // only moonlight remains. The time-keyed intensity alone lingers a few
@@ -241,8 +254,8 @@ class DayNightSystem extends AbstractSystem
         $moonBlend = $raw * $raw * (3.0 - 2.0 * $raw); // smoothstep
         $moonBlend *= min(1.0, $moonBright / 0.1); // only blend in if moon is bright
 
-        // Moonlight parameters
-        $moonIntensity = 0.15 + $moonBright * 0.5;
+        // Moonlight parameters — clouds block moonlight just like sunlight.
+        $moonIntensity = (0.15 + $moonBright * 0.5) * $directCloudDim;
 
         // Blended primary light: lerp direction, color, intensity between sun and moon
         $blendDirX = $sunDirX * (1.0 - $moonBlend) + (-$sunDirX) * $moonBlend;
@@ -332,30 +345,31 @@ class DayNightSystem extends AbstractSystem
 
         // --- Ambient light ---
         $ambient = self::interpolateKeys(self::AMBIENT_KEYS, $t);
-        // Cloud darkening
-        $ambientR = $ambient['r'] * (1.0 - $cycle->cloudDarkening * 0.5);
-        $ambientG = $ambient['g'] * (1.0 - $cycle->cloudDarkening * 0.5);
-        $ambientB = $ambient['b'] * (1.0 - $cycle->cloudDarkening * 0.5);
-        $ambientIntensity = $ambient['intensity'] * (1.0 - $cycle->cloudDarkening * 0.3);
+        $ambientR = $ambient['r'] * $ambientCloudDim;
+        $ambientG = $ambient['g'] * $ambientCloudDim;
+        $ambientB = $ambient['b'] * $ambientCloudDim;
+        $ambientIntensity = $ambient['intensity'] * $ambientCloudDim;
 
         // Moonlight: reflected sunlight creates faint blue-white ambient at night.
-        // Intensity scales with moon brightness (phase + elevation).
-        // Full moon at midnight ≈ 0.08 intensity, new moon ≈ 0.01.
+        // Intensity scales with moon brightness (phase + elevation). The base
+        // term is squared·π like the AMBIENT_KEYS (converted from the old
+        // quadratic pipeline): full moon ≈ 0.09, new moon ≈ 0.008.
         if ($moonBright > 0.01) {
-            $moonAmbient = 0.05 + $moonBright * 0.12;
-            $ambientR = max($ambientR, 0.12 * $moonBright + 0.03);
-            $ambientG = max($ambientG, 0.14 * $moonBright + 0.04);
-            $ambientB = max($ambientB, 0.22 * $moonBright + 0.06);
+            $moonAmbient = (0.05 + $moonBright * 0.12) ** 2 * M_PI * $ambientCloudDim;
+            $ambientR = max($ambientR, (0.12 * $moonBright + 0.03) * $ambientCloudDim);
+            $ambientG = max($ambientG, (0.14 * $moonBright + 0.04) * $ambientCloudDim);
+            $ambientB = max($ambientB, (0.22 * $moonBright + 0.06) * $ambientCloudDim);
             $ambientIntensity = max($ambientIntensity, $moonAmbient);
         }
 
-        // Lightning flash: brief white burst
+        // Lightning flash: brief white burst. The intensity cap is π so the
+        // peak matches the old full-flash brightness on the linear scale.
         if ($cycle->lightningFlash > 0.01) {
             $flash = $cycle->lightningFlash;
             $ambientR = min(1.0, $ambientR + $flash * 0.8);
             $ambientG = min(1.0, $ambientG + $flash * 0.85);
             $ambientB = min(1.0, $ambientB + $flash * 0.9);
-            $ambientIntensity = min(1.0, $ambientIntensity + $flash * 0.7);
+            $ambientIntensity = min(M_PI, $ambientIntensity + $flash * 3.0);
         }
 
         $this->commandList->add(new SetAmbientLight(
@@ -383,7 +397,7 @@ class DayNightSystem extends AbstractSystem
                 $mistStrength = 1.0 - ($t - 0.28) / 0.10; // burn off
             }
             // Humidity amplifies morning mist
-            $humidityFactor = min(1.0, $cycle->cloudDarkening * 2.0); // cloudDarkening ≈ humidity proxy
+            $humidityFactor = min(1.0, $overcast * 2.0); // cloud cover ≈ humidity proxy
             $mistStrength *= 0.6 + $humidityFactor * 0.4;
             $fogNear = $fogNear * (1.0 - $mistStrength * 0.7); // mist pulls fog very close
             $fogFar = $fogFar * (1.0 - $mistStrength * 0.5);
@@ -406,16 +420,16 @@ class DayNightSystem extends AbstractSystem
         // fragment shader). Cloud cover desaturates and darkens the sky;
         // sun size/glow grow near the horizon for a natural sunset look.
         $zenithRaw = self::interpolateKeysRGB(self::SKY_ZENITH_KEYS, $t);
-        $cloudMute = 1.0 - $cycle->cloudDarkening * 0.55;
+        $cloudMute = 1.0 - $overcast * 0.55;
         $zenithColor = new Color(
             $zenithRaw['r'] * $cloudMute,
             $zenithRaw['g'] * $cloudMute,
-            $zenithRaw['b'] * $cloudMute + $cycle->cloudDarkening * 0.08,
+            $zenithRaw['b'] * $cloudMute + $overcast * 0.08,
         );
         $horizonMuted = new Color(
-            $horizon['r'] * $cloudMute + $cycle->cloudDarkening * 0.08,
-            $horizon['g'] * $cloudMute + $cycle->cloudDarkening * 0.08,
-            $horizon['b'] * $cloudMute + $cycle->cloudDarkening * 0.10,
+            $horizon['r'] * $cloudMute + $overcast * 0.08,
+            $horizon['g'] * $cloudMute + $overcast * 0.08,
+            $horizon['b'] * $cloudMute + $overcast * 0.10,
         );
         $groundColor = new Color(
             $horizon['r'] * 0.35,

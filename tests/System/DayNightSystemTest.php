@@ -11,6 +11,7 @@ use PHPolygon\Component\Season;
 use PHPolygon\Component\Transform3D;
 use PHPolygon\Component\Weather;
 use PHPolygon\ECS\World;
+use PHPolygon\Rendering\Command\SetAmbientLight;
 use PHPolygon\Rendering\Command\SetSky;
 use PHPolygon\Rendering\RenderCommandList;
 use PHPolygon\System\DayNightSystem;
@@ -24,7 +25,9 @@ use PHPolygon\System\DayNightSystem;
  *   1. Season::axialTilt shifts the effective sun elevation (the key
  *      directional light points more steeply down in "summer" than "winter").
  *   2. SetSky::cloudDarkness == max(rainIntensity, snowIntensity, stormIntensity).
- *   3. A storm dims the primary directional light intensity vs. clear weather.
+ *   3. Clouds dim the scene: overcast alone dims the sun, storms dim sun AND
+ *      ambient, and the ambient falls proportionally less than the direct sun
+ *      (an overcast sky is diffuse gray, not dark).
  *
  * All tests run at timeOfDay 0.5 (local noon) with the cycle paused so the sun
  * stays well above the horizon and the time does not drift during update().
@@ -34,9 +37,9 @@ final class DayNightSystemTest extends TestCase
     /**
      * Build a minimal world (paused noon cycle + a key directional light) and
      * optionally a Season / Weather, run update()+render(), and return the
-     * emitted SetSky plus the key DirectionalLight.
+     * emitted SetSky and SetAmbientLight plus the key DirectionalLight.
      *
-     * @return array{sky: SetSky, light: DirectionalLight}
+     * @return array{sky: SetSky, light: DirectionalLight, ambient: SetAmbientLight}
      */
     private function runSystem(?Season $season = null, ?Weather $weather = null): array
     {
@@ -64,8 +67,10 @@ final class DayNightSystemTest extends TestCase
 
         $skies = $list->ofType(SetSky::class);
         $this->assertCount(1, $skies, 'expected exactly one SetSky per frame');
+        $ambients = $list->ofType(SetAmbientLight::class);
+        $this->assertCount(1, $ambients, 'expected exactly one SetAmbientLight per frame');
 
-        return ['sky' => $skies[0], 'light' => $light];
+        return ['sky' => $skies[0], 'light' => $light, 'ambient' => $ambients[0]];
     }
 
     public function testSeasonalTiltSteepensSunInSummer(): void
@@ -149,6 +154,59 @@ final class DayNightSystemTest extends TestCase
             $clear['light']->intensity,
             $storm['light']->intensity,
             'a full storm should dim the primary sun light',
+        );
+    }
+
+    public function testDryOvercastDimsSunAndAmbient(): void
+    {
+        $clear = $this->runSystem();
+        $overcast = $this->runSystem(weather: new Weather(cloudCoverage: 1.0)); // dry
+
+        $this->assertLessThan(
+            $clear['light']->intensity,
+            $overcast['light']->intensity,
+            'full cloud cover should dim the sun even without precipitation',
+        );
+        $this->assertLessThan(
+            $clear['ambient']->intensity,
+            $overcast['ambient']->intensity,
+            'full cloud cover should dim the ambient light',
+        );
+    }
+
+    public function testStormDimsAmbientLight(): void
+    {
+        $clear = $this->runSystem();
+
+        $stormy = new Weather(cloudCoverage: 1.0);
+        $stormy->stormIntensity = 1.0;
+        $storm = $this->runSystem(weather: $stormy);
+
+        $this->assertLessThan(
+            $clear['ambient']->intensity,
+            $storm['ambient']->intensity,
+            'a full storm should dim the ambient light',
+        );
+    }
+
+    public function testAmbientFallsLessThanDirectSun(): void
+    {
+        // An overcast sky is diffuse gray, not dark: the ambient share must
+        // survive a storm proportionally better than the direct sun, or the
+        // whole scene crushes to black.
+        $clear = $this->runSystem();
+
+        $stormy = new Weather(cloudCoverage: 1.0);
+        $stormy->stormIntensity = 1.0;
+        $storm = $this->runSystem(weather: $stormy);
+
+        $sunRatio = $storm['light']->intensity / $clear['light']->intensity;
+        $ambientRatio = $storm['ambient']->intensity / $clear['ambient']->intensity;
+
+        $this->assertGreaterThan(
+            $sunRatio,
+            $ambientRatio,
+            'ambient must dim less than the direct sun under storm clouds',
         );
     }
 }
