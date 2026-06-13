@@ -691,6 +691,11 @@ class MetalRenderer3D implements Renderer3DInterface
             str_starts_with($prefix, 'hut_thatch')     => 8,
             str_starts_with($prefix, 'moon_disc')      => 9,
             str_starts_with($prefix, 'car_paint')      => 10,
+            // Self-illuminated learning hologram (HologramBoardPrefab baked-text
+            // materials). Unlit. NOTE: the Metal mesh3d shader has no albedo
+            // texture binding, so this emits flat light.albedo (no baked text);
+            // the baked-text hologram is a vio/D3D12-path feature. proc_mode 12.
+            str_starts_with($prefix, 'hologram_text') => 12,
             default                                    => 0,
         };
 

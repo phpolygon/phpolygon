@@ -1047,6 +1047,11 @@ class OpenGLRenderer3D implements Renderer3DInterface
             str_starts_with($prefix, 'hut_thatch') => 8,
             str_starts_with($prefix, 'moon_disc') => 9,
             str_starts_with($prefix, 'car_paint') => 10,
+            // Self-illuminated learning hologram (HologramBoardPrefab baked-text
+            // materials). Unlit. NOTE: the OpenGL mesh3d shader has no albedo
+            // texture sampler, so this emits flat u_albedo (no baked text); the
+            // baked-text hologram is a vio/D3D12-path feature. See proc_mode 12.
+            str_starts_with($prefix, 'hologram_text') => 12,
             default => 0,
         };
 

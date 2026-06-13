@@ -1386,6 +1386,19 @@ void main() {
         frag_color = vec4(color, alpha);
         return;
 
+    } else if (u_proc_mode == 12) {
+        // UNLIT TEXTURED / HOLOGRAM. The panel is its own light source: emit the
+        // albedo directly with no ambient/directional/emission/shadow/fog, so a
+        // learning board reads identically day and night and never washes out in
+        // bright sun. NOTE (OpenGL backend limitation): this shader variant has
+        // NO u_albedo_texture sampler — the baked text texture is sampled only on
+        // the vio/D3D12 path (vio/mesh3d.frag.glsl). Here proc_mode 12 can only
+        // emit the flat material albedo (u_albedo), so on OpenGL the hologram
+        // panel shows as a solid unlit pane WITHOUT the baked text. finalize()
+        // applies the same gamma/exposure convention as the other branches.
+        frag_color = vec4(finalize(u_albedo), alpha);
+        return;
+
     } else if (u_proc_mode == 10) {
         // Carpaint: metallic flakes + clearcoat. The base albedo from the
         // material drives the paint colour; the standard PBR loop below

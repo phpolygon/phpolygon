@@ -988,6 +988,18 @@ fragment float4 fragment_mesh3d(
         float3 lit = computeMoon(N, V, light.moon_phase);
         return float4(finalizeColor(lit, light, in.position.xy), 1.0);
     }
+    if (proc == 12) {
+        // UNLIT TEXTURED / HOLOGRAM. The panel is its own light source: emit the
+        // albedo directly with no ambient/directional/emission/shadow/fog, so a
+        // learning board reads identically day and night and never washes out in
+        // bright sun. NOTE (Metal backend limitation): this shader has NO albedo
+        // texture binding (only the env cubemap) — the baked text texture is
+        // sampled only on the vio/D3D12 path. Here proc_mode 12 emits the flat
+        // material albedo (light.albedo), so on Metal the panel shows as a solid
+        // unlit pane WITHOUT the baked text. finalizeColor applies the same
+        // gamma/exposure convention as the other branches.
+        return float4(finalizeColor(light.albedo, light, in.position.xy), alpha);
+    }
 
     // ---- PBR modes ----
     if (proc == 1) {

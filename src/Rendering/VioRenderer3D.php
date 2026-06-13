@@ -2954,6 +2954,11 @@ class VioRenderer3D implements Renderer3DInterface
             str_starts_with($prefix, 'hut_thatch') => 8,
             str_starts_with($prefix, 'moon_disc') => 9,
             str_starts_with($prefix, 'car_paint') => 10,
+            // Self-illuminated learning hologram (HologramBoardPrefab's baked-text
+            // materials, id 'hologram_text_<topic>_<locale>'). Unlit: shows only
+            // the baked texture, immune to sun/ambient/fog so the text never
+            // washes out in bright daylight. See mesh3d.frag.glsl proc_mode 12.
+            str_starts_with($prefix, 'hologram_text') => 12,
             default => 0,
         };
 

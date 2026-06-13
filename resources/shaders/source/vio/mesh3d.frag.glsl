@@ -1099,6 +1099,20 @@ void main() {
         float ff = clamp((fd - u_fog_near) / (u_fog_far - u_fog_near), 0.0, 1.0);
         frag_color = outputColor(mix(albedo, u_fog_color, 1.0 - exp(-ff*ff*3.0)), alpha);
         return;
+    } else if (u_proc_mode == 12) {
+        // UNLIT TEXTURED / HOLOGRAM. The panel carries its own "light source":
+        // the baked text texture IS the final colour. No ambient, directional,
+        // emission, shadow, snow, wetness or fog touches it, so a learning board
+        // reads identically at high noon on the bright beach and at midnight —
+        // the text contrast can never be washed out by the scene sun/ambient.
+        // texAlbedo = u_albedo (white/neutral for holograms) * texture.rgb, so the
+        // baked texels dominate. Per-pixel transparency is intentionally absent
+        // (texture .a is discarded); the material-wide u_alpha gives the panel its
+        // even holographic translucency. outputColor() applies the same HDR/sRGB
+        // (u_linear_output) convention as every other branch, so it composites
+        // correctly on the D3D12 HDR/tonemap path. No fog by design.
+        frag_color = outputColor(texAlbedo, alpha);
+        return;
     } else if (u_proc_mode == 10) {
         // Carpaint: metallic flake micro-normal + per-fragment colour wash.
         float nse = noise(v_worldPos.xz * 0.4);
