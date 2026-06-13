@@ -696,6 +696,12 @@ class MetalRenderer3D implements Renderer3DInterface
             // texture binding, so this emits flat light.albedo (no baked text);
             // the baked-text hologram is a vio/D3D12-path feature. proc_mode 12.
             str_starts_with($prefix, 'hologram_text') => 12,
+            // Sci-fi holo-console accent surfaces (TerminalPrefab): screen panel,
+            // accent rim and input light-bar. Unlit — accent colour lives in
+            // albedo so it glows the same day and night (flat light.albedo here).
+            str_starts_with($prefix, 'terminal_screen_lit'),
+            str_starts_with($prefix, 'terminal_glow_edge'),
+            str_starts_with($prefix, 'terminal_lightbar') => 12,
             default                                    => 0,
         };
 

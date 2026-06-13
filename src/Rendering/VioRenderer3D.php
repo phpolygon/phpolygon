@@ -2959,6 +2959,12 @@ class VioRenderer3D implements Renderer3DInterface
             // the baked texture, immune to sun/ambient/fog so the text never
             // washes out in bright daylight. See mesh3d.frag.glsl proc_mode 12.
             str_starts_with($prefix, 'hologram_text') => 12,
+            // Sci-fi holo-console accent surfaces (TerminalPrefab): the glowing
+            // screen panel, its accent rim and the input light-bar. Unlit so the
+            // accent colour (carried in albedo) glows the same day and night.
+            str_starts_with($prefix, 'terminal_screen_lit'),
+            str_starts_with($prefix, 'terminal_glow_edge'),
+            str_starts_with($prefix, 'terminal_lightbar') => 12,
             default => 0,
         };
 

@@ -81,6 +81,47 @@ final class HologramProcModeTest extends TestCase
         );
     }
 
+    /**
+     * Code Rescue's sci-fi holo-console (TerminalPrefab) reuses the same unlit
+     * proc_mode 12 path for its glowing surfaces: the screen panel, its accent
+     * rim and the input light-bar. Their accent colour lives in albedo and is
+     * emitted directly, so the console glows the same day and night. The
+     * language-keyed material ids ('terminal_screen_lit_<key>', etc.) must all
+     * resolve to 12 across every backend.
+     *
+     * @dataProvider rendererProvider
+     * @param class-string $rendererClass
+     */
+    public function testTerminalConsoleAccentMaterialsResolveToUnlitProcMode(string $rendererClass): void
+    {
+        $renderer = (new \ReflectionClass($rendererClass))->newInstanceWithoutConstructor();
+        $resolve  = new ReflectionMethod($rendererClass, 'resolveProcMode');
+        $resolve->setAccessible(true);
+
+        foreach ([
+            'terminal_screen_lit_php',
+            'terminal_screen_lit_default',
+            'terminal_screen_lit_c_a1b2c3d4', // hashed-accent variant (has digits)
+            'terminal_glow_edge_python',
+            'terminal_lightbar_rust',
+        ] as $materialId) {
+            self::assertSame(
+                self::HOLOGRAM_PROC_MODE,
+                $resolve->invoke($renderer, $materialId),
+                "{$rendererClass}: '{$materialId}' must map to the unlit proc_mode"
+            );
+        }
+
+        // The dark, lit shell parts must stay standard PBR (proc_mode 0).
+        foreach (['terminal_body', 'terminal_frame_dark', 'terminal_keyboard_mat'] as $materialId) {
+            self::assertSame(
+                0,
+                $resolve->invoke($renderer, $materialId),
+                "{$rendererClass}: '{$materialId}' must stay standard (proc_mode 0)"
+            );
+        }
+    }
+
     public function testAllBackendShadersImplementTheUnlitBranch(): void
     {
         $vio   = (string) file_get_contents(self::VIO_FRAG);
