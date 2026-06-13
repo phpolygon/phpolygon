@@ -3053,10 +3053,10 @@ class VioRenderer3D implements Renderer3DInterface
             $d0 = $state['dirLights'][0] ?? null;
             $sig = [
                 'dirCount'  => $dirCount,
-                'intensity' => $d0?->intensity ?? -1.0,
+                'intensity' => $d0->intensity ?? -1.0,
                 'dirY'      => $d0?->direction->y ?? 0.0,
                 'ambient'   => $ai,
-                'cloudCov'  => $this->pendingSky?->cloudCover ?? -1.0,
+                'cloudCov'  => $this->pendingSky->cloudCover ?? -1.0,
             ];
             $p = $this->flashDbgPrev;
             if ($p !== []) {
