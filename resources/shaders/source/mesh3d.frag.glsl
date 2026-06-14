@@ -382,6 +382,34 @@ vec3 finalize(vec3 color) {
     return applyVignette(color);
 }
 
+// Underwater absorption tint. The CodeCity ocean surface sits at WATER_Y; any
+// fragment below it is submerged (notably the sunken W3/CShark harbour). Water
+// absorbs warm wavelengths first, so with depth the lit colour is pulled toward
+// a blue-green body colour AND darkened. Subtle near the surface, stronger with
+// depth (saturating ~13 m down). Applied at the very end of the lit path so it
+// affects terrain AND buildings uniformly. MUST stay identical to the vio mirror
+// (vio/mesh3d.frag.glsl): same WATER_Y, tint colour, depth scale and weights.
+const float WATER_Y = -0.4;
+vec3 applyUnderwaterTint(vec3 color, vec3 worldPos) {
+    if (worldPos.y >= WATER_Y) return color;
+    // Dry interior of the W3 underwater glass dome — no underwater tint inside
+    // its horizontal footprint. Two discs: embedded world (+1200 X) and
+    // standalone CodeCity. Centre = forward(144°)*300 (± the +1200 offset).
+    const float DOME_R2 = 120.0 * 120.0;
+    vec2 dE = worldPos.xz - vec2(957.3, 176.5);   // embedded (shipping) scene
+    vec2 dL = worldPos.xz - vec2(-242.7, 176.5);  // standalone CodeCityScene
+    if (dot(dE, dE) < DOME_R2 || dot(dL, dL) < DOME_R2) {
+        return color; // inside the dry bubble
+    }
+    float depth = (WATER_Y - worldPos.y) / 13.0;       // 0 at surface → 1 at ~13 m
+    depth = clamp(depth, 0.0, 1.0);
+    const vec3 WATER_TINT = vec3(0.06, 0.22, 0.28);    // blue-green body colour
+    float tintAmt = depth * 0.85;                       // colour shift, subtle near top
+    float darken  = mix(1.0, 0.30, depth);             // light loss with depth
+    color = mix(color, WATER_TINT, tintAmt) * darken;
+    return color;
+}
+
 // Curvature-based ambient occlusion approximation. Real screen-space AO
 // requires a depth pre-pass and a multi-tap sample loop; until that
 // pipeline lands the shader uses a cheap per-fragment surrogate that
@@ -426,8 +454,163 @@ float distributionGGX(float NdotH, float rough) {
 // ================================================================
 
 vec3 computeSand(vec3 N, vec3 V, vec3 L, out float roughOut) {
-    float zone = v_uv.x;    // 0.0=damp, 0.25=mid, 0.5=dry, 0.75=dune
+    float zone = v_uv.x;    // 0.0=damp, 0.25=mid, 0.5=dry, 0.75=dune; 1.5=industrial
     float variant = v_uv.y;
+
+    // ===============================================================
+    //  Themed district ground bands (BOUNDED, keyed by UV.x sentinel).
+    //  Half-open intervals so bands can't swallow one another; CPU sets exact
+    //  sentinels (1.5, 2.0, 2.5, 3.0, 3.5) that land mid-band. Order/thresholds
+    //  /constants MUST stay identical to the vio mirror (vio/mesh3d.frag.glsl).
+    //  This backend's fbm helper is fbm(p, octaves), not fbm2.
+    //  Bands:
+    //    [1.25,1.75) industrial concrete (W1 PHP)        — look unchanged
+    //    [1.75,2.25) marble / flagstone (W2 Python)
+    //    [2.25,2.75) asphalt + neon flecks (W4 JS)
+    //    [2.75,3.25) cobblestone (W5 Rust)
+    //    [3.25,+)    wet harbour stone (W3 CShark, underwater)
+    // ===============================================================
+
+    // --- [1.25,1.75) Industrial concrete (W1 PHP) — UNCHANGED LOOK ----------
+    if (zone >= 1.25 && zone < 1.75) {
+        const vec3  CONCRETE_BASE = vec3(0.334, 0.340, 0.354); // ~#55565A soot-grey
+        const float CRACK_STRENGTH = 0.55;
+        const float STAIN_STRENGTH = 0.45;
+        const float CONCRETE_ROUGH = 0.88;
+        vec3 base = CONCRETE_BASE * u_season_tint;
+
+        float w1 = fbm(v_worldPos.xz * 0.35, 3);
+        float w2 = noise(v_worldPos.xz * 4.0);
+        float w3 = noise(v_worldPos.xz * 26.0);
+        base *= 0.80 + w1 * 0.40;
+        base *= 0.90 + (w2 - 0.5) * 0.22;
+        base *= 0.93 + (w3 - 0.5) * 0.16;
+
+        float cA = abs(noise(v_worldPos.xz * 0.9) - 0.5) * 2.0;
+        float cB = abs(noise(v_worldPos.xz * 0.9 + vec2(37.2, 11.7)) - 0.5) * 2.0;
+        float crackField = min(cA, cB);
+        float cracks = 1.0 - smoothstep(0.0, 0.10, crackField);
+        base *= 1.0 - cracks * CRACK_STRENGTH;
+
+        float stain = smoothstep(0.58, 0.80, fbm(v_worldPos.xz * 0.18 + 13.0, 3));
+        base = mix(base, base * vec3(0.55, 0.57, 0.62), stain * STAIN_STRENGTH);
+
+        roughOut = mix(CONCRETE_ROUGH, 0.55, stain * 0.6);
+        return base;
+    }
+
+    // --- [1.75,2.25) Marble / flagstone (W2 Python academy) ----------------
+    // Pale grey-white slabs: broad value mottle, subtle grey veining, thin
+    // recessed flag joints. Low-mid roughness (polished academic stone).
+    if (zone >= 1.75 && zone < 2.25) {
+        const vec3  MARBLE_BASE  = vec3(0.86, 0.85, 0.83); // warm off-white
+        const vec3  VEIN_COLOR   = vec3(0.55, 0.56, 0.60); // cool grey vein
+        const float MARBLE_ROUGH = 0.32;                   // polished
+        vec3 base = MARBLE_BASE * u_season_tint;
+
+        float cloud = fbm(v_worldPos.xz * 0.5, 3);
+        base *= 0.92 + cloud * 0.16;
+
+        float v1 = abs(fbm(v_worldPos.xz * 0.7 + vec2(5.0, 9.0), 3) - 0.5) * 2.0;
+        float vein = 1.0 - smoothstep(0.0, 0.18, v1);
+        base = mix(base, VEIN_COLOR, vein * 0.35);
+
+        vec2 cell = fract(v_worldPos.xz * 1.0);
+        float jointX = 1.0 - smoothstep(0.0, 0.04, cell.x) * smoothstep(1.0, 0.96, cell.x);
+        float jointZ = 1.0 - smoothstep(0.0, 0.04, cell.y) * smoothstep(1.0, 0.96, cell.y);
+        float joint = max(jointX, jointZ);
+        base *= 1.0 - joint * 0.45;
+
+        float pit = noise(v_worldPos.xz * 24.0);
+        base *= 0.96 + (pit - 0.5) * 0.08;
+
+        roughOut = mix(MARBLE_ROUGH, 0.70, joint);
+        return base;
+    }
+
+    // --- [2.25,2.75) Asphalt + neon flecks (W4 JS neon entertainment) ------
+    // Near-black asphalt with aggregate grain + sparse emissive cyan/magenta
+    // specks (added to albedo so they read self-lit). Time-pulsed shimmer.
+    if (zone >= 2.25 && zone < 2.75) {
+        const vec3  ASPHALT_BASE  = vec3(0.045, 0.047, 0.052); // almost black
+        const float ASPHALT_ROUGH = 0.62;                       // semi-matte tarmac
+        vec3 base = ASPHALT_BASE * u_season_tint;
+
+        float a1 = noise(v_worldPos.xz * 6.0);
+        float a2 = noise(v_worldPos.xz * 30.0);
+        base *= 0.85 + a1 * 0.30;
+        base += vec3(0.03) * smoothstep(0.7, 0.95, a2);
+
+        vec2 fc = floor(v_worldPos.xz * 12.0);
+        float fh = hash21(fc);
+        float pick = hash21(fc + 41.0);
+        float pulse = 0.6 + 0.4 * sin(u_time * 2.0 + fh * 30.0);
+        float speck = smoothstep(0.93, 0.985, fh) * pulse;
+        vec3 neon = mix(vec3(0.0, 0.85, 1.0), vec3(1.0, 0.15, 0.8), step(0.5, pick));
+        base += neon * speck * 0.9;
+
+        roughOut = ASPHALT_ROUGH;
+        return base;
+    }
+
+    // --- [2.75,3.25) Cobblestone (W5 Rust medieval fortress) ----------------
+    // Rounded cobbles via a cheap cellular (Worley-ish) field: bright domed
+    // crowns, dark recessed mortar at the cell edges. Warm grey-brown, rough.
+    if (zone >= 2.75 && zone < 3.25) {
+        const vec3  COBBLE_BASE  = vec3(0.40, 0.36, 0.31); // warm grey-brown
+        const float COBBLE_ROUGH = 0.90;                   // rough hewn stone
+        vec3 base = COBBLE_BASE * u_season_tint;
+
+        vec2 p = v_worldPos.xz * 1.6;
+        vec2 ip = floor(p);
+        vec2 fp = fract(p);
+        float d1 = 8.0;
+        for (int y = -1; y <= 1; y++) {
+            for (int x = -1; x <= 1; x++) {
+                vec2 g = vec2(float(x), float(y));
+                vec2 o = vec2(hash21(ip + g), hash21(ip + g + 19.0));
+                float d = length(g + o - fp);
+                d1 = min(d1, d);
+            }
+        }
+        float dome = 1.0 - smoothstep(0.0, 0.55, d1);
+        base *= 0.55 + dome * 0.65;
+
+        float stoneHash = hash21(ip);
+        base *= 0.85 + stoneHash * 0.30;
+
+        float g3 = noise(v_worldPos.xz * 22.0);
+        base *= 0.94 + (g3 - 0.5) * 0.12;
+
+        roughOut = COBBLE_ROUGH - dome * 0.06;
+        return base;
+    }
+
+    // --- [3.25,+) Wet harbour stone (W3 CShark, underwater) ----------------
+    // Dark blue-green sea-wet stone, low roughness (wet sheen). The submerged
+    // tint pass in main() adds the deeper colour/darkening with depth.
+    if (zone >= 3.25) {
+        const vec3  WET_BASE   = vec3(0.10, 0.16, 0.17); // dark teal-grey stone
+        const float WET_ROUGH  = 0.14;                   // wet, glossy
+        vec3 base = WET_BASE * u_season_tint;
+
+        float m1 = fbm(v_worldPos.xz * 0.6, 3);
+        base *= 0.80 + m1 * 0.40;
+        float algae = smoothstep(0.55, 0.80, fbm(v_worldPos.xz * 0.9 + 7.0, 3));
+        base = mix(base, base * vec3(0.55, 0.95, 0.70), algae * 0.5);
+
+        vec2 cell = fract(v_worldPos.xz * 0.7);
+        float jointX = 1.0 - smoothstep(0.0, 0.05, cell.x) * smoothstep(1.0, 0.95, cell.x);
+        float jointZ = 1.0 - smoothstep(0.0, 0.05, cell.y) * smoothstep(1.0, 0.95, cell.y);
+        float joint = max(jointX, jointZ);
+        base *= 1.0 - joint * 0.55;
+
+        float g3 = noise(v_worldPos.xz * 20.0);
+        base *= 0.93 + (g3 - 0.5) * 0.14;
+
+        roughOut = mix(WET_ROUGH, 0.30, joint);
+        return base;
+    }
 
     // Zone color palettes — warm natural beach tones
     const vec3 damp[4] = vec3[](
@@ -920,6 +1103,68 @@ vec3 computeThatch(vec3 N, vec3 worldPos, vec3 baseAlbedo, out float roughOut) {
 }
 
 // ================================================================
+//  Procedural Ruin (proc_mode 13)
+//  Mirrors vio/mesh3d.frag.glsl computeRuined(). Shades intact box geometry
+//  as weathered, cracked, moss/soot-stained concrete so a not-yet-rebuilt
+//  district building reads as a ruin with NO geometry change. Pure world-
+//  space, deterministic (no u_time). Returns modulated albedo + roughness;
+//  the caller runs the standard PBR lighting (surface stays fully LIT).
+//  NOTE: this backend's fbm helper is fbm(p, octaves) rather than fbm2/fbm3.
+// ================================================================
+
+vec3 computeRuined(vec3 N, vec3 worldPos, vec3 baseAlbedo, out float roughOut) {
+    // ---- Tuning constants (keep in sync with vio/mesh3d.frag.glsl) ----
+    const float CRACK_SCALE   = 1.6;
+    const float CRACK_DARKEN  = 0.55;
+    const float MOSS_AMOUNT   = 0.55;
+    const float MOSS_MAX_Y    = 6.0;
+    const float SOOT_AMOUNT   = 0.45;
+    const float BASE_DARKEN   = 0.62;
+    const float DESATURATE    = 0.35;
+    const float EDGE_BLEACH   = 0.10;
+
+    vec3 col = baseAlbedo;
+
+    vec3 an = abs(normalize(N));
+    vec2 facePlane;
+    if (an.y >= an.x && an.y >= an.z)      facePlane = worldPos.xz;
+    else if (an.x >= an.z)                 facePlane = worldPos.zy;
+    else                                   facePlane = worldPos.xy;
+
+    float grime = fbm(facePlane * CRACK_SCALE, 3);
+    float crack = smoothstep(0.30, 0.46, grime);
+    float blotch = 0.85 + (grime - 0.5) * 0.5;
+    col *= blotch;
+    col = mix(col * (1.0 - CRACK_DARKEN), col, crack);
+
+    float pit = hash21(floor(facePlane * 26.0));
+    col *= 0.92 + pit * 0.12;
+
+    float streakX = noise(vec2(facePlane.x * 3.0, worldPos.y * 0.35));
+    float streak  = smoothstep(0.55, 0.85, streakX);
+    float drip = clamp(1.0 - worldPos.y / max(MOSS_MAX_Y * 1.8, 0.001), 0.0, 1.0);
+    float soot = streak * drip * (1.0 - an.y);
+    col *= 1.0 - soot * SOOT_AMOUNT;
+
+    float upFace = clamp(N.y, 0.0, 1.0);
+    float lowGround = 1.0 - smoothstep(0.0, MOSS_MAX_Y, worldPos.y);
+    float mossPatch = smoothstep(0.45, 0.75, fbm(facePlane * 2.2, 2));
+    float moss = upFace * lowGround * mossPatch * MOSS_AMOUNT;
+    vec3 mossColor = vec3(0.18, 0.27, 0.12);
+    col = mix(col, mossColor, moss);
+
+    float high = smoothstep(MOSS_MAX_Y * 0.6, MOSS_MAX_Y * 2.2, worldPos.y);
+    col = mix(col, col * 1.25 + vec3(0.04), high * EDGE_BLEACH);
+
+    float luma = dot(col, vec3(0.2126, 0.7152, 0.0722));
+    col = mix(col, vec3(luma), DESATURATE);
+    col *= BASE_DARKEN;
+
+    roughOut = clamp(0.88 + (1.0 - crack) * 0.08 + moss * 0.05, 0.04, 1.0);
+    return col;
+}
+
+// ================================================================
 //  Procedural Cloud
 // ================================================================
 
@@ -1329,6 +1574,11 @@ void main() {
         // Thatch / straw — beach hut roof
         albedo = computeThatch(N, v_worldPos, u_albedo, roughness);
 
+    } else if (u_proc_mode == 13) {
+        // Ruined district building — weathered/cracked concrete from the flat
+        // material albedo. Stays LIT: falls through to the standard PBR path.
+        albedo = computeRuined(N, v_worldPos, u_albedo, roughness);
+
     } else if (u_proc_mode == 6) {
         // Cloud — self-lit, skip PBR
         albedo = computeCloud(N, V, L, u_albedo, alpha);
@@ -1626,6 +1876,12 @@ void main() {
     // Volumetric scatter (god-ray surrogate). Added on top of distance
     // fog so the standard exp-fog still anchors the long-range falloff.
     color += volumetricScatter(v_worldPos);
+
+    // Submerged fragments (below the CodeCity water surface) get a depth-based
+    // blue-green absorption tint so the sunken W3 harbour reads as underwater.
+    // Applied on the LINEAR colour before finalize(), matching the vio mirror
+    // which tints before outputColor()'s tonemap/gamma.
+    color = applyUnderwaterTint(color, v_worldPos);
 
     // Gamma correction
     color = finalize(color);

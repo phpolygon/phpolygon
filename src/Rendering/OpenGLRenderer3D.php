@@ -1047,6 +1047,12 @@ class OpenGLRenderer3D implements Renderer3DInterface
             str_starts_with($prefix, 'hut_thatch') => 8,
             str_starts_with($prefix, 'moon_disc') => 9,
             str_starts_with($prefix, 'car_paint') => 10,
+            // Ruined / not-yet-rebuilt CodeCity district buildings — weathered,
+            // cracked, moss/soot-stained concrete shading on the intact box
+            // geometry. Stays LIT. See mesh3d.frag.glsl proc_mode 13. Kept in
+            // lock-step with VioRenderer3D. 'district_ruined' has no digits →
+            // prefix == full id.
+            str_starts_with($prefix, 'district_ruined') => 13,
             // Self-illuminated learning hologram (HologramBoardPrefab baked-text
             // materials). Unlit. NOTE: the OpenGL mesh3d shader has no albedo
             // texture sampler, so this emits flat u_albedo (no baked text); the

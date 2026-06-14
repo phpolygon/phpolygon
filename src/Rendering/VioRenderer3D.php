@@ -2954,6 +2954,13 @@ class VioRenderer3D implements Renderer3DInterface
             str_starts_with($prefix, 'hut_thatch') => 8,
             str_starts_with($prefix, 'moon_disc') => 9,
             str_starts_with($prefix, 'car_paint') => 10,
+            // Ruined / not-yet-rebuilt CodeCity district buildings. The intact box
+            // geometry is shaded as weathered, cracked, moss- and soot-stained
+            // concrete so a "stage 0" district reads as a ruin without any
+            // geometry/collider change. Stays fully LIT (modulates albedo/rough
+            // then falls through the normal PBR path). See mesh3d.frag.glsl
+            // proc_mode 13. 'district_ruined' has no digits → prefix == full id.
+            str_starts_with($prefix, 'district_ruined') => 13,
             // Self-illuminated learning hologram (HologramBoardPrefab's baked-text
             // materials, id 'hologram_text_<topic>_<locale>'). Unlit: shows only
             // the baked texture, immune to sun/ambient/fog so the text never
