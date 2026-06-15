@@ -164,6 +164,22 @@ struct LightingUBO {
     float  _spad_count1;
     float  _spad_count2;
     SpotLight spot_lights[8];
+
+    // Fieldtracing (SDF GI) — mirrors the vio + opengl mesh-shader copies
+    // (PHPOLYGON_FIELDTRACING.md §7). 0=Off 1=ProbesOnly 2=SdfOcclusion
+    // 3=SdfBounce. Appended at the struct tail (after the arrays) so existing
+    // field offsets are unchanged. The Metal 3D draw path is currently stubbed,
+    // so the renderer does not yet upload these — present for three-copy parity
+    // and forward-compat (ft_mode defaults to 0 => strict no-op).
+    float ft_mode;
+    float ft_intensity;
+    float ft_ao;
+    // SDF trace-pass result toggle. The screen-space SDF AO/shadow pass is not
+    // wired on Metal (its 3D draw path is stubbed), so this stays 0 and the
+    // mesh keeps the ProbesOnly contribution above. Present for struct/parity
+    // with the GLSL copies; the AO-map texture sample is part of the deferred
+    // Metal 3D pass.
+    float ft_sdf_ao_enabled;
 };
 
 // ── Interpolants ──────────────────────────────────────────────────────────────
@@ -1078,6 +1094,18 @@ fragment float4 fragment_mesh3d(
     float ao = curvatureAO(N, light.ao_strength);
     float3 color = light.ambient_color * light.ambient_intensity * albedo
                    * (1.0 - metallic * 0.9) * ao;
+
+    // Fieldtracing contribution (before finalizeColor): hemisphere "probe"
+    // ambient layered over the flat ambient (ProbesOnly tier), modulated by AO.
+    // mode 0 (Off) is a strict no-op. Mirror of the vio/opengl copies.
+    if (light.ft_mode >= 0.5f) {
+        float  ftHemi   = N.y * 0.5f + 0.5f;
+        float3 ambientC = float3(light.ambient_color);
+        float3 ftSky    = ambientC * 1.2f + float3(0.015f, 0.03f, 0.06f);
+        float3 ftGround = ambientC * 0.6f;
+        float3 ftProbe  = mix(ftGround, ftSky, ftHemi) * light.ambient_intensity;
+        color += albedo * (1.0f - metallic * 0.9f) * ftProbe * ao * (0.35f * light.ft_intensity);
+    }
 
     // Half-Lambert wrap on the directional light keeps low-angle terrain lit
     // (sunrise / sunset glow) — matches the GLSL renderer's behaviour.

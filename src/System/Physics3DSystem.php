@@ -173,6 +173,17 @@ class Physics3DSystem extends AbstractSystem
                 if (!$hm->isPopulated()) {
                     continue;
                 }
+                // A heightmap only grounds the player WITHIN its declared world
+                // bounds. getHeightAt() clamps out-of-range queries to the edge
+                // value, so without this a small map would "extend" its rim height
+                // under everything far away — e.g. a coastal island's heightmap
+                // clamping a diver/elevator in a distant deep basin up to its
+                // ocean-rim height. Skip heightmaps that don't cover this XZ.
+                if ($newPos->x < $hm->worldMinX || $newPos->x > $hm->worldMaxX
+                    || $newPos->z < $hm->worldMinZ || $newPos->z > $hm->worldMaxZ
+                ) {
+                    continue;
+                }
                 $terrainY = $hm->getHeightAt($newPos->x, $newPos->z);
                 $feetY = $newPos->y - $halfHeight;
                 if ($feetY < $terrainY) {

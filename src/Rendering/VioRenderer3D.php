@@ -137,6 +137,26 @@ class VioRenderer3D implements Renderer3DInterface
     /** GL texture unit wired to u_ssao_map. Distinct from albedo (0) and shadows (6,7,8,9). */
     private const SSAO_SAMPLER_SLOT = 1;
 
+    // Fieldtracing SDF trace pass (SdfOcclusion / SdfBounce tiers; D3D only, like
+    // SSAO). renderSdfAoPass() reconstructs world pos+normal from the G-buffer,
+    // samples the baked SDF volume for AO + soft sun-shadow, and writes them to
+    // sdfAoTarget (R = AO, G = shadow). The mesh shader samples it at slot 2.
+    private ?VioRenderTarget $sdfAoTarget = null;
+    private int $sdfAoWidth = 0;
+    private int $sdfAoHeight = 0;
+    private bool $sdfAoActiveThisFrame = false;
+    /** GL texture unit wired to u_sdf_ao_map. Distinct from albedo(0), ssao(1), shadows(6-9). */
+    private const SDF_AO_SAMPLER_SLOT = 2;
+
+    // The baked SDF volume (vio_texture_3d), uploaded from SetFieldtracingVolume.
+    private ?VioTexture $sdfVolumeTex = null;
+    private int $sdfVolumeVersion = -1;
+    private ?Vec3 $sdfVolOrigin = null;
+    private ?Vec3 $sdfVolSize = null;
+    private float $sdfVolRange = 4.0;
+    /** Effective Fieldtracing tier for the current frame (set in render() pass 1). */
+    private Quality\FieldtracingMode $frameFtMode = Quality\FieldtracingMode::Off;
+
     // SSR (real screen-space reflections; VIO/D3D12 only — see renderSsrPass()).
     // The pass reuses the FP16 G-buffer (view normal in rg, reflectivity in b,
     // linear depth in a) that the SSAO pass already produces, ray-marches it
@@ -323,6 +343,191 @@ class VioRenderer3D implements Renderer3DInterface
             || $previous->hdr !== $settings->hdr) {
             $this->offscreenDirty = true;
         }
+    }
+
+    /**
+     * Capability-gate a requested Fieldtracing tier. ProbesOnly needs no GPU
+     * feature (analytic hemisphere ambient in the mesh shader). SdfOcclusion /
+     * SdfBounce sample a baked SDF volume (3D texture) via the separate trace
+     * pass; on a backend without 3D-texture support they degrade to the highest
+     * runnable tier. Gating is against capabilities, never backend names.
+     */
+    private function gateFieldtracing(Quality\FieldtracingMode $mode): Quality\FieldtracingMode
+    {
+        while (($mode === Quality\FieldtracingMode::SdfOcclusion
+                || $mode === Quality\FieldtracingMode::SdfBounce)
+               && !$this->supportsTexture3D()) {
+            $mode = $mode->degraded();
+        }
+        return $mode;
+    }
+
+    private function supportsTexture3D(): bool
+    {
+        return defined('VIO_FEATURE_TEXTURE_3D')
+            && vio_supports_feature($this->ctx, VIO_FEATURE_TEXTURE_3D);
+    }
+
+    private function fieldtracingModeCode(Quality\FieldtracingMode $mode): int
+    {
+        return match ($mode) {
+            Quality\FieldtracingMode::Off          => 0,
+            Quality\FieldtracingMode::ProbesOnly   => 1,
+            Quality\FieldtracingMode::SdfOcclusion => 2,
+            Quality\FieldtracingMode::SdfBounce    => 3,
+        };
+    }
+
+    /**
+     * Upload a baked SDF volume (SetFieldtracingVolume) to a 3D texture, caching
+     * by version so re-emitting the command every frame is cheap. Stores the
+     * world transform for the trace pass.
+     */
+    private function ingestSdfVolume(Command\SetFieldtracingVolume $cmd): void
+    {
+        $this->sdfVolOrigin = $cmd->origin;
+        $this->sdfVolSize   = $cmd->size;
+        $this->sdfVolRange  = $cmd->range;
+
+        if ($this->sdfVolumeTex !== null && $this->sdfVolumeVersion === $cmd->version) {
+            return; // unchanged — keep the cached upload
+        }
+        if (!function_exists('vio_texture_3d') || !$this->supportsTexture3D()) {
+            return; // backend can't store a 3D volume; tier degrades to ProbesOnly
+        }
+
+        $tex = vio_texture_3d($this->ctx, [
+            'data'   => $cmd->data,
+            'width'  => $cmd->width,
+            'height' => $cmd->height,
+            'depth'  => $cmd->depth,
+            'filter' => VIO_FILTER_LINEAR,
+            'wrap'   => VIO_WRAP_CLAMP,
+        ]);
+        if ($tex !== false) {
+            $this->sdfVolumeTex = $tex;
+            $this->sdfVolumeVersion = $cmd->version;
+        }
+    }
+
+    /** SdfOcclusion / SdfBounce trace pass runs only on D3D with a volume present. */
+    private function sdfAoEnabledThisFrame(): bool
+    {
+        if (getenv('PHPOLYGON_SDF_AO') === '0') {
+            return false;
+        }
+        return ($this->frameFtMode === Quality\FieldtracingMode::SdfOcclusion
+                || $this->frameFtMode === Quality\FieldtracingMode::SdfBounce)
+            && $this->sdfVolumeTex !== null
+            && $this->sdfVolOrigin !== null
+            && $this->sdfVolSize !== null
+            && $this->conventions()->isDirect3D();
+    }
+
+    private function ensureSdfAoTarget(): void
+    {
+        $w = max(1, $this->backbufferWidth);
+        $h = max(1, $this->backbufferHeight);
+        if ($this->sdfAoTarget !== null && $this->sdfAoWidth === $w && $this->sdfAoHeight === $h) {
+            return;
+        }
+        $this->sdfAoTarget = vio_render_target($this->ctx, ['width' => $w, 'height' => $h]) ?: null;
+        $this->sdfAoWidth = $w;
+        $this->sdfAoHeight = $h;
+    }
+
+    /**
+     * Screen-space SDF AO + soft sun-shadow. Reconstructs world position/normal
+     * from the G-buffer, samples the baked SDF volume, writes R=AO, G=shadow to
+     * sdfAoTarget. The mesh shader samples it during the opaque/transparent pass.
+     *
+     * @param array{dirLights: list<SetDirectionalLight>, ftAoRadius: float, ...} $frameState
+     */
+    private function renderSdfAoPass(array $frameState): void
+    {
+        $this->sdfAoActiveThisFrame = false;
+
+        if (!$this->sdfAoEnabledThisFrame()) {
+            return;
+        }
+
+        $gbuffer = $this->gbufferTarget;
+        if ($gbuffer === null || $this->screenQuad === null
+            || $this->currentProjectionMatrix === null || $this->currentViewMatrix === null
+            || $this->sdfVolumeTex === null || $this->sdfVolOrigin === null || $this->sdfVolSize === null) {
+            return;
+        }
+
+        // Capture into locals before any method call (which would void the
+        // null-narrowing PHPStan derived from the guard above).
+        $quad    = $this->screenQuad;
+        $volTex  = $this->sdfVolumeTex;
+        $origin  = $this->sdfVolOrigin;
+        $size    = $this->sdfVolSize;
+        $proj    = $this->currentProjectionMatrix->toArray();
+        $invView = $this->currentViewMatrix->inverse()->toArray();
+
+        $this->ensureSdfAoTarget();
+        $target = $this->sdfAoTarget;
+        if ($target === null) {
+            return;
+        }
+
+        $w = max(1, $this->sdfAoWidth);
+        $h = max(1, $this->sdfAoHeight);
+        $uvFlipY = $this->conventions()->flipRenderTargetClipY() ? -1.0 : 1.0;
+
+        // Sun direction (toward the sun) from the primary directional light.
+        $sun = [0.0, 1.0, 0.0];
+        if (isset($frameState['dirLights'][0])) {
+            $d = $frameState['dirLights'][0]->direction;
+            $len = sqrt($d->x * $d->x + $d->y * $d->y + $d->z * $d->z) ?: 1.0;
+            $sun = [-$d->x / $len, -$d->y / $len, -$d->z / $len];
+        }
+
+        vio_bind_render_target($this->ctx, $target);
+        vio_viewport($this->ctx, 0, 0, $w, $h);
+        vio_clear($this->ctx, 1, 1, 0, 1);
+        $this->bindPostProcessPipeline('sdf_ao');
+
+        // The 3D volume goes to slot 0 and the 2D G-buffer to slot 1: binding the
+        // sampler3D as the FIRST sampler matches the working standalone volume
+        // pipeline; mixing it after a sampler2D mis-binds on the D3D sampler table.
+        vio_bind_texture($this->ctx, $volTex, 0);
+        vio_set_uniform($this->ctx, 'u_sdf_volume', 0);
+        vio_bind_texture($this->ctx, vio_render_target_texture($gbuffer), 1);
+        vio_set_uniform($this->ctx, 'u_gbuffer', 1);
+
+        vio_set_uniform($this->ctx, 'u_proj00', $proj[0]);
+        vio_set_uniform($this->ctx, 'u_proj11', $proj[5]);
+        vio_set_uniform($this->ctx, 'u_uv_flip_y', $uvFlipY);
+        vio_set_uniform($this->ctx, 'u_inv_view', $invView);
+        vio_set_uniform($this->ctx, 'u_sun_dir', $sun);
+        vio_set_uniform($this->ctx, 'u_vol_origin', [$origin->x, $origin->y, $origin->z]);
+        vio_set_uniform($this->ctx, 'u_vol_size', [$size->x, $size->y, $size->z]);
+        vio_set_uniform($this->ctx, 'u_vol_range', $this->sdfVolRange);
+        vio_set_uniform($this->ctx, 'u_ao_radius', (float) $frameState['ftAoRadius']);
+        vio_draw($this->ctx, $quad);
+        vio_unbind_render_target($this->ctx);
+
+        $this->sdfAoActiveThisFrame = true;
+    }
+
+    /** Bind the SDF-AO screen map (or white fallback) for the mesh pass. */
+    private function uploadSdfAoUniforms(): void
+    {
+        $enabled = $this->sdfAoActiveThisFrame && $this->sdfAoTarget !== null;
+        if ($enabled) {
+            $tex = vio_render_target_texture($this->sdfAoTarget);
+        } else {
+            $this->ensureWhiteTexture();
+            $tex = $this->whiteTexture;
+        }
+        if ($tex !== null) {
+            vio_bind_texture($this->ctx, $tex, self::SDF_AO_SAMPLER_SLOT);
+            vio_set_uniform($this->ctx, 'u_sdf_ao_map', self::SDF_AO_SAMPLER_SLOT);
+        }
+        vio_set_uniform($this->ctx, 'u_sdf_ao_enabled', $enabled ? 1.0 : 0.0);
     }
 
     /**
@@ -796,6 +1001,13 @@ class VioRenderer3D implements Renderer3DInterface
         $waveFrequency = 0.5;
         $wavePhase = 0.0;
 
+        // Fieldtracing: default to the persisted GraphicsSettings tier (the
+        // renderer is the authority since applySettings() always feeds it). A
+        // SetFieldtracing command in the list overrides it for this frame.
+        $ftMode = $this->gateFieldtracing($this->settings->fieldtracing);
+        $ftIntensity = 1.0;
+        $ftAoRadius = 1.5;
+
         foreach ($commands as $cmd) {
             if ($cmd instanceof SetCamera) {
                 $this->currentViewMatrix = $cmd->viewMatrix;
@@ -840,6 +1052,13 @@ class VioRenderer3D implements Renderer3DInterface
                     $cmd->direction->x, $cmd->direction->y, $cmd->direction->z,
                 ];
                 $this->windIntensity = $cmd->intensity;
+            } elseif ($cmd instanceof Command\SetFieldtracing) {
+                // Per-frame override of the settings-derived tier, capability-gated.
+                $ftMode = $this->gateFieldtracing($cmd->mode);
+                $ftIntensity = $cmd->intensity;
+                $ftAoRadius = $cmd->aoRadius;
+            } elseif ($cmd instanceof Command\SetFieldtracingVolume) {
+                $this->ingestSdfVolume($cmd);
             }
         }
 
@@ -865,7 +1084,11 @@ class VioRenderer3D implements Renderer3DInterface
             'waveAmplitude' => $waveAmplitude,
             'waveFrequency' => $waveFrequency,
             'wavePhase' => $wavePhase,
+            'ftMode' => $ftMode,
+            'ftIntensity' => $ftIntensity,
+            'ftAoRadius' => $ftAoRadius,
         ];
+        $this->frameFtMode = $ftMode;
 
         // --- Shadow pass ---
         $hasShadowMap = $this->renderShadowPass($commandList, $dirLights);
@@ -883,6 +1106,7 @@ class VioRenderer3D implements Renderer3DInterface
         // like the shadow pass above, so it must run BEFORE the scene target is
         // bound below. Leaves $this->ssaoActiveThisFrame set for the opaque pass.
         $this->renderSsaoPass($commands, $frameState);
+        $this->renderSdfAoPass($frameState);
 
         // HDR/Bloom disabled — D3D11 fullscreen quad draw produces no pixels (needs investigation)
         $hdrTarget = $this->enableHdr ? $this->hdrTarget : null;
@@ -937,6 +1161,7 @@ class VioRenderer3D implements Renderer3DInterface
         $this->uploadFrameUniforms($frameState);
         $this->uploadShadowUniforms($hasShadowMap, $dirLights);
         $this->uploadSsaoUniforms();
+        $this->uploadSdfAoUniforms();
 
         foreach ($commands as $cmd) {
             if ($cmd instanceof DrawMesh) {
@@ -959,6 +1184,7 @@ class VioRenderer3D implements Renderer3DInterface
         $this->uploadFrameUniforms($frameState);
         $this->uploadShadowUniforms($hasShadowMap, $dirLights);
         $this->uploadSsaoUniforms();
+        $this->uploadSdfAoUniforms();
 
         foreach ($commands as $cmd) {
             if ($cmd instanceof DrawMesh) {
@@ -1069,6 +1295,7 @@ class VioRenderer3D implements Renderer3DInterface
         // post passes (reuse postprocess.vert, whose quad UV.v is pre-flipped).
         $this->compileShaderFromFiles('gbuffer',    'gbuffer.vert.glsl',    'gbuffer.frag.glsl');
         $this->compileShaderFromFiles('ssao',       'postprocess.vert.glsl', 'ssao.frag.glsl');
+        $this->compileShaderFromFiles('sdf_ao',     'postprocess.vert.glsl', 'sdf_ao.frag.glsl');
         $this->compileShaderFromFiles('ssao_blur',  'postprocess.vert.glsl', 'ssao_blur.frag.glsl');
         // SSR: ray-march the G-buffer (depth+normal+reflectivity) against the HDR
         // scene colour, then composite the reflection back over the scene.
@@ -1497,7 +1724,8 @@ class VioRenderer3D implements Renderer3DInterface
      */
     private function gbufferNeededThisFrame(): bool
     {
-        return $this->ssaoEnabledThisFrame() || $this->ssrEnabledThisFrame();
+        return $this->ssaoEnabledThisFrame() || $this->ssrEnabledThisFrame()
+            || $this->sdfAoEnabledThisFrame();
     }
 
     /**
@@ -2954,6 +3182,13 @@ class VioRenderer3D implements Renderer3DInterface
             str_starts_with($prefix, 'hut_thatch') => 8,
             str_starts_with($prefix, 'moon_disc') => 9,
             str_starts_with($prefix, 'car_paint') => 10,
+            // Ruined / not-yet-rebuilt CodeCity district buildings. The intact box
+            // geometry is shaded as weathered, cracked, moss- and soot-stained
+            // concrete so a "stage 0" district reads as a ruin without any
+            // geometry/collider change. Stays fully LIT (modulates albedo/rough
+            // then falls through the normal PBR path). See mesh3d.frag.glsl
+            // proc_mode 13. 'district_ruined' has no digits → prefix == full id.
+            str_starts_with($prefix, 'district_ruined') => 13,
             // Self-illuminated learning hologram (HologramBoardPrefab's baked-text
             // materials, id 'hologram_text_<topic>_<locale>'). Unlit: shows only
             // the baked texture, immune to sun/ambient/fog so the text never
@@ -3010,7 +3245,7 @@ class VioRenderer3D implements Renderer3DInterface
     // ----------------------------------------------------------------
 
     /**
-     * @param array{ambientColor: Color, ambientIntensity: float, dirLights: list<SetDirectionalLight>, pointLights: list<AddPointLight>, spotLights: list<AddSpotLight>, fogColor: Color, fogNear: float, fogFar: float, waveEnabled: bool, waveAmplitude: float, waveFrequency: float, wavePhase: float} $state
+     * @param array{ambientColor: Color, ambientIntensity: float, dirLights: list<SetDirectionalLight>, pointLights: list<AddPointLight>, spotLights: list<AddSpotLight>, fogColor: Color, fogNear: float, fogFar: float, waveEnabled: bool, waveAmplitude: float, waveFrequency: float, wavePhase: float, ftMode: \PHPolygon\Rendering\Quality\FieldtracingMode, ftIntensity: float, ftAoRadius: float} $state
      */
     private function uploadFrameUniforms(array $state): void
     {
@@ -3128,6 +3363,12 @@ class VioRenderer3D implements Renderer3DInterface
 
         vio_set_uniform($this->ctx, 'u_time', $this->globalTime);
         vio_set_uniform($this->ctx, 'u_ao_strength', $this->settings->ambientOcclusion->strength());
+
+        // Fieldtracing (SDF GI) — float mode (int-in-UBO is unreliable across
+        // SPIRV-Cross targets). Off => 0.0 => strict no-op in the mesh shader.
+        vio_set_uniform($this->ctx, 'u_ft_mode', (float) $this->fieldtracingModeCode($state['ftMode']));
+        vio_set_uniform($this->ctx, 'u_ft_intensity', $state['ftIntensity']);
+        vio_set_uniform($this->ctx, 'u_ft_ao', $state['ftAoRadius']);
 
         // Cloud-shadow uniforms: the mesh samples the SAME cloud density field
         // toward the sun (sky_clouds.frag mirror) so the volumetric clouds cast
