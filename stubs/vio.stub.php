@@ -37,11 +37,21 @@ const VIO_FLOAT3 = 3;
 const VIO_CURSOR_NORMAL = 0;
 const VIO_CURSOR_DISABLED = 1;
 
+const VIO_FILTER_NEAREST = 0;
+const VIO_FILTER_LINEAR  = 1;
+const VIO_WRAP_REPEAT = 0;
+const VIO_WRAP_CLAMP  = 1;
+const VIO_WRAP_MIRROR = 2;
+
+const VIO_FEATURE_TEXTURE_3D = 22;
+
 // ----------------------------------------------------------------
 // Backend info
 // ----------------------------------------------------------------
 
 function vio_backend_name(VioContext $ctx): string {}
+
+function vio_supports_feature(VioContext $ctx, int $feature): bool {}
 
 /** @return list<string> */
 function vio_backends(): array {}
@@ -193,6 +203,8 @@ function vio_draw_instanced(VioContext $ctx, VioMesh $mesh, array|string $matric
  * @return VioTexture|false
  */
 function vio_texture(VioContext $ctx, array $desc): VioTexture|false {}
+
+function vio_texture_3d(VioContext $ctx, array $desc): VioTexture|false {}
 
 /** @return array{int, int} */
 function vio_texture_size(VioTexture $tex): array {}
