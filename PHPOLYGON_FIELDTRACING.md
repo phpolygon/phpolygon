@@ -1,10 +1,20 @@
-# PHPolygon — Procedural Global Illumination (SDF-GI)
+# PHPolygon — Fieldtracing
 
 > **Claude Code Implementierungs-Briefing**
-> **Status:** Design-Doc, prä-Implementierung. Keine Code-Änderung in diesem Commit.
+> **Status:** Implementierung begonnen (Stand 2026-06-15, uncommitted). Schritte 1–3
+> (§9) stehen: SDF-Primitive + Composite + Baker + `SdfVolume` (reines PHP, 36 Tests
+> grün), `FieldtracingMode`-Tier, `SetFieldtracing`-Command, `GraphicsSettings`-
+> Anbindung, sowie eigenständige Trace-Shader (analytisch **und** volume-gefüttert) mit
+> Demo-Examples. Der vio-Core-Eingriff (Schritt 6) wurde **vorgezogen**: `vio_texture_3d()`
+> + `VIO_FEATURE_TEXTURE_3D` sind auf **allen fünf** Backends implementiert (nicht erst
+> nach dem 2D-Atlas-Interim — bewusste Abweichung von §13). **Noch offen (Schritte 4–5):**
+> kein Renderer behandelt `SetFieldtracing`, kein System emittiert es, der Trace ist
+> **nicht** in die Forward-Mesh-Shader integriert, und es gibt kein `applySettings()`-
+> Tier-Gating in den Backends. Tier B ist damit als Prototyp über Examples validiert,
+> aber noch nicht in den Engine-Renderpfad verdrahtet.
 > **Ziel-Release:** offen — **nach** Code Tycoon Next Fest (15.–22. Juni 2026) und iPad-Port.
 > **Harte Vorbedingung:** vio muss Compute-Dispatch **oder** einen HDR-Fragment-Pass
-> plus eine Volume-Repräsentation zur PHP-API durchreichen (§5). Ohne die fällt das
+> plus eine Volume-Repräsentation zur PHP-API durchreichen (§3). Ohne die fällt das
 > Feature auf den bestehenden Forward-Shader + Screen-Space-Pfad zurück (Tier C).
 > **Verwandtes Projekt:** das parallel laufende PHPolygon Sky/Atmosphere-System
 > (`ProceduralSky`, `SetSky`/`SetSkyColors`). Analytischer Himmel ist geteilte
@@ -12,36 +22,48 @@
 
 ---
 
-## 0. Worum es geht (und worum nicht)
+## Was ist Fieldtracing?
+
+**Fieldtracing** ist PHPolygons Beleuchtungstechnik als gleichrangige Alternative zu
+Rasterisierung, Raytracing und Pathtracing.
+
+```
+Ray → Path → Field
+```
+
+Raytracing und Pathtracing sind nach dem benannt, *was* sie tracen: einen Strahl, eine
+Folge von Strahlen. Beide verfolgen diskrete Strahlen durch die Geometrie. Fieldtracing
+tract keine diskreten Strahlen — es marschiert ein **Signed Distance Field** (SDF). Statt
+einzelne Strahlen zu verfolgen, fragt es das Feld direkt ab (Sphere-/Cone-Tracing). Ein
+Ray ist eindimensional, ein Path eine Sequenz, ein Field der ganze Raum.
+
+Technisch ist Fieldtracing **Sphere Tracing** (Hart, 1996) plus analytische
+Closed-Form-Terme (Himmel, Flächenlicht) — der gebrandete Name für den Stack, den die
+Engine daraus baut.
 
 Ziel ist raytracing-*ähnliche* Beleuchtung — diffuse Global Illumination, weiche
-Schatten, Ambient Occlusion, Sonnenstand-abhängiger Himmel — **ohne** Hardware-RT
-und ohne große Echtzeit-Rechenkapazität. Der Ansatz ist prozedural: Geometrie als
-**Signed Distance Field** (SDF), Beleuchtung als billige Auswertung dieser Funktion
-pro Sample (Sphere-/Cone-Tracing), plus analytische Closed-Form-Terme (Himmel,
-Flächenlicht).
-
-Das Leitprinzip ist dasselbe, das die Engine schon überall benutzt: **nicht den
-Output backen, sondern die Struktur halten und on demand auswerten.** Ein SDF ist
-für 3D, was ein gespeicherter Pfad für Vektorgrafik ist — eine kompakte
-mathematische Beschreibung, die zur Laufzeit in der gebrauchten Auflösung
+Schatten, Ambient Occlusion, Sonnenstand-abhängiger Himmel — **ohne** Hardware-RT und
+ohne große Echtzeit-Rechenkapazität. Das Leitprinzip ist dasselbe, das die Engine schon
+überall benutzt: **nicht den Output backen, sondern die Struktur halten und on demand
+auswerten.** Ein SDF ist für 3D, was ein gespeicherter Pfad für Vektorgrafik ist — eine
+kompakte mathematische Beschreibung, die zur Laufzeit in der gebrauchten Auflösung
 ausgewertet wird.
 
 **Das ist KEIN:**
 
 - **Kein echtes RT-Äquivalent.** RTs Qualität kommt vom tatsächlichen Sampeln des
-  Lichttransport-Integrals. SDF-GI ist eine Approximation: überzeugende diffuse GI,
-  weiche Schatten und AO — aber keine scharfen Spiegelreflexionen, keine Kaustiken,
-  kein punktscharfes Kontaktlicht an dünnen Features. Wer mehr Marketing als das
-  reinschreibt, lügt.
+  Lichttransport-Integrals. Fieldtracing ist eine Approximation: überzeugende diffuse GI,
+  weiche Schatten und AO — aber keine scharfen Spiegelreflexionen, keine Kaustiken, kein
+  punktscharfes Kontaktlicht an dünnen Features. Wer mehr Marketing als das reinschreibt,
+  lügt.
 - **Kein Ersatz** für die bestehenden analytischen Forward-Shader-Features
   (Schattenkarten via `ShadowMapRenderer`, In-Shader-Volumetric-Fog, `ScreenSpaceAO`,
-  `ScreenSpaceReflections`, ACES-Tonemap, Normal-/Surface-Pattern). SDF-GI *ergänzt*
+  `ScreenSpaceReflections`, ACES-Tonemap, Normal-/Surface-Pattern). Fieldtracing *ergänzt*
   diesen Stack, es reißt ihn nicht raus.
 - **Kein Hardware-RT-Pfad.** vio meldet heute `VIO_FEATURE_RAYTRACING = 0` (nur über
-  NV/EXT-Vendor-Extensions, nicht gewired). Es gibt also vorerst nur den
-  Software-/SDF-Boden, keine HW-RT-Decke. Die Decke ist später nachrüstbar (Tier A+),
-  aber **nicht Scope dieser ersten Iteration.**
+  NV/EXT-Vendor-Extensions, nicht gewired). Es gibt also vorerst nur den Software-/SDF-
+  Boden, keine HW-RT-Decke. Die Decke ist später nachrüstbar (Tier A+), aber **nicht Scope
+  dieser ersten Iteration.**
 
 ---
 
@@ -52,7 +74,7 @@ Das Feature fügt sich in den vorhandenen Datenfluss ein, es bricht ihn nicht:
 ```
 Game Code / Scene
       ↓  (baut)
-RenderCommandList            ← reines PHP, neue GI-Kommandos als readonly value objects
+RenderCommandList            ← reines PHP, neue Fieldtracing-Kommandos als readonly value objects
       ↓  (ausgeführt von)
 Renderer3DInterface::render(RenderCommandList)
       ↓
@@ -61,18 +83,20 @@ VioRenderer3D  OpenGLRenderer3D   VulkanRenderer3D   MetalRenderer3D   NullRende
 (primary)      (fallback)         (native)           (native)          (headless)
 ```
 
-Die GI-Logik lebt **oberhalb der Backend-Grenze**: ein neues GI-Subsystem baut/füttert
-das SDF und emittiert GI-Kommandos in die `RenderCommandList`. Die Backends führen
-gegen *Capabilities* aus, die sie über `vio_supports_feature()` melden — **nicht**
-gegen Backend-Namen. Das ist exakt das Muster, das `BackendConventions`
+Die Fieldtracing-Logik lebt **oberhalb der Backend-Grenze**: ein neues Fieldtracing-
+Subsystem baut/füttert das SDF und emittiert Kommandos in die `RenderCommandList`. Die
+Backends führen gegen *Capabilities* aus, die sie über `vio_supports_feature()` melden —
+**nicht** gegen Backend-Namen. Das ist exakt das Muster, das `BackendConventions`
 (`src/Rendering/BackendConventions.php`) bereits für Depth-Range, Y-Flip und
 Shader-Format etabliert: ein zentraler Ort besitzt jede Konvention.
 
 **Präzedenz, dass der In-Shader-March-Ansatz hier schon zuhause ist:** Der
 Forward-Shader macht bereits einen 8-Step-Ray-March für Volumetric Fog, einen
 24-Step-World-Space-March für `OpenGLSsrPass`, und kurvaturbasiertes AO via `dFdx(N)`.
-SDF-Tracing ist dieselbe Klasse von Arbeit, nur gegen eine Distanzfunktion statt
+Sphere Tracing ist dieselbe Klasse von Arbeit, nur gegen eine Distanzfunktion statt
 gegen Tiefenpuffer/Phasenfunktion.
+
+Engine-seitiger Namespace: `PHPolygon\Fieldtracing\…`.
 
 ---
 
@@ -80,27 +104,27 @@ gegen Tiefenpuffer/Phasenfunktion.
 
 **Regel:** Gegen Capabilities gaten, niemals gegen Backend-Namen. Ein sechstes
 Backend (WebGPU, GNM) erbt das Feature, sobald es seine Caps meldet — ohne dass
-GI-Code angefasst wird.
+Fieldtracing-Code angefasst wird.
 
 Relevante Flags (`vio_supports_feature($ctx, …)`, Ladder in `php-vio/CLAUDE.md`):
 
-| Flag | Bedeutung für GI | Floor 3.3 |
+| Flag | Bedeutung für Fieldtracing | Floor 3.3 |
 |---|---|---|
 | `VIO_FEATURE_COMPUTE` | Compute-Trace möglich (Tier A). GL ≥ 4.3. **macOS-GL nie** (Cap 4.1). | 0 |
 | `VIO_FEATURE_RENDER_TARGET` | Fragment-Trace in FBO möglich (Tier B). | **1** |
-| `VIO_FEATURE_RENDER_TARGET_HDR` | GI-Result als HDR-Target (Pflicht für Bounce-Licht). | **1** |
+| `VIO_FEATURE_RENDER_TARGET_HDR` | Trace-Result als HDR-Target (Pflicht für Bounce-Licht). | **1** |
 | `VIO_FEATURE_TEXTURE_STORAGE` | Effizientes Volume-Storage (wenn Compute). | 0 |
 | `VIO_FEATURE_RAYTRACING` | HW-RT-Decke. **Heute überall 0.** | 0 |
 
 ### Drei Ausführungspfade nach Capability-Tier
 
 **Tier A — Compute-Trace (volle Qualität).**
-Voraussetzung: `VIO_FEATURE_COMPUTE` + Volume-Textur + HDR-Target. SDF-Trace läuft als
-Compute-Pass, schreibt Irradiance/AO in HDR-Targets, die der Mesh-Shader samplet.
+Voraussetzung: `VIO_FEATURE_COMPUTE` + Volume-Textur + HDR-Target. Der Sphere-Trace läuft
+als Compute-Pass, schreibt Irradiance/AO in HDR-Targets, die der Mesh-Shader samplet.
 Realistische Backends heute: **D3D12, D3D11 (CS 5.0), Vulkan, OpenGL ≥ 4.3
-(Windows/Linux).** Metal erst, wenn die Metal-3D-Pipeline kein Stub mehr ist
-(siehe `v2-architecture.md` §2: `create_pipeline`/`buffer`/`texture`/`draw` auf Metal
-noch nicht implementiert).
+(Windows/Linux).** Metal erst, wenn die Metal-3D-Pipeline kein Stub mehr ist (siehe
+`v2-architecture.md` §2: `create_pipeline`/`buffer`/`texture`/`draw` auf Metal noch nicht
+implementiert).
 
 **Tier B — Fragment-Fallback.**
 Kein Compute, aber Render-Targets (überall ab Floor 3.3). Der Trace läuft als
@@ -109,9 +133,9 @@ Memory, Scatter-Writes für Probe-Updates umständlich), aber funktioniert auf *
 3.3–4.1 inkl. macOS** und auf Metal, sobald dessen 3D-Pipeline steht.
 
 **Tier C — Degradation.**
-Keine Volume-Repräsentation oder bewusst abgeschaltet → GI wird zum No-Op über den
-*bestehenden* Forward-Features. SSAO/SSR/Schattenkarten/analytischer Himmel bleiben.
-Das ist auch der **Headless-/Null-Pfad**: `NullRenderer3D` akzeptiert die GI-Kommandos,
+Keine Volume-Repräsentation oder bewusst abgeschaltet → Fieldtracing wird zum No-Op über
+den *bestehenden* Forward-Features. SSAO/SSR/Schattenkarten/analytischer Himmel bleiben.
+Das ist auch der **Headless-/Null-Pfad**: `NullRenderer3D` akzeptiert die Kommandos,
 führt nichts aus, die `RenderCommandList` bleibt für Test-Assertions lesbar.
 
 ---
@@ -150,7 +174,8 @@ SDF-Volumen. Optionen, in Reihenfolge der Sauberkeit:
 
 PHPolygon hat **keine Modell-Dateien**; Geometrie entsteht in PHP (`src/Geometry/`,
 `BoxMesh`/`CylinderMesh`/`SphereMesh`/…, Ausgabe `MeshData`). Das ist ein Glücksfall für
-SDFs, denn es gibt zwei Quellen — und die elegante ist die, die zum Engine-Prinzip passt:
+Fieldtracing, denn es gibt zwei SDF-Quellen — und die elegante ist die, die zum
+Engine-Prinzip passt:
 
 **Analytische SDF-Primitive (bevorzugt).** Box, Sphere, Cylinder, Plane haben exakte,
 bekannte Distanzfunktionen. Eine Welt aus prozeduralen Primitiven lässt sich direkt als
@@ -165,8 +190,7 @@ gewählte Volume rastert.
 **Statisch vs. dynamisch.** Das globale SDF der statischen Welt wird **einmal** gebaut
 (beim Laden bzw. Build-Zeit, nicht „beim Startup" zur Laufzeit). Dynamische Objekte
 markieren über ihre AABB betroffene Volume-Regionen als *dirty* und triggern ein
-inkrementelles Update — nicht das ganze Feld neu. Das ist die Invalidierung über einen
-Radius, die wir im Konzept hatten.
+inkrementelles Update — nicht das ganze Feld neu.
 
 **Wo der Build läuft:** CPU-seitig als `parallel`-Subsystem nach dem Muster in
 `PHPOLYGON_MULTITHREADING.md` (`SubsystemInterface`) — ein `SdfBakeSystem`, das Deltas
@@ -208,25 +232,25 @@ declare(strict_types=1);
 namespace PHPolygon\Rendering\Command;
 
 /**
- * Configure procedural global illumination for the frame.
+ * Configure Fieldtracing global illumination for the frame.
  *
  * Mode is evaluated against renderer capability tiers; on backends that
- * can't satisfy it the renderer silently degrades (no crash) - see
- * GlobalIllumination tier table in PHPOLYGON_PROCEDURAL_GI.md.
+ * can't satisfy it the renderer silently degrades (no crash) - see the
+ * FieldtracingMode tier table in PHPOLYGON_FIELDTRACING.md.
  */
-readonly class SetGlobalIllumination
+readonly class SetFieldtracing
 {
     public function __construct(
-        public GlobalIlluminationMode $mode,   // Off | ProbesOnly | SdfOcclusion | SdfBounce
+        public FieldtracingMode $mode,   // Off | ProbesOnly | SdfOcclusion | SdfBounce
         public float $intensity = 1.0,
-        public int   $bounces   = 1,           // ignored unless mode == SdfBounce
+        public int   $bounces   = 1,     // ignored unless mode == SdfBounce
         public float $aoRadius  = 1.5,
     ) {}
 }
 ```
 
-Vermutlich genügen 1–2 Kommandos (`SetGlobalIllumination`, optional `SetSdfShadows`).
-Schatten könnten auch direkt an `SetDirectionalLight` andocken — entscheiden, wenn die
+Vermutlich genügen 1–2 Kommandos (`SetFieldtracing`, optional `SetSdfShadows`). Schatten
+könnten auch direkt an `SetDirectionalLight` andocken — entscheiden, wenn die
 Schnittstelle steht, nicht vorgreifend. Kommandos werden wie gehabt während des
 Scene-Ticks angehängt und vom `Renderer3DSystem` einmal pro Frame geflusht.
 
@@ -241,16 +265,17 @@ die synchron bleiben müssen:
 - `resources/shaders/source/vio/mesh3d.frag.glsl` (Vio — alle vio-Backends)
 - `resources/shaders/source/mesh3d.metal` (standalone Metal)
 
-Der GI-Beitrag wird im Mesh-Shader **gesamplet**, nicht dort getracet: Der Trace läuft
-im separaten Compute-/Fragment-Pass (Tier A/B) und legt Irradiance + AO in HDR-Targets.
-Der Mesh-Shader liest die nur noch — Kosten: ein paar Uniforms + Textur-Fetches pro
-Fragment, konsistent mit der bestehenden „shader-side, cost only uniforms"-Philosophie.
+Der Fieldtracing-Beitrag wird im Mesh-Shader **gesamplet**, nicht dort getracet: Der
+Sphere-Trace läuft im separaten Compute-/Fragment-Pass (Tier A/B) und legt Irradiance + AO
+in HDR-Targets. Der Mesh-Shader liest die nur noch — Kosten: ein paar Uniforms +
+Textur-Fetches pro Fragment, konsistent mit der bestehenden „shader-side, cost only
+uniforms"-Philosophie.
 
 Jede Änderung am Sampling muss **alle drei Kopien** in einem Commit patchen (gleiche
 Regel wie bei `NormalPattern`/`SurfacePattern`). Jeder Shader-Exit muss weiter über
 `finalize()` (GLSL) / `outputColor()` (Vio) / `finalizeColor()` (Metal) laufen, damit
-Color-Grading + ACES-Tonemap + Vignette über alle Pfade konsistent bleiben — GI-Result
-wird **vor** diesem Exit addiert, nicht danach.
+Color-Grading + ACES-Tonemap + Vignette über alle Pfade konsistent bleiben — der
+Fieldtracing-Beitrag wird **vor** diesem Exit addiert, nicht danach.
 
 ---
 
@@ -259,7 +284,7 @@ wird **vor** diesem Exit addiert, nicht danach.
 Neuer Enum, integriert in das immutable `GraphicsSettings`-Value-Object:
 
 ```php
-enum GlobalIlluminationMode { case Off; case ProbesOnly; case SdfOcclusion; case SdfBounce; }
+enum FieldtracingMode { case Off; case ProbesOnly; case SdfOcclusion; case SdfBounce; }
 ```
 
 | Tier | Inhalt | Ziel-Hardware |
@@ -274,9 +299,12 @@ enum GlobalIlluminationMode { case Off; case ProbesOnly; case SdfOcclusion; case
   Anti-Pattern).
 - `applySettings()` auf allen Backends implementiert die Tier-Auswahl, capability-gated.
 - **NICHT in den Adaptive-Hot-Swap-Stack aufnehmen.** Wie `TextureQuality`/`MeshLodTier`
-  dominiert der SDF-Rebuild-/Re-Bake-Kosten jeden Frame-Time-Gewinn. GI-Tier ist eine
-  bewusste Settings-Entscheidung, kein Frame-für-Frame-Regler. Gleiche Begründung wie im
-  bestehenden Adaptive-Anti-Pattern.
+  dominiert der SDF-Rebuild-/Re-Bake-Kosten jeden Frame-Time-Gewinn. Der Fieldtracing-Tier
+  ist eine bewusste Settings-Entscheidung, kein Frame-für-Frame-Regler. Gleiche Begründung
+  wie im bestehenden Adaptive-Anti-Pattern.
+- **User-facing Label:** „Fieldtracing" oder „Global Illumination (Fieldtracing)" sind in
+  Ordnung — Fieldtracing benennt die tatsächliche Technik ehrlich. Niemals „RT-Qualität"
+  oder „raytraced".
 - Bandbreite ist der Skalierungsknopf für schwache Ziele: niedrigere SDF-Auflösung,
   weniger Cones, gröberes Probe-Gitter, Mip-abhängige Volume-Fetches (grobe Cones lesen
   niedrige Mips → billiger). `vio_thermal_state()` kann als Eingang dienen.
@@ -346,7 +374,7 @@ früh sichtbaren Mehrwert, der Rest folgt der v2-Reife.
 ## 12. Wichtige Hinweise für Claude Code
 
 1. **Gegen Capabilities gaten, nie gegen Backend-Namen.** `vio_supports_feature()` +
-   `BackendConventions`. Ein `is-opengl`-Switch im GI-Code ist ein Bug.
+   `BackendConventions`. Ein `is-opengl`-Switch im Fieldtracing-Code ist ein Bug.
 2. **Drei Shader-Kopien synchron patchen** (`mesh3d.frag.glsl`, `vio/mesh3d.frag.glsl`,
    `mesh3d.metal`) — in einem Commit. Nie nur eine.
 3. **SDF-Build ist CPU-Subsystem, Trace ist GPU.** PHP orchestriert, rechnet nicht im
@@ -356,12 +384,12 @@ früh sichtbaren Mehrwert, der Rest folgt der v2-Reife.
 5. **Kein Hardware-RT annehmen.** `VIO_FEATURE_RAYTRACING == 0` überall. Floor-only
    designen; HW-RT-Decke ist spätere Iteration.
 6. **Den bestehenden Forward-Stack nicht ersetzen** — ergänzen. Schattenkarten,
-   Volumetric Fog, SSAO, SSR, ACES bleiben. GI-Result wird vor `finalize()`/
-   `outputColor()`/`finalizeColor()` addiert.
+   Volumetric Fog, SSAO, SSR, ACES bleiben. Der Fieldtracing-Beitrag wird vor
+   `finalize()`/`outputColor()`/`finalizeColor()` addiert.
 7. **Headless = No-Op, aber Command-List lesbar.** `NullRenderer3D` akzeptiert die
-   GI-Kommandos und führt nichts aus.
-8. **GI-Tier NICHT in den Adaptive-Hot-Swap-Stack.** Rebuild-Kosten dominieren — wie
-   `TextureQuality`.
+   Fieldtracing-Kommandos und führt nichts aus.
+8. **Fieldtracing-Tier NICHT in den Adaptive-Hot-Swap-Stack.** Rebuild-Kosten dominieren —
+   wie `TextureQuality`.
 9. **Analytischer Himmel gehört ins Sky/Atmosphere-Projekt**, nicht in eine zweite
    Implementierung. `SetSky`/`SetSkyColors`/`ProceduralSky` sind der Anker.
 10. **vio-Core-Eingriffe (Compute, 3D-Textur) sind v2-verzahnt.** Erst Tier B ohne
@@ -371,7 +399,7 @@ früh sichtbaren Mehrwert, der Rest folgt der v2-Reife.
 
 ## 13. Anti-Patterns — niemals
 
-- **Nicht** den SDF-Trace im Mesh-Shader selbst ausführen — er läuft im separaten
+- **Nicht** den Sphere-Trace im Mesh-Shader selbst ausführen — er läuft im separaten
   Compute-/Fragment-Pass, der Mesh-Shader samplet nur das Result.
 - **Nicht** eine Shader-Kopie ändern und die anderen zwei vergessen.
 - **Nicht** das ganze SDF-Volume neu backen, wenn sich ein dynamisches Objekt bewegt —
@@ -381,7 +409,8 @@ früh sichtbaren Mehrwert, der Rest folgt der v2-Reife.
 - **Nicht** vio um eine 3D-Textur-API erweitern, *bevor* Tier B mit dem 2D-Atlas-Interim
   validiert ist — sonst baust du Core-Surface für ein noch unbewiesenes Feature.
 - **Nicht** „RT-Qualität" oder „raytraced lighting" in user-facing Strings/Settings-
-  Labels schreiben. Es ist approximierte GI; ehrliche Labels („Global Illumination").
+  Labels schreiben. Es ist Fieldtracing — ehrliche Labels („Fieldtracing", „Global
+  Illumination").
 - **Nicht** einen Perf-Win ohne Benchmark behaupten.
 
 ---

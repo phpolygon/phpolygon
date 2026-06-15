@@ -348,6 +348,16 @@ class OpenGLRenderer3D implements Renderer3DInterface
         $this->setUniformMat4('u_csm_matrix_2', $identityMat);
         $this->setUniformFloat('u_ao_strength', $this->settings->ambientOcclusion->strength());
 
+        // Fieldtracing (SDF GI) default from settings (gated). A SetFieldtracing
+        // command later in the list overrides it. Off => 0.0 => no-op in shader.
+        $ftMode = $this->gateFieldtracing($this->settings->fieldtracing);
+        $this->setUniformFloat('u_ft_mode', (float) $this->fieldtracingModeCode($ftMode));
+        $this->setUniformFloat('u_ft_intensity', 1.0);
+        $this->setUniformFloat('u_ft_ao', 1.5);
+        // The screen-space SDF trace pass is D3D-only (like G-buffer SSAO); on
+        // OpenGL it never runs, so the mesh shader's SDF AO/shadow stays neutral.
+        $this->setUniformFloat('u_sdf_ao_enabled', 0.0);
+
         // Color grading + vignette (set every beginFrame so a settings
         // change between frames takes effect on the very next draw).
         $grade = $this->settings->colorGrading->params();
@@ -486,6 +496,13 @@ class OpenGLRenderer3D implements Renderer3DInterface
                 glBindTexture(GL_TEXTURE_CUBE_MAP, $command->textureId);
                 $this->setUniformInt('u_environment_map', 5);
                 $this->setUniformInt('u_has_environment_map', 1);
+
+            } elseif ($command instanceof Command\SetFieldtracing) {
+                // Per-frame override of the settings-derived tier, capability-gated.
+                $ftMode = $this->gateFieldtracing($command->mode);
+                $this->setUniformFloat('u_ft_mode', (float) $this->fieldtracingModeCode($ftMode));
+                $this->setUniformFloat('u_ft_intensity', $command->intensity);
+                $this->setUniformFloat('u_ft_ao', $command->aoRadius);
             }
         }
 
@@ -1760,6 +1777,26 @@ class OpenGLRenderer3D implements Renderer3DInterface
             $hadError = true;
         }
         return $hadError;
+    }
+
+    /**
+     * Capability-gate a Fieldtracing tier. OpenGL has 3D textures (core since
+     * GL 1.2), so no tier needs degrading here; the helper exists for symmetry
+     * with the other backends and a single place to add future gates.
+     */
+    private function gateFieldtracing(Quality\FieldtracingMode $mode): Quality\FieldtracingMode
+    {
+        return $mode;
+    }
+
+    private function fieldtracingModeCode(Quality\FieldtracingMode $mode): int
+    {
+        return match ($mode) {
+            Quality\FieldtracingMode::Off          => 0,
+            Quality\FieldtracingMode::ProbesOnly   => 1,
+            Quality\FieldtracingMode::SdfOcclusion => 2,
+            Quality\FieldtracingMode::SdfBounce    => 3,
+        };
     }
 
     /**

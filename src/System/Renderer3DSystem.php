@@ -24,9 +24,11 @@ use PHPolygon\Rendering\Command\DrawMesh;
 use PHPolygon\Rendering\Command\SetAmbientLight;
 use PHPolygon\Rendering\Command\SetCamera;
 use PHPolygon\Rendering\Command\SetDirectionalLight;
+use PHPolygon\Rendering\Command\SetFieldtracing;
 use PHPolygon\Rendering\Command\SetGroundWetness;
 use PHPolygon\Rendering\Command\SetSnowCover;
 use PHPolygon\Rendering\Command\SetWaveAnimation;
+use PHPolygon\Rendering\Quality\FieldtracingMode;
 use PHPolygon\Rendering\MaterialRegistry;
 use PHPolygon\Rendering\RenderCommandList;
 use PHPolygon\Rendering\Renderer3DInterface;
@@ -112,6 +114,19 @@ class Renderer3DSystem extends AbstractSystem
 
     private float $wavePhase = 0.0;
     private float $snowCover = 0.0;
+
+    /**
+     * Fieldtracing tier to emit each frame as a {@see SetFieldtracing} command,
+     * or null to emit nothing (the backend then uses its own settings-derived
+     * tier). The Engine keeps this in sync with GraphicsSettings::$fieldtracing.
+     */
+    private ?FieldtracingMode $fieldtracingMode = null;
+
+    /** Set the Fieldtracing tier emitted each frame; null disables emission. */
+    public function setFieldtracingMode(?FieldtracingMode $mode): void
+    {
+        $this->fieldtracingMode = $mode;
+    }
 
     public function __construct(
         private readonly Renderer3DInterface $renderer,
@@ -322,6 +337,15 @@ class Renderer3DSystem extends AbstractSystem
             frequency: $waveFreq,
             phase: $this->wavePhase,
         ));
+
+        // Fieldtracing (SDF global illumination): emit the configured tier so the
+        // backend applies it for this frame. Opt-in — only emitted once a mode
+        // has been set (the Engine pushes GraphicsSettings::$fieldtracing here on
+        // settings change). When unset, no command is emitted and the backend
+        // falls back to its own settings-derived tier (renderer is authority).
+        if ($this->fieldtracingMode !== null) {
+            $this->commandList->add(new SetFieldtracing($this->fieldtracingMode));
+        }
 
         // Camera3DSystem already pushed a SetCamera with the active view +
         // projection matrices. Pull the most recent one and derive 6 planes.

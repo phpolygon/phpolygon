@@ -6,6 +6,7 @@ namespace PHPolygon\Rendering;
 
 use PHPolygon\Rendering\Quality\AntiAliasing;
 use PHPolygon\Rendering\Quality\ColorGradingPreset;
+use PHPolygon\Rendering\Quality\FieldtracingMode;
 use PHPolygon\Rendering\Quality\MeshLodTier;
 use PHPolygon\Rendering\Quality\QualityMode;
 use PHPolygon\Rendering\Quality\ScreenSpaceAO;
@@ -51,6 +52,7 @@ final class GraphicsSettings
         public readonly float $vignetteIntensity = 0.0,
         public readonly bool $volumetricFog = false,
         public readonly ScreenSpaceReflections $ssr = ScreenSpaceReflections::Off,
+        public readonly FieldtracingMode $fieldtracing = FieldtracingMode::Off,
     ) {
     }
 
@@ -81,6 +83,7 @@ final class GraphicsSettings
         ?float $vignetteIntensity = null,
         ?bool $volumetricFog = null,
         ?ScreenSpaceReflections $ssr = null,
+        ?FieldtracingMode $fieldtracing = null,
     ): self {
         return new self(
             mode: $mode ?? $this->mode,
@@ -105,6 +108,7 @@ final class GraphicsSettings
             vignetteIntensity: $vignetteIntensity !== null ? max(0.0, min(1.0, $vignetteIntensity)) : $this->vignetteIntensity,
             volumetricFog: $volumetricFog ?? $this->volumetricFog,
             ssr: $ssr ?? $this->ssr,
+            fieldtracing: $fieldtracing ?? $this->fieldtracing,
         );
     }
 
@@ -136,6 +140,7 @@ final class GraphicsSettings
             'vignetteIntensity' => $this->vignetteIntensity,
             'volumetricFog' => $this->volumetricFog,
             'ssr' => $this->ssr->value,
+            'fieldtracing' => $this->fieldtracing->value,
         ];
     }
 
@@ -168,6 +173,7 @@ final class GraphicsSettings
             vignetteIntensity: ($v = self::asFloat($data['vignetteIntensity'] ?? null)) !== null ? max(0.0, min(1.0, $v)) : $defaults->vignetteIntensity,
             volumetricFog: self::asBool($data['volumetricFog'] ?? null) ?? $defaults->volumetricFog,
             ssr: self::enumFrom(ScreenSpaceReflections::class, $data['ssr'] ?? null) ?? $defaults->ssr,
+            fieldtracing: self::enumFrom(FieldtracingMode::class, $data['fieldtracing'] ?? null) ?? $defaults->fieldtracing,
         );
     }
 

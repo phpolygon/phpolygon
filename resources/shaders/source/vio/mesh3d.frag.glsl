@@ -79,6 +79,12 @@ uniform float u_ssr_intensity;
 uniform int   u_ssr_enabled;
 uniform int   u_volumetric_fog;
 uniform float u_ao_strength;
+// Fieldtracing (SDF global illumination) — see PHPOLYGON_FIELDTRACING.md §7.
+// mode: 0=Off 1=ProbesOnly 2=SdfOcclusion 3=SdfBounce (float; int-in-UBO is
+// unreliable across SPIRV-Cross targets). Default 0 => strict no-op.
+uniform float u_ft_mode;
+uniform float u_ft_intensity;
+uniform float u_ft_ao;
 uniform vec3  u_grade_lift;
 uniform vec3  u_grade_gamma;
 uniform vec3  u_grade_gain;
@@ -138,6 +144,13 @@ uniform sampler2D u_ssao_map;
 // with no v flip — see the AO sample site for why a per-backend flip here was
 // wrong (it double-counted postprocess.vert's pre-flip).
 uniform float u_ssao_uv_flip_y;
+
+// Fieldtracing SDF trace-pass result (SdfOcclusion / SdfBounce). R = SDF AO,
+// G = soft sun shadow. Written by sdf_ao.frag, sampled here at slot 2. Gated by
+// u_sdf_ao_enabled (0 when the pass didn't run — e.g. ProbesOnly tier, no volume,
+// or non-D3D backend); a 1x1 white texture is bound then so the sampler is valid.
+uniform float     u_sdf_ao_enabled;   // float: int-in-UBO is unreliable across SPIRV-Cross targets
+uniform sampler2D u_sdf_ao_map;
 
 out vec4 frag_color;
 
@@ -1547,7 +1560,35 @@ void main() {
     } else {
         ao = curvatureAO(N, u_ao_strength);
     }
+
+    // Fieldtracing SDF trace-pass result (SdfOcclusion / SdfBounce): fold the
+    // screen-space SDF AO into `ao` (contact darkening on the ambient terms) and
+    // capture the soft sun shadow for the directional term below. Neutral (1.0)
+    // when the pass didn't run (ProbesOnly, no volume, or non-D3D backend).
+    float ftSunShadow = 1.0;
+    if (u_sdf_ao_enabled > 0.5) {
+        vec2 ftUV = gl_FragCoord.xy / u_viewport_size;
+        vec2 ftAoSh = texture(u_sdf_ao_map, ftUV).rg;
+        ao = min(ao, clamp(ftAoSh.r, 0.0, 1.0));
+        ftSunShadow = clamp(ftAoSh.g, 0.0, 1.0);
+    }
+
     vec3 color = u_ambient_color * u_ambient_intensity * albedo * kD_ambient * ambientShadow * ao;
+
+    // Fieldtracing contribution (added before outputColor, per the engine's
+    // "contribution before finalize" rule). ProbesOnly tier: a hemisphere
+    // "probe" ambient — sky-tinted from above, dimmer ground bounce below —
+    // layered over the flat ambient as a cheap diffuse-GI surrogate, modulated
+    // by AO (which now includes the SDF occlusion above for the Sdf tiers).
+    // mode 0 (Off) is a strict no-op so default rendering is unchanged. The
+    // SDF soft sun-shadow is applied to the directional term further down.
+    if (u_ft_mode >= 0.5) {
+        float ftHemi  = N.y * 0.5 + 0.5;
+        vec3  ftSky   = u_ambient_color * 1.2 + vec3(0.015, 0.03, 0.06);
+        vec3  ftGround = u_ambient_color * 0.6;
+        vec3  ftProbe = mix(ftGround, ftSky, ftHemi) * u_ambient_intensity;
+        color += albedo * kD_ambient * ftProbe * ao * (0.35 * u_ft_intensity);
+    }
 
     // Clamp the loop bound to the array size: u_*_light_count is a GPU
     // uniform and a stale/garbage value would otherwise run the loop for
@@ -1560,7 +1601,9 @@ void main() {
         // re-scattered as soft diffuse): fade the shadow map toward 1.0 as cloud
         // cover rises, and dim the direct beam only mildly — so the world stays
         // lit but shadowless under a cloud rather than going black.
-        float dShadow = (dl == 0) ? mix(1.0, shadow, cloudSh) : 1.0;
+        // Primary light also receives the Fieldtracing soft SDF sun-shadow
+        // (ftSunShadow == 1.0 when the SDF trace pass is inactive).
+        float dShadow = (dl == 0) ? mix(1.0, shadow, cloudSh) * ftSunShadow : 1.0;
         vec3 radiance = u_dir_lights[dl].color * u_dir_lights[dl].intensity;
         // Under a thick cloud the direct beam nearly vanishes (floor 0.1)
         // while ambient keeps the scene readable — tuned in-game: the strong

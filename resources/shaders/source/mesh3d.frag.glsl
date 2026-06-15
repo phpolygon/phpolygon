@@ -100,6 +100,20 @@ uniform float u_ssr_intensity;
 // the in-shader path without touching the renderer wiring.
 uniform float u_ao_strength;
 
+// Fieldtracing (SDF global illumination) — see PHPOLYGON_FIELDTRACING.md §7.
+// Keep in sync with the vio + metal mesh-shader copies. mode: 0=Off 1=ProbesOnly
+// 2=SdfOcclusion 3=SdfBounce (float; int-in-UBO unreliable across SPIRV-Cross).
+// Default 0 => strict no-op.
+uniform float u_ft_mode;
+uniform float u_ft_intensity;
+uniform float u_ft_ao;
+// SDF trace-pass result (R = AO, G = soft sun shadow). The screen-space SDF
+// pass is D3D-only (like the G-buffer SSAO), so on OpenGL u_sdf_ao_enabled is
+// always 0 and these are neutral — declared for three-copy parity with the vio
+// shader. Mirrors the vio copy.
+uniform float     u_sdf_ao_enabled;   // float to mirror the vio copy (SPIRV-Cross int-in-UBO)
+uniform sampler2D u_sdf_ao_map;
+
 // Color-grading parameters (Lift/Gamma/Gain + saturation). Bound from
 // PHPolygon\Rendering\Quality\ColorGradingPreset::params(). Neutral
 // preset emits identity values so the math collapses to a no-op.
@@ -1747,7 +1761,30 @@ void main() {
     float shadowStrength = clamp(primaryIntensity / 1.0, 0.0, 1.0); // 0 at night, 1 at noon
     float ambientShadow = mix(1.0, mix(0.5, 1.0, shadow), shadowStrength);
     float ao = curvatureAO(N, u_ao_strength);
+
+    // Fieldtracing SDF trace-pass result (D3D only; neutral on GL). Mirror of vio.
+    float ftSunShadow = 1.0;
+    if (u_sdf_ao_enabled > 0.5) {
+        vec2 ftUV = gl_FragCoord.xy / u_viewport_size;
+        vec2 ftAoSh = texture(u_sdf_ao_map, ftUV).rg;
+        ao = min(ao, clamp(ftAoSh.r, 0.0, 1.0));
+        ftSunShadow = clamp(ftAoSh.g, 0.0, 1.0);
+    }
+
     vec3 color = u_ambient_color * u_ambient_intensity * albedo * (1.0 - metallic * 0.9) * ambientShadow * ao;
+
+    // Fieldtracing contribution (before finalize()): hemisphere "probe" ambient
+    // layered over the flat ambient as a cheap diffuse-GI surrogate (ProbesOnly
+    // tier), modulated by AO. mode 0 (Off) is a strict no-op. SdfOcclusion /
+    // SdfBounce render as ProbesOnly here; their SDF-traced terms come from the
+    // separate trace pass. Mirror of the vio copy.
+    if (u_ft_mode >= 0.5) {
+        float ftHemi   = N.y * 0.5 + 0.5;
+        vec3  ftSky    = u_ambient_color * 1.2 + vec3(0.015, 0.03, 0.06);
+        vec3  ftGround = u_ambient_color * 0.6;
+        vec3  ftProbe  = mix(ftGround, ftSky, ftHemi) * u_ambient_intensity;
+        color += albedo * (1.0 - metallic * 0.9) * ftProbe * ao * (0.35 * u_ft_intensity);
+    }
 
     // All directional lights (with Half-Lambert wrap for terrain/sand)
     // Clamp the loop bound to the array size: u_*_light_count is a GPU
@@ -1770,7 +1807,7 @@ void main() {
         float diffuseNdotL = mix(dNdotL, halfLambert, 0.4); // 40% wrap
 
         // Shadow only applies to primary light (index 0)
-        float dShadow = (dl == 0) ? shadow : 1.0;
+        float dShadow = (dl == 0) ? shadow * ftSunShadow : 1.0;
 
         if (diffuseNdotL > 0.0) {
             color += albedo * u_dir_lights[dl].color * u_dir_lights[dl].intensity * diffuseNdotL * dShadow * (1.0 - metallic);
