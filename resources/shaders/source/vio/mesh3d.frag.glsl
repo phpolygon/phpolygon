@@ -415,6 +415,17 @@ vec3 applyUnderwaterTint(vec3 color, vec3 worldPos) {
     if (dot(dE, dE) < DOME_R2 || dot(dL, dL) < DOME_R2) {
         return color; // inside the dry bubble
     }
+    // dry shaft+corridor tube (W3): keep its interior un-tinted
+    // (the descent shaft over deep water + the glass corridor to the dome).
+    // Pure-XZ point-to-segment distance → exception holds over the full shaft
+    // height and the whole corridor; water OUTSIDE the 6-unit radius stays tinted.
+    {
+        vec2 p = worldPos.xz;
+        // embedded scene segment (+1200 X)
+        { vec2 a = vec2(1070.6, 94.0), b = vec2(1050.3, 108.7); vec2 ab = b - a; float t = clamp(dot(p - a, ab) / dot(ab, ab), 0.0, 1.0); vec2 c = a + t * ab; if (dot(p - c, p - c) < 6.0 * 6.0) return color; }
+        // standalone scene segment
+        { vec2 a = vec2(-129.4, 94.0), b = vec2(-149.7, 108.7); vec2 ab = b - a; float t = clamp(dot(p - a, ab) / dot(ab, ab), 0.0, 1.0); vec2 c = a + t * ab; if (dot(p - c, p - c) < 6.0 * 6.0) return color; }
+    }
     float depth = (WATER_Y - worldPos.y) / 13.0;       // 0 at surface → 1 at ~13 m
     depth = clamp(depth, 0.0, 1.0);
     // Blue-green body colour the scene fades toward with depth.
@@ -732,6 +743,18 @@ vec3 computeWater(vec3 N, vec3 V, vec3 L, out float alphaOut, out float roughOut
     waveNormal = normalize(waveNormal);
 
     N = normalize(N + waveNormal * vec3(1.0, 0.0, 1.0));
+
+    // Seen from UNDERWATER (camera below this surface fragment): the sky/fresnel
+    // mirror below reads as flat white. Render the surface as a tinted,
+    // translucent ceiling with a soft light shimmer instead.
+    if (u_camera_pos.y < v_worldPos.y) {
+        float shimmer = fbm2(uv1 * 1.5) * 0.25 + noise(uv2 * 2.0) * 0.15;
+        vec3 underCol = mix(vec3(0.04, 0.16, 0.20), vec3(0.10, 0.34, 0.38), clamp(N.y, 0.0, 1.0));
+        underCol += shimmer * vec3(0.10, 0.18, 0.20);
+        alphaOut = 0.55;
+        roughOut = 0.12;
+        return underCol;
+    }
 
     float NdotV = max(dot(N, V), 0.0);
     float fresnel = pow(1.0 - NdotV, 5.0);
@@ -1351,6 +1374,19 @@ void main() {
 
     // ---- Material selection ----
     if (u_proc_mode == 2) {
+        // Punch a hole in the ocean sheet over the W3 elevator shaft so the open
+        // shaft (it spans from above the surface down to the -40 basin) reads as
+        // DRY air, not flooded. Shaft XZ = forward(144°)*160 in each placement
+        // (embedded +1200 and standalone CodeCity). The dome keeps water above it
+        // and the -40 corridor sits below this plane, so only the shaft needs it.
+        {
+            const float W3_SHAFT_R2 = 5.0 * 5.0;
+            vec2 shE = v_worldPos.xz - vec2(1070.6, 94.0);
+            vec2 shL = v_worldPos.xz - vec2(-129.4, 94.0);
+            if (dot(shE, shE) < W3_SHAFT_R2 || dot(shL, shL) < W3_SHAFT_R2) {
+                discard;
+            }
+        }
         albedo = computeWater(N, V, L, alpha, roughness);
         float fd = length(v_worldPos - u_camera_pos);
         float ff = clamp((fd - u_fog_near) / (u_fog_far - u_fog_near), 0.0, 1.0);
