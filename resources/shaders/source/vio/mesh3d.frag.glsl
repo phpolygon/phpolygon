@@ -85,6 +85,14 @@ uniform float u_ao_strength;
 uniform float u_ft_mode;
 uniform float u_ft_intensity;
 uniform float u_ft_ao;
+// Baked irradiance probe field (grayscale SH-L1). u_probe_enabled 0 => fall back
+// to the analytic hemisphere. RGBA = signed-encoded coeffs (c0,c1,c2,c3) over
+// [-u_probe_range, +u_probe_range]; reconstruct E(n)=c0+c1*n.x+c2*n.y+c3*n.z.
+uniform float u_probe_enabled;
+uniform sampler3D u_probe_field;
+uniform vec3  u_probe_origin;
+uniform vec3  u_probe_size;
+uniform float u_probe_range;
 uniform vec3  u_grade_lift;
 uniform vec3  u_grade_gamma;
 uniform vec3  u_grade_gain;
@@ -1583,10 +1591,22 @@ void main() {
     // mode 0 (Off) is a strict no-op so default rendering is unchanged. The
     // SDF soft sun-shadow is applied to the directional term further down.
     if (u_ft_mode >= 0.5) {
-        float ftHemi  = N.y * 0.5 + 0.5;
-        vec3  ftSky   = u_ambient_color * 1.2 + vec3(0.015, 0.03, 0.06);
-        vec3  ftGround = u_ambient_color * 0.6;
-        vec3  ftProbe = mix(ftGround, ftSky, ftHemi) * u_ambient_intensity;
+        vec3 ftProbe;
+        if (u_probe_enabled > 0.5) {
+            // Baked directional GI: reconstruct grayscale SH-L1 irradiance for N,
+            // tint with the ambient colour. Normalised so a fully-open probe (DC
+            // ~2.2) lands near the old hemisphere brightness.
+            vec3 puvw = clamp((v_worldPos - u_probe_origin) / u_probe_size, 0.0, 1.0);
+            vec4 sh   = texture(u_probe_field, puvw) * 2.0 - 1.0;  // decode [-1,1]
+            vec4 c    = sh * u_probe_range;                        // SH coeffs
+            float E   = max(c.x + c.y * N.x + c.z * N.y + c.w * N.z, 0.0);
+            ftProbe   = u_ambient_color * (E * 0.45) * u_ambient_intensity;
+        } else {
+            float ftHemi  = N.y * 0.5 + 0.5;
+            vec3  ftSky   = u_ambient_color * 1.2 + vec3(0.015, 0.03, 0.06);
+            vec3  ftGround = u_ambient_color * 0.6;
+            ftProbe = mix(ftGround, ftSky, ftHemi) * u_ambient_intensity;
+        }
         color += albedo * kD_ambient * ftProbe * ao * (0.35 * u_ft_intensity);
     }
 

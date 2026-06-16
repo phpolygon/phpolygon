@@ -1097,7 +1097,13 @@ fragment float4 fragment_mesh3d(
 
     // Fieldtracing contribution (before finalizeColor): hemisphere "probe"
     // ambient layered over the flat ambient (ProbesOnly tier), modulated by AO.
-    // mode 0 (Off) is a strict no-op. Mirror of the vio/opengl copies.
+    // mode 0 (Off) is a strict no-op.
+    //
+    // NOTE: the vio/opengl copies additionally sample a baked SH-L1 irradiance
+    // probe field (u_probe_*) here for directional GI. Metal keeps the analytic
+    // hemisphere only — wiring the probe field needs a texture3d binding plus the
+    // ft_* fields packed into the lighting UBO (buildLightingUboBytes), which is
+    // byte-offset-sensitive and must be done + validated on a Metal device.
     if (light.ft_mode >= 0.5f) {
         float  ftHemi   = N.y * 0.5f + 0.5f;
         float3 ambientC = float3(light.ambient_color);

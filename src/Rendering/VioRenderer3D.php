@@ -157,6 +157,16 @@ class VioRenderer3D implements Renderer3DInterface
     /** Effective Fieldtracing tier for the current frame (set in render() pass 1). */
     private Quality\FieldtracingMode $frameFtMode = Quality\FieldtracingMode::Off;
 
+    /** GL texture unit wired to u_probe_field (mesh pass). Free slot: albedo(0), ssao(1), sdf_ao(2), shadows(6-9). */
+    private const PROBE_SAMPLER_SLOT = 3;
+
+    // The baked irradiance probe field (vio_texture_3d), from SetFieldtracingProbes.
+    private ?VioTexture $probeFieldTex = null;
+    private int $probeFieldVersion = -1;
+    private ?Vec3 $probeOrigin = null;
+    private ?Vec3 $probeSize = null;
+    private float $probeRange = 3.0;
+
     // SSR (real screen-space reflections; VIO/D3D12 only — see renderSsrPass()).
     // The pass reuses the FP16 G-buffer (view normal in rg, reflectivity in b,
     // linear depth in a) that the SSAO pass already produces, ray-marches it
@@ -407,6 +417,38 @@ class VioRenderer3D implements Renderer3DInterface
         if ($tex !== false) {
             $this->sdfVolumeTex = $tex;
             $this->sdfVolumeVersion = $cmd->version;
+        }
+    }
+
+    /**
+     * Upload a baked irradiance probe field (SetFieldtracingProbes) to a 3D
+     * texture, cached by version. Sampled in the mesh shader (ProbesOnly+ tiers),
+     * so it works on any backend with 3D-texture support, not just D3D.
+     */
+    private function ingestProbeField(Command\SetFieldtracingProbes $cmd): void
+    {
+        $this->probeOrigin = $cmd->origin;
+        $this->probeSize   = $cmd->size;
+        $this->probeRange  = $cmd->range;
+
+        if ($this->probeFieldTex !== null && $this->probeFieldVersion === $cmd->version) {
+            return;
+        }
+        if (!function_exists('vio_texture_3d') || !$this->supportsTexture3D()) {
+            return;
+        }
+
+        $tex = vio_texture_3d($this->ctx, [
+            'data'   => $cmd->data,
+            'width'  => $cmd->width,
+            'height' => $cmd->height,
+            'depth'  => $cmd->depth,
+            'filter' => VIO_FILTER_LINEAR,
+            'wrap'   => VIO_WRAP_CLAMP,
+        ]);
+        if ($tex !== false) {
+            $this->probeFieldTex = $tex;
+            $this->probeFieldVersion = $cmd->version;
         }
     }
 
@@ -1059,6 +1101,8 @@ class VioRenderer3D implements Renderer3DInterface
                 $ftAoRadius = $cmd->aoRadius;
             } elseif ($cmd instanceof Command\SetFieldtracingVolume) {
                 $this->ingestSdfVolume($cmd);
+            } elseif ($cmd instanceof Command\SetFieldtracingProbes) {
+                $this->ingestProbeField($cmd);
             }
         }
 
@@ -3369,6 +3413,23 @@ class VioRenderer3D implements Renderer3DInterface
         vio_set_uniform($this->ctx, 'u_ft_mode', (float) $this->fieldtracingModeCode($state['ftMode']));
         vio_set_uniform($this->ctx, 'u_ft_intensity', $state['ftIntensity']);
         vio_set_uniform($this->ctx, 'u_ft_ao', $state['ftAoRadius']);
+
+        // Baked irradiance probe field (ProbesOnly+ tiers): bind the 3D texture
+        // and its world transform so the mesh shader reconstructs directional
+        // ambient GI from the SH-L1 coeffs instead of the flat hemisphere. Gated
+        // on the tier being enabled AND a field being uploaded; otherwise the
+        // shader's u_probe_enabled=0 path falls back to the analytic hemisphere.
+        $probeOn = $state['ftMode'] !== Quality\FieldtracingMode::Off
+            && $this->probeFieldTex !== null
+            && $this->probeOrigin !== null && $this->probeSize !== null;
+        if ($probeOn) {
+            vio_bind_texture($this->ctx, $this->probeFieldTex, self::PROBE_SAMPLER_SLOT);
+            vio_set_uniform($this->ctx, 'u_probe_field', self::PROBE_SAMPLER_SLOT);
+            vio_set_uniform($this->ctx, 'u_probe_origin', [$this->probeOrigin->x, $this->probeOrigin->y, $this->probeOrigin->z]);
+            vio_set_uniform($this->ctx, 'u_probe_size', [$this->probeSize->x, $this->probeSize->y, $this->probeSize->z]);
+            vio_set_uniform($this->ctx, 'u_probe_range', $this->probeRange);
+        }
+        vio_set_uniform($this->ctx, 'u_probe_enabled', $probeOn ? 1.0 : 0.0);
 
         // Cloud-shadow uniforms: the mesh samples the SAME cloud density field
         // toward the sun (sky_clouds.frag mirror) so the volumetric clouds cast
