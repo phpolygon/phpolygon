@@ -157,15 +157,22 @@ class VioRenderer3D implements Renderer3DInterface
     /** Effective Fieldtracing tier for the current frame (set in render() pass 1). */
     private Quality\FieldtracingMode $frameFtMode = Quality\FieldtracingMode::Off;
 
-    /** GL texture unit wired to u_probe_field (mesh pass). Free slot: albedo(0), ssao(1), sdf_ao(2), shadows(6-9). */
-    private const PROBE_SAMPLER_SLOT = 3;
+    /** Mesh-pass texture units (logical; vio name-maps them to HLSL registers).
+     *  Distinct from albedo(0), ssao(1), sdf_ao(2), shadows(6,8,9). The coloured
+     *  probe field uses three 3D textures (R/G/B SH-L1 coeffs). */
+    private const PROBE_R_SLOT = 3;
+    private const PROBE_G_SLOT = 4;
+    private const PROBE_B_SLOT = 5;
 
     /** Logical unit + registry id for the reflection-probe cubemap (mesh pass). */
-    private const ENV_CUBEMAP_SLOT = 4;
+    private const ENV_CUBEMAP_SLOT = 7;
     private const ENV_CUBEMAP_ID = 'reflection_probe';
 
-    // The baked irradiance probe field (vio_texture_3d), from SetFieldtracingProbes.
-    private ?VioTexture $probeFieldTex = null;
+    // The baked coloured irradiance probe field (3× vio_texture_3d), from
+    // SetFieldtracingProbes — one 3D texture per colour channel.
+    private ?VioTexture $probeTexR = null;
+    private ?VioTexture $probeTexG = null;
+    private ?VioTexture $probeTexB = null;
     private int $probeFieldVersion = -1;
     private ?Vec3 $probeOrigin = null;
     private ?Vec3 $probeSize = null;
@@ -425,9 +432,10 @@ class VioRenderer3D implements Renderer3DInterface
     }
 
     /**
-     * Upload a baked irradiance probe field (SetFieldtracingProbes) to a 3D
-     * texture, cached by version. Sampled in the mesh shader (ProbesOnly+ tiers),
-     * so it works on any backend with 3D-texture support, not just D3D.
+     * Upload a baked coloured irradiance probe field (SetFieldtracingProbes) to
+     * three 3D textures (R/G/B SH-L1 coeffs), cached by version. Sampled in the
+     * mesh shader (ProbesOnly+ tiers), so it works on any backend with 3D-texture
+     * support, not just D3D.
      */
     private function ingestProbeField(Command\SetFieldtracingProbes $cmd): void
     {
@@ -435,23 +443,29 @@ class VioRenderer3D implements Renderer3DInterface
         $this->probeSize   = $cmd->size;
         $this->probeRange  = $cmd->range;
 
-        if ($this->probeFieldTex !== null && $this->probeFieldVersion === $cmd->version) {
+        if ($this->probeTexR !== null && $this->probeFieldVersion === $cmd->version) {
             return;
         }
         if (!function_exists('vio_texture_3d') || !$this->supportsTexture3D()) {
             return;
         }
 
-        $tex = vio_texture_3d($this->ctx, [
-            'data'   => $cmd->data,
+        $upload = fn(string $data): VioTexture|false => vio_texture_3d($this->ctx, [
+            'data'   => $data,
             'width'  => $cmd->width,
             'height' => $cmd->height,
             'depth'  => $cmd->depth,
             'filter' => VIO_FILTER_LINEAR,
             'wrap'   => VIO_WRAP_CLAMP,
         ]);
-        if ($tex !== false) {
-            $this->probeFieldTex = $tex;
+
+        $r = $upload($cmd->dataR);
+        $g = $upload($cmd->dataG);
+        $b = $upload($cmd->dataB);
+        if ($r !== false && $g !== false && $b !== false) {
+            $this->probeTexR = $r;
+            $this->probeTexG = $g;
+            $this->probeTexB = $b;
             $this->probeFieldVersion = $cmd->version;
         }
     }
@@ -3424,11 +3438,15 @@ class VioRenderer3D implements Renderer3DInterface
         // on the tier being enabled AND a field being uploaded; otherwise the
         // shader's u_probe_enabled=0 path falls back to the analytic hemisphere.
         $probeOn = $state['ftMode'] !== Quality\FieldtracingMode::Off
-            && $this->probeFieldTex !== null
+            && $this->probeTexR !== null && $this->probeTexG !== null && $this->probeTexB !== null
             && $this->probeOrigin !== null && $this->probeSize !== null;
         if ($probeOn) {
-            vio_bind_texture($this->ctx, $this->probeFieldTex, self::PROBE_SAMPLER_SLOT);
-            vio_set_uniform($this->ctx, 'u_probe_field', self::PROBE_SAMPLER_SLOT);
+            vio_bind_texture($this->ctx, $this->probeTexR, self::PROBE_R_SLOT);
+            vio_bind_texture($this->ctx, $this->probeTexG, self::PROBE_G_SLOT);
+            vio_bind_texture($this->ctx, $this->probeTexB, self::PROBE_B_SLOT);
+            vio_set_uniform($this->ctx, 'u_probe_field_r', self::PROBE_R_SLOT);
+            vio_set_uniform($this->ctx, 'u_probe_field_g', self::PROBE_G_SLOT);
+            vio_set_uniform($this->ctx, 'u_probe_field_b', self::PROBE_B_SLOT);
             vio_set_uniform($this->ctx, 'u_probe_origin', [$this->probeOrigin->x, $this->probeOrigin->y, $this->probeOrigin->z]);
             vio_set_uniform($this->ctx, 'u_probe_size', [$this->probeSize->x, $this->probeSize->y, $this->probeSize->z]);
             vio_set_uniform($this->ctx, 'u_probe_range', $this->probeRange);

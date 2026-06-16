@@ -107,11 +107,13 @@ uniform float u_ao_strength;
 uniform float u_ft_mode;
 uniform float u_ft_intensity;
 uniform float u_ft_ao;
-// Baked irradiance probe field (grayscale SH-L1). Mirror of the vio copy.
-// u_probe_enabled 0 => analytic hemisphere fallback. RGBA = signed-encoded
-// coeffs (c0,c1,c2,c3); reconstruct E(n)=c0+c1*n.x+c2*n.y+c3*n.z.
+// Baked COLOURED irradiance probe field (RGB SH-L1, with 1-bounce). Mirror of
+// the vio copy: one 3D texture per channel, RGBA = coeffs (c0,c1,c2,c3); per
+// channel E = c0+c1*n.x+c2*n.y+c3*n.z. u_probe_enabled 0 => hemisphere fallback.
 uniform float u_probe_enabled;
-uniform sampler3D u_probe_field;
+uniform sampler3D u_probe_field_r;
+uniform sampler3D u_probe_field_g;
+uniform sampler3D u_probe_field_b;
 uniform vec3  u_probe_origin;
 uniform vec3  u_probe_size;
 uniform float u_probe_range;
@@ -1789,11 +1791,15 @@ void main() {
     if (u_ft_mode >= 0.5) {
         vec3 ftProbe;
         if (u_probe_enabled > 0.5) {
+            // Coloured RGB SH-L1 (mirror of the vio copy); colour is baked in.
             vec3 puvw = clamp((v_worldPos - u_probe_origin) / u_probe_size, 0.0, 1.0);
-            vec4 sh   = texture(u_probe_field, puvw) * 2.0 - 1.0;  // decode [-1,1]
-            vec4 c    = sh * u_probe_range;                        // SH coeffs
-            float E   = max(c.x + c.y * N.x + c.z * N.y + c.w * N.z, 0.0);
-            ftProbe   = u_ambient_color * (E * 0.45) * u_ambient_intensity;
+            vec4 nd = vec4(1.0, N.x, N.y, N.z);
+            vec4 cr = (texture(u_probe_field_r, puvw) * 2.0 - 1.0) * u_probe_range;
+            vec4 cg = (texture(u_probe_field_g, puvw) * 2.0 - 1.0) * u_probe_range;
+            vec4 cb = (texture(u_probe_field_b, puvw) * 2.0 - 1.0) * u_probe_range;
+            vec3 E = max(vec3(dot(cr, nd), dot(cg, nd), dot(cb, nd)), vec3(0.0));
+            float bounceGain = u_ft_mode >= 2.5 ? 1.0 : 0.7;
+            ftProbe = E * (0.45 * bounceGain) * u_ambient_intensity;
         } else {
             float ftHemi   = N.y * 0.5 + 0.5;
             vec3  ftSky    = u_ambient_color * 1.2 + vec3(0.015, 0.03, 0.06);
