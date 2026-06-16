@@ -99,9 +99,12 @@ class ThreadSchedulerTest extends TestCase
         $config = new EngineConfig();
         $scheduler = ThreadSchedulerFactory::create($config);
 
-        // Without parallel extension, should fall back to NullThreadScheduler
+        // Without parallel extension, should fall back to NullThreadScheduler;
+        // with it (ZTS + ext-parallel) the factory should pick a real one.
         if (!\PHP_ZTS || !extension_loaded('parallel')) {
             $this->assertInstanceOf(NullThreadScheduler::class, $scheduler);
+        } else {
+            $this->assertNotInstanceOf(NullThreadScheduler::class, $scheduler);
         }
     }
 

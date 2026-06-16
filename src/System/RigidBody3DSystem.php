@@ -252,16 +252,25 @@ class RigidBody3DSystem extends AbstractSystem
         // every frame.
         $staticAABBs = [];
         $seen = [];
-        foreach ($world->query(BoxCollider3D::class, Transform3D::class) as $entity) {
-            if ($world->tryGetComponent($entity->id, RigidBody3D::class) !== null) {
+        // Direct pool iteration (not query()): runs every tick over every box
+        // collider in the world (~thousands), so the generator + Entity wrap +
+        // get() overhead is a measurable steady-state cost. Same pattern as
+        // Transform3DSystem / Physics3DSystem.
+        /** @var array<int, BoxCollider3D> $boxPool */
+        $boxPool = $world->componentPool(BoxCollider3D::class);
+        foreach ($boxPool as $id => $collider) {
+            if ($collider->isTrigger) {
+                continue;
+            }
+            if ($world->tryGetComponent($id, RigidBody3D::class) !== null) {
                 continue; // Skip bodies handled above
             }
-            $collider = $entity->get(BoxCollider3D::class);
-            if ($collider->isTrigger) continue;
+            $transform = $world->tryGetComponent($id, Transform3D::class);
+            if (!$transform instanceof Transform3D) {
+                continue;
+            }
 
-            $id = $entity->id;
             $seen[$id] = true;
-            $transform = $entity->get(Transform3D::class);
             $p = $transform->position;
             $r = $transform->rotation;
             $s = $transform->scale;

@@ -285,13 +285,21 @@ class Physics3DSystem extends AbstractSystem
         $meshColliders = [];
         $boxTopY = []; // Entity ID → max Y of collider (for step-climbing on rotated boxes)
 
-        foreach ($world->query(BoxCollider3D::class, Transform3D::class) as $entity) {
-            $collider = $entity->get(BoxCollider3D::class);
+        // Direct pool iteration (not query()): this runs every fixed-timestep
+        // tick over every box collider in the world (~thousands on the star
+        // island), so the generator resume + Entity wrap + get() indirection is
+        // a measurable steady-state cost. Same pattern Transform3DSystem uses.
+        /** @var array<int, BoxCollider3D> $pool */
+        $pool = $world->componentPool(BoxCollider3D::class);
+        foreach ($pool as $entityId => $collider) {
             if ($collider->isTrigger) {
                 continue;
             }
 
-            $transform = $entity->get(Transform3D::class);
+            $transform = $world->tryGetComponent($entityId, Transform3D::class);
+            if (!$transform instanceof Transform3D) {
+                continue;
+            }
             $worldMatrix = $transform->getWorldMatrix();
 
             // Check if entity has meaningful rotation (non-identity)
@@ -318,17 +326,17 @@ class Physics3DSystem extends AbstractSystem
                 }
 
                 $meshColliders[] = [
-                    'entityId' => $entity->id,
+                    'entityId' => $entityId,
                     'bvh' => $collider->bvh,
                 ];
-                $boxTopY[$entity->id] = $collider->cachedWorldAabb['max']->y;
+                $boxTopY[$entityId] = $collider->cachedWorldAabb['max']->y;
             } else {
                 if ($matrixChanged || $collider->cachedWorldAabb === null) {
                     $collider->cachedWorldAabb = $collider->getWorldAABB($worldMatrix);
                     $collider->lastWorldMatrixArr = $worldMatrixArr;
                 }
                 $aabbs[] = [
-                    'entityId' => $entity->id,
+                    'entityId' => $entityId,
                     'min' => $collider->cachedWorldAabb['min'],
                     'max' => $collider->cachedWorldAabb['max'],
                 ];
@@ -402,13 +410,17 @@ class Physics3DSystem extends AbstractSystem
     {
         $colliders = [];
 
-        foreach ($world->query(MeshCollider3D::class, Transform3D::class) as $entity) {
-            $meshCollider = $entity->get(MeshCollider3D::class);
+        /** @var array<int, MeshCollider3D> $pool */
+        $pool = $world->componentPool(MeshCollider3D::class);
+        foreach ($pool as $entityId => $meshCollider) {
             if ($meshCollider->isTrigger) {
                 continue;
             }
 
-            $transform = $entity->get(Transform3D::class);
+            $transform = $world->tryGetComponent($entityId, Transform3D::class);
+            if (!$transform instanceof Transform3D) {
+                continue;
+            }
             $worldMatrix = $transform->getWorldMatrix();
             $worldMatrixArr = $worldMatrix->toArray();
 
@@ -429,7 +441,7 @@ class Physics3DSystem extends AbstractSystem
             }
 
             $colliders[] = [
-                'entityId' => $entity->id,
+                'entityId' => $entityId,
                 'bvh' => $meshCollider->bvh,
             ];
         }

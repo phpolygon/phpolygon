@@ -102,8 +102,16 @@ void main() {
     vec3 worldP = (u_inv_view * vec4(viewP, 1.0)).xyz;
     vec3 worldN = normalize(mat3(u_inv_view) * viewN);
 
-    float ao = ambientOcclusion(worldP + worldN * 0.02, worldN);
-    float sh = softShadow(worldP + worldN * 0.04, normalize(u_sun_dir));
+    // The baked SDF volume is COARSE (metres per voxel). A surface that is itself
+    // part of the field (a building wall, the ground under it) reads distance ~0
+    // for ~1 voxel out, so a tiny normal offset makes it self-occlude and
+    // self-shadow into dark blotches. Bias the start by ~1 voxel so the trace
+    // begins clearly in free space above the surface.
+    vec3 cellv = u_vol_size / vec3(textureSize(u_sdf_volume, 0));
+    float bias = max(cellv.x, max(cellv.y, cellv.z)) * 1.25;
+
+    float ao = ambientOcclusion(worldP + worldN * bias, worldN);
+    float sh = softShadow(worldP + worldN * bias, normalize(u_sun_dir));
 
     frag_color = vec4(ao, sh, 0.0, 1.0);
 }
