@@ -52,7 +52,7 @@ final readonly class CharacterDNA
                 }
                 $b |= $map[$ch] << ($j * 2);
             }
-            $bytes .= chr($b);
+            $bytes .= chr($b & 0xFF);
         }
         return new self($bytes);
     }
@@ -105,7 +105,7 @@ final readonly class CharacterDNA
         for ($i = 0; $i < $bitFlips; $i++) {
             $pos = $rand->getInt(0, $maxBit);
             $byteIdx = intdiv($pos, 8);
-            $bytes[$byteIdx] = chr(ord($bytes[$byteIdx]) ^ (1 << ($pos % 8)));
+            $bytes[$byteIdx] = chr((ord($bytes[$byteIdx]) ^ (1 << ($pos % 8))) & 0xFF);
         }
         return new self($bytes);
     }
