@@ -799,11 +799,12 @@ vec3 computeWater(vec3 N, vec3 V, vec3 L, out float alphaOut, out float roughOut
     vec3 R = reflect(-V, N);
     float skyBlend = clamp(R.y * 2.0, 0.0, 1.0);
     vec3 reflectColor = mix(u_horizon_color, u_sky_color, skyBlend);
-    // Reflection probe: the ocean mirrors the baked environment (sky + scene)
-    // where present, blended toward the sky tint for upward rays.
+    // Reflection probe: the baked cube already holds sky (up) AND the city
+    // skyline (horizon), so let it dominate the reflection — the water then
+    // visibly mirrors the buildings, not just the sky tint.
     if (u_has_environment_map == 1) {
         vec3 envR = texture(u_environment_map, R).rgb;
-        reflectColor = mix(envR, reflectColor, skyBlend * 0.4);
+        reflectColor = mix(reflectColor, envR, 0.8);
     }
 
     // Sun reflection on the water. As the sun lowers, the rough surface spreads
