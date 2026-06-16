@@ -160,6 +160,10 @@ class VioRenderer3D implements Renderer3DInterface
     /** GL texture unit wired to u_probe_field (mesh pass). Free slot: albedo(0), ssao(1), sdf_ao(2), shadows(6-9). */
     private const PROBE_SAMPLER_SLOT = 3;
 
+    /** Logical unit + registry id for the reflection-probe cubemap (mesh pass). */
+    private const ENV_CUBEMAP_SLOT = 4;
+    private const ENV_CUBEMAP_ID = 'reflection_probe';
+
     // The baked irradiance probe field (vio_texture_3d), from SetFieldtracingProbes.
     private ?VioTexture $probeFieldTex = null;
     private int $probeFieldVersion = -1;
@@ -3430,6 +3434,17 @@ class VioRenderer3D implements Renderer3DInterface
             vio_set_uniform($this->ctx, 'u_probe_range', $this->probeRange);
         }
         vio_set_uniform($this->ctx, 'u_probe_enabled', $probeOn ? 1.0 : 0.0);
+
+        // Reflection probe cubemap: bind the baked environment so water mirrors it.
+        // Cached by source identity in loadCubemap; u_has_environment_map=0 falls
+        // back to the sky-tint reflection. (Bind is name-mapped to the sampler's
+        // HLSL register by vio, so the logical unit here is arbitrary.)
+        $envCube = $this->loadCubemap(self::ENV_CUBEMAP_ID);
+        if ($envCube !== null) {
+            vio_bind_cubemap($this->ctx, $envCube, self::ENV_CUBEMAP_SLOT);
+            vio_set_uniform($this->ctx, 'u_environment_map', self::ENV_CUBEMAP_SLOT);
+        }
+        vio_set_uniform($this->ctx, 'u_has_environment_map', $envCube !== null ? 1 : 0);
 
         // Cloud-shadow uniforms: the mesh samples the SAME cloud density field
         // toward the sun (sky_clouds.frag mirror) so the volumetric clouds cast
