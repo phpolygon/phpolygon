@@ -6,6 +6,7 @@ on:
     paths:
       - 'src/**'
       - 'benchmarks/**'
+      - 'bin/**'
       - 'composer.json'
       - 'composer.lock'
       - '.github/workflows/perf-bench.yml'
@@ -39,7 +40,7 @@ jobs:
       - name: Setup PHP
         uses: shivammathur/setup-php@v2
         with:
-          php-version: '8.4'
+          php-version: '8.5'
           extensions: gd, mbstring, dom, xml
           coverage: none
 
@@ -132,7 +133,7 @@ jobs:
       - name: Setup PHP
         uses: shivammathur/setup-php@v2
         with:
-          php-version: '8.4'
+          php-version: '8.5'
           extensions: gd, mbstring, dom, xml
           coverage: none
 

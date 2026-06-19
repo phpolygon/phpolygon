@@ -995,7 +995,13 @@ the workflow output. Two pipelines run:
 1. **Scenario benches** (`.github/workflows/perf-bench.yml::bench`):
    six end-to-end frame-loop scenarios (`empty-scene`, `boxes-1000`,
    `boxes-1000-instanced`, `mixed-scene`, `mesh-gen-stress`,
-   `physics-stack`). > 15% p95 regression breaks the build.
+   `physics-stack`). > 15% p95 regression breaks the build. The
+   gated metrics are p50/p95/mean; p99/min/max are reported but
+   informational only - p99 is the worst 3 frames of 300, so on
+   sub-millisecond scenarios it is dominated by a single GC/scheduler
+   hiccup (especially across a runtime bump) and swings 40-60% while
+   the real signals stay flat. CI raises the threshold to 30% and
+   adds a 0.5ms absolute-delta floor on shared runners.
 
 2. **Micro benches** (`.github/workflows/perf-bench.yml::micro-bench`):
    PHPBench suite under `benchmarks/micro/`, scope-filtered against the
