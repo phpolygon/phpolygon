@@ -40,6 +40,34 @@ class VioRenderer2D implements Renderer2DInterface
     private array $fallbackFonts = [];
 
     /**
+     * Font names registered for asynchronous (background-thread) loading via
+     * {@see preloadFontAsync()}. When such a font is first needed at a given
+     * size, the renderer kicks off `vio_font_load_async()` instead of blocking
+     * on `vio_font()` — the render thread keeps drawing (the font is simply
+     * skipped in the fallback chain) until the worker thread finishes packing
+     * the atlas and {@see pollAsyncFontLoads()} promotes it into $fontCache.
+     *
+     * Used for the large CJK fallback fonts (NotoSansSC/KR, ~13 MB / ~32k
+     * glyphs) whose synchronous pack froze the render thread for 20-25 s the
+     * first time a CJK glyph hit the chain.
+     *
+     * @var array<string, true> Font name -> registered flag
+     */
+    private array $asyncFontNames = [];
+
+    /**
+     * In-flight async font loads, keyed by the same "name:size" cache key used
+     * by {@see $fontCache}. Holds the opaque resource handle returned by
+     * `vio_font_load_async()`; {@see pollAsyncFontLoads()} polls each one and,
+     * once ready, moves the resulting VioFont into $fontCache and clears the
+     * entry here. A key present here (but not in $fontCache) means "loading —
+     * skip this font for now".
+     *
+     * @var array<string, resource>
+     */
+    private array $pendingFontLoads = [];
+
+    /**
      * Memoized vio_text_measure results, keyed by font-object-id|text.
      *
      * Bounded with FIFO eviction once {@see $measureCacheCap} is exceeded. The
@@ -119,6 +147,12 @@ class VioRenderer2D implements Renderer2DInterface
 
     public function beginFrame(): void
     {
+        // Complete any background font loads whose worker thread has finished.
+        // The GPU upload happens here, on the render thread, with a current
+        // GL/Metal/D3D/Vulkan context — exactly where the engine already polls
+        // its async work each frame. Cheap no-op when nothing is in flight.
+        $this->pollAsyncFontLoads();
+
         if ($this->offscreenWarmTarget !== null) {
             // Redirected path: route this frame's draws into the warm-up
             // offscreen target instead of the swapchain. Window-size sync is
@@ -509,6 +543,69 @@ class VioRenderer2D implements Renderer2DInterface
         $this->fontPaths[$name] = $path;
     }
 
+    /**
+     * Register a font for background (worker-thread) loading.
+     *
+     * Behaves like {@see loadFont()} — it records the path so the font can be
+     * resolved by name — but additionally marks the font so that the first time
+     * it is actually needed at a given size, the renderer rasterizes its glyph
+     * atlas on a vio worker thread (`vio_font_load_async`) instead of blocking
+     * the render thread (`vio_font`). Until the worker finishes, the font is
+     * simply skipped in the fallback chain: text renders without it (the
+     * primary font's glyphs and .notdef boxes), then the real glyphs pop in a
+     * few frames later once {@see pollAsyncFontLoads()} has promoted the
+     * finished atlas into the cache.
+     *
+     * This exists for the large CJK fallback fonts (NotoSansSC/KR): loading
+     * them synchronously on first use froze Code Tycoon's splash for 20-25 s.
+     * Register them with this method and add them as fallbacks via
+     * {@see addFallbackFont()} exactly as before; everything else is unchanged.
+     *
+     * No-op-safe: if vio lacks the async font functions (older extension build)
+     * the renderer transparently falls back to synchronous loading, so games
+     * keep working against any vio version.
+     */
+    public function preloadFontAsync(string $name, string $path): void
+    {
+        $this->fontPaths[$name] = $path;
+        if (\function_exists('vio_font_load_async') && \function_exists('vio_font_load_poll')) {
+            $this->asyncFontNames[$name] = true;
+        }
+        // If the async API is unavailable we leave $asyncFontNames untouched, so
+        // resolveFontByName() takes the normal synchronous vio_font() path.
+    }
+
+    /**
+     * Poll all in-flight async font loads. For each one whose worker thread has
+     * finished, complete it (the GPU upload happens inside vio_font_load_poll)
+     * and move the resulting VioFont into the per-size font cache.
+     *
+     * Called once per frame from {@see beginFrame()}. Safe to call when nothing
+     * is pending (returns immediately). Must run on the render thread because
+     * the poll performs the atlas GPU upload.
+     */
+    public function pollAsyncFontLoads(): void
+    {
+        if ($this->pendingFontLoads === []) {
+            return;
+        }
+
+        foreach ($this->pendingFontLoads as $key => $handle) {
+            $result = vio_font_load_poll($handle);
+            if ($result === null) {
+                // Still rasterizing on the worker thread — try again next frame.
+                continue;
+            }
+            unset($this->pendingFontLoads[$key]);
+            if ($result instanceof VioFont) {
+                $this->fontCache[$key] = $result;
+            }
+            // $result === false: load failed (bad path / parse error). Drop the
+            // pending entry so we stop polling; the font stays absent from the
+            // chain, identical to a failed synchronous vio_font().
+        }
+    }
+
     public function setFont(string $name): void
     {
         $this->currentFontName = $name;
@@ -782,13 +879,38 @@ class VioRenderer2D implements Renderer2DInterface
         $roundedSize = (float)(int)$size;
         $key = $name . ':' . (int)$roundedSize;
 
-        if (!isset($this->fontCache[$key])) {
-            $font = vio_font($this->ctx, $this->fontPaths[$name], $roundedSize);
-            if ($font === false) {
-                return null;
-            }
-            $this->fontCache[$key] = $font;
+        if (isset($this->fontCache[$key])) {
+            return $this->fontCache[$key];
         }
+
+        // Async-registered font: kick off (or wait on) a background load instead
+        // of blocking the render thread on the atlas pack. Returns null while
+        // the worker is still busy, so the caller skips this font in the chain.
+        if (isset($this->asyncFontNames[$name])) {
+            if (!isset($this->pendingFontLoads[$key])) {
+                $handle = vio_font_load_async($this->ctx, $this->fontPaths[$name], $roundedSize);
+                if ($handle === false) {
+                    // Couldn't even start the worker (e.g. thread-create
+                    // failure). Fall back to a synchronous load so the font
+                    // still appears rather than being lost forever.
+                    $font = vio_font($this->ctx, $this->fontPaths[$name], $roundedSize);
+                    if ($font === false) {
+                        return null;
+                    }
+                    $this->fontCache[$key] = $font;
+                    return $font;
+                }
+                $this->pendingFontLoads[$key] = $handle;
+            }
+            // Loading in the background — not ready this frame.
+            return null;
+        }
+
+        $font = vio_font($this->ctx, $this->fontPaths[$name], $roundedSize);
+        if ($font === false) {
+            return null;
+        }
+        $this->fontCache[$key] = $font;
 
         return $this->fontCache[$key];
     }

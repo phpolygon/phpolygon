@@ -44,6 +44,7 @@ class WidgetTestHelper implements Renderer2DInterface
     public function pushScissor(float $x, float $y, float $w, float $h): void { $this->calls[] = ['method' => 'pushScissor', 'args' => func_get_args()]; }
     public function popScissor(): void { $this->calls[] = ['method' => 'popScissor', 'args' => []]; }
     public function loadFont(string $name, string $path): void {}
+    public function preloadFontAsync(string $name, string $path): void {}
     public function setFont(string $name): void {}
     public function setTextAlign(int $align): void {}
     public function measureText(string $text, float $size): TextMetrics { return new TextMetrics(strlen($text) * $size * 0.6, $size); }
