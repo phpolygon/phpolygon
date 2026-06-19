@@ -772,6 +772,15 @@ class Engine
                     $this->renderInterpolation = $interpolation;
                     $this->beginFrameStats();
 
+                    // Window has no drawable area (minimised / 0x0). Skip all
+                    // render work — including the onRender user callback — but
+                    // keep input + events pumping so the game resumes cleanly
+                    // when the window is restored. See skipRenderFrame().
+                    if ($this->isWindowMinimised()) {
+                        $this->skipRenderFrame();
+                        return;
+                    }
+
                     // Sync viewport to framebuffer every frame — handles Retina HiDPI and window resize
                     if ($this->renderer3D !== null && !$nativeBackend) {
                         $fbW = $this->window->getFramebufferWidth();
@@ -846,6 +855,15 @@ class Engine
                     $this->renderInterpolation = $interpolation;
                     $this->beginFrameStats();
 
+                    // Window has no drawable area (minimised / 0x0). Skip all
+                    // render work — including the onRender user callback — but
+                    // keep input + events pumping so the game resumes cleanly
+                    // when the window is restored. See skipRenderFrame().
+                    if ($this->isWindowMinimised()) {
+                        $this->skipRenderFrame();
+                        return;
+                    }
+
                     // Sync viewport to framebuffer every frame — handles Retina HiDPI and window resize
                     if ($this->renderer3D !== null && !$nativeBackend) {
                         $fbW = $this->window->getFramebufferWidth();
@@ -908,6 +926,33 @@ class Engine
     public function stop(): void
     {
         $this->running = false;
+    }
+
+    /**
+     * True when the window has no drawable area — i.e. it is minimised or
+     * otherwise reports a 0×0 size (common when a fullscreen window loses
+     * focus on a multi-monitor setup). Rendering against a 0×0 surface is
+     * pointless and causes games to divide by a zero width/height in their
+     * own layout/hit-test math, so the render frame is skipped entirely
+     * while this holds.
+     */
+    private function isWindowMinimised(): bool
+    {
+        return $this->window->getWidth() <= 0 || $this->window->getHeight() <= 0;
+    }
+
+    /**
+     * Frame body for a minimised / 0×0 window: skip every render call
+     * (the onRender user callback, the 2D/3D begin/end-frame pair and the
+     * buffer swap) but keep input edges and OS events flowing so the game
+     * keeps ticking and resumes cleanly the moment the window is restored.
+     */
+    private function skipRenderFrame(): void
+    {
+        $this->input->endFrame();
+        $this->window->pollEvents();
+        $this->endFrameStats();
+        PerfProfiler::end(); // closes the 'engine.render' section
     }
 
     private function beginFrameStats(): void

@@ -93,6 +93,67 @@ class HeadlessEngineTest extends TestCase
         $this->assertTrue($finalReached, 'code after the last yield must run');
     }
 
+    /**
+     * A minimised / 0×0 window must NOT invoke the onRender callback, but the
+     * update loop must keep ticking. Regression guard for the shipped
+     * DivisionByZeroError where a fullscreen game on a multi-monitor setup
+     * computed uiScale = windowHeight / DESIGN_HEIGHT = 0 and divided by it
+     * during hit-testing after the window was minimised.
+     */
+    public function testRenderCallbackSkippedWhenWindowIsZeroSized(): void
+    {
+        $engine = new Engine(new EngineConfig(headless: true, width: 0, height: 0));
+
+        $this->assertSame(0, $engine->window->getWidth());
+        $this->assertSame(0, $engine->window->getHeight());
+
+        $renderCount = 0;
+        $updateCount = 0;
+
+        $engine->onRender(function (Engine $e, float $interpolation) use (&$renderCount) {
+            $renderCount++;
+        });
+
+        $engine->onUpdate(function (Engine $e, float $dt) use (&$updateCount) {
+            $updateCount++;
+            if ($updateCount >= 3) {
+                $e->stop();
+            }
+        });
+
+        $engine->run();
+
+        $this->assertGreaterThanOrEqual(3, $updateCount, 'update loop must keep running while minimised');
+        $this->assertSame(0, $renderCount, 'onRender must not be invoked for a 0×0 window');
+    }
+
+    /**
+     * Sanity counterpart: a normally-sized window must invoke onRender as
+     * usual, so the minimise guard does not regress the shipping path.
+     */
+    public function testRenderCallbackInvokedForNormalWindow(): void
+    {
+        $engine = new Engine(new EngineConfig(headless: true, width: 1280, height: 720));
+
+        $renderCount = 0;
+        $updateCount = 0;
+
+        $engine->onRender(function (Engine $e, float $interpolation) use (&$renderCount) {
+            $renderCount++;
+        });
+
+        $engine->onUpdate(function (Engine $e, float $dt) use (&$updateCount) {
+            $updateCount++;
+            if ($updateCount >= 3) {
+                $e->stop();
+            }
+        });
+
+        $engine->run();
+
+        $this->assertGreaterThanOrEqual(1, $renderCount, 'onRender must run for a non-zero window');
+    }
+
     public function testHeadlessEngineCanLoadScenes(): void
     {
         $engine = new Engine(new EngineConfig(headless: true));
