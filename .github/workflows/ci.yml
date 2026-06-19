@@ -152,7 +152,10 @@ jobs:
             php85-ctype \
             freetype libpng libjpeg-turbo \
             git unzip
-          ln -s /usr/bin/php85 /usr/bin/php
+          # php85 in alpine:edge now ships /usr/bin/php itself; only symlink
+          # if it is missing, and force-overwrite so the step is idempotent.
+          if [ ! -e /usr/bin/php ]; then ln -sf /usr/bin/php85 /usr/bin/php; fi
+          php -v
 
       - uses: actions/checkout@v5
 
