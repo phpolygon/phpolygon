@@ -1474,7 +1474,7 @@ class OpenGLRenderer3D implements Renderer3DInterface
                     $data .= chr(($rgb >> 16) & 0xFF) . chr(($rgb >> 8) & 0xFF) . chr($rgb & 0xFF);
                 }
             }
-            imagedestroy($img);
+            unset($img); // GdImage is freed by GC; imagedestroy() is a no-op deprecated in PHP 8.5
 
             $unpacked = unpack('C*', $data);
             /** @var array<int> $bytes */

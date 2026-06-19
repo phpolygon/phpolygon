@@ -14,11 +14,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - php: '8.3'
+          - php: '8.5'
             os: ubuntu-latest
-          - php: '8.4'
-            os: ubuntu-latest
-          - php: '8.4'
+          - php: '8.5'
             os: macos-14
 
     steps:
@@ -43,7 +41,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        php: ['8.3', '8.4']
+        php: ['8.5']
 
     steps:
       - uses: actions/checkout@v5
@@ -59,7 +57,6 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            php${{ matrix.php }}-dev \
             build-essential cmake \
             libglfw3-dev xvfb \
             libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev
@@ -91,7 +88,7 @@ jobs:
       - name: Setup PHP
         uses: shivammathur/setup-php@v2
         with:
-          php-version: '8.4'
+          php-version: '8.5'
           extensions: mbstring
           coverage: none
 
@@ -111,7 +108,7 @@ jobs:
       - name: Setup PHP
         uses: shivammathur/setup-php@v2
         with:
-          php-version: '8.4'
+          php-version: '8.5'
           extensions: gd, mbstring, dom, xml
           coverage: none
 
@@ -119,7 +116,6 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            php8.4-dev \
             build-essential cmake \
             libglfw3-dev \
             libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev
@@ -142,21 +138,21 @@ jobs:
         run: vendor/bin/phpstan analyse --error-format=github
 
   vrt:
-    name: VRT (Alpine 3.22)
+    name: VRT (Alpine edge)
     runs-on: ubuntu-latest
     container:
-      image: alpine:3.22
+      image: alpine:edge
 
     steps:
       - name: Install PHP and dependencies
         run: |
           apk add --no-cache \
-            php84 php84-gd php84-mbstring php84-phar php84-dom \
-            php84-xml php84-xmlwriter php84-tokenizer php84-openssl \
-            php84-ctype \
+            php85 php85-gd php85-mbstring php85-phar php85-dom \
+            php85-xml php85-xmlwriter php85-tokenizer php85-openssl \
+            php85-ctype \
             freetype libpng libjpeg-turbo \
             git unzip
-          ln -s /usr/bin/php84 /usr/bin/php
+          ln -s /usr/bin/php85 /usr/bin/php
 
       - uses: actions/checkout@v5
 

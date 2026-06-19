@@ -104,7 +104,7 @@ PHPolygon\
 
 ### Requirements
 
-- PHP 8.3+
+- PHP 8.5+
 - [php-vio](https://github.com/hmennen90/php-vio) extension (primary: unified window, input, audio, 2D/3D rendering)
 - **Or** [php-glfw](https://github.com/mario-deluna/php-glfw) extension (fallback: OpenGL 4.1 + NanoVG)
 - [php-vulkan](https://github.com/hmennen90/php-vulkan) extension (optional: native Vulkan 3D backend)
