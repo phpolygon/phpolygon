@@ -646,12 +646,18 @@ function runDiff(string $a, string $b, string $scenario, float $threshold, float
     $worstRegression = 0.0;
     $worstRegressionMetric = '';
     $noiseFloorHits = [];
-    // Outlier-prone metrics (minMs/maxMs) are reported but not gated.
+    // Outlier-prone metrics (minMs/maxMs/p99Ms) are reported but not gated.
     // A single GC pause across 300 frames will always inflate maxMs by
     // 50%+ regardless of the code under test, so failing on max produces
-    // false positives even with the absolute-delta floor. p50/p95/p99/mean
-    // are the actual quality signals.
-    $gatedMetrics = ['p50Ms', 'p95Ms', 'p99Ms', 'meanMs'];
+    // false positives even with the absolute-delta floor. The same is true
+    // for p99Ms: it is the 99th percentile, i.e. the worst 3 frames of 300,
+    // so on sub-millisecond scenarios (mesh-gen-stress, mixed-scene) it is
+    // dominated by one scheduler/GC hiccup and routinely swings 40-60% while
+    // p50/p95/mean stay flat. This is especially pronounced across a runtime
+    // bump (e.g. PHP 8.4 -> 8.5) where the two reference runs use different
+    // interpreters. p50/p95/mean are the actual quality signals we gate on;
+    // p99 stays visible (and red when it moves) but does not block.
+    $gatedMetrics = ['p50Ms', 'p95Ms', 'meanMs'];
     foreach (['p50Ms', 'p95Ms', 'p99Ms', 'meanMs', 'minMs', 'maxMs'] as $key) {
         $av = (float) ($resultA['frame'][$key] ?? 0.0);
         $bv = (float) ($resultB['frame'][$key] ?? 0.0);

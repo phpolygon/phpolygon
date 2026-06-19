@@ -158,7 +158,7 @@ class AssetStreamingSubsystem implements SubsystemInterface
                     . chr(255 - $a * 2); // GD alpha 0=opaque, 127=transparent → GL 255=opaque, 0=transparent
             }
         }
-        imagedestroy($img);
+        unset($img); // GdImage is freed by GC; imagedestroy() is a no-op deprecated in PHP 8.5
 
         return [
             'id' => $id,
