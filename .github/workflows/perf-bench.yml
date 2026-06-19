@@ -6,6 +6,7 @@ on:
     paths:
       - 'src/**'
       - 'benchmarks/**'
+      - 'bin/**'
       - 'composer.json'
       - 'composer.lock'
       - '.github/workflows/perf-bench.yml'
