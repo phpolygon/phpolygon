@@ -55,10 +55,10 @@ jobs:
           ref: ${{ inputs.game_ref || 'main' }}
           path: game
 
-      - name: Setup PHP 8.3
+      - name: Setup PHP 8.5
         uses: shivammathur/setup-php@v2
         with:
-          php-version: '8.3'
+          php-version: '8.5'
           extensions: mbstring, dom, xml, zip, phar
           coverage: none
 
