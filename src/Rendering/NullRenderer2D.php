@@ -52,6 +52,7 @@ class NullRenderer2D implements Renderer2DInterface
     public function pushScissor(float $x, float $y, float $w, float $h): void {}
     public function popScissor(): void {}
     public function loadFont(string $name, string $path): void {}
+    public function preloadFontAsync(string $name, string $path): void {}
     public function setFont(string $name): void {}
     public function setTextAlign(int $align): void {}
 

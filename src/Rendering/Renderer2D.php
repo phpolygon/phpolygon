@@ -240,6 +240,12 @@ class Renderer2D implements Renderer2DInterface
         $this->vg->createFont($name, $path);
     }
 
+    public function preloadFontAsync(string $name, string $path): void
+    {
+        // NanoVG/GLFW fallback has no async font path; load synchronously.
+        $this->loadFont($name, $path);
+    }
+
     public function setFont(string $name): void
     {
         $this->currentFont = $name;

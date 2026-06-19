@@ -49,6 +49,23 @@ interface Renderer2DInterface extends RenderContextInterface
 
     public function loadFont(string $name, string $path): void;
 
+    /**
+     * Register a font for background (non-blocking) loading.
+     *
+     * Like {@see loadFont()}, but on backends that support it (currently the
+     * vio backend) the font's glyph atlas is rasterized on a worker thread the
+     * first time the font is needed, instead of blocking the render thread.
+     * Until the worker finishes, the font is skipped in the fallback chain
+     * (text still renders with the remaining fonts) and its real glyphs appear
+     * a few frames later. Intended for large CJK fallback fonts whose
+     * synchronous load otherwise stalls startup for many seconds.
+     *
+     * Backends without async support (NanoVG/GLFW fallback, GD test renderer,
+     * null renderer) may treat this as a synchronous alias for {@see loadFont()}
+     * — the call is always safe and the font ends up registered either way.
+     */
+    public function preloadFontAsync(string $name, string $path): void;
+
     public function setFont(string $name): void;
 
     /**

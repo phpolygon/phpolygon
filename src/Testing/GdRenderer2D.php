@@ -351,6 +351,12 @@ class GdRenderer2D implements Renderer2DInterface
         $this->fonts[$name] = $path;
     }
 
+    public function preloadFontAsync(string $name, string $path): void
+    {
+        // GD test renderer has no GPU worker thread; load synchronously.
+        $this->loadFont($name, $path);
+    }
+
     public function setFont(string $name): void
     {
         $this->currentFont = $name;

@@ -343,3 +343,26 @@ function vio_texture_load_async(VioContext $ctx, string $path, array $options = 
  * @return VioTexture|null Returns texture when loaded, null while still loading
  */
 function vio_texture_load_poll(VioContext $ctx, int $handle): ?VioTexture {}
+
+// ----------------------------------------------------------------
+// Async font loading
+// ----------------------------------------------------------------
+
+/**
+ * Start loading a TTF/OTF font on a background worker thread. The glyph-atlas
+ * rasterization runs off the render thread; the GPU upload is deferred to
+ * vio_font_load_poll().
+ *
+ * @return resource|false Async load handle, or false on failure
+ */
+function vio_font_load_async(VioContext $ctx, string $path, float $size = 24.0): mixed {}
+
+/**
+ * Poll an async font load. Returns null while still loading, false on failure,
+ * or a ready-to-use VioFont once the worker has finished (the atlas is uploaded
+ * to the GPU inside this call, so it must run on the render thread).
+ *
+ * @param resource $handle Handle from vio_font_load_async()
+ * @return VioFont|null|false
+ */
+function vio_font_load_poll($handle): VioFont|null|false {}

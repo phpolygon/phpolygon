@@ -316,8 +316,15 @@ class Engine
 
             $cjkDir = $fontDir . DIRECTORY_SEPARATOR . 'noto-sans-cjk';
             if (is_dir($cjkDir)) {
-                $engine->renderer2D->loadFont('noto-sans-sc', $cjkDir . DIRECTORY_SEPARATOR . 'NotoSansSC-Regular.otf');
-                $engine->renderer2D->loadFont('noto-sans-kr', $cjkDir . DIRECTORY_SEPARATOR . 'NotoSansKR-Regular.otf');
+                // The CJK fallback fonts are ~13 MB / ~32k glyphs each; packing
+                // their atlas synchronously froze the render thread for 20-25 s
+                // the first time a CJK glyph hit the fallback chain. Register
+                // them for background loading instead — on the vio backend the
+                // atlas is rasterized on a worker thread and the glyphs pop in a
+                // few frames after first use, with no stall. On non-vio backends
+                // preloadFontAsync() is a synchronous alias for loadFont().
+                $engine->renderer2D->preloadFontAsync('noto-sans-sc', $cjkDir . DIRECTORY_SEPARATOR . 'NotoSansSC-Regular.otf');
+                $engine->renderer2D->preloadFontAsync('noto-sans-kr', $cjkDir . DIRECTORY_SEPARATOR . 'NotoSansKR-Regular.otf');
                 $engine->renderer2D->addFallbackFont('regular', 'noto-sans-sc');
                 $engine->renderer2D->addFallbackFont('regular', 'noto-sans-kr');
                 $engine->renderer2D->addFallbackFont('semibold', 'noto-sans-sc');

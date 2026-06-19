@@ -77,6 +77,7 @@ class UISystemTest extends TestCase
             public function pushScissor(float $x, float $y, float $w, float $h): void {}
             public function popScissor(): void {}
             public function loadFont(string $name, string $path): void {}
+            public function preloadFontAsync(string $name, string $path): void {}
             public function setFont(string $name): void {}
             public function setTextAlign(int $align): void {}
             public function measureText(string $text, float $size): \PHPolygon\Rendering\TextMetrics { return new \PHPolygon\Rendering\TextMetrics(strlen($text) * $size * 0.6, $size); }
