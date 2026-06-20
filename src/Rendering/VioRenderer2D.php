@@ -606,6 +606,106 @@ class VioRenderer2D implements Renderer2DInterface
         }
     }
 
+    /**
+     * Pre-warm the glyph atlases for every (font, size) pair IN PARALLEL.
+     *
+     * Each atlas is rasterised on its own vio worker thread
+     * (vio_font_load_async) — the CPU-bound glyph packing runs concurrently
+     * across cores instead of one-at-a-time. The GPU upload for each finished
+     * atlas happens here on the render thread (vio_font_load_poll). Blocks until
+     * every requested atlas is cached.
+     *
+     * Replaces the common "measureText every size to prime the atlas" startup
+     * pattern, which is single-threaded and can cost seconds for a 20+ size
+     * warm. Falls back to synchronous vio_font() when the async font API is
+     * unavailable (older extension build).
+     *
+     * @param list<string> $names Font names previously registered via loadFont().
+     * @param list<float>  $sizes Sizes to pre-rasterise.
+     * @param int $maxConcurrent Cap on simultaneously-spawned worker threads
+     *                           (0 = sensible default). Bounds thread/memory
+     *                           pressure while still saturating the cores.
+     */
+    public function warmFonts(array $names, array $sizes, int $maxConcurrent = 0): void
+    {
+        // Build the (key => [path, roundedSize]) work list, skipping anything
+        // already cached. Keys match resolveFontByName()'s cache key exactly.
+        $work = [];
+        foreach ($names as $name) {
+            if (!isset($this->fontPaths[$name])) {
+                continue;
+            }
+            $path = $this->fontPaths[$name];
+            foreach ($sizes as $size) {
+                $rounded = (float)(int)$size;
+                $key = $name . ':' . (int)$rounded;
+                if (isset($this->fontCache[$key]) || isset($work[$key])) {
+                    continue;
+                }
+                $work[$key] = [$path, $rounded];
+            }
+        }
+        if ($work === []) {
+            return;
+        }
+
+        $hasAsync = \function_exists('vio_font_load_async') && \function_exists('vio_font_load_poll');
+        if (!$hasAsync) {
+            foreach ($work as $key => [$path, $rounded]) {
+                $font = vio_font($this->ctx, $path, $rounded);
+                if ($font instanceof VioFont) {
+                    $this->fontCache[$key] = $font;
+                }
+            }
+            return;
+        }
+
+        if ($maxConcurrent <= 0) {
+            $maxConcurrent = 16;
+        }
+
+        $inflight = []; // key => async handle
+        while ($work !== [] || $inflight !== []) {
+            // Saturate up to the concurrency cap with fresh worker threads.
+            while ($work !== [] && \count($inflight) < $maxConcurrent) {
+                $key = \array_key_first($work);
+                [$path, $rounded] = $work[$key];
+                unset($work[$key]);
+                $handle = vio_font_load_async($this->ctx, $path, $rounded);
+                if ($handle === false) {
+                    // Worker spawn failed — load synchronously so the font is
+                    // never lost.
+                    $font = vio_font($this->ctx, $path, $rounded);
+                    if ($font instanceof VioFont) {
+                        $this->fontCache[$key] = $font;
+                    }
+                    continue;
+                }
+                $inflight[$key] = $handle;
+            }
+
+            // Collect finished atlases — each poll performs the GPU upload.
+            $progressed = false;
+            foreach ($inflight as $key => $handle) {
+                $result = vio_font_load_poll($handle);
+                if ($result === null) {
+                    continue; // still rasterising on its worker thread
+                }
+                unset($inflight[$key]);
+                $progressed = true;
+                if ($result instanceof VioFont) {
+                    $this->fontCache[$key] = $result;
+                }
+            }
+
+            // Nothing finished this pass — yield the core briefly rather than
+            // busy-spinning while the workers rasterise.
+            if (!$progressed && $inflight !== []) {
+                usleep(200);
+            }
+        }
+    }
+
     public function setFont(string $name): void
     {
         $this->currentFontName = $name;
