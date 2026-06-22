@@ -68,6 +68,26 @@ class VioRenderer3D implements Renderer3DInterface
 
     private ?string $shaderOverride = null;
 
+    /**
+     * Per-draw state-dedup trackers: the materialId / meshId whose uniforms are
+     * currently resident in the bound shader's cbuffer. Because vio uniforms are
+     * sticky, the draw path skips re-uploading material uniforms / mesh AABB when
+     * these match the next draw. Reset (null) at every pass boundary and whenever
+     * the bound shader object changes (bindPipeline) — see resetDrawStateCache().
+     */
+    private ?string $lastMaterialId = null;
+    private ?string $lastMeshId = null;
+
+    /**
+     * The shader id whose per-frame uniforms (lights/fog/shadow/ssao/sdfao +
+     * their texture binds) are currently resident in the cbuffer this frame.
+     * Set by the opaque pass; the transparent pass skips re-uploading the
+     * identical frame state when the shader object is unchanged (sticky cbuffer,
+     * same shader). The opaque pass always refreshes this before the transparent
+     * pass reads it, so it never goes stale across frames.
+     */
+    private ?string $frameUniformsShaderId = null;
+
     /** @var array<string, int> Material prefix → proc_mode cache */
     private static array $procModeCache = [];
 
@@ -1242,19 +1262,29 @@ class VioRenderer3D implements Renderer3DInterface
         $this->uploadShadowUniforms($hasShadowMap, $dirLights);
         $this->uploadSsaoUniforms();
         $this->uploadSdfAoUniforms();
+        $this->frameUniformsShaderId = $this->shaderOverride ?? 'default';
 
+        // Collect opaque-eligible draws (resolving each material ONCE) and sort by
+        // (materialId, meshId) so identical draws cluster — that makes the per-draw
+        // material-uniform / mesh-AABB dedup in drawMeshCommand effective (a sorted
+        // run re-uploads the ~28 material uniforms once per material instead of per
+        // draw). Opaque is depth-buffer order-independent (VIO_BLEND_NONE), so
+        // reordering cannot change the image.
+        $opaque = [];
         foreach ($commands as $cmd) {
+            if ($cmd instanceof DrawMesh || $cmd instanceof DrawMeshInstanced) {
+                $material = MaterialRegistry::get($cmd->materialId);
+                if ($material === null || $material->alpha < 1.0) {
+                    continue;
+                }
+                $opaque[] = [$cmd->materialId, $cmd->meshId, $cmd, $material];
+            }
+        }
+        usort($opaque, static fn (array $a, array $b): int => ($a[0] <=> $b[0]) ?: ($a[1] <=> $b[1]));
+        foreach ($opaque as [, , $cmd, $material]) {
             if ($cmd instanceof DrawMesh) {
-                $material = MaterialRegistry::get($cmd->materialId);
-                if ($material === null || $material->alpha < 1.0) {
-                    continue;
-                }
                 $this->drawMeshCommand($cmd->meshId, $material, $cmd->modelMatrix, $cmd->materialId);
-            } elseif ($cmd instanceof DrawMeshInstanced) {
-                $material = MaterialRegistry::get($cmd->materialId);
-                if ($material === null || $material->alpha < 1.0) {
-                    continue;
-                }
+            } else {
                 $this->drawMeshInstancedCommand($cmd, $material);
             }
         }
@@ -1263,10 +1293,17 @@ class VioRenderer3D implements Renderer3DInterface
         // --- Pass 3: Transparent geometry ---
         PerfProfiler::begin('render3d.submit.transparent');
         $this->bindPipeline('transparent');
-        $this->uploadFrameUniforms($frameState);
-        $this->uploadShadowUniforms($hasShadowMap, $dirLights);
-        $this->uploadSsaoUniforms();
-        $this->uploadSdfAoUniforms();
+        // The opaque pass already uploaded the frame uniforms (+ probe/ssao/sdfao
+        // texture binds) into this same shader object's sticky cbuffer; re-upload
+        // only if the shader actually changed (it doesn't within a normal frame).
+        $transparentShaderId = $this->shaderOverride ?? 'default';
+        if ($transparentShaderId !== $this->frameUniformsShaderId) {
+            $this->uploadFrameUniforms($frameState);
+            $this->uploadShadowUniforms($hasShadowMap, $dirLights);
+            $this->uploadSsaoUniforms();
+            $this->uploadSdfAoUniforms();
+            $this->frameUniformsShaderId = $transparentShaderId;
+        }
 
         foreach ($commands as $cmd) {
             if ($cmd instanceof DrawMesh) {
@@ -1506,6 +1543,23 @@ class VioRenderer3D implements Renderer3DInterface
         }
 
         vio_bind_pipeline($this->ctx, $this->pipelineCache[$key]);
+
+        // A pipeline bind may switch the bound shader object (its own cbuffer),
+        // and the new pipeline starts a fresh draw run — invalidate the per-draw
+        // material/mesh dedup trackers so the first draw after the bind always
+        // re-uploads its material uniforms + AABB.
+        $this->resetDrawStateCache();
+    }
+
+    /**
+     * Forget which material/mesh uniforms are resident in the bound cbuffer, so
+     * the next drawMeshCommand re-applies them unconditionally. Call at pass
+     * boundaries / pipeline binds (done in bindPipeline).
+     */
+    private function resetDrawStateCache(): void
+    {
+        $this->lastMaterialId = null;
+        $this->lastMeshId = null;
     }
 
     /**
@@ -2997,15 +3051,25 @@ class VioRenderer3D implements Renderer3DInterface
             return;
         }
 
-        // Per-draw uniforms
+        // Per-draw uniforms (vary per transform — always set)
         vio_set_uniform($this->ctx, 'u_model', $modelMatrix->toArray());
         vio_set_uniform($this->ctx, 'u_use_instancing', 0);
 
         $nm = $this->computeNormalMatrix($modelMatrix);
         vio_set_uniform($this->ctx, 'u_normal_matrix', $nm);
 
-        $this->applyMaterial($material, $materialId);
-        $this->bindMeshAabb($meshId);
+        // Sticky-uniform dedup: skip the ~28 material uniforms / mesh AABB when
+        // unchanged from the previous draw (the opaque pass sorts by material+mesh
+        // so identical draws cluster). Texture binding is always issued.
+        if ($materialId !== $this->lastMaterialId) {
+            $this->applyMaterialUniforms($material, $materialId);
+            $this->lastMaterialId = $materialId;
+        }
+        $this->bindMaterialTextures($material);
+        if ($meshId !== $this->lastMeshId) {
+            $this->bindMeshAabb($meshId);
+            $this->lastMeshId = $meshId;
+        }
 
         vio_draw($this->ctx, $mesh);
     }
@@ -3025,8 +3089,18 @@ class VioRenderer3D implements Renderer3DInterface
             return;
         }
 
-        $this->applyMaterial($material, $cmd->materialId);
-        $this->bindMeshAabb($cmd->meshId);
+        // Sticky-uniform dedup (shared trackers with drawMeshCommand — same
+        // shader cbuffer). Texture binding always issued; u_use_instancing toggled
+        // around the draw and reset to 0 so a following non-instanced draw is fine.
+        if ($cmd->materialId !== $this->lastMaterialId) {
+            $this->applyMaterialUniforms($material, $cmd->materialId);
+            $this->lastMaterialId = $cmd->materialId;
+        }
+        $this->bindMaterialTextures($material);
+        if ($cmd->meshId !== $this->lastMeshId) {
+            $this->bindMeshAabb($cmd->meshId);
+            $this->lastMeshId = $cmd->meshId;
+        }
         vio_set_uniform($this->ctx, 'u_use_instancing', 1);
 
         [$packed, $count] = $this->resolveInstanceData($cmd->meshId, $material, $cmd);
@@ -3170,7 +3244,18 @@ class VioRenderer3D implements Renderer3DInterface
         );
     }
 
-    private function applyMaterial(Material $material, string $materialId = ''): void
+    /**
+     * Upload the per-material scalar/vector uniforms (NOT the texture bind).
+     * This is a pure function of ($material, $materialId) — every value derives
+     * from the Material or the per-id procMode cache, with no per-draw or
+     * frame-varying input (snow/rain/etc. live in uploadFrameUniforms). Because
+     * vio cbuffer uniforms are sticky (a uniform keeps its last value until
+     * overwritten, and vio_draw snapshots the current cbuffer without clearing
+     * it), the draw path skips this call when the materialId is unchanged from
+     * the previous draw — see drawMeshCommand. Texture binding is split out into
+     * bindMaterialTextures() and always issued (not deduped) for safety.
+     */
+    private function applyMaterialUniforms(Material $material, string $materialId = ''): void
     {
         vio_set_uniform($this->ctx, 'u_albedo', [$material->albedo->r, $material->albedo->g, $material->albedo->b]);
         vio_set_uniform($this->ctx, 'u_emission', [$material->emission->r, $material->emission->g, $material->emission->b]);
@@ -3225,8 +3310,17 @@ class VioRenderer3D implements Renderer3DInterface
         } else {
             vio_set_uniform($this->ctx, 'u_season_tint', [1.0, 1.0, 1.0]);
         }
+    }
 
-        // Texture binding
+    /**
+     * Bind the material's albedo texture (if any) and the two texture-state
+     * uniforms. ALWAYS issued per draw (never deduped): cbuffer-uniform
+     * stickiness is verified, but texture-slot binding stickiness across
+     * pipeline binds is not, so re-issuing the bind keeps slot 0 correct
+     * regardless of what a prior material bound. Cheap (~1 bind + 2 uniforms).
+     */
+    private function bindMaterialTextures(Material $material): void
+    {
         $hasTexture = false;
         if ($material->albedoTexture !== null && $this->textureManager !== null) {
             $vioTex = $this->resolveTexture($material->albedoTexture);
