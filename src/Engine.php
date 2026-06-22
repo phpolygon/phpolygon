@@ -1269,20 +1269,24 @@ class Engine
 
     private function applyRenderFpsCap(\PHPolygon\Rendering\GraphicsSettings $settings): void
     {
-        $tickRate = (float) $this->config->targetTickRate;
         if ($settings->fpsCap > 0) {
             $cap = (float) $settings->fpsCap;
         } else {
-            $cap = min($settings->targetFps, $tickRate);
+            // fpsCap == 0 means UNCAPPED. Do NOT clamp the render rate to the sim
+            // tick rate: with fixed-timestep + interpolation the render SHOULD run
+            // faster than the sim ticks (interpolation smooths between them), so a
+            // 30 Hz sim must still allow 60+ fps rendering. (targetFps drives
+            // adaptive quality, not a hard render ceiling.)
+            $cap = 0.0;
         }
         // Real hardware thermal throttle: under genuine heat (a real OS/GPU
         // sensor, NOT the frametime guard) drop the render rate below the
         // player's cap so the device can cool down — restored on recovery.
         $thermalCeiling = $this->realThermalFpsCeiling();
-        if ($thermalCeiling > 0.0 && $thermalCeiling < $cap) {
+        if ($thermalCeiling > 0.0 && ($cap <= 0.0 || $thermalCeiling < $cap)) {
             $cap = $thermalCeiling;
         }
-        $this->gameLoop->setFpsCap((int) round(max(1.0, $cap)));
+        $this->gameLoop->setFpsCap($cap > 0.0 ? (int) round(max(1.0, $cap)) : 0);
     }
 
     /**
