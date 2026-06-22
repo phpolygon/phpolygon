@@ -45,6 +45,7 @@ const VIO_WRAP_CLAMP  = 1;
 const VIO_WRAP_MIRROR = 2;
 
 const VIO_FEATURE_TEXTURE_3D = 22;
+const VIO_FEATURE_COMPUTE = 1;
 
 // ----------------------------------------------------------------
 // Backend info
