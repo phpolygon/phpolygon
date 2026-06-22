@@ -25,6 +25,21 @@ class World
     /** @var array<int, array<class-string, ComponentInterface>> */
     private array $entityComponents = [];
 
+    /**
+     * Parked components of dormant entities. Same shape as $components, but the
+     * per-tick iteration surface (componentPool / componentEntities / query)
+     * reads only $components — so dormant entities are excluded from all system
+     * iteration while staying fully resident. $entityComponents is NOT split, so
+     * single-entity access (getComponent / tryGetComponent / hasComponent) keeps
+     * working for a dormant entity. See setEntityDormant().
+     *
+     * @var array<class-string, array<int, ComponentInterface>>
+     */
+    private array $dormantComponents = [];
+
+    /** @var array<int, bool> Entities currently dormant (resident, iteration-excluded). */
+    private array $dormant = [];
+
     /** @var list<SystemInterface> */
     private array $systems = [];
 
@@ -99,10 +114,10 @@ class World
 
         foreach ($this->entityComponents[$id] as $class => $component) {
             $component->onDetach($this->entity($id));
-            unset($this->components[$class][$id]);
+            unset($this->components[$class][$id], $this->dormantComponents[$class][$id]);
         }
 
-        unset($this->entityComponents[$id], $this->alive[$id], $this->entityCache[$id]);
+        unset($this->entityComponents[$id], $this->alive[$id], $this->entityCache[$id], $this->dormant[$id]);
         $this->freeList[] = $id;
     }
 
@@ -140,7 +155,13 @@ class World
         }
 
         $class = get_class($component);
-        $this->components[$class][$entityId] = $component;
+        // Attaching to a dormant entity must keep its components parked, not leak
+        // one into the active iteration pool (the entity stays fully dormant).
+        if (isset($this->dormant[$entityId])) {
+            $this->dormantComponents[$class][$entityId] = $component;
+        } else {
+            $this->components[$class][$entityId] = $component;
+        }
         $this->entityComponents[$entityId][$class] = $component;
 
         $component->onAttach($this->entity($entityId));
@@ -155,7 +176,10 @@ class World
         $component = $this->entityComponents[$entityId][$componentClass];
         $component->onDetach($this->entity($entityId));
 
+        // The component lives in exactly one of the two pools depending on
+        // dormancy — clear both to be safe.
         unset($this->components[$componentClass][$entityId]);
+        unset($this->dormantComponents[$componentClass][$entityId]);
         unset($this->entityComponents[$entityId][$componentClass]);
     }
 
@@ -224,6 +248,66 @@ class World
     public function componentPool(string $componentClass): array
     {
         return $this->components[$componentClass] ?? [];
+    }
+
+    // --- Dormancy ---
+
+    /**
+     * Park (or wake) an entity: its components move between the active iteration
+     * pool and a parked store, so all per-tick systems (which iterate via
+     * componentPool / query) skip a dormant entity, while it stays fully resident
+     * and alive. Single-entity access (get/tryGet/hasComponent) is unaffected.
+     *
+     * Intended for activation of large spatial groups (e.g. an off-screen region
+     * kept loaded but not processed). The CALLER must toggle whole Transform
+     * subtrees together — a dormant child under an active parent (or vice-versa)
+     * produces stale/mis-parented transforms, since the parent's hierarchy walk
+     * still resolves the child via the intact single-entity index.
+     *
+     * O(components on the entity). No onAttach/onDetach is fired — the components
+     * stay attached, only their iteration visibility changes.
+     */
+    public function setEntityDormant(int $entityId, bool $dormant): void
+    {
+        if (!isset($this->alive[$entityId])) {
+            return;
+        }
+        $isDormant = isset($this->dormant[$entityId]);
+        if ($dormant === $isDormant) {
+            return;
+        }
+
+        if ($dormant) {
+            foreach ($this->entityComponents[$entityId] as $class => $component) {
+                $this->dormantComponents[$class][$entityId] = $component;
+                unset($this->components[$class][$entityId]);
+            }
+            $this->dormant[$entityId] = true;
+        } else {
+            foreach ($this->entityComponents[$entityId] as $class => $component) {
+                $this->components[$class][$entityId] = $component;
+                unset($this->dormantComponents[$class][$entityId]);
+            }
+            unset($this->dormant[$entityId]);
+        }
+    }
+
+    /**
+     * Bulk form of {@see setEntityDormant()} — the entry point for toggling a
+     * whole region's entity-id set in one go.
+     *
+     * @param iterable<int> $entityIds
+     */
+    public function setEntitiesDormant(iterable $entityIds, bool $dormant): void
+    {
+        foreach ($entityIds as $entityId) {
+            $this->setEntityDormant($entityId, $dormant);
+        }
+    }
+
+    public function isDormant(int $entityId): bool
+    {
+        return isset($this->dormant[$entityId]);
     }
 
     // --- Queries ---
@@ -333,6 +417,8 @@ class World
         $this->nextEntityId = 0;
         $this->freeList = [];
         $this->entityCache = [];
+        $this->dormantComponents = [];
+        $this->dormant = [];
 
         // Give every system a chance to drop per-entity-id caches. Without this
         // hook, caches keyed on int ids associate stale state with whichever
