@@ -24,7 +24,7 @@ final class GpuProbeBaker
     private const LOCAL_SIZE = 64;
 
     /** Cached compiled pipeline — warmed during the splash, reused per bake. */
-    private static mixed $pipeline = null;
+    private static ?\VioComputePipeline $pipeline = null;
 
     /**
      * GLSL compute shader. Lighting constants (ALBEDO 0.55, AMBIENT_FILL 0.16,
@@ -218,8 +218,12 @@ final class GpuProbeBaker
             if ($bytes === false || strlen($bytes) < $probes * 12 * 4) {
                 return null;
             }
+            $unpacked = unpack('f*', substr($bytes, 0, $probes * 12 * 4));
+            if ($unpacked === false) {
+                return null;
+            }
             /** @var list<float> $data */
-            $data = array_values(unpack('f*', substr($bytes, 0, $probes * 12 * 4)));
+            $data = array_values($unpacked);
             return $data;
         } catch (\Throwable $e) {
             return null;

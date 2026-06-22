@@ -25,8 +25,8 @@ final class GpuReflectionBaker
 
     /** Compiled compute pipelines (shade + blur), cached so the two shader
      *  compiles happen once — warmed during the splash, reused by every bake. */
-    private static mixed $shadePipeline = null;
-    private static mixed $blurPipeline = null;
+    private static ?\VioComputePipeline $shadePipeline = null;
+    private static ?\VioComputePipeline $blurPipeline = null;
 
     /**
      * Pre-compile + cache both compute pipelines (the two shader compiles are the
@@ -272,8 +272,12 @@ final class GpuReflectionBaker
             $faceBytes = $res * $res * 4;
             $faces = [];
             for ($f = 0; $f < 6; $f++) {
+                $unpacked = unpack('C*', substr($blurred, $f * $faceBytes, $faceBytes));
+                if ($unpacked === false) {
+                    return null;
+                }
                 /** @var list<int> $bytes */
-                $bytes = array_values(unpack('C*', substr($blurred, $f * $faceBytes, $faceBytes)));
+                $bytes = array_values($unpacked);
                 $faces[] = $bytes;
             }
             return new CubemapData($res, $faces);

@@ -3262,7 +3262,7 @@ class VioRenderer3D implements Renderer3DInterface
      * Both write byte-identical cbuffer state; the batch form just avoids the
      * per-uniform PHP→C call overhead on the hot draw path.
      *
-     * @param array<string, int|float|list<float>> $pairs
+     * @param array<string, int|float|array<float>> $pairs
      */
     private function setUniforms(array $pairs): void
     {

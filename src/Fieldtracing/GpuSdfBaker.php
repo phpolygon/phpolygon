@@ -26,7 +26,7 @@ final class GpuSdfBaker
 
     /** Compiled compute pipeline, cached so the (expensive) shader compile happens
      *  once — warmed during the splash via {@see warm()}, reused by every bake. */
-    private static mixed $pipeline = null;
+    private static ?\VioComputePipeline $pipeline = null;
 
     /**
      * Pre-compile + cache the compute pipeline (the shader compile is the
@@ -157,8 +157,12 @@ final class GpuSdfBaker
                 return null;
             }
 
+            $unpacked = unpack('f*', substr($bytes, 0, $cellCount * 4));
+            if ($unpacked === false) {
+                return null;
+            }
             /** @var list<float> $data */
-            $data = array_values(unpack('f*', substr($bytes, 0, $cellCount * 4)));
+            $data = array_values($unpacked);
             return $data;
         } catch (\Throwable $e) {
             return null;

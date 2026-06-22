@@ -14,6 +14,7 @@ class VioFont {}
 class VioSound {}
 class VioRenderTarget {}
 class VioCubemap {}
+class VioComputePipeline {}
 
 // ----------------------------------------------------------------
 // Constants
@@ -366,3 +367,33 @@ function vio_font_load_async(VioContext $ctx, string $path, float $size = 24.0):
  * @return VioFont|null|false
  */
 function vio_font_load_poll($handle): VioFont|null|false {}
+
+// ----------------------------------------------------------------
+// GPU compute + batch uniforms (php-vio >= 2.1; feature-gated / fallback-guarded
+// on the engine side, so older builds without these still work).
+// ----------------------------------------------------------------
+
+const VIO_COMPUTE_READ = 0;
+const VIO_COMPUTE_WRITE = 1;
+
+/** @param array<string,mixed> $config */
+function vio_compute_pipeline(VioContext $context, array $config): VioComputePipeline|false {}
+
+/** @param array<string,mixed> $config */
+function vio_storage_buffer(VioContext $context, array $config): VioBuffer|false {}
+
+function vio_compute_bind_buffer(VioContext $context, VioComputePipeline $pipeline, VioBuffer $buffer, int $slot, int $access): void {}
+
+function vio_compute_set_uniforms(VioContext $context, VioComputePipeline $pipeline, string $data): void {}
+
+function vio_compute_dispatch(VioContext $context, VioComputePipeline $pipeline, int $gx, int $gy, int $gz): void {}
+
+function vio_storage_buffer_read(VioContext $context, VioBuffer $buffer): string|false {}
+
+/**
+ * Batch form of vio_set_uniform — apply a map of ['u_name' => value, ...] in one
+ * native call.
+ *
+ * @param array<string, int|float|array<float>> $uniforms
+ */
+function vio_set_uniforms(VioContext $context, array $uniforms): void {}
