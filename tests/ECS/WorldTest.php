@@ -124,4 +124,98 @@ class WorldTest extends TestCase
         $world->clear();
         $this->assertEquals(0, $world->entityCount());
     }
+
+    public function testDormantEntityExcludedFromIterationButStaysAccessible(): void
+    {
+        $world = new World();
+        $entity = $world->createEntity();
+        $id = $entity->id;
+        $entity->attach(new NameTag('Region'))->attach(new Transform2D());
+
+        $this->assertCount(1, $world->componentPool(NameTag::class));
+        $this->assertFalse($world->isDormant($id));
+
+        $world->setEntityDormant($id, true);
+
+        // Excluded from every per-tick iteration surface...
+        $this->assertCount(0, $world->componentPool(NameTag::class));
+        $this->assertSame([], $world->componentEntities(NameTag::class));
+        $this->assertSame(0, $world->componentCount(NameTag::class));
+        $this->assertTrue($world->isDormant($id));
+        // ...but still alive and individually accessible.
+        $this->assertTrue($world->isAlive($id));
+        $this->assertInstanceOf(NameTag::class, $world->tryGetComponent($id, NameTag::class));
+        $this->assertTrue($world->hasComponent($id, NameTag::class));
+        $this->assertSame(1, $world->entityCount());
+    }
+
+    public function testWakeRestoresToIteration(): void
+    {
+        $world = new World();
+        $id = $world->createEntity()->attach(new NameTag('R'))->id;
+        $world->setEntityDormant($id, true);
+        $world->setEntityDormant($id, false);
+
+        $this->assertCount(1, $world->componentPool(NameTag::class));
+        $this->assertFalse($world->isDormant($id));
+    }
+
+    public function testAttachWhileDormantStaysParked(): void
+    {
+        $world = new World();
+        $id = $world->createEntity()->attach(new NameTag('R'))->id;
+        $world->setEntityDormant($id, true);
+
+        $world->attachComponent($id, new Transform2D());
+
+        // A component attached to a dormant entity must NOT leak into the active
+        // pool — it stays parked and re-enters iteration only on wake.
+        $this->assertCount(0, $world->componentPool(Transform2D::class));
+        $this->assertTrue($world->hasComponent($id, Transform2D::class));
+        $world->setEntityDormant($id, false);
+        $this->assertCount(1, $world->componentPool(Transform2D::class));
+    }
+
+    public function testSetEntitiesDormantBulkAndIdempotent(): void
+    {
+        $world = new World();
+        $a = $world->createEntity()->attach(new NameTag('A'))->id;
+        $b = $world->createEntity()->attach(new NameTag('B'))->id;
+
+        $world->setEntitiesDormant([$a, $b], true);
+        $this->assertCount(0, $world->componentPool(NameTag::class));
+
+        // Dorming again is a no-op; waking restores both.
+        $world->setEntitiesDormant([$a, $b], true);
+        $world->setEntitiesDormant([$a, $b], false);
+        $this->assertCount(2, $world->componentPool(NameTag::class));
+    }
+
+    public function testDestroyDormantEntityCleansParkedStore(): void
+    {
+        $world = new World();
+        $id = $world->createEntity()->attach(new NameTag('R'))->attach(new Transform2D())->id;
+        $world->setEntityDormant($id, true);
+
+        $world->destroyEntity($id);
+
+        $this->assertFalse($world->isAlive($id));
+        $this->assertFalse($world->isDormant($id));
+        $this->assertCount(0, $world->componentPool(NameTag::class));
+        // No stale parked component leaks onto the next entity that reuses the id.
+        $reuse = $world->createEntity();
+        $this->assertFalse($world->hasComponent($reuse->id, NameTag::class));
+    }
+
+    public function testClearResetsDormancy(): void
+    {
+        $world = new World();
+        $id = $world->createEntity()->attach(new NameTag('R'))->id;
+        $world->setEntityDormant($id, true);
+
+        $world->clear();
+
+        $this->assertSame(0, $world->entityCount());
+        $this->assertFalse($world->isDormant($id));
+    }
 }
