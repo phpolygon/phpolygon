@@ -88,6 +88,9 @@ class VioRenderer3D implements Renderer3DInterface
      */
     private ?string $frameUniformsShaderId = null;
 
+    /** Whether the php-vio build exposes the batch vio_set_uniforms helper. */
+    private bool $batchUniforms = false;
+
     /** @var array<string, int> Material prefix → proc_mode cache */
     private static array $procModeCache = [];
 
@@ -336,6 +339,10 @@ class VioRenderer3D implements Renderer3DInterface
         $this->width = $width;
         $this->height = $height;
         $this->settings = $settings ?? new GraphicsSettings();
+        // Batch uniform uploads through one native call when the extension
+        // provides vio_set_uniforms (new php-vio); otherwise fall back to
+        // per-uniform vio_set_uniform so an older DLL still works.
+        $this->batchUniforms = function_exists('vio_set_uniforms');
         $this->initShaders();
         $this->initShadowMap();
         $this->initSkyboxMesh();
@@ -3051,12 +3058,12 @@ class VioRenderer3D implements Renderer3DInterface
             return;
         }
 
-        // Per-draw uniforms (vary per transform — always set)
-        vio_set_uniform($this->ctx, 'u_model', $modelMatrix->toArray());
-        vio_set_uniform($this->ctx, 'u_use_instancing', 0);
-
-        $nm = $this->computeNormalMatrix($modelMatrix);
-        vio_set_uniform($this->ctx, 'u_normal_matrix', $nm);
+        // Per-draw uniforms (vary per transform — always set), batched.
+        $this->setUniforms([
+            'u_model'          => $modelMatrix->toArray(),
+            'u_use_instancing' => 0,
+            'u_normal_matrix'  => $this->computeNormalMatrix($modelMatrix),
+        ]);
 
         // Sticky-uniform dedup: skip the ~28 material uniforms / mesh AABB when
         // unchanged from the previous draw (the opaque pass sorts by material+mesh
@@ -3257,58 +3264,68 @@ class VioRenderer3D implements Renderer3DInterface
      */
     private function applyMaterialUniforms(Material $material, string $materialId = ''): void
     {
-        vio_set_uniform($this->ctx, 'u_albedo', [$material->albedo->r, $material->albedo->g, $material->albedo->b]);
-        vio_set_uniform($this->ctx, 'u_emission', [$material->emission->r, $material->emission->g, $material->emission->b]);
-        vio_set_uniform($this->ctx, 'u_roughness', $material->roughness);
-        vio_set_uniform($this->ctx, 'u_metallic', $material->metallic);
-        vio_set_uniform($this->ctx, 'u_alpha', $material->alpha);
-        vio_set_uniform($this->ctx, 'u_clearcoat', $material->clearcoat);
-        vio_set_uniform($this->ctx, 'u_clearcoat_roughness', $material->clearcoatRoughness);
-        vio_set_uniform($this->ctx, 'u_flakes', $material->flakes);
-        vio_set_uniform($this->ctx, 'u_normal_intensity', $material->normalIntensity);
-        vio_set_uniform($this->ctx, 'u_use_environment_map', $material->useEnvironmentMap ? 1 : 0);
-        vio_set_uniform($this->ctx, 'u_normal_pattern', NormalPattern::codeFor($material->normalPattern));
-        vio_set_uniform($this->ctx, 'u_normal_scale', $material->normalScale);
-        vio_set_uniform($this->ctx, 'u_surface_pattern', SurfacePattern::codeFor($material->surfacePattern));
-        vio_set_uniform($this->ctx, 'u_surface_scale', $material->surfaceScale);
-        vio_set_uniform($this->ctx, 'u_surface_intensity', $material->surfaceIntensity);
-        vio_set_uniform($this->ctx, 'u_wetness', $material->wetness);
-
-        // Subsurface scattering (skin path). Gated by strength > 0 in the
-        // shader so non-skin materials remain visually identical.
-        vio_set_uniform($this->ctx, 'u_subsurface_color', [
-            $material->subsurfaceColor->r,
-            $material->subsurfaceColor->g,
-            $material->subsurfaceColor->b,
-        ]);
-        vio_set_uniform($this->ctx, 'u_subsurface_strength', $material->subsurfaceStrength);
-
-        // Cloth (mirrors OpenGL backend - same uniform names).
-        vio_set_uniform($this->ctx, 'u_cloth', $material->cloth ? 1 : 0);
-        vio_set_uniform($this->ctx, 'u_cloth_strength', $material->clothStrength);
-        vio_set_uniform($this->ctx, 'u_cloth_frequency', $material->clothFrequency);
-        vio_set_uniform($this->ctx, 'u_cloth_phase', $material->clothPhase);
-        vio_set_uniform($this->ctx, 'u_cloth_anchor_top', $material->clothAnchorTop ? 1 : 0);
-
-        // Procedural material mode
         $procMode = self::$procModeCache[$materialId] ?? $this->resolveProcMode($materialId);
-        vio_set_uniform($this->ctx, 'u_proc_mode', $procMode);
 
-        // Water (proc_mode 2): enable GPU vertex wave animation
-        vio_set_uniform($this->ctx, 'u_vertex_anim', $procMode === 2 ? 1 : 0);
-
+        // One batched upload of the ~28 material uniforms (was ~28 individual
+        // native calls). Insertion order is irrelevant — each uniform writes its
+        // own reflected cbuffer offset, so the result is byte-identical.
+        $u = [
+            'u_albedo'              => [$material->albedo->r, $material->albedo->g, $material->albedo->b],
+            'u_emission'            => [$material->emission->r, $material->emission->g, $material->emission->b],
+            'u_roughness'           => $material->roughness,
+            'u_metallic'            => $material->metallic,
+            'u_alpha'               => $material->alpha,
+            'u_clearcoat'           => $material->clearcoat,
+            'u_clearcoat_roughness' => $material->clearcoatRoughness,
+            'u_flakes'              => $material->flakes,
+            'u_normal_intensity'    => $material->normalIntensity,
+            'u_use_environment_map' => $material->useEnvironmentMap ? 1 : 0,
+            'u_normal_pattern'      => NormalPattern::codeFor($material->normalPattern),
+            'u_normal_scale'        => $material->normalScale,
+            'u_surface_pattern'     => SurfacePattern::codeFor($material->surfacePattern),
+            'u_surface_scale'       => $material->surfaceScale,
+            'u_surface_intensity'   => $material->surfaceIntensity,
+            'u_wetness'             => $material->wetness,
+            // Subsurface scattering (skin path). Gated by strength > 0 in the
+            // shader so non-skin materials remain visually identical.
+            'u_subsurface_color'    => [$material->subsurfaceColor->r, $material->subsurfaceColor->g, $material->subsurfaceColor->b],
+            'u_subsurface_strength' => $material->subsurfaceStrength,
+            // Cloth (mirrors OpenGL backend - same uniform names).
+            'u_cloth'               => $material->cloth ? 1 : 0,
+            'u_cloth_strength'      => $material->clothStrength,
+            'u_cloth_frequency'     => $material->clothFrequency,
+            'u_cloth_phase'         => $material->clothPhase,
+            'u_cloth_anchor_top'    => $material->clothAnchorTop ? 1 : 0,
+            'u_proc_mode'           => $procMode,
+            // Water (proc_mode 2): enable GPU vertex wave animation.
+            'u_vertex_anim'         => $procMode === 2 ? 1 : 0,
+            'u_season_tint'         => $procMode === 1
+                ? [$material->albedo->r / 0.77, $material->albedo->g / 0.66, $material->albedo->b / 0.41]
+                : [1.0, 1.0, 1.0],
+        ];
         if ($procMode === 9) {
-            vio_set_uniform($this->ctx, 'u_moon_phase', $material->roughness);
+            $u['u_moon_phase'] = $material->roughness;
         }
 
-        if ($procMode === 1) {
-            vio_set_uniform($this->ctx, 'u_season_tint', [
-                $material->albedo->r / 0.77,
-                $material->albedo->g / 0.66,
-                $material->albedo->b / 0.41,
-            ]);
-        } else {
-            vio_set_uniform($this->ctx, 'u_season_tint', [1.0, 1.0, 1.0]);
+        $this->setUniforms($u);
+    }
+
+    /**
+     * Upload a batch of uniforms in a single native call when the php-vio build
+     * provides vio_set_uniforms, else fall back to per-uniform vio_set_uniform.
+     * Both write byte-identical cbuffer state; the batch form just avoids the
+     * per-uniform PHP→C call overhead on the hot draw path.
+     *
+     * @param array<string, int|float|list<float>> $pairs
+     */
+    private function setUniforms(array $pairs): void
+    {
+        if ($this->batchUniforms) {
+            vio_set_uniforms($this->ctx, $pairs);
+            return;
+        }
+        foreach ($pairs as $name => $value) {
+            vio_set_uniform($this->ctx, $name, $value);
         }
     }
 
@@ -3329,8 +3346,10 @@ class VioRenderer3D implements Renderer3DInterface
                 $hasTexture = true;
             }
         }
-        vio_set_uniform($this->ctx, 'u_has_albedo_texture', $hasTexture ? 1 : 0);
-        vio_set_uniform($this->ctx, 'u_albedo_texture', 0);
+        $this->setUniforms([
+            'u_has_albedo_texture' => $hasTexture ? 1 : 0,
+            'u_albedo_texture'     => 0,
+        ]);
     }
 
     private function resolveProcMode(string $materialId): int
