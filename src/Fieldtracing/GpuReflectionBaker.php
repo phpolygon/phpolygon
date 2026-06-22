@@ -9,16 +9,15 @@ use PHPolygon\Math\Vec3;
 use PHPolygon\Rendering\CubemapData;
 
 /**
- * GPU offload for the CodeCity reflection-probe cubemap (the water mirror). It
- * reproduces CityReflectionBaker's CPU work — per cube texel, sphere-march the
- * SDF from the probe, shade a building hit or return the sky gradient, then a
- * 3×3 box blur — on the GPU via two compute passes, returning the same
- * {@see CubemapData} (6 faces of RGBA8). Best-effort: returns null on any
- * unavailability/failure so the caller falls back to the CPU path.
+ * GPU offload for a reflection-probe cubemap baked from an SDF volume. Per cube
+ * texel it sphere-marches the SDF from a probe point, shades a surface hit or
+ * returns the sky gradient, then applies a 3×3 box blur — on the GPU via two
+ * compute passes, returning a {@see CubemapData} (6 faces of RGBA8). Best-effort:
+ * returns null on any unavailability/failure so the caller falls back to CPU.
  *
- * The marching/shading/encoding math is a faithful port of CityReflectionBaker
- * + SdfVolume::sample + ProceduralCubemap so the optics match (verified by
- * tools/reflection_gpu_verify.php).
+ * The marching/shading/encoding math must match whatever CPU baker it stands in
+ * for (per-texel direction from the cube-face basis, trilinear SDF sample, sky
+ * gradient, RGBA8 encoding) so the optics agree.
  */
 final class GpuReflectionBaker
 {

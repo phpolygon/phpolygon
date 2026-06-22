@@ -5,19 +5,19 @@ declare(strict_types=1);
 namespace PHPolygon\Fieldtracing;
 
 /**
- * GPU offload for the box-occluder SDF voxelization (the CodeCity fieldtracing
- * bake). Given the building boxes and a grid, it dispatches a compute shader
- * that writes the flat float distance grid, reads it back, and returns the same
+ * GPU offload for box-occluder SDF voxelization (the fieldtracing volume bake).
+ * Given a set of occluder boxes and a grid, it dispatches a compute shader that
+ * writes the flat float distance grid, reads it back, and returns the same
  * {@code list<float>} the CPU path produces — so callers are interchangeable and
  * the probe/reflection bakers (which consume the raw floats) are untouched.
  *
  * Everything is best-effort: if the php-vio build has no compute primitive, the
  * backend doesn't support VIO_FEATURE_COMPUTE, or anything throws, {@see tryFill}
- * returns null and the caller falls back to its CPU (ext-parallel) path. A GPU
- * failure must NEVER fail the bake.
+ * returns null and the caller falls back to its CPU path. A GPU failure must
+ * NEVER fail the bake.
  *
- * The per-cell distance math is byte-identical to the CPU Quilez box SDF so the
- * two paths agree to float precision (verified by tools/ft_gpu_selftest.php).
+ * The per-cell distance math is a Quilez box SDF; keep it identical to whatever
+ * CPU path it stands in for so the two agree to float precision.
  */
 final class GpuSdfBaker
 {
