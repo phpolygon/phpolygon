@@ -6,6 +6,7 @@ namespace PHPolygon\Rendering;
 
 use PHPolygon\Geometry\MeshData;
 use PHPolygon\Geometry\MeshRegistry;
+use PHPolygon\Runtime\PerfProfiler;
 use PHPolygon\Math\Mat4;
 use PHPolygon\Math\Vec3;
 use PHPolygon\Rendering\Command\AddPointLight;
@@ -1163,7 +1164,9 @@ class VioRenderer3D implements Renderer3DInterface
         $this->frameFtMode = $ftMode;
 
         // --- Shadow pass ---
+        PerfProfiler::begin('render3d.submit.shadow');
         $hasShadowMap = $this->renderShadowPass($commandList, $dirLights);
+        PerfProfiler::end();
         if ($this->flashDbgEnabled() && $hasShadowMap !== $this->flashDbgHadShadow) {
             fprintf(STDERR, "[flashdbg] %s  shadow pass flipped: %s -> %s\n",
                 date('H:i:s'),
@@ -1177,8 +1180,12 @@ class VioRenderer3D implements Renderer3DInterface
         // (see ssaoEnabledThisFrame()). Binds/unbinds its OWN targets, exactly
         // like the shadow pass above, so it must run BEFORE the scene target is
         // bound below. Leaves $this->ssaoActiveThisFrame set for the opaque pass.
+        PerfProfiler::begin('render3d.submit.ssao');
         $this->renderSsaoPass($commands, $frameState);
+        PerfProfiler::end();
+        PerfProfiler::begin('render3d.submit.sdfao');
         $this->renderSdfAoPass($frameState);
+        PerfProfiler::end();
 
         // HDR/Bloom disabled — D3D11 fullscreen quad draw produces no pixels (needs investigation)
         $hdrTarget = $this->enableHdr ? $this->hdrTarget : null;
@@ -1229,6 +1236,7 @@ class VioRenderer3D implements Renderer3DInterface
         }
 
         // --- Pass 2: Opaque geometry ---
+        PerfProfiler::begin('render3d.submit.opaque');
         $this->bindPipeline('opaque');
         $this->uploadFrameUniforms($frameState);
         $this->uploadShadowUniforms($hasShadowMap, $dirLights);
@@ -1250,8 +1258,10 @@ class VioRenderer3D implements Renderer3DInterface
                 $this->drawMeshInstancedCommand($cmd, $material);
             }
         }
+        PerfProfiler::end();
 
         // --- Pass 3: Transparent geometry ---
+        PerfProfiler::begin('render3d.submit.transparent');
         $this->bindPipeline('transparent');
         $this->uploadFrameUniforms($frameState);
         $this->uploadShadowUniforms($hasShadowMap, $dirLights);
@@ -1273,6 +1283,7 @@ class VioRenderer3D implements Renderer3DInterface
                 $this->drawMeshInstancedCommand($cmd, $material);
             }
         }
+        PerfProfiler::end();
 
         // --- Screen-space reflections (VIO/D3D12, HDR path) ---
         // Ray-march the G-buffer against the just-rendered HDR scene colour and
