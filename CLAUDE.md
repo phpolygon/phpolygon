@@ -26,6 +26,27 @@ unified backend. When php-vio is not loaded, the engine falls back to php-glfw
 Games are built in separate repositories and require `phpolygon/phpolygon`
 via Composer.
 
+### Rule: never reference a specific game (code OR comments)
+
+The engine is game-agnostic. **Nothing in this repository may name or describe a
+specific game** — not in code, comments, docblocks, shaders, tests, build
+templates, identifiers, strings, or magic constants. This includes (but is not
+limited to) "Code Rescue", "Code Tycoon", "CodeCity", "Tutorial Island", and any
+district/scene/feature names from a downstream game.
+
+- Describe behaviour generically ("the consuming game", "the SDF volume", "a
+  reflection probe") — never by the game that happens to use it.
+- Motivate a perf note or fix by the *mechanism*, not the game it surfaced in
+  (write "HUD-heavy panels with dynamic strings", not "<game>'s money panel").
+- **No game-specific values baked into engine code or shaders.** Coordinates,
+  world offsets, water heights, layout constants etc. that belong to one game's
+  scene must come from the game via uniforms/parameters/config — never hardcoded
+  here. A hardcoded game constant is a coupling bug, not just a naming one.
+
+If you find an existing reference, remove/genericize it. If genericizing would
+change behaviour (e.g. a hardcoded scene constant), surface it as a coupling to
+parameterize rather than silently leaving it.
+
 ---
 
 ## Architecture decisions (settled — do not revisit without explicit instruction)

@@ -406,26 +406,29 @@ vec3 finalize(vec3 color) {
     return applyVignette(color);
 }
 
-// Underwater absorption tint. The CodeCity ocean surface sits at WATER_Y; any
-// fragment below it is submerged (notably the sunken W3/CShark harbour). Water
-// absorbs warm wavelengths first, so with depth the lit colour is pulled toward
-// a blue-green body colour AND darkened. Subtle near the surface, stronger with
-// depth (saturating ~13 m down). Applied at the very end of the lit path so it
-// affects terrain AND buildings uniformly. MUST stay identical to the vio mirror
+// Underwater absorption tint. The ocean surface sits at WATER_Y; any fragment
+// below it is submerged (e.g. a sunken harbour). Water absorbs warm wavelengths
+// first, so with depth the lit colour is pulled toward a blue-green body colour
+// AND darkened. Subtle near the surface, stronger with depth (saturating ~13 m
+// down). Applied at the very end of the lit path so it affects terrain AND
+// buildings uniformly. MUST stay identical to the vio mirror
 // (vio/mesh3d.frag.glsl): same WATER_Y, tint colour, depth scale and weights.
+// FIXME(coupling): WATER_Y, the dome centres/radius and the world offset below
+// are scene constants supplied by the consuming game — they should arrive as
+// uniforms, not be hardcoded in the engine shader. See engine CLAUDE.md.
 const float WATER_Y = -0.4;
 vec3 applyUnderwaterTint(vec3 color, vec3 worldPos) {
     if (worldPos.y >= WATER_Y) return color;
-    // Dry interior of the W3 underwater glass dome — no underwater tint inside
-    // its horizontal footprint. Two discs: embedded world (+1200 X) and
-    // standalone CodeCity. Centre = forward(144°)*300 (± the +1200 offset).
+    // Dry interior of an underwater glass dome — no underwater tint inside its
+    // horizontal footprint. Two discs: an embedded scene (+X world offset) and a
+    // standalone one. (Game-supplied centres — see FIXME above.)
     const float DOME_R2 = 120.0 * 120.0;
     vec2 dE = worldPos.xz - vec2(957.3, 176.5);   // embedded (shipping) scene
-    vec2 dL = worldPos.xz - vec2(-242.7, 176.5);  // standalone CodeCityScene
+    vec2 dL = worldPos.xz - vec2(-242.7, 176.5);  // standalone scene
     if (dot(dE, dE) < DOME_R2 || dot(dL, dL) < DOME_R2) {
         return color; // inside the dry bubble
     }
-    // dry shaft+corridor tube (W3): keep its interior un-tinted
+    // dry shaft+corridor tube: keep its interior un-tinted
     // (the descent shaft over deep water + the glass corridor to the dome).
     // Pure-XZ point-to-segment distance → exception holds over the full shaft
     // height and the whole corridor; water OUTSIDE the 6-unit radius stays tinted.
@@ -499,14 +502,14 @@ vec3 computeSand(vec3 N, vec3 V, vec3 L, out float roughOut) {
     //  /constants MUST stay identical to the vio mirror (vio/mesh3d.frag.glsl).
     //  This backend's fbm helper is fbm(p, octaves), not fbm2.
     //  Bands:
-    //    [1.25,1.75) industrial concrete (W1 PHP)        — look unchanged
-    //    [1.75,2.25) marble / flagstone (W2 Python)
-    //    [2.25,2.75) asphalt + neon flecks (W4 JS)
-    //    [2.75,3.25) cobblestone (W5 Rust)
-    //    [3.25,+)    wet harbour stone (W3 CShark, underwater)
+    //    [1.25,1.75) industrial concrete    — look unchanged
+    //    [1.75,2.25) marble / flagstone
+    //    [2.25,2.75) asphalt + neon flecks
+    //    [2.75,3.25) cobblestone
+    //    [3.25,+)    wet harbour stone (underwater)
     // ===============================================================
 
-    // --- [1.25,1.75) Industrial concrete (W1 PHP) — UNCHANGED LOOK ----------
+    // --- [1.25,1.75) Industrial concrete — UNCHANGED LOOK ------------------
     if (zone >= 1.25 && zone < 1.75) {
         const vec3  CONCRETE_BASE = vec3(0.334, 0.340, 0.354); // ~#55565A soot-grey
         const float CRACK_STRENGTH = 0.55;
@@ -534,7 +537,7 @@ vec3 computeSand(vec3 N, vec3 V, vec3 L, out float roughOut) {
         return base;
     }
 
-    // --- [1.75,2.25) Marble / flagstone (W2 Python academy) ----------------
+    // --- [1.75,2.25) Marble / flagstone ------------------------------------
     // Pale grey-white slabs: broad value mottle, subtle grey veining, thin
     // recessed flag joints. Low-mid roughness (polished academic stone).
     if (zone >= 1.75 && zone < 2.25) {
@@ -563,7 +566,7 @@ vec3 computeSand(vec3 N, vec3 V, vec3 L, out float roughOut) {
         return base;
     }
 
-    // --- [2.25,2.75) Asphalt + neon flecks (W4 JS neon entertainment) ------
+    // --- [2.25,2.75) Asphalt + neon flecks ---------------------------------
     // Near-black asphalt with aggregate grain + sparse emissive cyan/magenta
     // specks (added to albedo so they read self-lit). Time-pulsed shimmer.
     if (zone >= 2.25 && zone < 2.75) {
@@ -588,7 +591,7 @@ vec3 computeSand(vec3 N, vec3 V, vec3 L, out float roughOut) {
         return base;
     }
 
-    // --- [2.75,3.25) Cobblestone (W5 Rust medieval fortress) ----------------
+    // --- [2.75,3.25) Cobblestone -------------------------------------------
     // Rounded cobbles via a cheap cellular (Worley-ish) field: bright domed
     // crowns, dark recessed mortar at the cell edges. Warm grey-brown, rough.
     if (zone >= 2.75 && zone < 3.25) {
@@ -621,7 +624,7 @@ vec3 computeSand(vec3 N, vec3 V, vec3 L, out float roughOut) {
         return base;
     }
 
-    // --- [3.25,+) Wet harbour stone (W3 CShark, underwater) ----------------
+    // --- [3.25,+) Wet harbour stone (underwater) ---------------------------
     // Dark blue-green sea-wet stone, low roughness (wet sheen). The submerged
     // tint pass in main() adds the deeper colour/darkening with depth.
     if (zone >= 3.25) {
@@ -777,9 +780,11 @@ vec3 computeWater(vec3 N, vec3 V, vec3 L, out float alphaOut, out float roughOut
     // origin), not a fixed Z line: the old `-8 - z` assumed one south-facing
     // shore, so the entire north/west half of the island read as shallow water
     // + shore foam ("half the island not in the sea"). Radial distance gives a
-    // proper shallow ring at the coastline all the way around. Tutorial Island
-    // is centred at the origin (~100 m shore radius, ~70 m to full depth);
-    // far-offset water like CodeCity simply reads as deep, which is fine.
+    // proper shallow ring at the coastline all the way around. An island centred
+    // at the origin (~100 m shore radius, ~70 m to full depth) gets the ring;
+    // far-offset water simply reads as deep, which is fine.
+    // FIXME(coupling): the 100/70 shore radii are a game scene constant — should
+    // be a uniform, not hardcoded here. See engine CLAUDE.md.
     float depth = clamp((length(v_worldPos.xz) - 100.0) / 70.0, 0.0, 1.0);
 
     vec3 shallowColor = vec3(0.15, 0.55, 0.50);  // turquoise
@@ -1572,11 +1577,12 @@ void main() {
 
     // ---- Material selection ----
     if (u_proc_mode == 2) {
-        // Punch a hole in the ocean sheet over the W3 elevator shaft so the open
-        // shaft (it spans from above the surface down to the -40 basin) reads as
-        // DRY air, not flooded. Shaft XZ = forward(144°)*160 in each placement
-        // (embedded +1200 and standalone CodeCity). The dome keeps water above it
-        // and the -40 corridor sits below this plane, so only the shaft needs it.
+        // Punch a hole in the ocean sheet over an elevator shaft so the open
+        // shaft (it spans from above the surface down to the basin) reads as DRY
+        // air, not flooded. Shaft XZ in each placement (an embedded +X-offset
+        // scene and a standalone one). The dome keeps water above it and the
+        // corridor sits below this plane, so only the shaft needs it.
+        // (Game-supplied shaft centres — see the FIXME on applyUnderwaterTint.)
         {
             const float W3_SHAFT_R2 = 5.0 * 5.0;
             vec2 shE = v_worldPos.xz - vec2(1070.6, 94.0);
@@ -1973,8 +1979,8 @@ void main() {
     // fog so the standard exp-fog still anchors the long-range falloff.
     color += volumetricScatter(v_worldPos);
 
-    // Submerged fragments (below the CodeCity water surface) get a depth-based
-    // blue-green absorption tint so the sunken W3 harbour reads as underwater.
+    // Submerged fragments (below the water surface) get a depth-based
+    // blue-green absorption tint so a sunken harbour reads as underwater.
     // Applied on the LINEAR colour before finalize(), matching the vio mirror
     // which tints before outputColor()'s tonemap/gamma.
     color = applyUnderwaterTint(color, v_worldPos);

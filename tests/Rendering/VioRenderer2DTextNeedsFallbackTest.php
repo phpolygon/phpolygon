@@ -12,8 +12,8 @@ use ReflectionMethod;
  * Regression test for the v0.17.2 perf fix: the private
  * VioRenderer2D::textNeedsFallback() gate used to call
  * preg_match('/[\x{0500}-\x{10FFFF}]/u', $text) on every drawText, which
- * dominated per-frame text cost on HUD-heavy panels because Code Tycoon
- * registers CJK fallbacks unconditionally.
+ * dominated per-frame text cost on HUD-heavy panels whenever CJK fallbacks
+ * are registered (the gate then runs unconditionally).
  *
  * The replacement is a UTF-8 byte-scan for any byte >= 0xD4 — equivalent to
  * "any codepoint >= U+0500" — and these tests pin the boundaries so a future

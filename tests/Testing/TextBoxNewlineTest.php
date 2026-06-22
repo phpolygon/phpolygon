@@ -10,8 +10,8 @@ use PHPolygon\Testing\GdRenderer2D;
 
 /**
  * Regression: drawTextBox/measureTextBox must treat explicit \n as a hard
- * line break instead of dropping it into a token. Code Tycoon's coding-event
- * overlay relies on this for multi-line monospace prompts.
+ * line break instead of dropping it into a token. Multi-line monospace prompts
+ * (e.g. overlay text) rely on this.
  *
  * Exercises the GdRenderer2D backend (it shares the wrap algorithm with
  * VioRenderer2D). VioRenderer2D needs a live VioContext, which is unavailable

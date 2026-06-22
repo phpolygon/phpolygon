@@ -14,11 +14,11 @@ use ReflectionMethod;
  * Locks the "unlit hologram" material -> proc_mode mapping and its presence
  * in every backend shader source.
  *
- * Code Rescue's learning holograms (HologramBoardPrefab) bake their text into
- * an albedo texture. Rendered through the normal PBR path the panel is lit by
- * the scene sun/ambient and the text contrast washes out in bright daylight.
- * proc_mode 12 renders the panel UNLIT (texture/albedo emitted directly, no
- * lighting/fog), so the text reads identically day and night.
+ * A hologram panel that bakes its text into an albedo texture, rendered through
+ * the normal PBR path, is lit by the scene sun/ambient and the text contrast
+ * washes out in bright daylight. proc_mode 12 renders the panel UNLIT
+ * (texture/albedo emitted directly, no lighting/fog), so the text reads
+ * identically day and night.
  *
  * The mapping is keyed by the material-id prefix 'hologram_text' and is
  * duplicated across the three backend renderers' private resolveProcMode().
@@ -82,10 +82,10 @@ final class HologramProcModeTest extends TestCase
     }
 
     /**
-     * Code Rescue's sci-fi holo-console (TerminalPrefab) reuses the same unlit
-     * proc_mode 12 path for its glowing surfaces: the screen panel, its accent
-     * rim and the input light-bar. Their accent colour lives in albedo and is
-     * emitted directly, so the console glows the same day and night. The
+     * A sci-fi holo-console reuses the same unlit proc_mode 12 path for its
+     * glowing surfaces: the screen panel, its accent rim and the input
+     * light-bar. Their accent colour lives in albedo and is emitted directly, so
+     * the console glows the same day and night. The
      * language-keyed material ids ('terminal_screen_lit_<key>', etc.) must all
      * resolve to 12 across every backend.
      *

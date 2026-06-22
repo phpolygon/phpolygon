@@ -80,7 +80,7 @@
     if (rv) { [rv touchesCancelled:touches withEvent:event]; }
 }
 
-/* Landscape only - Code Tycoon is a 16:9 landscape game. */
+/* Landscape only (16:9). Adjust per game if a different orientation is needed. */
 - (UIInterfaceOrientationMask)supportedInterfaceOrientations {
     return UIInterfaceOrientationMaskLandscape;
 }

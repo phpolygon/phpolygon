@@ -49,7 +49,7 @@ static void php_ios_ini_defaults(HashTable *configuration_hash)
 @implementation PHPRuntime
 
 + (NSString *)runBundledScript:(NSString *)scriptName {
-    /* scriptName is a bundle-relative path like "CodeTycoon/ios_main".
+    /* scriptName is a bundle-relative path like "MyGame/ios_main".
      * Resolve it against the bundle root. */
     NSString *path = [[NSBundle mainBundle] pathForResource:scriptName ofType:@"php"];
     if (!path) {

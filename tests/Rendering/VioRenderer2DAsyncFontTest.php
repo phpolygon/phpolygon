@@ -16,7 +16,7 @@ use ReflectionProperty;
  *
  * The large CJK fallback fonts (NotoSansSC/KR) used to be loaded synchronously
  * the first time a CJK glyph hit the fallback chain, packing a 4096x4096 atlas
- * over ~32k glyphs on the render thread and freezing Code Tycoon's splash for
+ * over ~32k glyphs on the render thread and freezing the splash for
  * 20-25 s. preloadFontAsync() defers the pack to a vio worker thread and
  * pollAsyncFontLoads() (called from beginFrame) promotes the finished atlas
  * into the font cache without ever blocking.

@@ -424,26 +424,29 @@ vec3 applyVignette(vec3 color) {
     return color * (1.0 - v * u_vignette_intensity);
 }
 
-// Underwater absorption tint. The CodeCity ocean surface sits at WATER_Y; any
-// fragment below it is submerged (notably the sunken W3/CShark harbour). Water
-// absorbs warm wavelengths first, so with depth the lit colour is pulled toward
-// a blue-green body colour AND darkened. Subtle near the surface, stronger with
-// depth (saturating ~12–14 m down). Applied at the very end of the lit path so
-// it affects terrain AND buildings uniformly. MUST stay identical to the
-// OpenGL mirror (mesh3d.frag.glsl).
+// Underwater absorption tint. The ocean surface sits at WATER_Y; any fragment
+// below it is submerged (e.g. a sunken harbour). Water absorbs warm wavelengths
+// first, so with depth the lit colour is pulled toward a blue-green body colour
+// AND darkened. Subtle near the surface, stronger with depth (saturating
+// ~12–14 m down). Applied at the very end of the lit path so it affects terrain
+// AND buildings uniformly. MUST stay identical to the OpenGL mirror
+// (mesh3d.frag.glsl).
+// FIXME(coupling): WATER_Y, the dome centres/radius and the world offset below
+// are scene constants supplied by the consuming game — they should arrive as
+// uniforms, not be hardcoded in the engine shader. See engine CLAUDE.md.
 const float WATER_Y = -0.4;
 vec3 applyUnderwaterTint(vec3 color, vec3 worldPos) {
     if (worldPos.y >= WATER_Y) return color;
-    // Dry interior of the W3 underwater glass dome — no underwater tint inside
-    // its horizontal footprint. Two discs: embedded world (+1200 X) and
-    // standalone CodeCity. Centre = forward(144°)*300 (± the +1200 offset).
+    // Dry interior of an underwater glass dome — no underwater tint inside its
+    // horizontal footprint. Two discs: an embedded scene (+X world offset) and a
+    // standalone one. (Game-supplied centres — see FIXME above.)
     const float DOME_R2 = 120.0 * 120.0;
     vec2 dE = worldPos.xz - vec2(957.3, 176.5);   // embedded (shipping) scene
-    vec2 dL = worldPos.xz - vec2(-242.7, 176.5);  // standalone CodeCityScene
+    vec2 dL = worldPos.xz - vec2(-242.7, 176.5);  // standalone scene
     if (dot(dE, dE) < DOME_R2 || dot(dL, dL) < DOME_R2) {
         return color; // inside the dry bubble
     }
-    // dry shaft+corridor tube (W3): keep its interior un-tinted
+    // dry shaft+corridor tube: keep its interior un-tinted
     // (the descent shaft over deep water + the glass corridor to the dome).
     // Pure-XZ point-to-segment distance → exception holds over the full shaft
     // height and the whole corridor; water OUTSIDE the 6-unit radius stays tinted.
@@ -502,14 +505,14 @@ vec3 computeSand(vec3 N, vec3 V, vec3 L, out float roughOut) {
     //  to the OpenGL mirror (mesh3d.frag.glsl). All bands share the lit path:
     //  the function only returns albedo and writes roughOut.
     //  Bands:
-    //    [1.25,1.75) industrial concrete (W1 PHP)        — look unchanged
-    //    [1.75,2.25) marble / flagstone (W2 Python)
-    //    [2.25,2.75) asphalt + neon flecks (W4 JS)
-    //    [2.75,3.25) cobblestone (W5 Rust)
-    //    [3.25,+)    wet harbour stone (W3 CShark, underwater)
+    //    [1.25,1.75) industrial concrete    — look unchanged
+    //    [1.75,2.25) marble / flagstone
+    //    [2.25,2.75) asphalt + neon flecks
+    //    [2.75,3.25) cobblestone
+    //    [3.25,+)    wet harbour stone (underwater)
     // ===============================================================
 
-    // --- [1.25,1.75) Industrial concrete (W1 PHP) — UNCHANGED LOOK ----------
+    // --- [1.25,1.75) Industrial concrete — UNCHANGED LOOK ------------------
     if (zone >= 1.25 && zone < 1.75) {
         // --- Industrial-look tuning constants (safe to adjust) -------------
         const vec3  CONCRETE_BASE = vec3(0.334, 0.340, 0.354); // ~#55565A soot-grey
@@ -543,7 +546,7 @@ vec3 computeSand(vec3 N, vec3 V, vec3 L, out float roughOut) {
         return base;
     }
 
-    // --- [1.75,2.25) Marble / flagstone (W2 Python academy) ----------------
+    // --- [1.75,2.25) Marble / flagstone ------------------------------------
     // Pale grey-white stone slabs: broad value mottle, subtle grey veining,
     // and thin recessed joints between square flags. Low-mid roughness so it
     // reads as polished academic stone.
@@ -577,7 +580,7 @@ vec3 computeSand(vec3 N, vec3 V, vec3 L, out float roughOut) {
         return base;
     }
 
-    // --- [2.25,2.75) Asphalt + neon flecks (W4 JS neon entertainment) ------
+    // --- [2.25,2.75) Asphalt + neon flecks ---------------------------------
     // Near-black asphalt with fine aggregate, plus sparse emissive cyan/magenta
     // specks for a nightlife glow. The specks are added directly to albedo so
     // they read as self-lit even where the sun doesn't hit.
@@ -606,7 +609,7 @@ vec3 computeSand(vec3 N, vec3 V, vec3 L, out float roughOut) {
         return base;
     }
 
-    // --- [2.75,3.25) Cobblestone (W5 Rust medieval fortress) ----------------
+    // --- [2.75,3.25) Cobblestone -------------------------------------------
     // Rounded cobbles via a cheap cellular field: per-cell jittered centres
     // give each stone a domed value (bright crown, dark recessed mortar at the
     // cell edges). Warm grey-brown, high roughness.
@@ -644,7 +647,7 @@ vec3 computeSand(vec3 N, vec3 V, vec3 L, out float roughOut) {
         return base;
     }
 
-    // --- [3.25,+) Wet harbour stone (W3 CShark, underwater) ----------------
+    // --- [3.25,+) Wet harbour stone (underwater) ---------------------------
     // Dark sea-wet stone with a blue-green cast and low roughness (a wet sheen).
     // The submerged-tint pass in main() adds the deeper colour/darkening; here
     // the surface itself is already damp and glossy.
@@ -1409,11 +1412,12 @@ void main() {
 
     // ---- Material selection ----
     if (u_proc_mode == 2) {
-        // Punch a hole in the ocean sheet over the W3 elevator shaft so the open
-        // shaft (it spans from above the surface down to the -40 basin) reads as
-        // DRY air, not flooded. Shaft XZ = forward(144°)*160 in each placement
-        // (embedded +1200 and standalone CodeCity). The dome keeps water above it
-        // and the -40 corridor sits below this plane, so only the shaft needs it.
+        // Punch a hole in the ocean sheet over an elevator shaft so the open
+        // shaft (it spans from above the surface down to the basin) reads as DRY
+        // air, not flooded. Shaft XZ in each placement (an embedded +X-offset
+        // scene and a standalone one). The dome keeps water above it and the
+        // corridor sits below this plane, so only the shaft needs it.
+        // (Game-supplied shaft centres — see the FIXME on applyUnderwaterTint.)
         {
             const float W3_SHAFT_R2 = 5.0 * 5.0;
             vec2 shE = v_worldPos.xz - vec2(1070.6, 94.0);
@@ -1756,8 +1760,8 @@ void main() {
 
     color += volumetricScatter(v_worldPos);
 
-    // Submerged fragments (below the CodeCity water surface) get a depth-based
-    // blue-green absorption tint so the sunken W3 harbour reads as underwater.
+    // Submerged fragments (below the water surface) get a depth-based
+    // blue-green absorption tint so a sunken harbour reads as underwater.
     color = applyUnderwaterTint(color, v_worldPos);
 
     frag_color = outputColor(color, alpha);

@@ -73,8 +73,8 @@ class VioRenderer2D implements Renderer2DInterface
      * Bounded with FIFO eviction once {@see $measureCacheCap} is exceeded. The
      * cap exists because UI/HUD text (date strings, money counters, project
      * timers) feeds new keys every frame; an unbounded map produced GC and
-     * hashtable-resize stalls in the v0.17.1 perf regression (Code Tycoon p95
-     * 1-2 ms -> 10-13 ms across all panels). PHP arrays keep insertion order,
+     * hashtable-resize stalls in the v0.17.1 perf regression (p95 1-2 ms ->
+     * 10-13 ms across all HUD panels). PHP arrays keep insertion order,
      * so the first key is always the oldest entry — array_key_first + unset is
      * O(1) and cheaper than array_shift.
      *
@@ -687,7 +687,7 @@ class VioRenderer2D implements Renderer2DInterface
      * finished atlas into the cache.
      *
      * This exists for the large CJK fallback fonts (NotoSansSC/KR): loading
-     * them synchronously on first use froze Code Tycoon's splash for 20-25 s.
+     * them synchronously on first use froze the splash for 20-25 s.
      * Register them with this method and add them as fallbacks via
      * {@see addFallbackFont()} exactly as before; everything else is unchanged.
      *
@@ -864,9 +864,9 @@ class VioRenderer2D implements Renderer2DInterface
      *
      * The cache is bounded with FIFO eviction (see {@see $measureCache}).
      * Without this bound the v0.17.1 build leaked p95 frame time on every
-     * panel of Code Tycoon (1-2 ms -> 10-13 ms) once dynamic strings — money
-     * counters, dates, deadlines — had accumulated enough distinct keys to
-     * trigger PHP hashtable resizes mid-frame.
+     * HUD panel (1-2 ms -> 10-13 ms) once dynamic strings — counters, dates,
+     * deadlines — had accumulated enough distinct keys to trigger PHP
+     * hashtable resizes mid-frame.
      *
      * @return array{width: float, height: float}
      */
@@ -935,9 +935,9 @@ class VioRenderer2D implements Renderer2DInterface
      * false positives from ASCII, Latin-1, Latin Extended, IPA, combining
      * marks, Greek, or basic Cyrillic, and no decode work needed.
      *
-     * The 2026-06 fix (v0.17.2) replaced the regex here because Code Tycoon's
-     * benches register CJK fallbacks (so the regex runs unconditionally) and
-     * `preg_match` with the u-flag was dominating per-frame text cost.
+     * The 2026-06 fix (v0.17.2) replaced the regex here because once CJK
+     * fallbacks are registered the regex runs unconditionally and `preg_match`
+     * with the u-flag was dominating per-frame text cost.
      */
     private static function textNeedsFallback(string $text): bool
     {
