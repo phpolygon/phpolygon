@@ -322,6 +322,16 @@ class VioRenderer3D implements Renderer3DInterface
     }
 
     /**
+     * The active vio rendering context. Exposed so load-time GPU compute work
+     * (e.g. the fieldtracing SDF bake via {@see \PHPolygon\Fieldtracing\GpuSdfBaker})
+     * can dispatch on the same device the renderer draws with.
+     */
+    public function vioContext(): VioContext
+    {
+        return $this->ctx;
+    }
+
+    /**
      * Rendering conventions for the active vio backend. Cached — the backend
      * cannot change for the lifetime of a context.
      */
