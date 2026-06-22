@@ -16,6 +16,13 @@ class EngineConfig
         public readonly bool $vsync = true,
         public readonly bool $resizable = true,
         public readonly float $targetTickRate = 60.0,
+        // When true the simulation runs ONE update per rendered frame with the
+        // real (clamped) frame time, instead of the fixed-timestep accumulator —
+        // the sim rate then tracks the render rate exactly, so motion never steps
+        // when the render runs faster than a fixed tick (the engine renders
+        // transforms without interpolation). Trade-off: variable dt, so physics
+        // is less deterministic; a max-dt clamp guards against frame-spike tunneling.
+        public readonly bool $variableTimestep = false,
         public readonly string $assetsPath = '',
         public readonly string $defaultLocale = 'en',
         public readonly string $fallbackLocale = 'en',

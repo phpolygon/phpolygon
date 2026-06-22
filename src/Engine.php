@@ -170,7 +170,10 @@ class Engine
 
         self::log('TextureManager: ' . get_class($this->textures));
 
-        $this->gameLoop = new GameLoop($config->targetTickRate);
+        $this->gameLoop = new GameLoop(
+            $config->targetTickRate,
+            variableTimestep: $config->variableTimestep,
+        );
         $this->scenes = new SceneManager($this);
         $audioBackend = null;
         if (!$this->headless) {

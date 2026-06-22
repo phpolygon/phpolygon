@@ -24,9 +24,18 @@ class GameLoop
      */
     private int $minFrameTimeNs = 0;
 
+    /**
+     * Largest dt (seconds) a single variable-timestep update may receive. A
+     * one-off stall (asset load, window drag, debugger pause) is clamped to this
+     * so it can't inject a huge step that tunnels physics — the variable-mode
+     * analogue of the fixed loop's spiral-of-death guard. ~14 fps floor.
+     */
+    private const MAX_VARIABLE_DT = 1.0 / 14.0;
+
     public function __construct(
         private float $targetTickRate = 60.0,
         int $maxUpdatesPerFrame = 10,
+        private bool $variableTimestep = false,
     ) {
         $this->timestepNs = (int)(1_000_000_000.0 / $targetTickRate);
         $this->maxUpdatesPerFrame = $maxUpdatesPerFrame;
@@ -59,6 +68,31 @@ class GameLoop
      */
     public function run(callable $update, callable $render, callable $shouldStop): void
     {
+        // Variable-timestep mode: one update per rendered frame with the real
+        // (clamped) frame time, so the sim rate tracks the render rate exactly —
+        // no stepping when the render outruns a fixed tick. render() gets
+        // interpolation = 1.0 because the state shown IS the just-updated state.
+        if ($this->variableTimestep) {
+            $previousTime = Clock::now();
+            while (!$shouldStop()) {
+                $frameStart = Clock::now();
+                $elapsed = $frameStart - $previousTime;
+                $previousTime = $frameStart;
+
+                $elapsedSeconds = $elapsed / 1_000_000_000.0;
+                $this->frameTimeSamples[$this->sampleIndex] = $elapsedSeconds;
+                $this->sampleIndex = ($this->sampleIndex + 1) % $this->sampleCount;
+
+                $dt = min($elapsedSeconds, self::MAX_VARIABLE_DT);
+                $update($dt);
+                $render(1.0);
+
+                $this->updateAverages();
+                $this->throttleToFpsCap($frameStart);
+            }
+            return;
+        }
+
         $fixedDt = 1.0 / $this->targetTickRate;
         $lag = 0;
         $previousTime = Clock::now();
