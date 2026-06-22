@@ -4,10 +4,19 @@ declare(strict_types=1);
 
 namespace PHPolygon\Rendering\Quality;
 
+use PHPolygon\Runtime\DevLogger;
+
 /**
- * Universal pressure source that watches the engine's own frametime. Works
- * on every platform - no OS API needed - so it complements the macOS-only
- * NSProcessInfo source.
+ * Frametime-based pressure source — a THERMAL FALLBACK for platforms with no
+ * real temperature sensor. Frame time is only a proxy for heat: slow frames can
+ * mean a hot/throttling chip OR simply a heavy scene on a cool machine, and this
+ * source cannot tell them apart. So when a real sensor is available (a
+ * ThermalSourceOs reading vio_thermal_state), THAT is authoritative for thermal
+ * throttling and this source must run in ADVISORY mode ($contributesPressure =
+ * false): it still tracks p95 + logs what it would have flagged (useful in the
+ * dev log), but always reports Nominal to the monitor so a busy-but-cool scene
+ * never raises a false thermal alarm. Adaptive quality reacts to frame time
+ * independently (AdaptiveQualityController), so advisory mode loses nothing.
  *
  * Compares the rolling p95 of the last WINDOW_FRAMES samples against the
  * theoretical frametime budget (1000 / targetFps):
@@ -38,8 +47,11 @@ final class ThermalSourceFrametime implements ThermalSourceInterface
     private PressureSignal $current = PressureSignal::Nominal;
     private float $lastP95Ms = 0.0;
 
-    public function __construct(int $warmupFrames = self::WARMUP_FRAMES)
-    {
+    public function __construct(
+        int $warmupFrames = self::WARMUP_FRAMES,
+        private readonly ?DevLogger $log = null,
+        private readonly bool $contributesPressure = true,
+    ) {
         $this->warmupRemaining = max(0, $warmupFrames);
     }
 
@@ -66,6 +78,7 @@ final class ThermalSourceFrametime implements ThermalSourceInterface
         $p95 = self::percentile($this->samples, 0.95);
         $this->lastP95Ms = $p95;
         $budgetMs = 1000.0 / max(1.0, $currentTargetFps);
+        $prev = $this->current;
 
         if ($p95 > $budgetMs * self::TRIGGER_OVER_BUDGET) {
             $this->sustainedUnderSince = 0.0;
@@ -91,7 +104,24 @@ final class ThermalSourceFrametime implements ThermalSourceInterface
             $this->sustainedUnderSince = 0.0;
         }
 
-        return $this->current;
+        // Dev mode (--dev / --dev-monitor): surface every signal change with the
+        // numbers behind it, including the WORST single sample in the window. In
+        // advisory mode the line is tagged so it's clear it did NOT throttle (the
+        // real sensor is authoritative) — a busy-but-cool scene shows here without
+        // raising a thermal alarm.
+        if ($this->current !== $prev) {
+            $this->log?->logMessage(sprintf(
+                '[frametime-guard%s] %s -> %s  p95=%.1fms budget=%.1fms ratio=%.2f thisFrame=%.1fms max=%.1fms targetFps=%.0f samples=%d',
+                $this->contributesPressure ? '' : ' advisory',
+                $prev->value, $this->current->value, $p95, $budgetMs, $p95 / max(0.001, $budgetMs),
+                $frameTimeMs, max($this->samples), $currentTargetFps, count($this->samples),
+            ));
+        }
+
+        // Advisory mode (a real thermal sensor is present): never drive thermal
+        // throttling from frame time — report Nominal regardless of what the
+        // proxy computed above. The diagnostic log still fired.
+        return $this->contributesPressure ? $this->current : PressureSignal::Nominal;
     }
 
     public function lastP95Ms(): float

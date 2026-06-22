@@ -232,13 +232,26 @@ class Engine
         $this->devLogger?->logHardwareProfile($this->hardware);
 
         if ($config->autoThermalManagement && !$this->headless) {
-            $sources = [new ThermalSourceFrametime()];
             // Real hardware thermal sensor wherever php-vio can read one:
             // macOS NSProcessInfo, Linux sysfs thermal zones (CPU+GPU), Windows
-            // NVIDIA NVAPI GPU temp (with an ACPI-WMI fallback). Returns Unknown
-            // (→ frametime guard) on platforms/GPUs without a sensor, so it is
-            // safe to register on every platform.
-            if (function_exists('vio_thermal_state')) {
+            // NVIDIA NVAPI GPU temp (with an ACPI-WMI fallback). Gate on a
+            // PLAUSIBLE reading, not mere function existence: a present-but-
+            // unsupported sensor (driver returns an unparseable/unknown value)
+            // must NOT demote the frametime fallback to advisory — that would
+            // leave no thermal safety net at all. A known, non-Unknown state
+            // means a real sensor is actually reporting; otherwise keep the
+            // frametime guard active as the fallback. (Honors PHPOLYGON_THERMAL_FORCE.)
+            $hasRealThermalSensor = \PHPolygon\Runtime\ThermalState::fromVio()
+                !== \PHPolygon\Runtime\ThermalState::Unknown;
+            // The frametime guard is only a THERMAL FALLBACK. When a real sensor
+            // exists it runs in ADVISORY mode — it still tracks p95 + logs in dev
+            // mode, but does NOT drive thermal throttling, so a heavy-but-cool
+            // scene can't raise a false thermal alarm (the real sensor decides).
+            $sources = [new ThermalSourceFrametime(
+                log: $this->devLogger,
+                contributesPressure: !$hasRealThermalSensor,
+            )];
+            if ($hasRealThermalSensor) {
                 $sources[] = new ThermalSourceOs();
             }
             $this->thermalMonitor = new ThermalMonitor(
