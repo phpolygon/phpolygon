@@ -386,8 +386,131 @@ class VioRenderer2D implements Renderer2DInterface
     }
 
     /**
-     * Render text using the font chain. Primary font renders first;
-     * fallback fonts only render characters the primary doesn't cover.
+     * Assign each character of a string to exactly one font in the chain and
+     * compute the explicit x-offset at which that character must be drawn.
+     *
+     * Pure coverage/claim/positioning logic, extracted from {@see
+     * drawTextWithChain} so it can be unit-tested without a live VioContext.
+     * Returns one draw op per contiguous run of characters claimed by the same
+     * fallback font, each carrying the *absolute* x at which that run begins
+     * (relative to the text origin), so the engine can render every fallback
+     * glyph at exactly the position the primary pen would have reached.
+     *
+     * Two bugs are fixed here, both invisible for pure-Latin text:
+     *
+     *  1. CJK double-draw (v0.22.0). A glyph present in two fallback fonts
+     *     (e.g. a Han char shared by noto-sans-sc and noto-sans-kr) used to be
+     *     emitted into *every* covering fallback and overprinted. Now each
+     *     character is claimed by the *earliest* font in the chain that covers
+     *     it and drawn exactly once.
+     *
+     *  2. Mixed-string mis-positioning (v0.22.1). The previous implementation
+     *     padded each fallback run with substituted spaces and drew the whole
+     *     run at the text origin, relying on the *fallback* font's space advance
+     *     to skip over primary-covered characters. Because the fallback
+     *     (NotoSansSC/KR) space advance differs from the primary (Inter)
+     *     per-glyph advances, CJK glyphs in a mixed string such as "Save 接受"
+     *     landed at the wrong x — offset by SC-space widths for "Save " instead
+     *     of Inter's real width of "Save ". Now each run's x is computed from
+     *     the *primary* font's measured width of the preceding substring (via
+     *     $prefixWidth), so it matches the primary pen exactly. No spaces are
+     *     substituted at all.
+     *
+     * Claim rules per character (unchanged from the double-draw fix):
+     *  - Covered by the primary (index 0)  -> claimed by primary; emits no
+     *    fallback draw (the primary's full-string draw already rendered it).
+     *  - Otherwise the first fallback index i (i >= 1) whose $covers(i, ch) is
+     *    true claims it and draws the glyph.
+     *  - Covered by no font in the chain    -> no fallback draw; the primary's
+     *    full-string draw renders the .notdef box (unchanged behaviour).
+     *
+     * Contiguous characters claimed by the *same* fallback font are merged into
+     * one run/draw. Within such a run the fallback font's own advances position
+     * the glyphs relative to each other correctly; only the run's *starting* x
+     * needs to come from the primary measurement, which is what we anchor here.
+     *
+     * @param list<string>                 $chars      ordered single characters
+     * @param int                          $chainSize  total fonts in the chain (>= 1)
+     * @param callable(int, string): bool  $covers     fn($fontIndex, $char): bool —
+     *                                                 does the font at $fontIndex have
+     *                                                 a glyph for $char?
+     * @param callable(int): float         $prefixWidth fn($charCount): float —
+     *                                                 the primary font's measured
+     *                                                 width of the first $charCount
+     *                                                 characters of the string. Used
+     *                                                 to anchor each fallback run to
+     *                                                 the primary pen position.
+     * @return list<array{font: int, text: string, x: float}> draw ops, in order,
+     *         each rendering $text with chain font $font at offset $x from origin
+     */
+    private static function planFallbackDraws(
+        array $chars,
+        int $chainSize,
+        callable $covers,
+        callable $prefixWidth,
+    ): array {
+        if ($chainSize <= 1) {
+            return [];
+        }
+
+        // First pass: collect contiguous runs of characters claimed by the same
+        // fallback font as {font, startIndex, text} tuples. A run breaks when
+        // the claiming font changes or a character is claimed by the primary /
+        // no font (those need no fallback draw). Kept as a plain loop with no
+        // by-reference closure so the run state stays a simple, analysable value.
+        /** @var list<array{font: int, start: int, text: string}> $runs */
+        $runs = [];
+        foreach ($chars as $index => $ch) {
+            // Find the first font in the chain (primary included) that covers
+            // this char; that font "claims" it.
+            $claimedBy = -1;
+            for ($i = 0; $i < $chainSize; $i++) {
+                if ($covers($i, $ch)) {
+                    $claimedBy = $i;
+                    break;
+                }
+            }
+
+            // Primary-covered (0) or uncovered (-1): no fallback draw, and it
+            // breaks any open run.
+            if ($claimedBy < 1) {
+                continue;
+            }
+
+            $lastRun = $runs === [] ? null : $runs[count($runs) - 1];
+            if (
+                $lastRun !== null
+                && $lastRun['font'] === $claimedBy
+                && $lastRun['start'] + mb_strlen($lastRun['text']) === $index
+            ) {
+                // Contiguous extension of the current run.
+                $runs[count($runs) - 1]['text'] .= $ch;
+                continue;
+            }
+
+            // Start a fresh run anchored at this character's index.
+            $runs[] = ['font' => $claimedBy, 'start' => $index, 'text' => $ch];
+        }
+
+        // Second pass: anchor each run at the primary pen position — the
+        // primary font's measured width of the substring before the run.
+        $draws = [];
+        foreach ($runs as $run) {
+            $draws[] = [
+                'font' => $run['font'],
+                'text' => $run['text'],
+                'x' => $prefixWidth($run['start']),
+            ];
+        }
+
+        return $draws;
+    }
+
+    /**
+     * Render text using the font chain. Primary font renders the whole string
+     * first; each remaining character is then drawn by exactly one fallback
+     * font — the earliest one in the chain that covers it — at the explicit x
+     * the primary pen reached (see {@see planFallbackDraws}).
      * @param list<\VioFont> $chain
      */
     private function drawTextWithChain(array $chain, string $text, float $x, float $y, int $argb, float $z): void
@@ -400,7 +523,8 @@ class VioRenderer2D implements Renderer2DInterface
         // we're done. This skips the per-glyph coverage scan AND the extra
         // vio_text draws through the large CJK fallback fonts — which cost
         // ~40 ms/frame on a HUD full of Latin text.
-        if (count($chain) <= 1 || !self::textNeedsFallback($text)) {
+        $chainSize = count($chain);
+        if ($chainSize <= 1 || !self::textNeedsFallback($text)) {
             return;
         }
 
@@ -415,22 +539,28 @@ class VioRenderer2D implements Renderer2DInterface
             return; // Primary covers all glyphs
         }
 
-        // Build per-character font assignments: find chars primary can't render
-        $len = mb_strlen($text);
-        for ($i = 1; $i < count($chain); $i++) {
-            $fb = $chain[$i];
-            $fbText = '';
-            for ($c = 0; $c < $len; $c++) {
-                $ch = mb_substr($text, $c, 1);
-                $pw = (float)$this->measureCached($primary, $ch)['width'];
-                if ($pw > 0.001) {
-                    // Primary has this glyph — insert a space so fallback advances cursor
-                    $fbText .= ' ';
-                } else {
-                    $fbText .= $ch;
-                }
+        // Build per-character claims. A char is "covered" by a font when that
+        // font reports a non-zero advance for it on its own. This is memoised
+        // through measureCached, so each (font, char) probe is paid at most once.
+        $chars = mb_str_split($text);
+        $covers = fn (int $fontIndex, string $ch): bool
+            => (float)$this->measureCached($chain[$fontIndex], $ch)['width'] > 0.001;
+
+        // Each fallback run is anchored at the *primary* font's width of the
+        // preceding substring — the exact x the primary draw left the pen at.
+        // Memoised through measureCached, so repeated prefixes (a run boundary
+        // measures the same prefix once) cost nothing extra.
+        $prefixWidth = function (int $charCount) use ($primary, $chars, $x): float {
+            if ($charCount <= 0) {
+                return $x;
             }
-            vio_text($this->ctx, $fb, $fbText, $x, $y, ['color' => $argb, 'z' => $z]);
+            $prefix = implode('', array_slice($chars, 0, $charCount));
+            return $x + (float)$this->measureCached($primary, $prefix)['width'];
+        };
+
+        $draws = self::planFallbackDraws($chars, $chainSize, $covers, $prefixWidth);
+        foreach ($draws as $draw) {
+            vio_text($this->ctx, $chain[$draw['font']], $draw['text'], $draw['x'], $y, ['color' => $argb, 'z' => $z]);
         }
     }
 
