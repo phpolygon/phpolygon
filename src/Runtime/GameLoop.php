@@ -74,6 +74,15 @@ class GameLoop
         // interpolation = 1.0 because the state shown IS the just-updated state.
         if ($this->variableTimestep) {
             $previousTime = Clock::now();
+            // Short moving average of the per-frame interval. The raw measured dt
+            // jitters frame-to-frame (OS scheduling, where the vsync wait lands
+            // relative to the measurement) even at a steady fps, which makes motion
+            // advance by slightly uneven amounts → visible micro-judder. Averaging
+            // a few frames yields a near-constant step while preserving the
+            // real-time mean (no clock drift). Cleared-on-spike via the clamp below.
+            /** @var list<float> $dtWindow */
+            $dtWindow = [];
+            $dtWindowSize = 8;
             while (!$shouldStop()) {
                 $frameStart = Clock::now();
                 $elapsed = $frameStart - $previousTime;
@@ -83,7 +92,18 @@ class GameLoop
                 $this->frameTimeSamples[$this->sampleIndex] = $elapsedSeconds;
                 $this->sampleIndex = ($this->sampleIndex + 1) % $this->sampleCount;
 
-                $dt = min($elapsedSeconds, self::MAX_VARIABLE_DT);
+                // A genuine stall (> the spike guard) restarts the window so the
+                // average isn't dragged by a one-off freeze.
+                if ($elapsedSeconds > self::MAX_VARIABLE_DT) {
+                    $dtWindow = [];
+                }
+                $dtWindow[] = $elapsedSeconds;
+                if (count($dtWindow) > $dtWindowSize) {
+                    array_shift($dtWindow);
+                }
+                $smoothed = array_sum($dtWindow) / count($dtWindow);
+
+                $dt = min($smoothed, self::MAX_VARIABLE_DT);
                 $update($dt);
                 $render(1.0);
 
