@@ -103,6 +103,31 @@ class Renderer3DSystem extends AbstractSystem
     /** @var array<int, string> */
     private array $entityBin = [];
 
+    /**
+     * The world X/Z translation each entity had when it was binned, kept
+     * alongside {@see $entityBin} so the coarse pre-cull can cheaply (no
+     * allocation) detect a MOVED entity and skip its now-stale bin verdict.
+     *
+     * Cell index alone is not enough: bins use a tight per-entity AABB (not the
+     * full BIN_SIZE cell), so an entity moving WITHIN one cell still invalidates
+     * its bin's AABB — its old, smaller AABB drifts out of the frustum and the
+     * cell gets wrongly culled. Comparing the live position to the binned one
+     * catches that intra-cell movement.
+     *
+     * @var array<int, float>
+     */
+    private array $entityBinPosX = [];
+
+    /** @var array<int, float> */
+    private array $entityBinPosZ = [];
+
+    /**
+     * Movement (world units) past which an entity is treated as having moved
+     * since binning, so its stale bin cull is distrusted. Tiny — static entities
+     * compare exactly equal (Δ=0); any real motion trips it.
+     */
+    private const BIN_STALE_EPS = 0.05;
+
     private const BIN_SIZE = 256.0;
     private const BIN_REBUILD_INTERVAL = 30;
 
@@ -405,7 +430,23 @@ class Renderer3DSystem extends AbstractSystem
             if ($visibleBins !== null) {
                 $binKey = $this->entityBin[$entity->id] ?? null;
                 if ($binKey !== null && !isset($visibleBins[$binKey])) {
-                    continue;
+                    // Bins (and their tight per-entity AABBs) are rebuilt only
+                    // every BIN_REBUILD_INTERVAL frames. An entity that has MOVED
+                    // since then invalidates its bin's stale AABB — so trust this
+                    // "culled" verdict only while the entity is still at its binned
+                    // position; otherwise fall through to the always-correct
+                    // per-entity sphere test below. Without this a fast-moving
+                    // entity strobes as its stale, now-behind AABB drops out of the
+                    // frustum mid-rebuild-interval. Live X/Z are read off the world
+                    // matrix with no allocation.
+                    $bpx = $this->entityBinPosX[$entity->id] ?? null;
+                    $bpz = $this->entityBinPosZ[$entity->id] ?? null;
+                    if ($bpx !== null && $bpz !== null
+                        && abs($matrix->translationX() - $bpx) < self::BIN_STALE_EPS
+                        && abs($matrix->translationZ() - $bpz) < self::BIN_STALE_EPS
+                    ) {
+                        continue;
+                    }
                 }
             }
 
@@ -556,6 +597,8 @@ class Renderer3DSystem extends AbstractSystem
     {
         $this->binAabbs = [];
         $this->entityBin = [];
+        $this->entityBinPosX = [];
+        $this->entityBinPosZ = [];
 
         foreach ($world->query(MeshRenderer::class, Transform3D::class) as $entity) {
             $mesh = $entity->get(MeshRenderer::class);
@@ -568,6 +611,8 @@ class Renderer3DSystem extends AbstractSystem
             $bz = (int) floor($tr->z / self::BIN_SIZE);
             $key = $bx . ',' . $bz;
             $this->entityBin[$entity->id] = $key;
+            $this->entityBinPosX[$entity->id] = $tr->x;
+            $this->entityBinPosZ[$entity->id] = $tr->z;
 
             // Expand the bin AABB by the entity's actual world-space extent.
             // A 3 km water plane sitting at one bin centre would otherwise

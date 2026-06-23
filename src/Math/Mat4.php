@@ -279,6 +279,26 @@ class Mat4
         return new Vec3($this->m[12], $this->m[13], $this->m[14]);
     }
 
+    /**
+     * Single translation components, without allocating a {@see Vec3}. For
+     * allocation-sensitive hot loops (per-entity culling/binning) that only
+     * need one or two axes of the world position.
+     */
+    public function translationX(): float
+    {
+        return $this->m[12];
+    }
+
+    public function translationY(): float
+    {
+        return $this->m[13];
+    }
+
+    public function translationZ(): float
+    {
+        return $this->m[14];
+    }
+
     /** @return float[] */
     public function toArray(): array
     {
