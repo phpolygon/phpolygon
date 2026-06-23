@@ -9,266 +9,280 @@ use PHPUnit\Framework\TestCase;
 use ReflectionMethod;
 
 /**
- * Regression test for two CJK font-chain bugs in
- * VioRenderer2D::drawTextWithChain, both exercised through the pure static
- * helper VioRenderer2D::planFallbackDraws() without a live VioContext.
+ * Regression test for the CJK font-chain layout in
+ * VioRenderer2D::drawTextWithChain, exercised through the pure static helper
+ * VioRenderer2D::planTextRuns() without a live VioContext.
  *
  * Bug 1 — double-draw (v0.22.0). The fallback loop emitted a character into
- * *every* fallback font whose glyph the primary lacked. A CJK char present in
- * both fallback fonts (e.g. a Han char shared by noto-sans-sc and noto-sans-kr)
- * was therefore drawn once per covering fallback and the two draws overlapped.
- * Fix: each character is claimed by exactly one font — the earliest in the
- * chain that covers it — so it is drawn once.
+ * *every* fallback font whose glyph the primary lacked, so a CJK char shared by
+ * two fallbacks (e.g. a Han char in both noto-sans-sc and noto-sans-kr) was
+ * overprinted. Fix: each character is claimed by exactly one font — the earliest
+ * in the chain that covers it.
  *
- * Bug 2 — mixed-string mis-positioning (v0.22.1). The fix for bug 1 padded each
- * fallback run with substituted spaces and drew the whole run at the text
- * origin, relying on the *fallback* font's space advance to skip over
- * primary-covered characters. The fallback (NotoSansSC/KR) space advance
- * differs from the primary (Inter) per-glyph advances, so CJK glyphs in mixed
- * strings such as "Save 接受" landed at the wrong x. Fix: each fallback run is
- * anchored at the *primary* font's measured width of the preceding substring,
- * supplied here via a fake $prefixWidth predicate.
+ * Bug 2 — mixed-string mis-positioning (v0.22.1). Fallback runs were anchored at
+ * the *primary* font's measured width of the preceding substring. That holds
+ * only while the prefix is pure primary text: the primary (Inter) cannot measure
+ * a CJK glyph, so as soon as the prefix contained one its width collapsed and
+ * any text *after* the CJK overprinted it. "Save 接受" looked fine only because
+ * the CJK sat at the end with nothing following.
  *
- * planFallbackDraws() takes everything the live path feeds with real metrics —
- * a coverage predicate $covers(int $fontIndex, string $char): bool and a
- * prefix-width predicate $prefixWidth(int $charCount): float — as callables, so
- * fakes fully exercise the claim + positioning logic.
+ * Bug 3 — trailing text over full-width CJK (this fix). The primary still drew
+ * the whole string, advancing its pen by its narrow .notdef width over each CJK
+ * glyph — far less than the full-width glyph the fallback actually renders — so
+ * following characters landed on top of the CJK. planTextRuns() now draws every
+ * run (primary runs included) with its claiming font and advances the pen by
+ * that font's own per-glyph width, so a full-width CJK glyph reserves its true
+ * width and nothing overprints it.
+ *
+ * planTextRuns() takes a per-glyph width predicate
+ * $charWidth(int $fontIndex, string $char): float — the only metric the live
+ * path needs — as a callable, so fakes fully exercise claim + positioning.
  */
 final class VioRenderer2DFallbackClaimTest extends TestCase
 {
     /**
      * @param list<string>                 $chars
-     * @param callable(int, string): bool  $covers
-     * @param callable(int): float         $prefixWidth
-     * @return list<array{font: int, text: string, x: float}>
+     * @param callable(int, string): float $charWidth
+     * @return array{runs: list<array{font: int, text: string, x: float}>, width: float}
      */
-    private static function plan(array $chars, int $chainSize, callable $covers, callable $prefixWidth): array
+    private static function plan(array $chars, int $chainSize, callable $charWidth, float $originX = 0.0): array
     {
-        $m = new ReflectionMethod(VioRenderer2D::class, 'planFallbackDraws');
+        $m = new ReflectionMethod(VioRenderer2D::class, 'planTextRuns');
 
-        /** @var list<array{font: int, text: string, x: float}> $result */
-        $result = $m->invoke(null, $chars, $chainSize, $covers, $prefixWidth);
+        /** @var array{runs: list<array{font: int, text: string, x: float}>, width: float} $result */
+        $result = $m->invoke(null, $chars, $chainSize, $charWidth, $originX);
 
         return $result;
     }
 
     /**
-     * Count how many of the planned fallback draws render $char.
+     * Build a $charWidth(int $fontIndex, string $ch): float from a spec map
+     * `$spec[$char] = [$fontIndex => $width, ...]`. Any (font, char) not listed
+     * has width 0.0 — i.e. that font has no glyph for the char. Latin chars are
+     * 1.0 wide in the primary; CJK glyphs are 2.0 wide in their fallback to model
+     * full-width advance against half-width Latin.
      *
-     * @param list<array{font: int, text: string, x: float}> $draws
+     * @param array<string, array<int, float>> $spec
+     * @return callable(int, string): float
      */
-    private static function drawCount(array $draws, string $char): int
+    private static function widths(array $spec): callable
+    {
+        return static fn (int $fontIndex, string $ch): float => (float) ($spec[$ch][$fontIndex] ?? 0.0);
+    }
+
+    /**
+     * Count how many of the planned runs render $char.
+     *
+     * @param list<array{font: int, text: string, x: float}> $runs
+     */
+    private static function drawCount(array $runs, string $char): int
     {
         $n = 0;
-        foreach ($draws as $draw) {
-            $n += mb_substr_count($draw['text'], $char);
+        foreach ($runs as $run) {
+            $n += mb_substr_count($run['text'], $char);
         }
 
         return $n;
     }
 
-    /**
-     * Width model standing in for a real font: every character is one "unit"
-     * wide so the primary prefix width equals the number of preceding chars.
-     * This makes the asserted x-positions exact and readable.
-     *
-     * @param list<string> $chars
-     * @return callable(int): float
-     */
-    private static function unitPrefixWidth(array $chars): callable
-    {
-        return static fn (int $charCount): float => (float) max(0, $charCount);
-    }
-
     public function testGlyphInFonts2And3IsDrawnExactlyOnceByFont2(): void
     {
         // 3-font chain: 0 = primary (Latin only), 1 = "SC", 2 = "KR".
-        // The CJK char 世 is present in BOTH SC and KR — the exact overlap case.
-        $char = '世';
-        $covers = static function (int $fontIndex, string $ch) use ($char): bool {
-            if ($ch !== $char) {
-                return false;
-            }
-            // Primary (0) does NOT cover it; both fallbacks (1, 2) do.
-            return $fontIndex === 1 || $fontIndex === 2;
-        };
+        // 世 is present in BOTH SC and KR — the double-draw overlap case.
+        $spec = ['世' => [1 => 2.0, 2 => 2.0]];
 
-        $draws = self::plan([$char], 3, $covers, self::unitPrefixWidth([$char]));
+        $plan = self::plan(['世'], 3, self::widths($spec));
+        $runs = $plan['runs'];
 
-        self::assertSame(
-            1,
-            self::drawCount($draws, $char),
-            'A glyph present in fonts 2 AND 3 must be drawn exactly once.',
-        );
-        self::assertCount(1, $draws);
-        self::assertSame(1, $draws[0]['font'], 'Font 2 (first covering fallback) must claim the glyph.');
-        self::assertSame($char, $draws[0]['text']);
-        self::assertSame(0.0, $draws[0]['x'], 'Single leading glyph draws at the origin.');
+        self::assertSame(1, self::drawCount($runs, '世'), 'A glyph in fonts 2 AND 3 must be drawn exactly once.');
+        self::assertCount(1, $runs);
+        self::assertSame(1, $runs[0]['font'], 'Font 2 (first covering fallback) must claim the glyph.');
+        self::assertSame('世', $runs[0]['text']);
+        self::assertSame(0.0, $runs[0]['x'], 'Single leading glyph draws at the origin.');
+        self::assertSame(2.0, $plan['width'], 'Width is the full-width glyph advance.');
     }
 
     public function testGlyphOnlyInFont3IsStillDrawnByFont3(): void
     {
-        // Hangul that SC lacks but KR has: primary (0) and SC (1) miss it,
-        // only KR (2) covers it.
-        $char = '한';
-        $covers = static fn (int $fontIndex, string $ch): bool
-            => $ch === $char && $fontIndex === 2;
+        // Hangul that SC lacks but KR has: only KR (2) covers it.
+        $spec = ['한' => [2 => 2.0]];
 
-        $draws = self::plan([$char], 3, $covers, self::unitPrefixWidth([$char]));
+        $runs = self::plan(['한'], 3, self::widths($spec))['runs'];
 
-        self::assertSame(
-            1,
-            self::drawCount($draws, $char),
-            'A glyph only in font 3 must still be drawn — exactly once.',
-        );
-        self::assertCount(1, $draws);
-        self::assertSame(2, $draws[0]['font'], 'Font 3 must draw the glyph it alone covers.');
-        self::assertSame($char, $draws[0]['text']);
+        self::assertSame(1, self::drawCount($runs, '한'), 'A glyph only in font 3 must still be drawn — once.');
+        self::assertCount(1, $runs);
+        self::assertSame(2, $runs[0]['font'], 'Font 3 must draw the glyph it alone covers.');
+        self::assertSame('한', $runs[0]['text']);
     }
 
-    public function testPrimaryCoveredGlyphIsNeverReDrawnByAnyFallback(): void
+    public function testPrimaryCoveredGlyphIsDrawnByThePrimaryRun(): void
     {
-        // 'A' is covered by the primary; no fallback may re-draw it.
-        $char = 'A';
-        $covers = static fn (int $fontIndex, string $ch): bool
-            => $ch === $char; // covered by all fonts, including primary (0)
+        // 'A' is covered by the primary; it must be drawn once, by the primary,
+        // and never by a fallback.
+        $spec = ['A' => [0 => 1.0, 1 => 1.0, 2 => 1.0]];
 
-        $draws = self::plan([$char], 3, $covers, self::unitPrefixWidth([$char]));
+        $runs = self::plan(['A'], 3, self::widths($spec))['runs'];
 
-        self::assertSame([], $draws, 'A primary-covered glyph emits no fallback draws.');
+        self::assertSame([['font' => 0, 'text' => 'A', 'x' => 0.0]], $runs);
     }
 
-    public function testGlyphCoveredByNoFontIsNotDrawnByAnyFallback(): void
+    public function testGlyphCoveredByNoFontFallsBackToThePrimaryNotdef(): void
     {
-        // Nothing in the chain covers it -> the primary's full-string draw
-        // renders the .notdef box; fallbacks emit nothing.
-        $char = '猫';
-        $covers = static fn (int $fontIndex, string $ch): bool => false;
+        // Nothing in the chain covers it -> the primary draws the .notdef box,
+        // in place, so it can never overprint a neighbour.
+        $runs = self::plan(['猫'], 3, self::widths([]))['runs'];
 
-        $draws = self::plan([$char], 3, $covers, self::unitPrefixWidth([$char]));
-
-        self::assertSame([], $draws);
+        self::assertSame([['font' => 0, 'text' => '猫', 'x' => 0.0]], $runs);
     }
 
     /**
-     * The core v0.22.1 regression: a fallback glyph after a run of primary
-     * characters must be positioned at the PRIMARY-measured width of that run,
-     * not at the origin and not via fallback-space padding.
+     * A fallback glyph between primary characters sits at the pen position the
+     * primary text reached. "A世B": A(primary,1) 世(SC,2) B(primary,1).
+     */
+    public function testFallbackGlyphBetweenPrimaryRunsIsPositionedAtThePen(): void
+    {
+        $spec = [
+            'A'  => [0 => 1.0],
+            'B'  => [0 => 1.0],
+            '世' => [1 => 2.0, 2 => 2.0],
+        ];
+
+        $plan = self::plan(['A', '世', 'B'], 3, self::widths($spec));
+        $runs = $plan['runs'];
+
+        self::assertSame([
+            ['font' => 0, 'text' => 'A', 'x' => 0.0],
+            ['font' => 1, 'text' => '世', 'x' => 1.0],
+            ['font' => 0, 'text' => 'B', 'x' => 3.0], // past the full-width 世 (1.0 + 2.0)
+        ], $runs);
+        self::assertSame(4.0, $plan['width']);
+    }
+
+    /**
+     * THE bug that survived v0.22.1: a CJK glyph FOLLOWED by more text. The
+     * trailing text must start past the full-width CJK glyph, not on top of it.
      *
-     * "A世B": A,B in primary; 世 in fallback (SC). With unit widths the primary
-     * pen reaches x=1.0 after "A", so 世 must draw at x=1.0.
+     * "世X": 世 is full-width (2.0) in the fallback; X (primary, 1.0) must draw at
+     * x=2.0. The old path measured the "世" prefix with the primary (width ~0) and
+     * let the primary's whole-string pass place X at x≈0 — directly over 世.
      */
-    public function testMixedStringPositionsFallbackGlyphAtPrimaryPrefixWidth(): void
+    public function testCjkFollowedByPrimaryTextDoesNotOverprint(): void
     {
-        $chars = ['A', '世', 'B'];
-        $covers = static function (int $fontIndex, string $ch): bool {
-            return match ($ch) {
-                'A', 'B' => $fontIndex === 0,
-                '世' => $fontIndex === 1,
-                default => false,
-            };
-        };
+        $spec = [
+            '世' => [1 => 2.0],
+            'X'  => [0 => 1.0],
+        ];
 
-        $draws = self::plan($chars, 3, $covers, self::unitPrefixWidth($chars));
+        $plan = self::plan(['世', 'X'], 3, self::widths($spec));
 
-        self::assertCount(1, $draws, 'Only the single fallback glyph is drawn by a fallback.');
-        self::assertSame(1, $draws[0]['font']);
-        self::assertSame('世', $draws[0]['text']);
-        self::assertSame(
-            1.0,
-            $draws[0]['x'],
-            'The fallback glyph must sit at the primary-measured width of "A" (1 unit), '
-            . 'not at the origin or a space-padded approximation.',
-        );
-        // The Latin chars are never re-drawn by a fallback.
-        self::assertSame(0, self::drawCount($draws, 'A'));
-        self::assertSame(0, self::drawCount($draws, 'B'));
+        self::assertSame([
+            ['font' => 1, 'text' => '世', 'x' => 0.0],
+            ['font' => 0, 'text' => 'X', 'x' => 2.0],
+        ], $plan['runs']);
+        self::assertSame(3.0, $plan['width']);
     }
 
     /**
-     * A realistic "Save 接受" style mix: a multi-char primary prefix (incl. a
-     * space) followed by a contiguous CJK run that is shared between SC and KR.
-     * The run must be drawn once, by SC, anchored at the primary width of the
-     * 5-char prefix "Save " (5 units), as a single merged draw.
+     * The hotkey case from the bug report: a CJK label followed by a bracketed
+     * Latin hotkey, e.g. "暂停 [P]". Every Latin character after the two
+     * full-width CJK glyphs must be offset by their true width.
      */
-    public function testContiguousFallbackRunIsMergedAndAnchoredAtPrimaryWidth(): void
+    public function testCjkLabelFollowedByLatinHotkeyIsOffsetByFullWidth(): void
     {
-        $chars = ['S', 'a', 'v', 'e', ' ', '接', '受'];
-        $covers = static function (int $fontIndex, string $ch): bool {
-            // CJK shared by SC (1) and KR (2); everything else primary-only.
-            if ($ch === '接' || $ch === '受') {
-                return $fontIndex === 1 || $fontIndex === 2;
-            }
-            return $fontIndex === 0;
-        };
+        $spec = [
+            '暂' => [1 => 2.0],
+            '停' => [1 => 2.0],
+            ' '  => [0 => 1.0],
+            '['  => [0 => 1.0],
+            'P'  => [0 => 1.0],
+            ']'  => [0 => 1.0],
+        ];
 
-        $draws = self::plan($chars, 3, $covers, self::unitPrefixWidth($chars));
+        $plan = self::plan(['暂', '停', ' ', '[', 'P', ']'], 3, self::widths($spec));
 
-        self::assertCount(1, $draws, 'The two CJK chars merge into a single fallback run/draw.');
-        self::assertSame(1, $draws[0]['font'], 'SC (earliest covering fallback) claims the run.');
-        self::assertSame('接受', $draws[0]['text']);
-        self::assertSame(
-            5.0,
-            $draws[0]['x'],
-            'The CJK run starts at the primary width of "Save " (5 units).',
-        );
-        // Each CJK glyph drawn exactly once — no KR overprint.
-        self::assertSame(1, self::drawCount($draws, '接'));
-        self::assertSame(1, self::drawCount($draws, '受'));
+        self::assertSame([
+            ['font' => 1, 'text' => '暂停', 'x' => 0.0],
+            ['font' => 0, 'text' => ' [P]', 'x' => 4.0], // 2 CJK * 2.0 each
+        ], $plan['runs']);
+        self::assertSame(8.0, $plan['width']); // 4 (CJK) + 4 (" [P]")
+    }
+
+    /**
+     * "Save 接受": a primary prefix (incl. a space) then a contiguous CJK run
+     * shared by SC and KR. The run is drawn once, by SC, after the 5-unit prefix.
+     */
+    public function testContiguousFallbackRunIsMergedAndAnchoredAfterPrimaryPrefix(): void
+    {
+        $spec = [
+            'S' => [0 => 1.0], 'a' => [0 => 1.0], 'v' => [0 => 1.0], 'e' => [0 => 1.0], ' ' => [0 => 1.0],
+            '接' => [1 => 2.0, 2 => 2.0],
+            '受' => [1 => 2.0, 2 => 2.0],
+        ];
+
+        $plan = self::plan(['S', 'a', 'v', 'e', ' ', '接', '受'], 3, self::widths($spec));
+        $runs = $plan['runs'];
+
+        self::assertSame([
+            ['font' => 0, 'text' => 'Save ', 'x' => 0.0],
+            ['font' => 1, 'text' => '接受', 'x' => 5.0],
+        ], $runs);
+        self::assertSame(1, self::drawCount($runs, '接'));
+        self::assertSame(1, self::drawCount($runs, '受'));
+        self::assertSame(9.0, $plan['width']); // 5 + 2*2.0
     }
 
     public function testMixedStringWithTwoFallbackFontsClaimsAndPositionsEach(): void
     {
-        // "A世한B" — primary has A/B, SC has 世, only KR has 한. The two CJK
-        // chars are claimed by DIFFERENT fallbacks, so they are separate draws,
-        // each anchored at its own primary prefix width.
-        $chars = ['A', '世', '한', 'B'];
-        $covers = static function (int $fontIndex, string $ch): bool {
-            return match ($ch) {
-                'A', 'B' => $fontIndex === 0,
-                '世' => $fontIndex === 1 || $fontIndex === 2, // shared SC+KR
-                '한' => $fontIndex === 2,
-                default => false,
-            };
-        };
+        // "A世한B": SC owns 世 (shared with KR), only KR owns 한.
+        $spec = [
+            'A'  => [0 => 1.0],
+            'B'  => [0 => 1.0],
+            '世' => [1 => 2.0, 2 => 2.0],
+            '한' => [2 => 2.0],
+        ];
 
-        $draws = self::plan($chars, 3, $covers, self::unitPrefixWidth($chars));
+        $runs = self::plan(['A', '世', '한', 'B'], 3, self::widths($spec))['runs'];
 
-        self::assertCount(2, $draws);
-
-        // 世 -> SC (1) at width of "A" (1 unit)
-        self::assertSame(1, $draws[0]['font']);
-        self::assertSame('世', $draws[0]['text']);
-        self::assertSame(1.0, $draws[0]['x']);
-
-        // 한 -> KR (2) at width of "A世" (2 units)
-        self::assertSame(2, $draws[1]['font']);
-        self::assertSame('한', $draws[1]['text']);
-        self::assertSame(2.0, $draws[1]['x']);
-
-        self::assertSame(1, self::drawCount($draws, '世'));
-        self::assertSame(1, self::drawCount($draws, '한'));
-        self::assertSame(0, self::drawCount($draws, 'A'));
+        self::assertSame([
+            ['font' => 0, 'text' => 'A',  'x' => 0.0],
+            ['font' => 1, 'text' => '世', 'x' => 1.0],
+            ['font' => 2, 'text' => '한', 'x' => 3.0], // past 世 (1.0 + 2.0)
+            ['font' => 0, 'text' => 'B',  'x' => 5.0], // past 한 (3.0 + 2.0)
+        ], $runs);
+        self::assertSame(1, self::drawCount($runs, '世'));
+        self::assertSame(1, self::drawCount($runs, '한'));
     }
 
     public function testTwoFontChainStillPositionsFallbackGlyph(): void
     {
         // Backwards-compat: with a single fallback, a mixed string still draws
-        // the missing glyph through the fallback at the primary prefix width.
-        $chars = ['A', '世'];
-        $covers = static function (int $fontIndex, string $ch): bool {
-            return match ($ch) {
-                'A' => $fontIndex === 0,
-                '世' => $fontIndex === 1,
-                default => false,
-            };
-        };
+        // the missing glyph through the fallback at the right pen position.
+        $spec = [
+            'A'  => [0 => 1.0],
+            '世' => [1 => 2.0],
+        ];
 
-        $draws = self::plan($chars, 2, $covers, self::unitPrefixWidth($chars));
+        $runs = self::plan(['A', '世'], 2, self::widths($spec))['runs'];
 
-        self::assertSame(
-            [['font' => 1, 'text' => '世', 'x' => 1.0]],
-            $draws,
-        );
+        self::assertSame([
+            ['font' => 0, 'text' => 'A',  'x' => 0.0],
+            ['font' => 1, 'text' => '世', 'x' => 1.0],
+        ], $runs);
+    }
+
+    public function testOriginOffsetShiftsEveryRun(): void
+    {
+        // A non-zero text origin must offset every run's x by the same amount.
+        $spec = [
+            '世' => [1 => 2.0],
+            'X'  => [0 => 1.0],
+        ];
+
+        $runs = self::plan(['世', 'X'], 3, self::widths($spec), 10.0)['runs'];
+
+        self::assertSame([
+            ['font' => 1, 'text' => '世', 'x' => 10.0],
+            ['font' => 0, 'text' => 'X', 'x' => 12.0],
+        ], $runs);
     }
 }
