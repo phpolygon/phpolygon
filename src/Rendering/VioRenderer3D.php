@@ -166,6 +166,13 @@ class VioRenderer3D implements Renderer3DInterface
     // samples the baked SDF volume for AO + soft sun-shadow, and writes them to
     // sdfAoTarget (R = AO, G = shadow). The mesh shader samples it at slot 2.
     private ?VioRenderTarget $sdfAoTarget = null;
+    // Bilateral-blurred copy of sdfAoTarget. The baked SDF volume is COARSE
+    // (metres per voxel), so the raw AO + soft-shadow it produces carries
+    // quantised, voxel-grid-aligned mottle on flat surfaces standing near baked
+    // geometry. A depth-aware box blur (sdf_ao_blur.frag) averages that mottle
+    // out while keeping contact AO/shadow crisp at real geometry silhouettes.
+    // The MESH pass samples THIS blurred target (R=AO, G=shadow preserved).
+    private ?VioRenderTarget $sdfAoBlurTarget = null;
     private int $sdfAoWidth = 0;
     private int $sdfAoHeight = 0;
     private bool $sdfAoActiveThisFrame = false;
@@ -529,7 +536,10 @@ class VioRenderer3D implements Renderer3DInterface
         if ($this->sdfAoTarget !== null && $this->sdfAoWidth === $w && $this->sdfAoHeight === $h) {
             return;
         }
-        $this->sdfAoTarget = vio_render_target($this->ctx, ['width' => $w, 'height' => $h]) ?: null;
+        // Full-res (matches the G-buffer it reconstructs from). RGBA8 default —
+        // R=AO, G=shadow are all the channels the pass and its blur need.
+        $this->sdfAoTarget     = vio_render_target($this->ctx, ['width' => $w, 'height' => $h]) ?: null;
+        $this->sdfAoBlurTarget = vio_render_target($this->ctx, ['width' => $w, 'height' => $h]) ?: null;
         $this->sdfAoWidth = $w;
         $this->sdfAoHeight = $h;
     }
@@ -567,7 +577,8 @@ class VioRenderer3D implements Renderer3DInterface
 
         $this->ensureSdfAoTarget();
         $target = $this->sdfAoTarget;
-        if ($target === null) {
+        $blur   = $this->sdfAoBlurTarget;
+        if ($target === null || $blur === null) {
             return;
         }
 
@@ -608,15 +619,37 @@ class VioRenderer3D implements Renderer3DInterface
         vio_draw($this->ctx, $quad);
         vio_unbind_render_target($this->ctx);
 
+        // --- Bilateral blur: smooth the coarse-voxel mottle, keep edges crisp ---
+        // The raw SDF-AO target carries quantised, voxel-grid-aligned noise on
+        // flat surfaces standing near baked geometry (the field is metres per
+        // voxel). A depth-aware box blur (guarded on the G-buffer's linear view
+        // depth) averages that mottle while NOT bleeding contact AO/shadow across
+        // geometry silhouettes. R=AO and G=shadow are blurred INDEPENDENTLY, so
+        // the mesh pass still reads (AO, shadow) in (R, G). The 2D G-buffer is
+        // bound first (slot 0) here — this pass has no sampler3D, so the D3D
+        // sampler-table ordering caveat above does not apply.
+        vio_bind_render_target($this->ctx, $blur);
+        vio_viewport($this->ctx, 0, 0, $w, $h);
+        vio_clear($this->ctx, 1, 1, 0, 1);
+        $this->bindPostProcessPipeline('sdf_ao_blur');
+        vio_bind_texture($this->ctx, vio_render_target_texture($gbuffer), 0);
+        vio_set_uniform($this->ctx, 'u_gbuffer', 0);
+        vio_bind_texture($this->ctx, vio_render_target_texture($target), 1);
+        vio_set_uniform($this->ctx, 'u_source', 1);
+        vio_set_uniform($this->ctx, 'u_texel', [1.0 / $w, 1.0 / $h]);
+        vio_draw($this->ctx, $quad);
+        vio_unbind_render_target($this->ctx);
+
         $this->sdfAoActiveThisFrame = true;
     }
 
     /** Bind the SDF-AO screen map (or white fallback) for the mesh pass. */
     private function uploadSdfAoUniforms(): void
     {
-        $enabled = $this->sdfAoActiveThisFrame && $this->sdfAoTarget !== null;
+        // Sample the BLURRED target (raw sdfAoTarget carries coarse-voxel mottle).
+        $enabled = $this->sdfAoActiveThisFrame && $this->sdfAoBlurTarget !== null;
         if ($enabled) {
-            $tex = vio_render_target_texture($this->sdfAoTarget);
+            $tex = vio_render_target_texture($this->sdfAoBlurTarget);
         } else {
             $this->ensureWhiteTexture();
             $tex = $this->whiteTexture;
@@ -1423,6 +1456,7 @@ class VioRenderer3D implements Renderer3DInterface
         $this->compileShaderFromFiles('gbuffer',    'gbuffer.vert.glsl',    'gbuffer.frag.glsl');
         $this->compileShaderFromFiles('ssao',       'postprocess.vert.glsl', 'ssao.frag.glsl');
         $this->compileShaderFromFiles('sdf_ao',     'postprocess.vert.glsl', 'sdf_ao.frag.glsl');
+        $this->compileShaderFromFiles('sdf_ao_blur','postprocess.vert.glsl', 'sdf_ao_blur.frag.glsl');
         $this->compileShaderFromFiles('ssao_blur',  'postprocess.vert.glsl', 'ssao_blur.frag.glsl');
         // SSR: ray-march the G-buffer (depth+normal+reflectivity) against the HDR
         // scene colour, then composite the reflection back over the scene.
@@ -1926,6 +1960,9 @@ class VioRenderer3D implements Renderer3DInterface
 
         foreach ($commands as $cmd) {
             if ($cmd instanceof DrawMesh) {
+                if ($cmd->excludeFromGbuffer) {
+                    continue; // dynamic object opted out of SSAO/SDF-AO/SSR
+                }
                 $material = MaterialRegistry::get($cmd->materialId);
                 if ($material === null || $material->alpha < 1.0) {
                     continue;

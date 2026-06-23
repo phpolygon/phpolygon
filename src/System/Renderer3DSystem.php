@@ -508,7 +508,7 @@ class Renderer3DSystem extends AbstractSystem
 
             $material = MaterialRegistry::get($mesh->materialId);
             $isTransparent = $material !== null && $material->alpha < 1.0;
-            $draw = new DrawMesh($mesh->meshId, $mesh->materialId, $matrix);
+            $draw = new DrawMesh($mesh->meshId, $mesh->materialId, $matrix, $mesh->excludeFromGbuffer);
 
             if ($isTransparent) {
                 // Use the mesh's bounding-sphere centre (transformed into

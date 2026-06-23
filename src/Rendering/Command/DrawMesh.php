@@ -12,5 +12,7 @@ readonly class DrawMesh
         public string $meshId,
         public string $materialId,
         public Mat4 $modelMatrix,
+        /** When true, skip this draw in the deferred G-buffer prepass (no SSAO/SDF-AO/SSR). */
+        public bool $excludeFromGbuffer = false,
     ) {}
 }

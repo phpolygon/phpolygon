@@ -31,15 +31,29 @@ class MeshRenderer extends AbstractComponent
     #[Property]
     public bool $visible = true;
 
+    /**
+     * When true, this mesh is NOT written into the deferred G-buffer that drives
+     * the screen-space effects (SSAO, fieldtracing SDF-AO, SSR). Use for DYNAMIC
+     * objects that move outside the baked SDF/probe data: the baked field can't
+     * represent them, so sampling it on their surface yields voxel-grid mottle.
+     * Excluded fragments read the background of the AO maps (sky → 1.0) and so
+     * get no spurious screen-space occlusion. They still render normally in the
+     * forward pass; they merely forgo (and don't contribute to) SSAO/SSR.
+     */
+    #[Property]
+    public bool $excludeFromGbuffer = false;
+
     public function __construct(
         string $meshId = '',
         string $materialId = '',
         bool $castShadows = true,
         bool $visible = true,
+        bool $excludeFromGbuffer = false,
     ) {
         $this->meshId = $meshId;
         $this->materialId = $materialId;
         $this->castShadows = $castShadows;
         $this->visible = $visible;
+        $this->excludeFromGbuffer = $excludeFromGbuffer;
     }
 }
