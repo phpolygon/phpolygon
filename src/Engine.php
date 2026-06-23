@@ -559,6 +559,10 @@ class Engine
         self::log('Window initializing...');
         $this->window->initialize($this->input);
         self::log('Window initialized, framebuffer: ' . $this->window->getFramebufferWidth() . 'x' . $this->window->getFramebufferHeight());
+        // Apply the saved display mode NOW — the window exists but no frame has
+        // drawn yet, so the studio splash (and everything after) renders in the
+        // player's chosen mode instead of briefly flashing windowed.
+        self::applyDisplayMode($this->window, $this->config->displayMode);
         if ($this->window instanceof VioWindow) {
             self::log('VIO backend active: ' . vio_backend_name($this->window->getContext()));
         }
@@ -1267,6 +1271,25 @@ class Engine
             if ($system instanceof \PHPolygon\System\Renderer3DSystem) {
                 $system->setFieldtracingMode($settings->fieldtracing);
             }
+        }
+    }
+
+    /**
+     * Apply the configured initial display mode to the window. Called during
+     * run() right after the window is initialized and before the studio splash
+     * draws, so the very first visible frame (the studio splash) is already in
+     * the player's chosen mode instead of flashing windowed first.
+     *
+     * The window is created windowed, so only fullscreen/borderless need an
+     * action; an unknown value is treated as windowed and never throws — a
+     * corrupted setting must not break engine startup.
+     */
+    private static function applyDisplayMode(Window $window, string $mode): void
+    {
+        if ($mode === 'fullscreen') {
+            $window->setFullscreen();
+        } elseif ($mode === 'borderless') {
+            $window->setBorderless();
         }
     }
 

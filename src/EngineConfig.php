@@ -15,6 +15,11 @@ class EngineConfig
         public readonly int $height = 720,
         public readonly bool $vsync = true,
         public readonly bool $resizable = true,
+        // Initial window display mode, applied during run() BEFORE the studio
+        // splash draws so the first visible frame is already in the player's
+        // saved mode. One of 'windowed' | 'borderless' | 'fullscreen'; anything
+        // else is treated as 'windowed'.
+        public readonly string $displayMode = 'windowed',
         public readonly float $targetTickRate = 60.0,
         // When true the simulation runs ONE update per rendered frame with the
         // real (clamped) frame time, instead of the fixed-timestep accumulator —
