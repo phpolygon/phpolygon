@@ -90,6 +90,11 @@ void main() {
     float depth = g.a;
 
     // Sky / no geometry: leave fully lit (alpha-cleared to 0 -> depth 0).
+    // G = 0 marks this texel as background so the (bilateral) blur pass can tell
+    // sky apart from genuinely-unoccluded foreground; B carries the linear view
+    // depth (scaled into 0..1) so the blur can reject neighbours across a depth
+    // discontinuity. Both are written for every texel below; here the sky case
+    // writes flag 0 / depth 0.
     if (depth <= 0.0) {
         frag_color = vec4(1.0, 0.0, 0.0, 1.0);
         return;
@@ -134,5 +139,15 @@ void main() {
     occlusion = occlusion / float(KERNEL);
     float ao = clamp(1.0 - occlusion * u_intensity, 0.0, 1.0);
     ao = pow(ao, u_power);
-    frag_color = vec4(ao, 0.0, 0.0, 1.0);
+
+    // R = AO, G = foreground flag (1 = real geometry), B = compressed linear
+    // depth in 0..1. The blur pass uses G/B to stay bilateral: it rejects sky
+    // neighbours (G==0) and neighbours across a large depth step, so the noisy
+    // per-pixel rotation is averaged only over the SAME surface. This is what
+    // keeps thin geometry silhouetted against the background from speckling
+    // (its blur footprint is otherwise mostly background). The compression is
+    // monotonic and convention-independent (linear view depth, GL and D3D
+    // identical); the blur only ever compares B values, never decodes metres.
+    float bdepth = depth / (depth + 8.0);
+    frag_color = vec4(ao, 1.0, bdepth, 1.0);
 }

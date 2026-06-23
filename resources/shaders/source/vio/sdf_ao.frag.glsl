@@ -61,6 +61,16 @@ float mapVolume(vec3 p) {
     return (s * 2.0 - 1.0) * u_vol_range;
 }
 
+// True when p lies OUTSIDE the baked volume — i.e. mapVolume(p) would have to
+// clamp its UVW and would return an EDGE voxel's distance rather than the real
+// (large) free-space distance. A trace that steps out of the volume must treat
+// that as open space, not as a hit, or the clamped edge voxel fabricates a
+// false occluder / shadow. (UVW domain only; no NDC, no Y convention.)
+bool outsideVolume(vec3 p) {
+    vec3 t = (p - u_vol_origin) / u_vol_size;
+    return any(lessThan(t, vec3(0.0))) || any(greaterThan(t, vec3(1.0)));
+}
+
 float ambientOcclusion(vec3 p, vec3 n) {
     float occ = 0.0;
     float sca = 1.0;
@@ -77,7 +87,12 @@ float softShadow(vec3 ro, vec3 rd) {
     float res = 1.0;
     float t = 0.05;
     for (int i = 0; i < 40; i++) {
-        float h = mapVolume(ro + rd * t);
+        vec3 p = ro + rd * t;
+        // Once the ray leaves the baked volume there is no more geometry to
+        // shadow against — the sun is unobstructed from here on. Stop rather
+        // than read a clamped edge voxel (which could fake a near hit).
+        if (outsideVolume(p)) break;
+        float h = mapVolume(p);
         if (h < 0.0015) return 0.0;
         res = min(res, 8.0 * h / t);
         t += clamp(h, 0.03, 0.4);
@@ -109,6 +124,39 @@ void main() {
     // begins clearly in free space above the surface.
     vec3 cellv = u_vol_size / vec3(textureSize(u_sdf_volume, 0));
     float bias = max(cellv.x, max(cellv.y, cellv.z)) * 1.25;
+
+    // Out-of-volume guard. mapVolume() clamps the sample UVW into [0,1], so a
+    // fragment OUTSIDE the baked SDF volume (e.g. a dynamic object that has
+    // travelled beyond the bake bounds) would silently read the volume's EDGE
+    // voxel instead of true free space — yielding a spurious occlusion / shadow
+    // that has nothing to do with this fragment's surroundings. Anything outside
+    // the volume must return fully unoccluded / lit (1,1) so it composites as a
+    // no-op via the min() fold in mesh3d.frag. A small margin (one cell) keeps
+    // the boundary from flickering at the faces.
+    vec3 nrm = (worldP - u_vol_origin) / u_vol_size;
+    vec3 margin = cellv / u_vol_size;
+    if (any(lessThan(nrm, -margin)) || any(greaterThan(nrm, 1.0 + margin))) {
+        frag_color = vec4(1.0, 1.0, 0.0, 1.0);
+        return;
+    }
+
+    // Free-space guard. A fragment can sit INSIDE the volume bounds yet far from
+    // any baked geometry — e.g. a dynamic surface hovering in open space above
+    // empty terrain. The SDF distance AT that fragment is then large and
+    // positive: nothing is near enough to occlude or shadow it. Running the
+    // cone-AO / soft-shadow traces there is not just wasteful, it is WRONG — the
+    // baked field is coarse (metres per voxel), and reading it where the true
+    // distance is large picks up quantised, voxel-grid-aligned noise that mottles
+    // bright lit surfaces. A real wall or floor is PART of the field, so its own
+    // distance is ~0 (well under the AO radius) and this guard never fires on it;
+    // only surfaces genuinely standing in open space short-circuit to (1,1).
+    // Compares an SDF distance (world metres) against the AO reach (world
+    // metres) — convention-independent, no NDC, no Y-flip touched.
+    float selfDist = mapVolume(worldP);
+    if (selfDist > u_ao_radius + bias) {
+        frag_color = vec4(1.0, 1.0, 0.0, 1.0);
+        return;
+    }
 
     float ao = ambientOcclusion(worldP + worldN * bias, worldN);
     float sh = softShadow(worldP + worldN * bias, normalize(u_sun_dir));

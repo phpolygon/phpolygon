@@ -59,17 +59,22 @@ enum ScreenSpaceAO: string
         return match ($this) {
             self::Off, self::Low => 0.0,
             self::Medium         => 1.0,
-            self::High           => 1.4,
+            self::High           => 1.15,
         };
     }
 
-    /** Hemisphere sample radius in view-space (world) units — ssao.frag u_radius. */
+    /**
+     * Hemisphere sample radius in view-space (world) units — ssao.frag u_radius.
+     * High was 0.7, which scattered AO well past real contact points and read as
+     * unnatural smudging; 0.55 keeps the occlusion tight to where geometry
+     * actually meets while staying a touch wider than Medium.
+     */
     public function ssaoRadius(): float
     {
         return match ($this) {
             self::Off, self::Low => 0.0,
             self::Medium         => 0.5,
-            self::High           => 0.7,
+            self::High           => 0.55,
         };
     }
 
@@ -79,7 +84,7 @@ enum ScreenSpaceAO: string
         return match ($this) {
             self::Off, self::Low => 1.0,
             self::Medium         => 1.5,
-            self::High           => 1.8,
+            self::High           => 1.6,
         };
     }
 
