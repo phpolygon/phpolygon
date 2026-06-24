@@ -446,6 +446,16 @@ vec3 applyUnderwaterTint(vec3 color, vec3 worldPos) {
     if (dot(dE, dE) < DOME_R2 || dot(dL, dL) < DOME_R2) {
         return color; // inside the dry bubble
     }
+    // Dry sealed cellar under each city centre: a control room sits below the
+    // plaza, well under the water plane, so its whole footprint must stay
+    // un-tinted. ROOM_HALF≈22 → a 32 m disc covers the square room's corners.
+    // (Game-supplied centres — see the FIXME above.)
+    const float CELLAR_R2 = 32.0 * 32.0;
+    vec2 cE = worldPos.xz - vec2(1200.0, 0.0); // embedded (shipping) scene
+    vec2 cL = worldPos.xz - vec2(0.0, 0.0);    // standalone scene
+    if (dot(cE, cE) < CELLAR_R2 || dot(cL, cL) < CELLAR_R2) {
+        return color; // inside the dry cellar
+    }
     // dry shaft+corridor tube: keep its interior un-tinted
     // (the descent shaft over deep water + the glass corridor to the dome).
     // Pure-XZ point-to-segment distance → exception holds over the full shaft
