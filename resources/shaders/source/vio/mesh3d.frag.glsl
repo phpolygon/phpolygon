@@ -916,11 +916,13 @@ vec3 computePoolWater(vec3 N, vec3 V, vec3 L, out float alphaOut, out float roug
     float NdotV = max(dot(N, V), 0.0);
     float fresnel = mix(0.04, 1.0, pow(1.0 - NdotV, 5.0));
 
-    // Clear shallow water over a dark wet basin floor: top-down shows the floor,
-    // grazing angles pick up the body tint and the sky reflection.
-    vec3 floorColor = vec3(0.04, 0.16, 0.18);
-    vec3 bodyColor  = vec3(0.10, 0.42, 0.48);
-    vec3 waterColor = mix(floorColor, bodyColor, fresnel);
+    // Tinted shallow basin water: reads clearly as water even top-down (the old
+    // near-transparent "clear" look vanished against the dark wet floor at eye
+    // level / distance). Lifted floor tint + a body-colour floor so the surface
+    // always carries a teal cast; grazing angles still pick up the sky reflection.
+    vec3 floorColor = vec3(0.05, 0.24, 0.28);
+    vec3 bodyColor  = vec3(0.12, 0.52, 0.60);
+    vec3 waterColor = mix(floorColor, bodyColor, max(fresnel, 0.45));
 
     vec3 R = reflect(-V, N);
     float skyBlend = clamp(R.y * 2.0, 0.0, 1.0);
@@ -942,8 +944,10 @@ vec3 computePoolWater(vec3 N, vec3 V, vec3 L, out float alphaOut, out float roug
     float caustic = pow(max(0.0, 1.0 - abs(cs1 - cs2) * 2.5), 3.0);
     finalColor += vec3(0.12, 0.22, 0.20) * caustic * (1.0 - fresnel);
 
-    // See-through from above (floor visible), reflective at grazing angles.
-    alphaOut = mix(0.45, 0.95, fresnel);
+    // Mostly opaque so the basin reads as filled with water (was 0.45 top-down,
+    // which let the dark floor show through and read as bare stone); fully
+    // reflective at grazing angles.
+    alphaOut = mix(0.82, 0.97, fresnel);
     roughOut = 0.03;
 
     return finalColor;
