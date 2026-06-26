@@ -609,28 +609,43 @@ vec3 computeSand(vec3 N, vec3 V, vec3 L, out float roughOut) {
         const float COBBLE_ROUGH = 0.90;                   // rough hewn stone
         vec3 base = COBBLE_BASE * u_season_tint;
 
-        vec2 p = v_worldPos.xz * 1.6;
+        // Domain-warp the lookup with a low-frequency field so the cobble cells
+        // do not pack into axis-aligned rows / a regular hexagonal grid.
+        vec2 wp = v_worldPos.xz;
+        vec2 warp = vec2(noise(wp * 0.35 + 11.3), noise(wp * 0.35 + 47.7)) - 0.5;
+        vec2 p = (wp + warp * 0.9) * 1.6;
         vec2 ip = floor(p);
         vec2 fp = fract(p);
-        float d1 = 8.0;
+
+        // Worley over the 3x3 neighbourhood, tracking the nearest (F1) AND the
+        // second-nearest (F2) distance plus the nearest cell id. F2-F1 yields a
+        // crisp mortar seam that follows the irregular cell borders (real
+        // cobbles), not a concentric dome that reads as uniform hexagons.
+        float d1 = 8.0, d2 = 8.0;
+        vec2  nearId = ip;
         for (int y = -1; y <= 1; y++) {
             for (int x = -1; x <= 1; x++) {
                 vec2 g = vec2(float(x), float(y));
-                vec2 o = vec2(hash21(ip + g), hash21(ip + g + 19.0));
+                vec2 cell = ip + g;
+                vec2 o = vec2(hash21(cell), hash21(cell + 19.0));
                 float d = length(g + o - fp);
-                d1 = min(d1, d);
+                if (d < d1) { d2 = d1; d1 = d; nearId = cell; }
+                else if (d < d2) { d2 = d; }
             }
         }
-        float dome = 1.0 - smoothstep(0.0, 0.55, d1);
-        base *= 0.55 + dome * 0.65;
 
-        float stoneHash = hash21(ip);
-        base *= 0.85 + stoneHash * 0.30;
+        float seam = smoothstep(0.0, 0.07, d2 - d1);  // dark joint -> bright stone
+        float dome = 1.0 - smoothstep(0.0, 0.70, d1); // gentle worn crown
+        base *= 0.45 + seam * 0.45 + dome * 0.18;
+
+        float stoneHash = hash21(nearId);
+        base *= 0.80 + stoneHash * 0.38;
+        base *= 0.92 + 0.16 * step(0.82, hash21(nearId + 5.0));
 
         float g3 = noise(v_worldPos.xz * 22.0);
         base *= 0.94 + (g3 - 0.5) * 0.12;
 
-        roughOut = COBBLE_ROUGH - dome * 0.06;
+        roughOut = COBBLE_ROUGH - dome * 0.05;
         return base;
     }
 
