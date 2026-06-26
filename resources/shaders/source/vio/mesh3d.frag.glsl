@@ -691,12 +691,19 @@ vec3 computeSand(vec3 N, vec3 V, vec3 L, out float roughOut) {
     // of as a separate overlay mesh, so one terrain mesh covers shore sand
     // AND inland grass. TerrainMesh encodes a 'grass' material as UV.x = 1.0.
     // Use a bounded test so the themed-ground sentinels (>=1.25) do NOT match.
-    if (zone > 0.9 && zone < 1.25) {
+    // Rather than a HARD cutover at the sand↔grass line (which reads as a crisp
+    // seam), compute the grass colour and BLEND it over the shore sand across the
+    // UV.x transition band so the border is a soft natural fringe. grassBlend
+    // ramps 0→1 over zone 0.74→1.0; the bounded test keeps the themed-ground
+    // sentinels (>=1.25) out of the grass blend.
+    float grassBlend = (zone < 1.25) ? smoothstep(0.74, 1.0, zone) : 0.0;
+    vec3 grass = vec3(0.0);
+    if (grassBlend > 0.0) {
         vec3 grassBase = vec3(0.368, 0.478, 0.220) * u_season_tint; // ~#5E7A38
         float g1 = fbm2(v_worldPos.xz * 0.8);          // broad sun/shadow patches
         float g2 = noise(v_worldPos.xz * 5.0);         // clumps
         float g3 = noise(v_worldPos.xz * 22.0);        // blade-scale speckle
-        vec3 grass = grassBase;
+        grass = grassBase;
         grass *= 0.80 + g1 * 0.34;
         grass *= 0.90 + (g2 - 0.5) * 0.26;
         grass *= 0.92 + (g3 - 0.5) * 0.20;
@@ -704,8 +711,11 @@ vec3 computeSand(vec3 N, vec3 V, vec3 L, out float roughOut) {
         grass = mix(grass, grass * vec3(1.12, 1.06, 0.66), smoothstep(0.6, 0.95, g2) * 0.3);
         // Rain deepens the green.
         grass = mix(grass, grass * 0.72, u_rain_wetness * 0.4);
-        roughOut = 0.95;
-        return grass;
+        // Fully inland: pure grass, skip the sand work below.
+        if (grassBlend >= 0.999) {
+            roughOut = 0.95;
+            return grass;
+        }
     }
 
     vec3 baseColor = u_albedo * u_season_tint;
@@ -763,6 +773,12 @@ vec3 computeSand(vec3 N, vec3 V, vec3 L, out float roughOut) {
     // Roughness: dry sand is rough, wet/puddle is smooth (specular).
     roughOut = mix(0.92, 0.20, wetness);
 
+    // Soft grass↔sand seam: fold the inland grass in over the transition band
+    // computed above, so the border is a gradient rather than a hard line.
+    if (grassBlend > 0.0) {
+        sandColor = mix(sandColor, grass, grassBlend);
+        roughOut = mix(roughOut, 0.95, grassBlend);
+    }
     return sandColor;
 }
 
