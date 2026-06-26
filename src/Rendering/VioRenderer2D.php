@@ -25,12 +25,54 @@ class VioRenderer2D implements Renderer2DInterface
     /** @var array<string, string> Font name -> file path */
     private array $fontPaths = [];
 
-    /** @var array<string, \VioFont> Cache key "name:size" -> VioFont */
+    /** @var array<string, \VioFont> Cache key "name:size@scale" -> VioFont */
     private array $fontCache = [];
+
+    /**
+     * devicePixelRatio for glyph rasterisation. The UI is authored in a fixed
+     * design grid and magnified onto the framebuffer by a transform; a glyph
+     * atlas rasterised at its logical size then gets bilinearly upscaled by that
+     * transform and looks blurry on HiDPI / high-resolution displays. Setting
+     * this to the on-screen magnification (logical->physical px) makes the
+     * renderer rasterise each atlas at size*scale physical pixels while keeping
+     * all metrics in logical units, so text stays crisp.
+     *
+     * 1.0 = legacy behaviour (atlas == logical size). Bumping this re-keys the
+     * font cache so the higher-resolution atlases live alongside any 1.0 ones.
+     */
+    private float $fontRenderScale = 1.0;
 
     public function clearFontCache(): void
     {
         $this->fontCache = [];
+    }
+
+    /**
+     * Set the glyph-atlas devicePixelRatio. See {@see $fontRenderScale}. Values
+     * below 1.0 are clamped (an atlas smaller than its logical size would be
+     * upscaled — the very blur this exists to prevent). Cheap and idempotent:
+     * re-rasterisation only happens lazily when a (font, size) at the new scale
+     * is first requested. Callers should quantise to a few discrete steps to
+     * avoid thrashing the atlas cache as the window resizes continuously.
+     */
+    public function setFontRenderScale(float $scale): void
+    {
+        $this->fontRenderScale = $scale < 1.0 ? 1.0 : $scale;
+    }
+
+    public function getFontRenderScale(): float
+    {
+        return $this->fontRenderScale;
+    }
+
+    /**
+     * Cache key for a (font, logical size) pair at the current render scale.
+     * The scale is folded in so atlases rasterised at different devicePixelRatios
+     * never collide (e.g. moving the window between a 1x and a 2x monitor).
+     */
+    private function fontCacheKey(string $name, int $roundedSize): string
+    {
+        return $name . ':' . $roundedSize . '@' . (int)round($this->fontRenderScale * 100);
     }
 
     /** @var array<int, VioTexture> Texture glId/objectId -> VioTexture */
@@ -738,7 +780,7 @@ class VioRenderer2D implements Renderer2DInterface
             $path = $this->fontPaths[$name];
             foreach ($sizes as $size) {
                 $rounded = (float)(int)$size;
-                $key = $name . ':' . (int)$rounded;
+                $key = $this->fontCacheKey($name, (int)$rounded);
                 if (isset($this->fontCache[$key]) || isset($work[$key])) {
                     continue;
                 }
@@ -749,10 +791,11 @@ class VioRenderer2D implements Renderer2DInterface
             return;
         }
 
+        $scale = $this->fontRenderScale;
         $hasAsync = \function_exists('vio_font_load_async') && \function_exists('vio_font_load_poll');
         if (!$hasAsync) {
             foreach ($work as $key => [$path, $rounded]) {
-                $font = vio_font($this->ctx, $path, $rounded);
+                $font = vio_font($this->ctx, $path, $rounded, $scale);
                 if ($font instanceof VioFont) {
                     $this->fontCache[$key] = $font;
                 }
@@ -771,11 +814,11 @@ class VioRenderer2D implements Renderer2DInterface
                 $key = \array_key_first($work);
                 [$path, $rounded] = $work[$key];
                 unset($work[$key]);
-                $handle = vio_font_load_async($this->ctx, $path, $rounded);
+                $handle = vio_font_load_async($this->ctx, $path, $rounded, $scale);
                 if ($handle === false) {
                     // Worker spawn failed — load synchronously so the font is
                     // never lost.
-                    $font = vio_font($this->ctx, $path, $rounded);
+                    $font = vio_font($this->ctx, $path, $rounded, $scale);
                     if ($font instanceof VioFont) {
                         $this->fontCache[$key] = $font;
                     }
@@ -1091,8 +1134,9 @@ class VioRenderer2D implements Renderer2DInterface
             return null;
         }
 
-        $roundedSize = (float)(int)$size;
-        $key = $name . ':' . (int)$roundedSize;
+        $roundedSize = (int)$size;
+        $scale = $this->fontRenderScale;
+        $key = $this->fontCacheKey($name, $roundedSize);
 
         if (isset($this->fontCache[$key])) {
             return $this->fontCache[$key];
@@ -1103,12 +1147,12 @@ class VioRenderer2D implements Renderer2DInterface
         // the worker is still busy, so the caller skips this font in the chain.
         if (isset($this->asyncFontNames[$name])) {
             if (!isset($this->pendingFontLoads[$key])) {
-                $handle = vio_font_load_async($this->ctx, $this->fontPaths[$name], $roundedSize);
+                $handle = vio_font_load_async($this->ctx, $this->fontPaths[$name], (float)$roundedSize, $scale);
                 if ($handle === false) {
                     // Couldn't even start the worker (e.g. thread-create
                     // failure). Fall back to a synchronous load so the font
                     // still appears rather than being lost forever.
-                    $font = vio_font($this->ctx, $this->fontPaths[$name], $roundedSize);
+                    $font = vio_font($this->ctx, $this->fontPaths[$name], (float)$roundedSize, $scale);
                     if ($font === false) {
                         return null;
                     }
@@ -1121,7 +1165,7 @@ class VioRenderer2D implements Renderer2DInterface
             return null;
         }
 
-        $font = vio_font($this->ctx, $this->fontPaths[$name], $roundedSize);
+        $font = vio_font($this->ctx, $this->fontPaths[$name], (float)$roundedSize, $scale);
         if ($font === false) {
             return null;
         }

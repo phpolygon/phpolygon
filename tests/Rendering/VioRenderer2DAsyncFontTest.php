@@ -72,9 +72,10 @@ final class VioRenderer2DAsyncFontTest extends TestCase
         $first = $resolve->invoke($renderer, 24.0);
         self::assertNull($first, 'font must not block-load on first use');
 
-        // An async load is now in flight, keyed by name:size.
+        // An async load is now in flight, keyed by name:size@scale (scale 100 =
+        // the default 1.0× render scale).
         $pending = $this->readProperty($renderer, 'pendingFontLoads');
-        self::assertArrayHasKey('cjk:24', $pending);
+        self::assertArrayHasKey('cjk:24@100', $pending);
 
         // Drive frames: each beginFrame polls completions. The worker finishes
         // the CPU pack quickly for a normal-sized system font, but give it a
@@ -95,7 +96,7 @@ final class VioRenderer2DAsyncFontTest extends TestCase
 
         // Once cached, the pending entry is cleared and re-resolution is a hit.
         $pendingAfter = $this->readProperty($renderer, 'pendingFontLoads');
-        self::assertArrayNotHasKey('cjk:24', $pendingAfter);
+        self::assertArrayNotHasKey('cjk:24@100', $pendingAfter);
         self::assertSame($font, $resolve->invoke($renderer, 24.0));
     }
 

@@ -362,6 +362,9 @@ class GdRenderer2D implements Renderer2DInterface
         $this->currentFont = $name;
     }
 
+    /** No-op: the GD test renderer rasterizes glyphs per draw at exact size. */
+    public function setFontRenderScale(float $scale): void {}
+
     public function setTextAlign(int $align): void
     {
         $this->textAlign = $align;

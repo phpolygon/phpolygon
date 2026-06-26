@@ -291,10 +291,12 @@ function vio_pop_scissor(VioContext $ctx): void {}
 // ----------------------------------------------------------------
 
 /**
- * @param array<string, mixed> $options
+ * Atlas rasterized at $size * $scale physical px; metrics reported in logical
+ * $size units (devicePixelRatio). $scale clamped to >= 1.0.
+ *
  * @return VioFont|false
  */
-function vio_font(VioContext $ctx, string $path, float $size, array $options = []): VioFont|false {}
+function vio_font(VioContext $ctx, string $path, float $size = 24.0, float $scale = 1.0): VioFont|false {}
 
 /**
  * @param array<string, mixed> $options
@@ -357,7 +359,7 @@ function vio_texture_load_poll(VioContext $ctx, int $handle): ?VioTexture {}
  *
  * @return resource|false Async load handle, or false on failure
  */
-function vio_font_load_async(VioContext $ctx, string $path, float $size = 24.0): mixed {}
+function vio_font_load_async(VioContext $ctx, string $path, float $size = 24.0, float $scale = 1.0): mixed {}
 
 /**
  * Poll an async font load. Returns null while still loading, false on failure,

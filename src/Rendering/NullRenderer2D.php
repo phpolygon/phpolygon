@@ -54,6 +54,7 @@ class NullRenderer2D implements Renderer2DInterface
     public function loadFont(string $name, string $path): void {}
     public function preloadFontAsync(string $name, string $path): void {}
     public function setFont(string $name): void {}
+    public function setFontRenderScale(float $scale): void {}
     public function setTextAlign(int $align): void {}
 
     public function measureText(string $text, float $size): TextMetrics

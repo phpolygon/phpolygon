@@ -46,6 +46,7 @@ class WidgetTestHelper implements Renderer2DInterface
     public function loadFont(string $name, string $path): void {}
     public function preloadFontAsync(string $name, string $path): void {}
     public function setFont(string $name): void {}
+    public function setFontRenderScale(float $scale): void {}
     public function setTextAlign(int $align): void {}
     public function measureText(string $text, float $size): TextMetrics { return new TextMetrics(strlen($text) * $size * 0.6, $size); }
     public function measureTextBox(string $text, float $breakWidth, float $size): TextMetrics { return new TextMetrics($breakWidth, $size); }

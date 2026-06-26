@@ -252,6 +252,13 @@ class Renderer2D implements Renderer2DInterface
         $this->vg->fontFace($name);
     }
 
+    /**
+     * No-op: NanoVG already rasterizes glyphs at the frame's devicePixelRatio
+     * (passed to beginFrame()) and scales them with the active transform, so
+     * text is crisp on HiDPI without an explicit atlas-scale hint.
+     */
+    public function setFontRenderScale(float $scale): void {}
+
     public function setTextAlign(int $align): void
     {
         $this->currentTextAlign = $align;

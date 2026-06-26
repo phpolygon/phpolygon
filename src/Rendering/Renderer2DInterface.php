@@ -69,6 +69,21 @@ interface Renderer2DInterface extends RenderContextInterface
     public function setFont(string $name): void;
 
     /**
+     * Set the glyph-atlas devicePixelRatio (logical->physical magnification).
+     *
+     * Backends that rasterize glyphs into a fixed-size atlas (vio) bilinearly
+     * upscale that atlas when a transform magnifies text, which looks blurry on
+     * HiDPI / high-resolution displays. Passing the on-screen magnification here
+     * makes such backends rasterize the atlas at size*scale physical pixels
+     * while keeping every metric in logical units, so text stays crisp.
+     *
+     * Backends that already rasterize per device-pixel (NanoVG/GLFW via
+     * devicePixelRatio, the GD test renderer, the null renderer) may treat this
+     * as a no-op — the call is always safe. Values below 1.0 are clamped.
+     */
+    public function setFontRenderScale(float $scale): void;
+
+    /**
      * Sets the text alignment for subsequent drawText/drawTextCentered/drawTextBox calls.
      * Use TextAlign constants combined with bitwise OR, e.g. TextAlign::CENTER | TextAlign::MIDDLE.
      */
