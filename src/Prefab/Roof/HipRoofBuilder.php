@@ -58,8 +58,19 @@ class HipRoofBuilder extends AbstractRoofBuilder
         );
         $entityCount += 2;
 
-        // Left and right panels (slope along X, rotated 90°)
-        $sideSpan = $this->width * 0.5 + $this->overhang;
+        // Left and right HIP-END panels (slope along X, rotated 90°). A hip roof
+        // has ONE uniform pitch on every face, so the end slopes rise over the
+        // SAME run as the front/back panels ($halfSpan = depth/2 + overhang), NOT
+        // width/2 + overhang. Each end panel spans from its eave inward to the
+        // ridge END so the four faces meet cleanly at the hip rafters. The old
+        // width-based span gave the ends a shallower pitch AND made them overshoot
+        // the eaves and cross the centre line — two roof surfaces at different
+        // heights, which read as a doubled roof.
+        $sideRun = $halfSpan; // depth/2 + overhang → uniform pitch with front/back
+        // Horizontal mid-point of the end slope: eave (width/2 + overhang) inward
+        // to the ridge end ((width − depth)/2, clamped ≥ 0 for a square base).
+        $ridgeEndX = max(0.0, ($this->width - $this->depth) * 0.5);
+        $sideCenterX = $ridgeEndX + $sideRun * 0.5;
         $sidePanelWidth = $halfSpan; // depth direction
         $yawQ = $this->extractYawQuaternion($baseRotation);
 
@@ -72,13 +83,13 @@ class HipRoofBuilder extends AbstractRoofBuilder
         // around +Y by -90° brings mesh +Z to world -X (toward the LEFT
         // eave) and the +Y normal stays pointing up-and-outward; +90° does
         // the mirrored job for the right panel.
-        $sideSlope = sqrt($sideSpan * $sideSpan + $this->roofHeight * $this->roofHeight);
-        $sideAngle = atan2($this->roofHeight, $sideSpan);
+        $sideSlope = sqrt($sideRun * $sideRun + $this->roofHeight * $this->roofHeight);
+        $sideAngle = atan2($this->roofHeight, $sideRun);
         $sideTilt = Quaternion::fromAxisAngle(new Vec3(1.0, 0.0, 0.0), $sideAngle);
 
         $leftRot = $yawQ->multiply(Quaternion::fromAxisAngle(new Vec3(0.0, 1.0, 0.0), -M_PI * 0.5));
         $leftPos = $this->transformPoint($basePosition, $baseRotation,
-            new Vec3(-$sideSpan * 0.5, $this->roofHeight * 0.5, 0.0));
+            new Vec3(-$sideCenterX, $this->roofHeight * 0.5, 0.0));
         $builder->entity($this->prefix . '_RoofLeft')
             ->with(new \PHPolygon\Component\Transform3D(
                 position: $leftPos,
@@ -89,7 +100,7 @@ class HipRoofBuilder extends AbstractRoofBuilder
 
         $rightRot = $yawQ->multiply(Quaternion::fromAxisAngle(new Vec3(0.0, 1.0, 0.0), M_PI * 0.5));
         $rightPos = $this->transformPoint($basePosition, $baseRotation,
-            new Vec3($sideSpan * 0.5, $this->roofHeight * 0.5, 0.0));
+            new Vec3($sideCenterX, $this->roofHeight * 0.5, 0.0));
         $builder->entity($this->prefix . '_RoofRight')
             ->with(new \PHPolygon\Component\Transform3D(
                 position: $rightPos,
