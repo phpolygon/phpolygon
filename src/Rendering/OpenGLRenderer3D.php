@@ -440,7 +440,7 @@ class OpenGLRenderer3D implements Renderer3DInterface
                 ];
                 $this->dirLightCount++;
 
-            } elseif ($command instanceof AddPointLight && $this->pointLightCount < 8) {
+            } elseif ($command instanceof AddPointLight && $this->pointLightCount < 32) {
                 $this->pointLights[$this->pointLightCount] = [
                     'pos'       => [$command->position->x, $command->position->y, $command->position->z],
                     'color'     => [$command->color->r, $command->color->g, $command->color->b],

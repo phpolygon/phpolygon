@@ -29,7 +29,7 @@ struct PointLight {
     float intensity;
     float radius;
 };
-uniform PointLight u_point_lights[8];
+uniform PointLight u_point_lights[32];
 uniform int u_point_light_count;
 
 struct SpotLight {
@@ -1875,7 +1875,7 @@ void main() {
     }
 
     // Point lights
-    int pointCount = min(u_point_light_count, 4);
+    int pointCount = min(u_point_light_count, 32);
     for (int i = 0; i < pointCount; i++) {
         vec3 Lp = u_point_lights[i].position - v_worldPos;
         float dist = length(Lp);

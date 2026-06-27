@@ -51,7 +51,7 @@ layout(binding = 1) uniform LightingUBO {
     float _pad3;
     float _pad4;
 
-    PointLight u_point_lights[8];
+    PointLight u_point_lights[32];
 
     int   u_spot_light_count;
     float _spad_count0;
@@ -119,7 +119,7 @@ void main() {
     // Clamp the loop bound to the array size: u_*_light_count is a GPU
     // uniform and a stale/garbage value would otherwise run the loop for
     // millions of iterations (and index out of bounds) → GPU TDR / device hang.
-    int pointCount = min(u_point_light_count, 4);
+    int pointCount = min(u_point_light_count, 32);
     for (int i = 0; i < pointCount; i++) {
         vec3 Lp   = u_point_lights[i].position - v_worldPos;
         float dist = length(Lp);

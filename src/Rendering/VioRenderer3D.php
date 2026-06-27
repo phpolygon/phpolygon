@@ -3495,13 +3495,12 @@ class VioRenderer3D implements Renderer3DInterface
             vio_set_uniform($this->ctx, "u_dir_lights[{$i}].intensity", $dl->intensity * $piScale);
         }
 
-        // The shader supports 8 point lights, but a scene can register many more
-        // (street lamps, props, the cargo-plane interior, …). Upload the 8
-        // NEAREST to the camera so close lights — e.g. the plane the player is
-        // riding during the intro — always win instead of being dropped by
+        // The shader supports 32 point lights, but a scene can register many more
+        // (street lamps, props, vehicle interiors, …). Upload the 32 NEAREST to
+        // the camera so close lights always win instead of being dropped by
         // command order.
         $pointLights = $state['pointLights'];
-        if (count($pointLights) > 8) {
+        if (count($pointLights) > 32) {
             $cam = $this->currentViewMatrix->inverse()->getTranslation();
             $cx = $cam->x;
             $cy = $cam->y;
@@ -3512,7 +3511,7 @@ class VioRenderer3D implements Renderer3DInterface
                 return $da <=> $db;
             });
         }
-        $ptCount = min(count($pointLights), 8);
+        $ptCount = min(count($pointLights), 32);
         vio_set_uniform($this->ctx, 'u_point_light_count', $ptCount);
         for ($i = 0; $i < $ptCount; $i++) {
             $pl = $pointLights[$i];

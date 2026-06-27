@@ -56,8 +56,9 @@ final class AreaLightHelper
      * smoother light without changing total scene radiance.
      *
      * @param int $samples per-axis sample count (>= 1). Final point-light
-     *                    count is $samples * $samples; keep < 4 if you
-     *                    care about the engine's u_point_lights[8] cap.
+     *                    count is $samples * $samples; mind the engine's
+     *                    u_point_lights[32] cap (a single area light's grid
+     *                    plus other scene lights must fit the budget).
      */
     public static function pushRectangle(
         RenderCommandList $commandList,

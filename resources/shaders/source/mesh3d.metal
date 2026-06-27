@@ -157,7 +157,7 @@ struct LightingUBO {
     packed_float3 mesh_local_aabb_max;
     float  _pad_aabb_b;
 
-    PointLight point_lights[8];
+    PointLight point_lights[32];
 
     int    spot_light_count;
     float  _spad_count0;
@@ -1135,7 +1135,7 @@ fragment float4 fragment_mesh3d(
     // Clamp the loop bound to the array size: *_light_count is GPU-supplied
     // and a stale/garbage value would otherwise run the loop for millions of
     // iterations (and index out of bounds) → GPU hang.
-    int pointCount = min(light.point_light_count, 4);
+    int pointCount = min(light.point_light_count, 32);
     for (int i = 0; i < pointCount; i++) {
         float3 plPos   = light.point_lights[i].position;
         float3 plColor = light.point_lights[i].color;

@@ -53,15 +53,18 @@ class Renderer3DSystem extends AbstractSystem
 {
     /**
      * Hard cap on the number of PointLight commands emitted per frame.
-     * Backend shaders only honour the first 4-8 anyway, so trimming here
-     * avoids wasted command-list allocations and keeps the closest lights.
+     * Must stay in lock-step with the forward mesh shaders' point-light
+     * array size and loop bound (all backends: OpenGL/Vulkan/D3D/Metal);
+     * trimming here avoids wasted command-list allocations and keeps the
+     * closest lights when a scene has more than this many.
      */
-    public const MAX_POINT_LIGHTS = 8;
+    public const MAX_POINT_LIGHTS = 32;
 
     /**
      * Hard cap on the number of SpotLight commands emitted per frame.
      * Mirrors {@see MAX_POINT_LIGHTS}: backend shaders only honour the first
-     * few, so trimming to the nearest spots keeps the closest beams.
+     * few (spot arrays stay at 4), so trimming to the nearest spots keeps the
+     * closest beams.
      */
     public const MAX_SPOT_LIGHTS = 8;
 
@@ -234,8 +237,8 @@ class Renderer3DSystem extends AbstractSystem
             ));
         }
         // Pick the closest MAX_POINT_LIGHTS to the active camera. Backend
-        // shaders cap at 4-8 active lights and pick whichever they receive
-        // first, so without sorting a faraway torch can outrank the sun
+        // shaders cap at MAX_POINT_LIGHTS active lights and pick whichever they
+        // receive first, so without sorting a faraway torch can outrank the sun
         // beacon next to the player. Distance is squared to skip the sqrt.
         $cameraPos = null;
         foreach ($world->query(Camera3DComponent::class, Transform3D::class) as $entity) {

@@ -35,7 +35,7 @@ struct PointLight {
     vec3 color;
     float intensity;
 };
-uniform PointLight u_point_lights[4];
+uniform PointLight u_point_lights[32];
 uniform int u_point_light_count;
 
 // Same packing discipline as PointLight: every vec3 is paired with a trailing
@@ -1729,7 +1729,7 @@ void main() {
         }
     }
 
-    int pointCount = min(u_point_light_count, 4);
+    int pointCount = min(u_point_light_count, 32);
     for (int i = 0; i < pointCount; i++) {
         vec3 Lp = u_point_lights[i].position - v_worldPos;
         float dist = length(Lp);
