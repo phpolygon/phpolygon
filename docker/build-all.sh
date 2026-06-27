@@ -131,12 +131,50 @@ if [ "$INTERACTIVE" = "1" ]; then
         case "$_s" in n|N|no|No) SIGN_MAC=0 ;; *) SIGN_MAC=1 ;; esac
     fi
 
-    # optional Steam upload after the build
+    # optional Steam upload after the build - offer the configured targets as a
+    # numbered pick list (a pre-set UPLOAD, e.g. from a CLI arg, stays the default
+    # on Enter). Each line shows app id, build type and whether it sets a branch
+    # live, so 'beta'-style branch targets are picked deliberately.
     echo ""
-    _known="$(jq -r '.uploads // {} | keys | join(", ")' steam-build.json 2>/dev/null)"
-    echo "Steam upload after build?  ${_known:+configured: $_known;  }blank = no upload"
-    read -rp "Upload target(s) (e.g. 'full', 'full demo'), or Enter to skip: " _ul
-    UPLOAD="$(echo "${_ul:-}" | xargs)"
+    mapfile -t _UT < <(jq -r '.uploads | keys_unsorted[]' steam-build.json 2>/dev/null)
+    if [ "${#_UT[@]}" -eq 0 ]; then
+        echo "No Steam upload targets in steam-build.json - skipping upload."
+        UPLOAD=""
+    else
+        echo "Steam upload after build (targets from steam-build.json):"
+        _n=1
+        for _t in "${_UT[@]}"; do
+            _app="$(jq -r --arg t "$_t" '.uploads[$t].appId // "?"' steam-build.json)"
+            _bt="$(jq -r --arg t "$_t" '.uploads[$t].buildType // "full"' steam-build.json)"
+            _sl="$(jq -r --arg t "$_t" '.uploads[$t].setLive // ""' steam-build.json)"
+            printf "  %d) %-8s  app %s, builds '%s'%s\n" "$_n" "$_t" "$_app" "$_bt" \
+                "${_sl:+  ${C_Y}(sets branch '${_sl}' live)${C_0}}"
+            _n=$((_n + 1))
+        done
+        _hint="Enter = skip"; [ -n "$UPLOAD" ] && _hint="Enter = keep '$UPLOAD'"
+        read -rp "Pick numbers/names (e.g. '1 2'), 'all' = store targets (no branch), ${_hint}: " _ul
+        if [ -z "$_ul" ]; then
+            : # keep the preset UPLOAD (or empty = skip)
+        else
+            _sel=""
+            for _tok in $_ul; do
+                case "$_tok" in
+                    all)
+                        for _t in "${_UT[@]}"; do
+                            [ -z "$(jq -r --arg t "$_t" '.uploads[$t].setLive // ""' steam-build.json)" ] && _sel="$_sel $_t"
+                        done ;;
+                    none) _sel="" ;;
+                    *[!0-9]*)
+                        for _t in "${_UT[@]}"; do [ "$_t" = "$_tok" ] && _sel="$_sel $_t"; done ;;
+                    *)
+                        _i=$((_tok - 1))
+                        [ "$_i" -ge 0 ] && [ "$_i" -lt "${#_UT[@]}" ] && _sel="$_sel ${_UT[$_i]}"
+                        [ "$_i" -lt 0 ] || [ "$_i" -ge "${#_UT[@]}" ] && echo "  ${C_Y}ignoring out-of-range '$_tok'${C_0}" ;;
+                esac
+            done
+            UPLOAD="$(echo "$_sel" | xargs)"
+        fi
+    fi
 else
     PLATFORMS="$(expand_platforms "$PLATFORMS")"
 fi
@@ -201,6 +239,11 @@ else
     echo "                Pass one with:  -e GITHUB_TOKEN=\$(gh auth token)"
 fi
 git config --global url."https://github.com/".insteadOf "git@github.com:" || true
+# Resolve VCS repos (phpolygon/phpolygon) by git-clone over HTTPS instead of the
+# GitHub commits API. That API endpoint gets secondary-throttled (HTTP 429 "this
+# endpoint is temporarily being throttled") on repeated builds even WITH a token,
+# which breaks the composer update phpolygon build runs internally.
+composer config --global use-github-api false >/dev/null 2>&1 || true
 
 # ── micro.sfx prefetch (cache key + osName MUST match StaticPhpResolver) ──────
 RELEASE_TAG="runtime-php${PHP_VERSION}"
