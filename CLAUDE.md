@@ -522,7 +522,17 @@ php -d phar.readonly=0 vendor/bin/phpolygon build                # auto-detect p
 php -d phar.readonly=0 vendor/bin/phpolygon build macos-arm64     # specific target
 php -d phar.readonly=0 vendor/bin/phpolygon build all              # every platform
 php vendor/bin/phpolygon build --dry-run                           # show config only
+php -d phar.readonly=0 vendor/bin/phpolygon build all --phar /tmp/game.phar  # reuse one PHAR across targets
 ```
+
+The optional `--phar PATH` flag enables a cross-target PHAR cache. The staged
+PHP code is identical for every desktop target of the same variant/build-type,
+so the PHAR only needs to be built once: the first target builds it and persists
+it at `PATH`; every later target reuses it, skipping the vendor + stage + PHAR
+phases (only micro.sfx + combine + package run). This roughly triples
+all-four-target throughput. iOS never participates (it links the staged tree and
+has no PHAR). The flag is optional and additive — omitting it preserves the
+classic per-target build.
 
 ### 7-phase pipeline
 
@@ -531,6 +541,11 @@ php vendor/bin/phpolygon build --dry-run                           # show config
    symlinks, exclude tests/docs/editor via glob patterns
 3. **PHAR** — create game.phar with a custom stub that handles micro SAPI
    detection, macOS .app bundle paths, resource extraction, and engine bootstrap
+
+> Phases 1–3 are PHAR-producing and identical across desktop targets of the same
+> variant/build-type. With `--phar PATH`, they run once for the first target and
+> are skipped on every later target (the cached PHAR is reused). The vendor
+> restore only runs in the call that prepared vendor.
 4. **micro.sfx** — resolve static PHP binary (explicit path → cache
    `~/.phpolygon/build-cache/` → download from GitHub Release)
 5. **Combine** — concatenate micro.sfx + game.phar into single executable

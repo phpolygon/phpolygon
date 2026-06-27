@@ -1,0 +1,95 @@
+# syntax=docker/dockerfile:1
+#
+# Cross-platform build image for PHPolygon games.
+#
+# Produces the bundled artifacts for windows-x86_64, linux-x86_64, macos-arm64
+# and macos-x86_64 entirely inside a Linux container - no macOS host required.
+# The macOS targets are ad-hoc code-signed with `rcodesign` so the arm64 binary
+# is launchable on Apple Silicon. Notarization is intentionally skipped: Steam's
+# "not notarized" depot option strips the quarantine flag on launch.
+#
+# The actual build is pure packaging (PHAR + pre-built micro.sfx runtime + libs
+# -> platform bundle). The micro.sfx runtime is downloaded by PHPolygon's
+# StaticPhpResolver from the static-php-cli releases; this image prefetches it
+# with a GitHub token to avoid anonymous rate limits on shared Docker IPs.
+#
+# This image is game-agnostic. The consuming game is bind-mounted at /app at
+# runtime; the app name, version and build types are read from its build.json.
+#
+# Build:  docker build -f docker/Dockerfile.build -t phpolygon-build docker
+# Run:    see docker/README.md
+
+FROM php:8.5-cli-bookworm
+
+# Container arch (amd64/arm64) -> rcodesign asset arch (x86_64/aarch64).
+ARG TARGETARCH=amd64
+ARG RCODESIGN_VERSION=0.29.0
+
+# ── System deps + PHP extensions needed at BUILD time ──
+#   zip      -> StaticPhpResolver extracts micro.sfx zips (ext-zip / ZipArchive)
+#   mbstring -> composer + phar staging
+#   git/unzip/jq/curl -> tooling
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends \
+        git unzip jq curl ca-certificates libzip-dev libonig-dev; \
+    docker-php-ext-install -j"$(nproc)" zip mbstring; \
+    rm -rf /var/lib/apt/lists/*
+
+# ── Composer ──
+COPY --from=composer:2 /usr/bin/composer /usr/bin/composer
+
+# ── rcodesign (ad-hoc Mach-O signing on Linux, no Apple tooling) ──
+RUN set -eux; \
+    case "${TARGETARCH}" in \
+        amd64) RC_ARCH="x86_64" ;; \
+        arm64) RC_ARCH="aarch64" ;; \
+        *) echo "unsupported TARGETARCH: ${TARGETARCH}" >&2; exit 1 ;; \
+    esac; \
+    URL="https://github.com/indygreg/apple-platform-rs/releases/download/apple-codesign%2F${RCODESIGN_VERSION}/apple-codesign-${RCODESIGN_VERSION}-${RC_ARCH}-unknown-linux-musl.tar.gz"; \
+    curl -fsSL "$URL" -o /tmp/rcodesign.tar.gz; \
+    tar -xzf /tmp/rcodesign.tar.gz -C /tmp; \
+    find /tmp -name rcodesign -type f -exec cp {} /usr/local/bin/rcodesign \; ; \
+    chmod +x /usr/local/bin/rcodesign; \
+    rm -rf /tmp/rcodesign.tar.gz /tmp/apple-codesign-*; \
+    rcodesign --version
+
+# ── steamcmd (Steam depot upload) ──
+# steamcmd is a 32-bit Linux binary, so it needs the i386 C/C++ runtime. The
+# tiny bootstrap tarball self-updates to the full client on first run; that and
+# the login session (Steam Guard sentry) land under /root/Steam, persisted via a
+# volume so 2FA is entered only once.
+RUN set -eux; \
+    dpkg --add-architecture i386; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends lib32gcc-s1 lib32stdc++6 ca-certificates; \
+    rm -rf /var/lib/apt/lists/*; \
+    mkdir -p /opt/steamcmd; \
+    curl -fsSL https://steamcdn-a.akamaihd.net/client/installer/steamcmd_linux.tar.gz \
+        | tar -xz -C /opt/steamcmd; \
+    printf '#!/usr/bin/env bash\nexec /opt/steamcmd/steamcmd.sh "$@"\n' > /usr/local/bin/steamcmd; \
+    chmod +x /usr/local/bin/steamcmd
+
+# PHPolygon's PharBuilder needs phar.readonly off; the build script also passes
+# `-d phar.readonly=0`, this is just a belt-and-braces default.
+RUN echo "phar.readonly=0" > /usr/local/etc/php/conf.d/zz-phar.ini
+
+# The php base image exports PHP_VERSION=8.5.7 (full patch version). The harness
+# uses PHP_VERSION as the micro.sfx release selector, which is keyed by MAJOR.MINOR
+# (release tag `runtime-php8.5`). Clear the inherited value so the script's
+# `${PHP_VERSION:-8.5}` default applies; an explicit `-e PHP_VERSION=8.4` still wins.
+ENV PHP_VERSION=""
+
+# Build context is the docker/ dir (see README) so the whole repo isn't sent
+# to the daemon - the game source is bind-mounted at runtime, not baked in.
+WORKDIR /app
+COPY build-all.sh /usr/local/bin/build-all
+COPY steam-upload.sh /usr/local/bin/steam-upload
+RUN chmod +x /usr/local/bin/build-all /usr/local/bin/steam-upload
+
+# Persist the micro.sfx download cache (/root/.phpolygon) and the steamcmd
+# session + Steam Guard sentry (/root/Steam) across runs via mounted volumes.
+ENV PHPOLYGON_HOME=/root/.phpolygon
+VOLUME ["/root/.phpolygon", "/root/Steam"]
+
+ENTRYPOINT ["/usr/local/bin/build-all"]

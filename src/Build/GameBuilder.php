@@ -37,9 +37,16 @@ class GameBuilder
     /**
      * Run the full build pipeline.
      *
+     * @param ?string $sharedPharPath Optional cross-target PHAR cache path. The
+     *   staged PHP code is identical for every desktop target of the same
+     *   variant/build-type, so when this points at an existing file, vendor
+     *   prep + staging + PHAR creation are skipped and the PHAR is reused (only
+     *   micro.sfx + combine + package run per target). When it points at a path
+     *   that does not exist yet, the PHAR is built once and persisted there so
+     *   sibling targets reuse it. iOS never reuses (it links the staged tree).
      * @return array{outputPath: string, pharSize: int, binarySize: int, bundleSize: int}
      */
-    public function build(string $platform, string $outputDir, ?string $microSfxPath = null, ?string $arch = null, string $variant = 'base', string $buildType = 'full', string $phpVersion = '8.5', bool $iosRelease = false, bool $iosExportIpa = false): array
+    public function build(string $platform, string $outputDir, ?string $microSfxPath = null, ?string $arch = null, string $variant = 'base', string $buildType = 'full', string $phpVersion = '8.5', bool $iosRelease = false, bool $iosExportIpa = false, ?string $sharedPharPath = null): array
     {
         $arch = $arch ?? StaticPhpResolver::detectArch();
 
@@ -63,50 +70,83 @@ class GameBuilder
 
         $tempDir = sys_get_temp_dir() . '/phpolygon-build-' . $this->config->name . '-' . getmypid();
 
+        // Reuse a cross-target PHAR when one is already built (see $sharedPharPath
+        // docblock). iOS never reuses - it links the staged tree, it has no PHAR.
+        $isIos = str_starts_with($platform, 'ios');
+        $reusePhar = !$isIos
+            && $sharedPharPath !== null
+            && is_file($sharedPharPath)
+            && (int) filesize($sharedPharPath) > 0;
+        // Only the path that prepares vendor must restore it afterwards.
+        $vendorPrepared = false;
+
         try {
-            // Phase 1: Prepare vendor (install --no-dev)
-            $this->log('info', 'Installing production dependencies...');
-            $this->prepareVendor();
+            if ($reusePhar) {
+                /** @var string $sharedPharPath */
+                $pharPath = $sharedPharPath;
+                $pharSize = (int) filesize($pharPath);
+                $this->log('info', sprintf('Reusing prebuilt PHAR (%.2f MB)...', $pharSize / 1024 / 1024));
+                // The combine step writes into $tempDir, which is normally created
+                // as a side effect of staging. Staging is skipped on reuse, so
+                // create the temp dir explicitly.
+                if (!is_dir($tempDir)) {
+                    mkdir($tempDir, 0755, true);
+                }
+            } else {
+                // Phase 1: Prepare vendor (install --no-dev)
+                $this->log('info', 'Installing production dependencies...');
+                $this->prepareVendor();
+                $vendorPrepared = true;
 
-            // Phase 2: Stage sources
-            $stagingDir = $tempDir . '/staging';
-            $this->log('info', 'Staging sources...');
-            $this->pharBuilder->stage($stagingDir);
-            $fileCount = $this->countFiles($stagingDir);
-            $this->log('success', "Staged {$fileCount} files");
+                // Phase 2: Stage sources
+                $stagingDir = $tempDir . '/staging';
+                $this->log('info', 'Staging sources...');
+                $this->pharBuilder->stage($stagingDir);
+                $fileCount = $this->countFiles($stagingDir);
+                $this->log('success', "Staged {$fileCount} files");
 
-            // Phase 2b: Apply build type constant overrides
-            $buildTypeConfig = $this->config->buildTypes[$buildType] ?? [];
-            if ($buildType !== 'full' && isset($buildTypeConfig['constants']) && is_array($buildTypeConfig['constants'])) {
-                /** @var array<string, mixed> $constants */
-                $constants = $buildTypeConfig['constants'];
-                $this->applyBuildTypeConstants($stagingDir, $constants);
-                $this->log('info', "Applied build type '{$buildType}' constants");
+                // Phase 2b: Apply build type constant overrides
+                $buildTypeConfig = $this->config->buildTypes[$buildType] ?? [];
+                if ($buildType !== 'full' && isset($buildTypeConfig['constants']) && is_array($buildTypeConfig['constants'])) {
+                    /** @var array<string, mixed> $constants */
+                    $constants = $buildTypeConfig['constants'];
+                    $this->applyBuildTypeConstants($stagingDir, $constants);
+                    $this->log('info', "Applied build type '{$buildType}' constants");
+                }
+
+                // iOS branch: no phar / micro.sfx / combine. Link the staged tree
+                // against an embed libphp.a in a UIKit/Metal wrapper via Xcode.
+                if ($isIos) {
+                    $libphpDir = $this->resolveIosBuildroot($platform);
+                    $mode = $iosRelease ? 'release' : 'debug';
+                    $this->log('info', "Building iOS {$mode} ({$platform}) against {$libphpDir}...");
+                    $appPath = $this->iosAppBuilder->build($stagingDir, $libphpDir, $platformOutputDir, $platform, $mode, $iosExportIpa);
+                    $this->log('success', 'Output: ' . $appPath);
+                    // tempDir + vendor are cleaned up by the finally block below.
+                    return [
+                        'outputPath' => $appPath,
+                        'pharSize'   => 0,
+                        'binarySize' => 0,
+                        'bundleSize' => $this->getDirectorySize($appPath),
+                    ];
+                }
+
+                // Phase 3: Create PHAR
+                $pharPath = $tempDir . '/' . strtolower($this->config->name) . '.phar';
+                $this->log('info', 'Creating PHAR archive...');
+                $this->pharBuilder->build($stagingDir, $pharPath);
+                $pharSize = (int) filesize($pharPath);
+                $this->log('success', sprintf('PHAR created: %.2f MB', $pharSize / 1024 / 1024));
+
+                // Persist the freshly built PHAR so sibling targets can reuse it.
+                if ($sharedPharPath !== null) {
+                    $sharedDir = dirname($sharedPharPath);
+                    if (!is_dir($sharedDir)) {
+                        mkdir($sharedDir, 0755, true);
+                    }
+                    copy($pharPath, $sharedPharPath);
+                }
             }
-
-            // iOS branch: no phar / micro.sfx / combine. Link the staged tree
-            // against an embed libphp.a in a UIKit/Metal wrapper via Xcode.
-            if (str_starts_with($platform, 'ios')) {
-                $libphpDir = $this->resolveIosBuildroot($platform);
-                $mode = $iosRelease ? 'release' : 'debug';
-                $this->log('info', "Building iOS {$mode} ({$platform}) against {$libphpDir}...");
-                $appPath = $this->iosAppBuilder->build($stagingDir, $libphpDir, $platformOutputDir, $platform, $mode, $iosExportIpa);
-                $this->log('success', 'Output: ' . $appPath);
-                // tempDir + vendor are cleaned up by the finally block below.
-                return [
-                    'outputPath' => $appPath,
-                    'pharSize'   => 0,
-                    'binarySize' => 0,
-                    'bundleSize' => $this->getDirectorySize($appPath),
-                ];
-            }
-
-            // Phase 3: Create PHAR
-            $pharPath = $tempDir . '/' . strtolower($this->config->name) . '.phar';
-            $this->log('info', 'Creating PHAR archive...');
-            $this->pharBuilder->build($stagingDir, $pharPath);
-            $pharSize = filesize($pharPath);
-            $this->log('success', sprintf('PHAR created: %.2f MB', $pharSize / 1024 / 1024));
 
             // Phase 4: Resolve static PHP binary
             $this->log('info', 'Resolving micro.sfx binary...');
@@ -144,7 +184,10 @@ class GameBuilder
             if (is_dir($tempDir)) {
                 $this->removeDirectory($tempDir);
             }
-            $this->restoreVendor();
+            // Only restore dev dependencies if this call actually prepared vendor.
+            if ($vendorPrepared) {
+                $this->restoreVendor();
+            }
         }
     }
 

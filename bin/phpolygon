@@ -18,6 +18,8 @@ declare(strict_types=1);
  * Options:
  *   --dry-run          Show resolved config without building
  *   --micro-sfx PATH   Path to a pre-built micro.sfx binary
+ *   --phar PATH         Cross-target PHAR cache: build the PHAR once at PATH,
+ *                       reuse it for every later target (skips vendor+stage+phar)
  *   --output DIR        Output directory (default: build/)
  *   --variant NAME      Build variant: base or steam (default: base)
  *   --type NAME         Build type from build.json (default: full)
@@ -71,6 +73,7 @@ $platformArg = '';
 $options = [
     'dry-run' => false,
     'micro-sfx' => null,
+    'phar' => null, // cross-target PHAR cache path: build once, reuse per target
     'output' => '',
     'variant' => 'base',
     'type' => 'full',
@@ -92,6 +95,8 @@ while ($i < count($args)) {
         $options['game'] = false;
     } elseif ($arg === '--micro-sfx' && isset($args[$i + 1])) {
         $options['micro-sfx'] = $args[++$i];
+    } elseif ($arg === '--phar' && isset($args[$i + 1])) {
+        $options['phar'] = $args[++$i];
     } elseif (($arg === '--output' || $arg === '--out') && isset($args[$i + 1])) {
         $options['output'] = $args[++$i];
     } elseif ($arg === '-o' && isset($args[$i + 1])) {
@@ -175,6 +180,7 @@ $config = BuildConfig::load($projectRoot);
 
 $outputDir = $options['output'] !== '' ? $options['output'] : $projectRoot . '/build';
 $microSfxPath = $options['micro-sfx'];
+$sharedPharPath = $options['phar'];
 $variant = $options['variant'];
 $buildType = $options['type'];
 $phpVersion = $options['php-version'];
@@ -239,6 +245,7 @@ foreach ($targets as $targetName => $target) {
             $phpVersion,
             $iosRelease,
             $iosExportIpa,
+            $sharedPharPath,
         );
         $results[$targetName] = $result;
 
