@@ -5,10 +5,12 @@ declare(strict_types=1);
 namespace PHPolygon\Testing\Shader;
 
 use VioContext;
+use VioCubemap;
 use VioMesh;
 use VioPipeline;
 use VioRenderTarget;
 use VioShader;
+use VioTexture;
 
 /**
  * Runs a real GLSL shader against a real GPU context for tests.
@@ -48,6 +50,15 @@ final class HeadlessShaderHarness
 
     /** Lazy 1x1 depth render target, created on first bindDummyShadowSamplers() call. */
     private ?VioRenderTarget $dummyShadowTarget = null;
+
+    /** Lazy 1x1 white sampler2D, bound to the regular material samplers (albedo/SSAO/SDF-AO). */
+    private ?VioTexture $dummyTexture2D = null;
+
+    /** Lazy 1x1 sampler3D, bound to the irradiance-probe field samplers. */
+    private ?VioTexture $dummyTexture3D = null;
+
+    /** Lazy 1x1 samplerCube, bound to the reflection-environment sampler. */
+    private ?VioCubemap $dummyCubemap = null;
 
     private function __construct(
         VioContext $ctx,
@@ -110,6 +121,9 @@ final class HeadlessShaderHarness
         $this->shaderCache   = [];
         $this->pipelineCache = [];
         $this->meshCache     = [];
+        $this->dummyTexture2D = null;
+        $this->dummyTexture3D = null;
+        $this->dummyCubemap   = null;
         vio_destroy($this->ctx);
     }
 
@@ -259,22 +273,37 @@ final class HeadlessShaderHarness
     }
 
     /**
-     * Bind a 1x1 depth texture to every sampler2DShadow referenced by the
-     * mesh3d shader (u_csm_map_0..2, u_shadow_map), and set the matching
-     * uniform sampler indices.
+     * Bind a valid dummy texture to EVERY sampler the mesh3d shader declares -
+     * the cascade/shadow `sampler2DShadow`s, the regular material `sampler2D`s
+     * (albedo / SSAO / SDF-AO), the irradiance-probe `sampler3D`s and the
+     * reflection `samplerCube` - and set the matching uniform sampler indices.
      *
      * Why this is needed:
-     *   - macOS OpenGL (and likely other drivers) requires every declared
-     *     sampler in a shader to be bound to a valid texture *of the
-     *     matching type* before fragment execution, even if the static
-     *     control flow never reaches the sampling instruction.
-     *   - When the engine renders a scene without shadows, it leaves the
-     *     shadow samplers unbound. On macOS headless this causes the
-     *     fragment shader to bail out silently, leaving the framebuffer
-     *     at a small uniform colour (~0.098 grey here).
-     *   - The fix in production is to either always bind a dummy or never
-     *     reference a sampler the engine doesn't intend to use. For the
-     *     headless test harness, binding a dummy is sufficient.
+     *   - macOS OpenGL requires every declared sampler in a linked program to
+     *     be bound to a valid texture *of the matching type* before fragment
+     *     execution, even when the static control flow never reaches the
+     *     sampling instruction (the branch is guarded off by a uniform). An
+     *     unbound non-2D sampler (samplerCube / sampler3D / sampler2DShadow)
+     *     silently collapses the WHOLE fragment stage: every pixel comes back
+     *     a flat ~0.098 grey regardless of the lighting math.
+     *   - Empirically on this stack it is the `samplerCube u_environment_map`
+     *     AND the `sampler3D u_probe_field_*` that poison the program when
+     *     left unbound - binding only the shadow samplers (as this method
+     *     historically did) is NOT enough once those samplers were added to
+     *     mesh3d. The regular 2D material samplers are bound too for parity
+     *     with production, which never leaves any of them unbound (see
+     *     VioRenderer3D: ensureWhiteTexture / loadCubemap / probe upload).
+     *   - Production never hits the flat-grey bug because the renderer always
+     *     binds these (a baked cubemap or sky fallback, the probe field or a
+     *     1x1 white texture). The headless harness must mirror that.
+     *
+     * Texture units mirror VioRenderer3D's slot map so a future test that
+     * mixes in real data does not clash:
+     *   0/1/2 = albedo / SSAO / SDF-AO (sampler2D)
+     *   3/4/5 = probe field r/g/b      (sampler3D)
+     *   6     = u_shadow_map + cascade 0 (sampler2DShadow)
+     *   7     = environment cubemap    (samplerCube)
+     *   8/9   = cascade 1/2            (sampler2DShadow)
      */
     public function bindDummyShadowSamplers(): void
     {
@@ -293,6 +322,82 @@ final class HeadlessShaderHarness
         $this->setUniform('u_csm_map_1',  8);
         $this->setUniform('u_csm_map_2',  9);
         $this->setUniform('u_shadow_map', 6);
+
+        $this->bindDummyMaterialSamplers();
+    }
+
+    /**
+     * Bind the non-shadow material samplers (sampler2D / sampler3D /
+     * samplerCube) to valid 1x1 dummy textures so the mesh3d fragment stage
+     * does not collapse on macOS OpenGL. Split out from
+     * {@see bindDummyShadowSamplers} so the intent reads clearly; both are
+     * required together for mesh3d. Idempotent: the dummy textures are created
+     * once and reused.
+     */
+    public function bindDummyMaterialSamplers(): void
+    {
+        // Regular 2D material samplers: a 1x1 white texture means "neutral"
+        // (white albedo modulation, fully unoccluded AO) so even a sampled
+        // read leaves the lit output unchanged. Its real job is to keep the
+        // sampler BOUND.
+        if ($this->dummyTexture2D === null) {
+            $tex = vio_texture($this->ctx, [
+                'data'   => pack('C*', 255, 255, 255, 255),
+                'width'  => 1,
+                'height' => 1,
+            ]);
+            if ($tex !== false) {
+                $this->dummyTexture2D = $tex;
+            }
+        }
+        if ($this->dummyTexture2D !== null) {
+            // Bind via a local so the non-null narrowing survives the setUniform()
+            // call inside the loop (a method call re-widens the property to nullable).
+            $tex2d = $this->dummyTexture2D;
+            foreach ([0 => 'u_albedo_texture', 1 => 'u_ssao_map', 2 => 'u_sdf_ao_map'] as $unit => $name) {
+                vio_bind_texture($this->ctx, $tex2d, $unit);
+                $this->setUniform($name, $unit);
+            }
+        }
+
+        // Irradiance-probe sampler3D field (one per RGB channel). A 1x1
+        // mid-grey voxel is harmless: u_probe_enabled gates the sample off.
+        if ($this->dummyTexture3D === null && function_exists('vio_texture_3d')) {
+            $tex3d = vio_texture_3d($this->ctx, [
+                'data'   => pack('C*', 128, 128, 128, 255),
+                'width'  => 1,
+                'height' => 1,
+                'depth'  => 1,
+            ]);
+            if ($tex3d !== false) {
+                $this->dummyTexture3D = $tex3d;
+            }
+        }
+        if ($this->dummyTexture3D !== null) {
+            $tex3d = $this->dummyTexture3D;
+            foreach ([3 => 'u_probe_field_r', 4 => 'u_probe_field_g', 5 => 'u_probe_field_b'] as $unit => $name) {
+                vio_bind_texture($this->ctx, $tex3d, $unit);
+                $this->setUniform($name, $unit);
+            }
+        }
+
+        // Reflection environment samplerCube. u_has_environment_map gates the
+        // sample off; the binding only needs to exist and be the right type.
+        if ($this->dummyCubemap === null && function_exists('vio_cubemap')) {
+            $face = [128, 128, 128, 255];
+            $cube = vio_cubemap($this->ctx, [
+                'pixels' => array_fill(0, 6, $face),
+                'width'  => 1,
+                'height' => 1,
+            ]);
+            if ($cube !== false) {
+                $this->dummyCubemap = $cube;
+            }
+        }
+        if ($this->dummyCubemap !== null) {
+            vio_bind_cubemap($this->ctx, $this->dummyCubemap, 7);
+            $this->setUniform('u_environment_map', 7);
+        }
     }
 
     /**
