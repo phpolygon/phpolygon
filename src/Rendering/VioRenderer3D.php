@@ -91,6 +91,14 @@ class VioRenderer3D implements Renderer3DInterface
     /** Whether the php-vio build exposes the batch vio_set_uniforms helper. */
     private bool $batchUniforms = false;
 
+    /**
+     * Whether the php-vio build exposes vio_submit_batch — a single native call
+     * that records an ordered list of draws (collapsing the per-draw PHP->C
+     * crossings of the opaque submit). Gated so an older DLL falls back to the
+     * per-draw loop with identical output.
+     */
+    private bool $batchSubmit = false;
+
     /** @var array<string, int> Material prefix → proc_mode cache */
     private static array $procModeCache = [];
 
@@ -350,6 +358,11 @@ class VioRenderer3D implements Renderer3DInterface
         // provides vio_set_uniforms (new php-vio); otherwise fall back to
         // per-uniform vio_set_uniform so an older DLL still works.
         $this->batchUniforms = function_exists('vio_set_uniforms');
+        // PHPOLYGON_NO_BATCH=1 forces the per-draw opaque submit path even when the
+        // DLL exposes vio_submit_batch — an A/B diagnostic toggle (both paths are
+        // pixel-equivalent; this isolates the batch's CPU/submit win).
+        $this->batchSubmit = function_exists('vio_submit_batch')
+            && getenv('PHPOLYGON_NO_BATCH') !== '1';
         $this->initShaders();
         $this->initShadowMap();
         $this->initSkyboxMesh();
@@ -1321,11 +1334,39 @@ class VioRenderer3D implements Renderer3DInterface
             }
         }
         usort($opaque, static fn (array $a, array $b): int => ($a[0] <=> $b[0]) ?: ($a[1] <=> $b[1]));
-        foreach ($opaque as [, , $cmd, $material]) {
-            if ($cmd instanceof DrawMesh) {
-                $this->drawMeshCommand($cmd->meshId, $material, $cmd->modelMatrix, $cmd->materialId);
-            } else {
-                $this->drawMeshInstancedCommand($cmd, $material);
+        if ($this->batchSubmit) {
+            // Single-crossing batched submit: accumulate non-instanced draws into
+            // one vio_submit_batch call (collapsing the per-draw PHP->C crossings
+            // that dominate submit.opaque). Instanced draws keep the existing
+            // per-draw path; flush the pending batch before each so the sticky
+            // cbuffer / texture state stays in submission order. The lastMaterialId
+            // / lastMeshId trackers are shared, so a flush + instanced draw + more
+            // batched draws remains byte-identical to the per-draw loop.
+            $batch = [];
+            foreach ($opaque as [, , $cmd, $material]) {
+                if ($cmd instanceof DrawMesh) {
+                    $record = $this->buildMeshDrawRecord($cmd->meshId, $material, $cmd->modelMatrix, $cmd->materialId);
+                    if ($record !== null) {
+                        $batch[] = $record;
+                    }
+                } else {
+                    if ($batch !== []) {
+                        vio_submit_batch($this->ctx, $batch);
+                        $batch = [];
+                    }
+                    $this->drawMeshInstancedCommand($cmd, $material);
+                }
+            }
+            if ($batch !== []) {
+                vio_submit_batch($this->ctx, $batch);
+            }
+        } else {
+            foreach ($opaque as [, , $cmd, $material]) {
+                if ($cmd instanceof DrawMesh) {
+                    $this->drawMeshCommand($cmd->meshId, $material, $cmd->modelMatrix, $cmd->materialId);
+                } else {
+                    $this->drawMeshInstancedCommand($cmd, $material);
+                }
             }
         }
         PerfProfiler::end();
@@ -3097,6 +3138,74 @@ class VioRenderer3D implements Renderer3DInterface
         vio_draw($this->ctx, $mesh);
     }
 
+    /**
+     * Build ONE vio_submit_batch record for a non-instanced opaque draw, mirroring
+     * drawMeshCommand exactly: the same per-draw transforms, the same sticky
+     * material-uniform / mesh-AABB dedup (so identical clustered draws re-emit the
+     * heavy material set only on change), and the same albedo texture + state
+     * uniforms. The record's uniforms are applied in C in array order; because no
+     * two uniforms share a cbuffer offset, the resulting cbuffer snapshot per draw
+     * is byte-identical to the per-draw path — this is a transport optimization
+     * only. Shares the lastMaterialId / lastMeshId trackers with the per-draw
+     * methods so mixing batched and (instanced) per-draw submission stays correct.
+     *
+     * @return array{mesh: VioMesh, uniforms: array<string, int|float|array<float>>, textures?: array<int, VioTexture>}|null
+     */
+    private function buildMeshDrawRecord(string $meshId, Material $material, Mat4 $modelMatrix, string $materialId): ?array
+    {
+        $mesh = $this->uploadMesh($meshId);
+        if ($mesh === null) {
+            return null;
+        }
+
+        // Per-draw uniforms (vary per transform — always emitted).
+        $uniforms = [
+            'u_model'          => $modelMatrix->toArray(),
+            'u_use_instancing' => 0,
+            'u_normal_matrix'  => $this->computeNormalMatrix($modelMatrix),
+        ];
+
+        // Sticky material-uniform dedup: fold the ~28 material uniforms into this
+        // record only when the material changed from the previous (batched or
+        // per-draw) submission — matches drawMeshCommand's dedup.
+        if ($materialId !== $this->lastMaterialId) {
+            foreach ($this->collectMaterialUniforms($material, $materialId) as $name => $value) {
+                $uniforms[$name] = $value;
+            }
+            $this->lastMaterialId = $materialId;
+        }
+
+        // Texture state (mirror bindMaterialTextures — always issued): the albedo
+        // texture goes on GL slot 0, plus the two texture-state uniforms.
+        $textures = null;
+        $hasTexture = false;
+        if ($material->albedoTexture !== null && $this->textureManager !== null) {
+            $vioTex = $this->resolveTexture($material->albedoTexture);
+            if ($vioTex !== null) {
+                $textures = [0 => $vioTex];
+                $hasTexture = true;
+            }
+        }
+        $uniforms['u_has_albedo_texture'] = $hasTexture ? 1 : 0;
+        $uniforms['u_albedo_texture']     = 0;
+
+        // Sticky mesh-AABB dedup (drives cloth-sway anchor weighting): emit only
+        // on mesh change, matching drawMeshCommand.
+        if ($meshId !== $this->lastMeshId) {
+            $aabb = $this->meshAabb($meshId);
+            $uniforms['u_mesh_local_aabb_min'] = $aabb['min'];
+            $uniforms['u_mesh_local_aabb_max'] = $aabb['max'];
+            $this->lastMeshId = $meshId;
+        }
+
+        $record = ['mesh' => $mesh, 'uniforms' => $uniforms];
+        if ($textures !== null) {
+            $record['textures'] = $textures;
+        }
+
+        return $record;
+    }
+
     private function drawMeshInstancedCommand(DrawMeshInstanced $cmd, Material $material): void
     {
         // Hot-path: read public properties directly instead of via the
@@ -3247,11 +3356,24 @@ class VioRenderer3D implements Renderer3DInterface
      */
     private function applyMaterialUniforms(Material $material, string $materialId = ''): void
     {
+        $this->setUniforms($this->collectMaterialUniforms($material, $materialId));
+    }
+
+    /**
+     * Build the ~28 per-material scalar/vector uniforms as a name => value map
+     * WITHOUT uploading them. Split out from applyMaterialUniforms so the batched
+     * submit path (buildMeshDrawRecord) can fold them into a draw record's
+     * uniform delta, while the direct/gbuffer/instanced paths keep calling
+     * applyMaterialUniforms. Pure function of ($material, $materialId).
+     *
+     * @return array<string, int|float|array<float>>
+     */
+    private function collectMaterialUniforms(Material $material, string $materialId = ''): array
+    {
         $procMode = self::$procModeCache[$materialId] ?? $this->resolveProcMode($materialId);
 
-        // One batched upload of the ~28 material uniforms (was ~28 individual
-        // native calls). Insertion order is irrelevant — each uniform writes its
-        // own reflected cbuffer offset, so the result is byte-identical.
+        // Insertion order is irrelevant — each uniform writes its own reflected
+        // cbuffer offset, so the result is byte-identical regardless of order.
         $u = [
             'u_albedo'              => [$material->albedo->r, $material->albedo->g, $material->albedo->b],
             'u_emission'            => [$material->emission->r, $material->emission->g, $material->emission->b],
@@ -3290,7 +3412,7 @@ class VioRenderer3D implements Renderer3DInterface
             $u['u_moon_phase'] = $material->roughness;
         }
 
-        $this->setUniforms($u);
+        return $u;
     }
 
     /**
