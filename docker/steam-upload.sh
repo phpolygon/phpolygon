@@ -92,6 +92,40 @@ LAUNCHER
     echo "  universal bundle: build/macos-universal-${suffix}/${APP_NAME}.app"
 }
 
+# Pre-deploy guard: verify every runtime file a Steam build needs is actually
+# present, per platform. A missing Steam API lib ships a build that crashes at
+# startup with no window and no log (e.g. Windows can't resolve steam_api64.dll),
+# so we ABORT the deploy instead of uploading a broken build.
+steam_verify_files() {
+    local suffix="$1" miss=0
+    local win="build/windows-x86_64-${suffix}/${APP_NAME}"
+    local lin="build/linux-x86_64-${suffix}/${APP_NAME}"
+    local mac="build/macos-universal-${suffix}/${APP_NAME}.app"
+
+    _req()  { [ -e "$1" ] || { echo "  ${C_R}MISSING required file: $1${C_0}"; miss=1; }; }
+    _reqf() { [ -n "$(find "$1" -name "$2" -print -quit 2>/dev/null)" ] \
+                || { echo "  ${C_R}MISSING required file in $1: $2${C_0}"; miss=1; }; }
+
+    # Windows (D3D11/12 backend hard-imports D3DCOMPILER_47.dll; missing it
+    # crashes the exe at load with 0xC0000135 - no window, no log)
+    _req  "${win}/${APP_NAME}.exe"
+    _req  "${win}/steam_api64.dll"
+    _req  "${win}/D3DCOMPILER_47.dll"
+    # Linux
+    _req  "${lin}/${APP_NAME}"
+    _reqf "${lin}" "libsteam_api.so"
+    # macOS (universal .app)
+    _req  "${mac}/Contents/MacOS/${APP_NAME}"
+    _reqf "${mac}" "libsteam_api.dylib"
+
+    if [ "$miss" = "1" ]; then
+        echo "  ${C_R}Steam deploy ABORTED: required runtime files are missing (see above).${C_0}"
+        echo "  ${C_R}Shipping this build would crash at startup. Fix the build before deploying.${C_0}"
+        return 1
+    fi
+    echo "  ${C_G}Pre-deploy file check OK${C_0} - all required runtime files present."
+}
+
 # Emit the app_build VDF for a target to stdout.
 steam_gen_vdf() {
     local target="$1" suffix="$2"
@@ -164,6 +198,7 @@ steam_upload() {
     [ "$miss" = "1" ] && { echo "  build the '${btype}' type for all desktop targets first."; return 1; }
 
     steam_make_universal "$suffix" || return 1
+    steam_verify_files "$suffix" || return 1
 
     mkdir -p /app/steam/output
     local vdf="/tmp/app_build_${target}.vdf"

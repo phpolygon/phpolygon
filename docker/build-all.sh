@@ -264,6 +264,15 @@ os_name_for() {
 cache_key_for() {
     if [ "$VARIANT" != "base" ]; then echo "$1-${VARIANT}-php${PHP_VERSION}"; else echo "$1-php${PHP_VERSION}"; fi
 }
+# Per-OS destination name for the Steam API library (must match
+# StaticPhpResolver::steamLibName / PlatformPackager basename copy).
+steam_lib_name_for() {
+    case "$1" in
+        windows-x86_64) echo "steam_api64.dll" ;;
+        macos-*)        echo "libsteam_api.dylib" ;;
+        *)              echo "libsteam_api.so" ;;
+    esac
+}
 curl_gh() {
     if [ -n "$TOKEN" ]; then
         curl -fsSL --retry 4 --retry-delay 2 --retry-connrefused -H "Authorization: Bearer $TOKEN" "$@"
@@ -315,6 +324,23 @@ prefetch_runtime() {
     if [ "$target" = "windows-x86_64" ] && [ ! -f "${dir}/vulkan-1.dll" ]; then
         fetch_zip_member "vulkan-1-dll-${VARIANT}-${PHP_VERSION}-${os}.zip" "${dir}/vulkan-1.dll" \
             vulkan-1.dll buildroot/bin/vulkan-1.dll || echo "  (vulkan-1.dll optional - skipped)"
+    fi
+    # d3dcompiler_47.dll: hard load-time import of the d3d11/d3d12 backends
+    # (runtime HLSL compile). Missing it = exe dies at startup with 0xC0000135.
+    if [ "$target" = "windows-x86_64" ] && [ ! -f "${dir}/d3dcompiler_47.dll" ]; then
+        fetch_zip_member "d3dcompiler-47-dll-${VARIANT}-${PHP_VERSION}-${os}.zip" "${dir}/d3dcompiler_47.dll" \
+            d3dcompiler_47.dll buildroot/bin/d3dcompiler_47.dll \
+            || echo "  ${C_Y}! d3dcompiler_47.dll missing - Windows d3d11/d3d12 build will crash at startup (0xC0000135)${C_0}"
+    fi
+    # Steam API library: all four desktop platforms. A game built against
+    # php-steamworks hard-imports it, so a missing one = the shipped binary
+    # fails to start. The asset name has NO variant suffix; the cache file uses
+    # the per-OS destination name so PlatformPackager copies it by basename.
+    local steamlib; steamlib="$(steam_lib_name_for "$target")"
+    if [ ! -f "${dir}/${steamlib}" ]; then
+        fetch_zip_member "libsteam-api-${PHP_VERSION}-${os}.zip" "${dir}/${steamlib}" \
+            "$steamlib" "buildroot/bin/${steamlib}" \
+            || echo "  ${C_Y}! ${steamlib} missing - the Steam API library is REQUIRED; the shipped ${target} binary will fail to start${C_0}"
     fi
 }
 

@@ -72,36 +72,201 @@ class StaticPhpResolver
 
     /**
      * Resolve platform-specific runtime support libraries that must be shipped
-     * alongside the final binary. Currently: vulkan-1.dll on Windows — php-vio
-     * links against vulkan-loader as a dynamic library, so the DLL has to sit
-     * next to the executable. Other platforms return an empty array.
+     * alongside the final binary.
+     *
+     * Windows only:
+     *   - vulkan-1.dll: php-vio links against vulkan-loader as a dynamic
+     *     library, so the DLL has to sit next to the executable.
+     *   - d3dcompiler_47.dll: the d3d11/d3d12 vio backends compile HLSL at
+     *     runtime via D3DCompile and hard-link it as a load-time import; a
+     *     clean Windows install lacks it, so the exe fails to start with
+     *     0xC0000135 unless it ships next to the binary.
+     *
+     * All four desktop platforms:
+     *   - the Steam API library (steam_api64.dll / libsteam_api.so /
+     *     libsteam_api.dylib): a game using php-steamworks hard-imports it, so
+     *     it must ship next to the binary / inside the .app. The asset name has
+     *     no variant suffix (libsteam-api-<ver>-<os>.zip).
      *
      * @return list<string> Absolute paths to runtime libs, empty if none needed
      */
     public function resolveRuntimeLibs(string $platform, string $arch, string $variant = 'base', string $phpVersion = '8.5'): array
     {
-        if ($platform !== 'windows') {
-            return [];
-        }
-
         $cacheKey = $variant !== 'base'
             ? "{$platform}-{$arch}-{$variant}-php{$phpVersion}"
             : "{$platform}-{$arch}-php{$phpVersion}";
-        $cachedPath = $this->cacheDir . "/{$cacheKey}/vulkan-1.dll";
 
-        $downloaded = $this->downloadVulkanDllIfNewer($platform, $arch, $variant, $phpVersion, $cachedPath);
+        $libs = [];
+
+        if ($platform === 'windows') {
+            // vulkan-1.dll
+            $vulkanPath = $this->cacheDir . "/{$cacheKey}/vulkan-1.dll";
+            $downloaded = $this->downloadVulkanDllIfNewer($platform, $arch, $variant, $phpVersion, $vulkanPath);
+            if ($downloaded !== null) {
+                $libs[] = $downloaded;
+            } elseif (file_exists($vulkanPath)) {
+                $libs[] = $vulkanPath;
+            } else {
+                // vulkan-1.dll is optional — Vulkan backend just won't be available
+                // if absent. Log once so the user knows.
+                $this->log("No vulkan-1.dll found for {$cacheKey} — Vulkan backend will be unavailable in the shipped binary.");
+            }
+
+            // d3dcompiler_47.dll
+            $d3dPath = $this->cacheDir . "/{$cacheKey}/d3dcompiler_47.dll";
+            $downloaded = $this->downloadD3DCompilerDllIfNewer($platform, $arch, $variant, $phpVersion, $d3dPath);
+            if ($downloaded !== null) {
+                $libs[] = $downloaded;
+            } elseif (file_exists($d3dPath)) {
+                $libs[] = $d3dPath;
+            } else {
+                // d3dcompiler_47.dll is required for the d3d11/d3d12 backends. Without
+                // it the shipped exe dies at startup with 0xC0000135.
+                $this->log("No d3dcompiler_47.dll found for {$cacheKey} — the d3d11/d3d12 backends will fail to start (0xC0000135) on a clean Windows install.");
+            }
+        }
+
+        // Steam API library — all four desktop platforms. The cached file is
+        // stored under its final, per-OS basename so PlatformPackager (which
+        // copies runtime libs by basename) lands the correct name next to the
+        // binary / into the .app.
+        $steamLibName = $this->steamLibName($platform);
+        $steamPath = $this->cacheDir . "/{$cacheKey}/{$steamLibName}";
+        $downloaded = $this->downloadSteamApiLibIfNewer($platform, $arch, $phpVersion, $steamPath);
         if ($downloaded !== null) {
-            return [$downloaded];
+            $libs[] = $downloaded;
+        } elseif (file_exists($steamPath)) {
+            $libs[] = $steamPath;
+        } else {
+            // Required: a game built against php-steamworks hard-imports the
+            // Steam API library, so a missing one means the shipped binary
+            // cannot start. Loud warning, mirroring d3dcompiler_47.dll.
+            $this->log("No {$steamLibName} found for {$cacheKey} — the Steam API library is REQUIRED; the shipped binary will fail to start without it.");
         }
 
-        if (file_exists($cachedPath)) {
-            return [$cachedPath];
+        return $libs;
+    }
+
+    /**
+     * Per-OS destination name for the Steam API library.
+     */
+    private function steamLibName(string $platform): string
+    {
+        return match ($platform) {
+            'windows' => 'steam_api64.dll',
+            'macos'   => 'libsteam_api.dylib',
+            default   => 'libsteam_api.so',
+        };
+    }
+
+    private function downloadSteamApiLibIfNewer(string $platform, string $arch, string $phpVersion, string $cachedPath): ?string
+    {
+        $releaseUrl = $this->findRuntimeRelease($phpVersion);
+        if ($releaseUrl === null) {
+            return null;
         }
 
-        // vulkan-1.dll is optional — Vulkan backend just won't be available if
-        // absent. Log once so the user knows.
-        $this->log("No vulkan-1.dll found for {$cacheKey} — Vulkan backend will be unavailable in the shipped binary.");
-        return [];
+        $json = $this->httpGet($releaseUrl);
+        $release = $json !== null ? json_decode($json, true) : null;
+        if (!is_array($release)) {
+            return null;
+        }
+
+        $publishedAt = isset($release['published_at']) && is_string($release['published_at'])
+            ? strtotime($release['published_at'])
+            : null;
+
+        if ($publishedAt !== false && $publishedAt !== null && file_exists($cachedPath)) {
+            $cachedMtime = filemtime($cachedPath);
+            if ($cachedMtime !== false && $cachedMtime >= $publishedAt) {
+                return null;
+            }
+        }
+
+        $osName = match (true) {
+            $platform === 'macos' && $arch === 'arm64'   => 'macos-aarch64',
+            $platform === 'macos' && $arch === 'x86_64'  => 'macos-x86_64',
+            $platform === 'linux' && $arch === 'arm64'   => 'linux-aarch64',
+            $platform === 'linux' && $arch === 'x86_64'  => 'linux-x86_64',
+            $platform === 'windows'                       => 'windows-x86_64',
+            default                                       => "{$platform}-{$arch}",
+        };
+
+        // No variant suffix: libsteam-api-<phpVersion>-<os>.zip
+        $assetName = "libsteam-api-{$phpVersion}-{$osName}.zip";
+        $libName = $this->steamLibName($platform);
+
+        $downloadUrl = null;
+        if (isset($release['assets']) && is_array($release['assets'])) {
+            foreach ($release['assets'] as $asset) {
+                if (!is_array($asset)) {
+                    continue;
+                }
+                $name = isset($asset['name']) && is_string($asset['name']) ? $asset['name'] : '';
+                if ($name === $assetName) {
+                    $downloadUrl = isset($asset['browser_download_url']) && is_string($asset['browser_download_url'])
+                        ? $asset['browser_download_url']
+                        : null;
+                    break;
+                }
+            }
+        }
+
+        if ($downloadUrl === null) {
+            return null;
+        }
+
+        $this->log("Downloading {$assetName}...");
+        /** @var string $downloadUrl */
+
+        $tempFile = tempnam(sys_get_temp_dir(), 'phpolygon-steamlib-');
+        if ($tempFile === false) {
+            return null;
+        }
+
+        $content = $this->httpGet($downloadUrl);
+        if ($content === null) {
+            @unlink($tempFile);
+            return null;
+        }
+        file_put_contents($tempFile, $content);
+
+        $actualFile = null;
+        if (class_exists(\ZipArchive::class)) {
+            $zip = new \ZipArchive();
+            if ($zip->open($tempFile) === true) {
+                $extractDir = sys_get_temp_dir() . '/phpolygon-steamlib-extract-' . getmypid();
+                $zip->extractTo($extractDir);
+                $zip->close();
+                foreach ([$libName, "buildroot/bin/{$libName}"] as $candidate) {
+                    if (file_exists($extractDir . '/' . $candidate)) {
+                        $actualFile = $extractDir . '/' . $candidate;
+                        break;
+                    }
+                }
+            }
+        }
+
+        if ($actualFile === null) {
+            @unlink($tempFile);
+            return null;
+        }
+
+        $cachedDir = dirname($cachedPath);
+        if (!is_dir($cachedDir)) {
+            mkdir($cachedDir, 0755, true);
+        }
+        copy($actualFile, $cachedPath);
+
+        @unlink($tempFile);
+        if (isset($extractDir) && is_dir($extractDir)) {
+            $this->removeDir($extractDir);
+        }
+
+        $size = filesize($cachedPath);
+        $this->log(sprintf("Downloaded and cached: %s (%.1f KB)", $cachedPath, $size / 1024));
+
+        return $cachedPath;
     }
 
     private function downloadVulkanDllIfNewer(string $platform, string $arch, string $variant, string $phpVersion, string $cachedPath): ?string
@@ -181,6 +346,113 @@ class StaticPhpResolver
                 $zip->extractTo($extractDir);
                 $zip->close();
                 foreach (['vulkan-1.dll', 'buildroot/bin/vulkan-1.dll'] as $candidate) {
+                    if (file_exists($extractDir . '/' . $candidate)) {
+                        $actualFile = $extractDir . '/' . $candidate;
+                        break;
+                    }
+                }
+            }
+        }
+
+        if ($actualFile === null) {
+            @unlink($tempFile);
+            return null;
+        }
+
+        $cachedDir = dirname($cachedPath);
+        if (!is_dir($cachedDir)) {
+            mkdir($cachedDir, 0755, true);
+        }
+        copy($actualFile, $cachedPath);
+
+        @unlink($tempFile);
+        if (isset($extractDir) && is_dir($extractDir)) {
+            $this->removeDir($extractDir);
+        }
+
+        $size = filesize($cachedPath);
+        $this->log(sprintf("Downloaded and cached: %s (%.1f KB)", $cachedPath, $size / 1024));
+
+        return $cachedPath;
+    }
+
+    private function downloadD3DCompilerDllIfNewer(string $platform, string $arch, string $variant, string $phpVersion, string $cachedPath): ?string
+    {
+        $releaseUrl = $this->findRuntimeRelease($phpVersion);
+        if ($releaseUrl === null) {
+            return null;
+        }
+
+        $json = $this->httpGet($releaseUrl);
+        $release = $json !== null ? json_decode($json, true) : null;
+        if (!is_array($release)) {
+            return null;
+        }
+
+        $publishedAt = isset($release['published_at']) && is_string($release['published_at'])
+            ? strtotime($release['published_at'])
+            : null;
+
+        if ($publishedAt !== false && $publishedAt !== null && file_exists($cachedPath)) {
+            $cachedMtime = filemtime($cachedPath);
+            if ($cachedMtime !== false && $cachedMtime >= $publishedAt) {
+                return null;
+            }
+        }
+
+        $osName = match (true) {
+            $platform === 'windows' => 'windows-x86_64',
+            default                 => "{$platform}-{$arch}",
+        };
+
+        $prefix = "d3dcompiler-47-dll-{$variant}-{$phpVersion}-";
+        $suffix = "-{$osName}.zip";
+
+        $downloadUrl = null;
+        $matchedAsset = null;
+        if (isset($release['assets']) && is_array($release['assets'])) {
+            foreach ($release['assets'] as $asset) {
+                if (!is_array($asset)) {
+                    continue;
+                }
+                $name = isset($asset['name']) && is_string($asset['name']) ? $asset['name'] : '';
+                if (str_starts_with($name, $prefix) && str_ends_with($name, $suffix)) {
+                    $downloadUrl = isset($asset['browser_download_url']) && is_string($asset['browser_download_url'])
+                        ? $asset['browser_download_url']
+                        : null;
+                    $matchedAsset = $name;
+                    break;
+                }
+            }
+        }
+
+        if ($downloadUrl === null) {
+            return null;
+        }
+
+        $this->log("Downloading {$matchedAsset}...");
+        /** @var string $downloadUrl */
+
+        $tempFile = tempnam(sys_get_temp_dir(), 'phpolygon-d3ddll-');
+        if ($tempFile === false) {
+            return null;
+        }
+
+        $content = $this->httpGet($downloadUrl);
+        if ($content === null) {
+            @unlink($tempFile);
+            return null;
+        }
+        file_put_contents($tempFile, $content);
+
+        $actualFile = null;
+        if (class_exists(\ZipArchive::class)) {
+            $zip = new \ZipArchive();
+            if ($zip->open($tempFile) === true) {
+                $extractDir = sys_get_temp_dir() . '/phpolygon-d3ddll-extract-' . getmypid();
+                $zip->extractTo($extractDir);
+                $zip->close();
+                foreach (['d3dcompiler_47.dll', 'buildroot/bin/d3dcompiler_47.dll'] as $candidate) {
                     if (file_exists($extractDir . '/' . $candidate)) {
                         $actualFile = $extractDir . '/' . $candidate;
                         break;
