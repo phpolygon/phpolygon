@@ -255,7 +255,9 @@ class DayNightSystem extends AbstractSystem
         $moonBlend *= min(1.0, $moonBright / 0.1); // only blend in if moon is bright
 
         // Moonlight parameters — clouds block moonlight just like sunlight.
-        $moonIntensity = (0.15 + $moonBright * 0.5) * $directCloudDim;
+        // Tuned brighter than physical moonlight so a scene played at night stays
+        // navigable (full moon ≈ 1.15 directional instead of a barely-there 0.65).
+        $moonIntensity = (0.30 + $moonBright * 0.85) * $directCloudDim;
 
         // Blended primary light: lerp direction, color, intensity between sun and moon
         $blendDirX = $sunDirX * (1.0 - $moonBlend) + (-$sunDirX) * $moonBlend;
@@ -355,10 +357,10 @@ class DayNightSystem extends AbstractSystem
         // term is squared·π like the AMBIENT_KEYS (converted from the old
         // quadratic pipeline): full moon ≈ 0.09, new moon ≈ 0.008.
         if ($moonBright > 0.01) {
-            $moonAmbient = (0.05 + $moonBright * 0.12) ** 2 * M_PI * $ambientCloudDim;
-            $ambientR = max($ambientR, (0.12 * $moonBright + 0.03) * $ambientCloudDim);
-            $ambientG = max($ambientG, (0.14 * $moonBright + 0.04) * $ambientCloudDim);
-            $ambientB = max($ambientB, (0.22 * $moonBright + 0.06) * $ambientCloudDim);
+            $moonAmbient = (0.07 + $moonBright * 0.16) ** 2 * M_PI * $ambientCloudDim;
+            $ambientR = max($ambientR, (0.16 * $moonBright + 0.04) * $ambientCloudDim);
+            $ambientG = max($ambientG, (0.18 * $moonBright + 0.05) * $ambientCloudDim);
+            $ambientB = max($ambientB, (0.26 * $moonBright + 0.08) * $ambientCloudDim);
             $ambientIntensity = max($ambientIntensity, $moonAmbient);
         }
 
