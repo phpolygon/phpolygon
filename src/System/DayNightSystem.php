@@ -88,8 +88,8 @@ class DayNightSystem extends AbstractSystem
 
     // ── Sky zenith emission ──────────────────────────────────────────
     private const SKY_ZENITH_KEYS = [
-        ['time' => 0.0,  'r' => 0.01, 'g' => 0.01, 'b' => 0.04],  // near-black
-        ['time' => 0.15, 'r' => 0.01, 'g' => 0.01, 'b' => 0.04],  // deep night
+        ['time' => 0.0,  'r' => 0.015, 'g' => 0.02, 'b' => 0.05],  // near-black
+        ['time' => 0.15, 'r' => 0.015, 'g' => 0.02, 'b' => 0.05],  // deep night
         ['time' => 0.17, 'r' => 0.03, 'g' => 0.03, 'b' => 0.10],  // astro. — first hint of blue
         ['time' => 0.19, 'r' => 0.08, 'g' => 0.08, 'b' => 0.22],  // nautical — deep blue
         ['time' => 0.22, 'r' => 0.18, 'g' => 0.15, 'b' => 0.40],  // civil — purple-blue
@@ -101,14 +101,14 @@ class DayNightSystem extends AbstractSystem
         ['time' => 0.77, 'r' => 0.18, 'g' => 0.12, 'b' => 0.35],  // civil dusk — purple
         ['time' => 0.82, 'r' => 0.08, 'g' => 0.06, 'b' => 0.20],  // nautical dusk — deep
         ['time' => 0.85, 'r' => 0.03, 'g' => 0.03, 'b' => 0.10],  // astro. dusk
-        ['time' => 0.88, 'r' => 0.01, 'g' => 0.01, 'b' => 0.04],  // night
-        ['time' => 1.0,  'r' => 0.01, 'g' => 0.01, 'b' => 0.04],
+        ['time' => 0.88, 'r' => 0.015, 'g' => 0.02, 'b' => 0.05],  // night
+        ['time' => 1.0,  'r' => 0.015, 'g' => 0.02, 'b' => 0.05],
     ];
 
     // ── Sky horizon emission ─────────────────────────────────────────
     private const SKY_HORIZON_KEYS = [
-        ['time' => 0.0,  'r' => 0.02, 'g' => 0.02, 'b' => 0.06],
-        ['time' => 0.15, 'r' => 0.02, 'g' => 0.02, 'b' => 0.06],  // deep night
+        ['time' => 0.0,  'r' => 0.03, 'g' => 0.04, 'b' => 0.075],
+        ['time' => 0.15, 'r' => 0.03, 'g' => 0.04, 'b' => 0.075],  // deep night
         ['time' => 0.17, 'r' => 0.05, 'g' => 0.04, 'b' => 0.10],  // astro. — barely visible
         ['time' => 0.19, 'r' => 0.20, 'g' => 0.12, 'b' => 0.18],  // nautical — dark orange hint
         ['time' => 0.22, 'r' => 0.55, 'g' => 0.28, 'b' => 0.20],  // civil — warm orange band
@@ -122,8 +122,8 @@ class DayNightSystem extends AbstractSystem
         ['time' => 0.77, 'r' => 0.70, 'g' => 0.25, 'b' => 0.15],  // civil dusk — deep red
         ['time' => 0.82, 'r' => 0.30, 'g' => 0.12, 'b' => 0.18],  // nautical dusk — purple-red
         ['time' => 0.85, 'r' => 0.10, 'g' => 0.06, 'b' => 0.12],  // astro. dusk — fading
-        ['time' => 0.88, 'r' => 0.02, 'g' => 0.02, 'b' => 0.06],  // night
-        ['time' => 1.0,  'r' => 0.02, 'g' => 0.02, 'b' => 0.06],
+        ['time' => 0.88, 'r' => 0.03, 'g' => 0.04, 'b' => 0.075],  // night
+        ['time' => 1.0,  'r' => 0.03, 'g' => 0.04, 'b' => 0.075],
     ];
 
     public function __construct(
@@ -263,9 +263,11 @@ class DayNightSystem extends AbstractSystem
         $blendDirX = $sunDirX * (1.0 - $moonBlend) + (-$sunDirX) * $moonBlend;
         $blendDirY = $sunDirY * (1.0 - $moonBlend) + (-$sunDirY) * $moonBlend;
         $blendDirZ = $sunDirZ * (1.0 - $moonBlend) + (-$sunDirZ) * $moonBlend;
-        $blendR = $sunColor['r'] * (1.0 - $moonBlend) + 0.55 * $moonBlend;
-        $blendG = $sunColor['g'] * (1.0 - $moonBlend) + 0.60 * $moonBlend;
-        $blendB = $sunColor['b'] * (1.0 - $moonBlend) + 0.80 * $moonBlend;
+        // Cool, moody moonlight (slightly bluer than before); intensity unchanged
+        // so the scene stays as navigable as the earlier night-brightness pass.
+        $blendR = $sunColor['r'] * (1.0 - $moonBlend) + 0.50 * $moonBlend;
+        $blendG = $sunColor['g'] * (1.0 - $moonBlend) + 0.58 * $moonBlend;
+        $blendB = $sunColor['b'] * (1.0 - $moonBlend) + 0.86 * $moonBlend;
         $blendIntensity = $sunIntensityFinal * (1.0 - $moonBlend) + $moonIntensity * $moonBlend;
 
         $isFirst = true;
@@ -489,7 +491,8 @@ class DayNightSystem extends AbstractSystem
             sunGlowSize: $sunGlowSize,
             sunGlowIntensity: $sunGlowIntensity,
             moonDirection: $skyMoonDir,
-            moonColor: new Color(0.85, 0.87, 0.95),
+            // Near-white disc; the sky_moon shader tints the surrounding glow bluer.
+            moonColor: new Color(0.95, 0.96, 1.0),
             moonIntensity: $moonVisible ? $moonBright : 0.0,
             cloudCover: $cloudCover,
             cloudAltitude: $cloudAltitude,
@@ -498,7 +501,7 @@ class DayNightSystem extends AbstractSystem
             cloudWindDirection: new Vec3(1.0, 0.0, 0.2),
             fogDensity: $fogDensity,
             cloudDarkness: $cloudDarkness,
-            starBrightness: $cycle->isDaytime() ? 0.0 : 0.9 * $moonBright,
+            starBrightness: $cycle->isDaytime() ? 0.0 : 1.15 * $moonBright,
             time: $this->skyTime,
         ));
 

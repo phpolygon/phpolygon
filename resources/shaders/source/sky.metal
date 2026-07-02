@@ -142,12 +142,15 @@ fragment float4 fragment_sky(SkyVertexOut in [[stage_in]],
     if (sky.moon_intensity > 0.0) {
         float cosM  = dot(dir, float3(sky.moon_direction));
         float angle = acos(clamp(cosM, -1.0, 1.0));
-        float disc  = 1.0 - smoothstep01(sky.sun_size * 0.7, sky.sun_size * 1.4, angle);
-        color = mix(color, float3(sky.moon_color) * sky.moon_intensity, disc);
+        // Small, crisp disc (this combined shader has no HDR-bloom path, so lift
+        // the disc a touch instead) + a separate cool-blue glow. Mirrors
+        // vio/sky_moon.frag.glsl.
+        float disc  = 1.0 - smoothstep01(sky.sun_size * 0.30, sky.sun_size * 0.44, angle);
+        color = mix(color, float3(sky.moon_color) * min(sky.moon_intensity * 1.6, 1.0), disc);
         if (angle < sky.sun_glow_size * 0.6) {
             float g = 1.0 - angle / (sky.sun_glow_size * 0.6);
-            g = g * g * 0.35 * sky.moon_intensity;
-            color += float3(sky.moon_color) * g;
+            g = g * g * 0.42 * sky.moon_intensity;
+            color += float3(sky.moon_color) * float3(0.72, 0.82, 1.08) * g;
         }
     }
 

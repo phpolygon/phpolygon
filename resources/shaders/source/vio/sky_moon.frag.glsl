@@ -38,19 +38,26 @@ void main() {
     float angle = acos(clamp(dot(dir, u_moon_direction), -1.0, 1.0));
 
     vec3 add = vec3(0.0);
-    float disc = 1.0 - smoothstep01(u_sun_size * 0.7, u_sun_size * 1.4, angle);
-    add += u_moon_color * u_moon_intensity * disc;
 
+    // Soft, cool-BLUE atmospheric glow around the moon. Kept display-referred (it
+    // flows through the invToneMap below) so it stays a gentle halo, and tinted
+    // bluer than the disc for the "bright moon in a blue night" look.
     if (angle < u_sun_glow_size * 0.6) {
         float g = 1.0 - angle / (u_sun_glow_size * 0.6);
-        g = g * g * 0.35 * u_moon_intensity;
-        add += u_moon_color * g;
+        g = g * g * 0.42 * u_moon_intensity;
+        add += u_moon_color * vec3(0.72, 0.82, 1.08) * g;
     }
-
-    // Under HDR, linearise the additive contribution so the resolve ACES maps an
-    // isolated moon back to its authored display look (no over-bright/over-spread).
     if (u_linear_output == 1) {
         add = invToneMapInvGamma(add);
     }
+
+    // Small, crisp moon disc. Added AFTER the tonemap so under HDR its bright core
+    // sits in LINEAR space above 1.0 and feeds the bloom pass — a bright disc with
+    // a soft bloom halo, instead of the old large flat clamped disc. LDR path adds
+    // it at 1× (crisp, no bloom pass anyway).
+    float disc = 1.0 - smoothstep01(u_sun_size * 0.30, u_sun_size * 0.44, angle);
+    float discHdr = (u_linear_output == 1) ? 2.2 : 1.0;
+    add += u_moon_color * (u_moon_intensity * disc * discHdr);
+
     frag_color = vec4(add, 1.0);
 }
