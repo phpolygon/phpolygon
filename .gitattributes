@@ -1,0 +1,6 @@
+# Shell scripts and Dockerfiles must stay LF so they run inside Linux containers
+# and via bash — this repo is often checked out on Windows (core.autocrlf=true),
+# which would otherwise give them CRLF and break `#!/usr/bin/env bash` as `bash\r`.
+*.sh            text eol=lf
+Dockerfile*     text eol=lf
+*.bash          text eol=lf
