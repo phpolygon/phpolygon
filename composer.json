@@ -2,6 +2,7 @@
     "name": "phpolygon/phpolygon",
     "description": "PHP-native game engine with AI-first authoring",
     "type": "library",
+    "version": "0.26.1",
     "license": "MIT",
     "require": {
         "php": ">=8.5",
