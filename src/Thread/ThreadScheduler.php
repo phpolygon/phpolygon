@@ -95,6 +95,18 @@ class ThreadScheduler
 
     /**
      * Send shutdown signal to all threads and close runtimes.
+     *
+     * Order matters for a clean process exit:
+     *   1. Send the `null` sentinel so each worker loop breaks and returns.
+     *   2. Close the Runtimes (joins the underlying threads).
+     *   3. Close the named Channels.
+     *
+     * Step 3 is required on Windows: `Channel::make(..., Infinite)` registers
+     * the channel in `parallel`'s process-global channel table, where it holds
+     * a synchronization monitor. Channels that are never closed are torn down
+     * in the extension's MSHUTDOWN instead — and on Windows that teardown can
+     * block the process from exiting even after all PHP-level shutdown has run
+     * to completion. Closing them here empties the table before MSHUTDOWN.
      */
     public function shutdown(): void
     {
@@ -112,6 +124,24 @@ class ThreadScheduler
                 $runtime->close();
             } catch (\parallel\Runtime\Error\Closed) {
                 // Already closed
+            }
+        }
+
+        // Explicitly close the named Channels so parallel's global channel
+        // table is empty before the extension's MSHUTDOWN runs. Both the `_in`
+        // and `_out` channels are opened by name and closed; a channel that was
+        // already reclaimed (e.g. by a crashed worker) throws Closed, which we
+        // ignore. close() is idempotent-safe here because each name is closed
+        // exactly once per shutdown().
+        foreach (array_keys($this->subsystems) as $name) {
+            foreach (["{$name}_in", "{$name}_out"] as $channelName) {
+                try {
+                    \parallel\Channel::open($channelName)->close();
+                } catch (\parallel\Channel\Error\Closed) {
+                    // Already closed — nothing to do
+                } catch (\parallel\Channel\Error\Existence) {
+                    // Never created / already reclaimed — nothing to do
+                }
             }
         }
 
