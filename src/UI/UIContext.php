@@ -364,14 +364,20 @@ class UIContext
         if ($hovered) {
             $this->anyHovered = true; $this->hoveredWidget = $id;
 
-            if ($this->input->isMouseButtonDown(0)) {
+            // Claim the widget only on the PRESS EDGE (not every down-frame), so
+            // the press origin is recorded on exactly one widget.
+            if ($this->input->isMouseButtonPressed(0)) {
                 $this->activeWidget = $id;
-                $pressing = true;
             }
-            if ($this->input->isMouseButtonReleased(0)) {
+            // Fire only if the press began on THIS widget and we're still hovered
+            // at release — the correct IMGUI press-then-release-on-same-widget
+            // model. Prevents ghost clicks where a press starts on another widget
+            // and the cursor is over this one at the release edge (issue #181).
+            if ($this->input->isMouseButtonReleased(0) && $this->activeWidget === $id) {
                 $clicked = true;
                 $this->activeWidget = '';
             }
+            $pressing = $this->activeWidget === $id && $this->input->isMouseButtonDown(0);
         } else {
             if ($this->activeWidget === $id && !$this->input->isMouseButtonDown(0)) {
                 $this->activeWidget = '';

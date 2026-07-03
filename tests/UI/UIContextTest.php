@@ -124,6 +124,92 @@ class UIContextTest extends TestCase
         $this->assertTrue($result);
     }
 
+    public function testPressAndReleaseOnSameButtonFiresExactlyOnce(): void
+    {
+        // Frame 1: press over button A's rect — must NOT fire yet.
+        $this->input->handleCursorPosEvent(15.0, 15.0);
+        $this->input->handleMouseButtonEvent(0, 1); // PRESS edge
+
+        $this->ctx->begin(10.0, 10.0, 300.0);
+        $pressFrame = $this->ctx->button('A', 'A');
+        $this->ctx->end();
+
+        $this->assertFalse($pressFrame, 'button must not fire on the press frame');
+
+        // Frame 2: release over A's rect — must fire exactly once.
+        $this->input->unsuppress();
+        $this->input->endFrame();
+        $this->input->handleCursorPosEvent(15.0, 15.0);
+        $this->input->handleMouseButtonEvent(0, 0); // RELEASE edge
+
+        $this->ctx->begin(10.0, 10.0, 300.0);
+        $releaseFrame = $this->ctx->button('A', 'A');
+        $this->ctx->end();
+
+        $this->assertTrue($releaseFrame, 'button fires once on release when press began on it');
+    }
+
+    public function testPressOnAReleaseOverBDoesNotFireB(): void
+    {
+        // The ghost-click bug (game issue #181): press starts on button A (drawn
+        // first), cursor moves over button B (drawn later) before release. B must
+        // NOT fire, because the press never began on B.
+        //
+        // Two buttons stacked vertically in the same region:
+        //   A occupies roughly y=10..~30 (fontSize+padding*2 tall)
+        //   B is drawn right after A, lower on screen.
+
+        // Frame 1: press while hovering A's rect.
+        $this->input->handleCursorPosEvent(15.0, 15.0); // over A
+        $this->input->handleMouseButtonEvent(0, 1); // PRESS edge
+
+        $this->ctx->begin(10.0, 10.0, 300.0);
+        $aPress = $this->ctx->button('A', 'A');
+        $bYTop = $this->ctx->getCursorY(); // top of B after A advanced
+        $bPress = $this->ctx->button('B', 'B');
+        $this->ctx->end();
+
+        $this->assertFalse($aPress, 'A must not fire on press frame');
+        $this->assertFalse($bPress, 'B must not fire on press frame');
+
+        // Frame 2: move cursor over B's rect and release there.
+        $this->input->unsuppress();
+        $this->input->endFrame();
+        $bCenterY = $bYTop + 10.0; // inside B's rect
+        $this->input->handleCursorPosEvent(15.0, $bCenterY); // now over B, not A
+        $this->input->handleMouseButtonEvent(0, 0); // RELEASE edge
+
+        $this->ctx->begin(10.0, 10.0, 300.0);
+        $aRelease = $this->ctx->button('A', 'A');
+        $bRelease = $this->ctx->button('B', 'B');
+        $this->ctx->end();
+
+        $this->assertFalse($bRelease, 'B must NOT fire: press began on A, not B (issue #181)');
+        $this->assertFalse($aRelease, 'A must NOT fire: release was not over A');
+    }
+
+    public function testPlainPressReleaseStillFires(): void
+    {
+        // Guard against over-restriction: a normal press+release on a single
+        // button must still fire.
+        $this->input->handleCursorPosEvent(15.0, 15.0);
+        $this->input->handleMouseButtonEvent(0, 1); // PRESS
+        $this->ctx->begin(10.0, 10.0, 300.0);
+        $this->ctx->button('only', 'Only');
+        $this->ctx->end();
+
+        $this->input->unsuppress();
+        $this->input->endFrame();
+        $this->input->handleCursorPosEvent(15.0, 15.0);
+        $this->input->handleMouseButtonEvent(0, 0); // RELEASE
+
+        $this->ctx->begin(10.0, 10.0, 300.0);
+        $result = $this->ctx->button('only', 'Only');
+        $this->ctx->end();
+
+        $this->assertTrue($result, 'plain press+release on one button still fires');
+    }
+
     public function testSetInteractiveBlocksClicks(): void
     {
         // Same setup as testButtonReturnsTrueOnClick — but interactive=false on
