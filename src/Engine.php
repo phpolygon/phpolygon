@@ -346,6 +346,25 @@ class Engine
                 $engine->renderer2D->addFallbackFont('semibold', 'noto-sans-sc');
                 $engine->renderer2D->addFallbackFont('semibold', 'noto-sans-kr');
             }
+
+            // Arabic + Thai fallbacks (vio shapes/BiDis via HarfBuzz+SheenBidi;
+            // it needs a font that actually carries the glyphs in the chain).
+            // Each is a small static Regular (~140 KB / ~20 KB) so, unlike the
+            // multi-MB CJK faces, loading them synchronously is cheap.
+            $arabicFont = $fontDir . DIRECTORY_SEPARATOR . 'noto-sans-arabic'
+                . DIRECTORY_SEPARATOR . 'NotoSansArabic-Regular.ttf';
+            if (is_file($arabicFont)) {
+                $engine->renderer2D->loadFont('noto-sans-arabic', $arabicFont);
+                $engine->renderer2D->addFallbackFont('regular', 'noto-sans-arabic');
+                $engine->renderer2D->addFallbackFont('semibold', 'noto-sans-arabic');
+            }
+            $thaiFont = $fontDir . DIRECTORY_SEPARATOR . 'noto-sans-thai'
+                . DIRECTORY_SEPARATOR . 'NotoSansThai-Regular.ttf';
+            if (is_file($thaiFont)) {
+                $engine->renderer2D->loadFont('noto-sans-thai', $thaiFont);
+                $engine->renderer2D->addFallbackFont('regular', 'noto-sans-thai');
+                $engine->renderer2D->addFallbackFont('semibold', 'noto-sans-thai');
+            }
         }
 
         return $engine;
@@ -1373,6 +1392,22 @@ class Engine
         $this->window->pollEvents();
         $this->renderer2D->loadFont('noto-sans-kr', $cjkDir . DIRECTORY_SEPARATOR . 'NotoSansKR-Regular.otf');
         $this->window->pollEvents();
+
+        // Arabic + Thai (small static Regulars) — register the names so a game
+        // can chain them as fallbacks. Cheap enough to load inline; unlike CJK
+        // there is no multi-MB parse to defer.
+        $arabicFont = $fontDir . DIRECTORY_SEPARATOR . 'noto-sans-arabic'
+            . DIRECTORY_SEPARATOR . 'NotoSansArabic-Regular.ttf';
+        if (is_file($arabicFont)) {
+            $this->renderer2D->loadFont('noto-sans-arabic', $arabicFont);
+            $this->window->pollEvents();
+        }
+        $thaiFont = $fontDir . DIRECTORY_SEPARATOR . 'noto-sans-thai'
+            . DIRECTORY_SEPARATOR . 'NotoSansThai-Regular.ttf';
+        if (is_file($thaiFont)) {
+            $this->renderer2D->loadFont('noto-sans-thai', $thaiFont);
+            $this->window->pollEvents();
+        }
     }
 
     /**

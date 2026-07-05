@@ -86,6 +86,14 @@ class UIContext
     private float $contentScale = 1.0;
 
     /**
+     * Right-to-left mirroring: when set to the design width, hover/hit-testing
+     * mirrors the cursor's X (designWidth - x) so widget hit-tests line up with a
+     * consumer that draws its UI mirrored for an RTL locale. null = LTR (default,
+     * no effect). Generic RTL support — the consuming app toggles it per locale.
+     */
+    public static ?float $rtlMirrorWidth = null;
+
+    /**
      * When false, hover detection short-circuits to false. Used by callers
      * that want to render an underlying scene visually while a modal overlay
      * (e.g. a confirm dialog) absorbs input — set to false before drawing
@@ -1184,8 +1192,13 @@ class UIContext
         }
         $mouse = $this->input->getMousePosition();
         // Adjust mouse position for viewport offset (letterboxing) and content scale
+        $mx = ($mouse->x - $this->viewportOffsetX) / $this->contentScale;
+        // RTL: mirror the cursor X so hit-tests match mirror-drawn widgets.
+        if (self::$rtlMirrorWidth !== null) {
+            $mx = self::$rtlMirrorWidth - $mx;
+        }
         $adjustedMouse = new Vec2(
-            ($mouse->x - $this->viewportOffsetX) / $this->contentScale,
+            $mx,
             ($mouse->y - $this->viewportOffsetY) / $this->contentScale,
         );
         return $rect->contains($adjustedMouse);
