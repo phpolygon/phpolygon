@@ -110,7 +110,7 @@ steam_verify_files() {
     # crashes the exe at load with 0xC0000135 - no window, no log)
     _req  "${win}/${APP_NAME}.exe"
     _req  "${win}/steam_api64.dll"
-    _req  "${win}/D3DCOMPILER_47.dll"
+    _req  "${win}/d3dcompiler_47.dll"
     # Linux
     _req  "${lin}/${APP_NAME}"
     _reqf "${lin}" "libsteam_api.so"
