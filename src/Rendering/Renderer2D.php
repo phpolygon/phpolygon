@@ -288,6 +288,14 @@ class Renderer2D implements Renderer2DInterface
         $this->vg->addFallbackFont($baseFont, $fallbackFont);
     }
 
+    public function clearFallbackFonts(?string $baseFont = null): void
+    {
+        // NanoVG registers fallbacks natively and (in the bound API) has no
+        // reset call — the chain can only grow within a session. Acceptable:
+        // vio is the production path; this fallback backend just keeps the
+        // widest coverage instead of locale-preference ordering.
+    }
+
     public function setGlobalAlpha(float $alpha): void
     {
         $this->vg->globalAlpha($alpha);

@@ -74,6 +74,7 @@ class NullRenderer2D implements Renderer2DInterface
     }
 
     public function addFallbackFont(string $baseFont, string $fallbackFont): void {}
+    public function clearFallbackFonts(?string $baseFont = null): void {}
     public function setGlobalAlpha(float $alpha): void {}
     public function drawArc(float $cx, float $cy, float $r, float $startAngle, float $endAngle, Color $color, int $direction = 0): void {}
     public function saveState(): void {}

@@ -1052,6 +1052,15 @@ class VioRenderer2D implements Renderer2DInterface
         }
     }
 
+    public function clearFallbackFonts(?string $baseFont = null): void
+    {
+        if ($baseFont === null) {
+            $this->fallbackFonts = [];
+            return;
+        }
+        unset($this->fallbackFonts[$baseFont]);
+    }
+
     public function setGlobalAlpha(float $alpha): void
     {
         $this->globalAlpha = $alpha;

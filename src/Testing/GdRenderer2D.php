@@ -446,6 +446,11 @@ class GdRenderer2D implements Renderer2DInterface
         // GD does not support fallback font chains
     }
 
+    public function clearFallbackFonts(?string $baseFont = null): void
+    {
+        // GD does not support fallback font chains
+    }
+
     public function setGlobalAlpha(float $alpha): void
     {
         $this->globalAlpha = $alpha;

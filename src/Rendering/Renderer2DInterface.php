@@ -110,6 +110,16 @@ interface Renderer2DInterface extends RenderContextInterface
     public function addFallbackFont(string $baseFont, string $fallbackFont): void;
 
     /**
+     * Removes registered fallback fonts — for $baseFont only, or the whole
+     * chain when null. Lets a locale switch REORDER the chain (fallbacks are
+     * first-covering-glyph-wins, so e.g. a Japanese locale wants its regional
+     * CJK face chained before the Simplified-Chinese one): clear, then re-add
+     * in the new preference order. Loaded font faces stay registered; only
+     * the fallback wiring is reset.
+     */
+    public function clearFallbackFonts(?string $baseFont = null): void;
+
+    /**
      * Sets the global alpha (opacity) applied to all subsequent draw calls.
      * Value should be between 0.0 (fully transparent) and 1.0 (fully opaque).
      */
