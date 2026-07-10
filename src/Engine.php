@@ -339,12 +339,26 @@ class Engine
                 // atlas is rasterized on a worker thread and the glyphs pop in a
                 // few frames after first use, with no stall. On non-vio backends
                 // preloadFontAsync() is a synchronous alias for loadFont().
-                $engine->renderer2D->preloadFontAsync('noto-sans-sc', $cjkDir . DIRECTORY_SEPARATOR . 'NotoSansSC-Regular.otf');
-                $engine->renderer2D->preloadFontAsync('noto-sans-kr', $cjkDir . DIRECTORY_SEPARATOR . 'NotoSansKR-Regular.otf');
-                $engine->renderer2D->addFallbackFont('regular', 'noto-sans-sc');
-                $engine->renderer2D->addFallbackFont('regular', 'noto-sans-kr');
-                $engine->renderer2D->addFallbackFont('semibold', 'noto-sans-sc');
-                $engine->renderer2D->addFallbackFont('semibold', 'noto-sans-kr');
+                // Region subsets: SC/TC/JP carry overlapping Han codepoints with
+                // different glyph forms. The chain below is a coverage default —
+                // a consumer with a known active locale should rebuild the chain
+                // (clearFallbackFonts + addFallbackFont) with that locale's face
+                // first so Han-unified codepoints pick the right regional form.
+                $cjkFaces = [
+                    'noto-sans-sc' => 'NotoSansSC-Regular.otf',
+                    'noto-sans-tc' => 'NotoSansTC-Regular.otf',
+                    'noto-sans-jp' => 'NotoSansJP-Regular.otf',
+                    'noto-sans-kr' => 'NotoSansKR-Regular.otf',
+                ];
+                foreach ($cjkFaces as $faceId => $file) {
+                    $path = $cjkDir . DIRECTORY_SEPARATOR . $file;
+                    if (!is_file($path)) {
+                        continue;
+                    }
+                    $engine->renderer2D->preloadFontAsync($faceId, $path);
+                    $engine->renderer2D->addFallbackFont('regular', $faceId);
+                    $engine->renderer2D->addFallbackFont('semibold', $faceId);
+                }
             }
 
             // Arabic + Thai fallbacks (vio shapes/BiDis via HarfBuzz+SheenBidi;
@@ -1388,10 +1402,20 @@ class Engine
         $cjkDir = $fontDir . DIRECTORY_SEPARATOR . 'noto-sans-cjk';
         if (!is_dir($cjkDir)) return;
 
-        $this->renderer2D->loadFont('noto-sans-sc', $cjkDir . DIRECTORY_SEPARATOR . 'NotoSansSC-Regular.otf');
-        $this->window->pollEvents();
-        $this->renderer2D->loadFont('noto-sans-kr', $cjkDir . DIRECTORY_SEPARATOR . 'NotoSansKR-Regular.otf');
-        $this->window->pollEvents();
+        $cjkFaces = [
+            'noto-sans-sc' => 'NotoSansSC-Regular.otf',
+            'noto-sans-tc' => 'NotoSansTC-Regular.otf',
+            'noto-sans-jp' => 'NotoSansJP-Regular.otf',
+            'noto-sans-kr' => 'NotoSansKR-Regular.otf',
+        ];
+        foreach ($cjkFaces as $faceId => $file) {
+            $path = $cjkDir . DIRECTORY_SEPARATOR . $file;
+            if (!is_file($path)) {
+                continue;
+            }
+            $this->renderer2D->loadFont($faceId, $path);
+            $this->window->pollEvents();
+        }
 
         // Arabic + Thai (small static Regulars) — register the names so a game
         // can chain them as fallbacks. Cheap enough to load inline; unlike CJK
