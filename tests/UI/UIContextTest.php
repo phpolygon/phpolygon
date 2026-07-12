@@ -37,6 +37,7 @@ class UIContextTest extends TestCase
             }
             public function beginFrame(): void {}
             public function endFrame(): void {}
+            public function clearFallbackFonts(?string $baseFont = null): void {}
             public function clear(Color $color): void {}
             public function setViewport(int $x, int $y, int $width, int $height): void {}
             public function getWidth(): int { return 1280; }
