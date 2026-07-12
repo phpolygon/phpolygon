@@ -57,6 +57,7 @@ class UISystemTest extends TestCase
         $renderer = new class implements \PHPolygon\Rendering\Renderer2DInterface {
             public function beginFrame(): void {}
             public function endFrame(): void {}
+            public function clearFallbackFonts(?string $baseFont = null): void {}
             public function clear(\PHPolygon\Rendering\Color $color): void {}
             public function setViewport(int $x, int $y, int $width, int $height): void {}
             public function getWidth(): int { return 1280; }
