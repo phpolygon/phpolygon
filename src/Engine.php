@@ -52,6 +52,8 @@ use PHPolygon\Runtime\Window;
 use PHPolygon\SaveGame\SaveManager;
 use PHPolygon\Scene\SceneManager;
 use PHPolygon\Scene\SceneManagerInterface;
+use PHPolygon\Scene\Transpiler\WorldExporter;
+use PHPolygon\Scene\Transpiler\WorldImporter;
 use PHPolygon\Support\Facades\Facade;
 use PHPolygon\Thread\NullThreadScheduler;
 use PHPolygon\Thread\ThreadScheduler;
@@ -61,6 +63,14 @@ use PHPolygon\UI\PerfOverlay;
 class Engine
 {
     public readonly World $world;
+
+    // Game-authoritative editor sync (opt-in via enableEditorSync()).
+    private ?string $editorSyncPath = null;
+    private float $editorSyncInterval = 0.5;
+    private float $editorSyncAccum = 0.0;
+    private int $editorSyncWorldVersion = 0;
+    private int $editorSyncMtime = 0;
+
     public readonly Window $window;
     public readonly InputInterface $input;
     public readonly Camera2D $camera2D;
@@ -412,6 +422,102 @@ class Engine
         }
 
         return $fullImg;
+    }
+
+    /**
+     * Snapshot the live ECS world to an editor-loadable `*.scene.json`. Call
+     * from a dev command/hotkey to hand the running game state to the editor.
+     *
+     * @param  list<class-string>|null  $systems  Override declared systems.
+     */
+    public function exportWorldSnapshot(string $path, string $name = 'game_world', ?array $systems = null): void
+    {
+        (new WorldExporter)->toJsonFile($this->world, $path, $name, $systems);
+    }
+
+    /**
+     * Apply an editor-saved `*.scene.json` snapshot to the live world — the
+     * "editor → game" direction. With $replace the world is cleared first
+     * (full swap to the edited version); otherwise entities are added.
+     *
+     * @return array<string, int>  Created entities keyed by name.
+     */
+    public function importWorldSnapshot(string $path, bool $replace = false): array
+    {
+        $raw = is_file($path) ? file_get_contents($path) : false;
+        $data = $raw !== false ? json_decode($raw, true) : null;
+        if (! is_array($data)) {
+            throw new \RuntimeException("Invalid world snapshot: {$path}");
+        }
+        if ($replace) {
+            $this->world->clear();
+        }
+
+        /** @var array<string, mixed> $data */
+        return (new WorldImporter)->apply($this->world, $data);
+    }
+
+    /**
+     * Enable game-authoritative live sync with the editor via a snapshot file.
+     *
+     * On enable, the current world is exported (the editor sees it). Each frame
+     * (throttled) the engine reconciles: if the world has structurally advanced
+     * since the last export, the game re-exports and overwrites an out-of-date
+     * editor; only when the world is unchanged is an editor save imported. This
+     * keeps code/game authoritative (AI-authoring), with editor tweaks applied
+     * only while the editor is current (e.g. while the game is paused/idle).
+     */
+    public function enableEditorSync(string $path, float $intervalSeconds = 0.5): void
+    {
+        $this->editorSyncPath = $path;
+        $this->editorSyncInterval = max(0.05, $intervalSeconds);
+        $this->exportWorldSnapshot($path);
+        $this->editorSyncWorldVersion = $this->world->version();
+        $this->editorSyncMtime = $this->snapshotMtime($path);
+        $this->editorSyncAccum = 0.0;
+    }
+
+    public function disableEditorSync(): void
+    {
+        $this->editorSyncPath = null;
+    }
+
+    private function tickEditorSync(float $dt): void
+    {
+        if ($this->editorSyncPath === null) {
+            return;
+        }
+        $this->editorSyncAccum += $dt;
+        if ($this->editorSyncAccum < $this->editorSyncInterval) {
+            return;
+        }
+        $this->editorSyncAccum = 0.0;
+        $path = $this->editorSyncPath;
+
+        if ($this->world->version() !== $this->editorSyncWorldVersion) {
+            // Game moved on since the last export → authoritative; overwrite the
+            // (now outdated) editor snapshot.
+            $this->exportWorldSnapshot($path);
+            $this->editorSyncWorldVersion = $this->world->version();
+            $this->editorSyncMtime = $this->snapshotMtime($path);
+
+            return;
+        }
+
+        $mtime = $this->snapshotMtime($path);
+        if ($mtime !== $this->editorSyncMtime) {
+            // World unchanged and the editor saved → the editor was current; apply.
+            $this->importWorldSnapshot($path, replace: true);
+            $this->editorSyncWorldVersion = $this->world->version();
+            $this->editorSyncMtime = $this->snapshotMtime($path);
+        }
+    }
+
+    private function snapshotMtime(string $path): int
+    {
+        clearstatcache(true, $path);
+
+        return is_file($path) ? (int) filemtime($path) : 0;
     }
 
     public function onUpdate(callable $callback): self
@@ -818,6 +924,7 @@ class Engine
                     if ($this->onUpdate !== null) {
                         ($this->onUpdate)($this, $dt);
                     }
+                    $this->tickEditorSync($dt);
                     PerfProfiler::end();
                 },
                 render: function (float $interpolation) use ($nativeBackend) {
@@ -901,6 +1008,7 @@ class Engine
                     if ($this->onUpdate !== null) {
                         ($this->onUpdate)($this, $dt);
                     }
+                    $this->tickEditorSync($dt);
                     PerfProfiler::end();
                 },
                 render: function (float $interpolation) use ($nativeBackend) {

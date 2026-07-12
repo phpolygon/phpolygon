@@ -57,6 +57,9 @@ class World
      */
     private array $systemPerfNames = [];
 
+    /** Bumped on every structural change (create/destroy/attach/detach). */
+    private int $structuralVersion = 0;
+
     public function createEntity(): Entity
     {
         if (!empty($this->freeList)) {
@@ -67,6 +70,7 @@ class World
 
         $this->alive[$id] = true;
         $this->entityComponents[$id] = [];
+        $this->structuralVersion++;
 
         $entity = new Entity($id, $this);
         $this->entityCache[$id] = $entity;
@@ -119,6 +123,7 @@ class World
 
         unset($this->entityComponents[$id], $this->alive[$id], $this->entityCache[$id], $this->dormant[$id]);
         $this->freeList[] = $id;
+        $this->structuralVersion++;
     }
 
     public function entity(int $id): Entity
@@ -146,6 +151,26 @@ class World
         return count($this->alive);
     }
 
+    /**
+     * Ids of all live entities, e.g. to snapshot the whole world.
+     *
+     * @return list<int>
+     */
+    public function aliveEntityIds(): array
+    {
+        return array_keys($this->alive);
+    }
+
+    /**
+     * A monotonically increasing structural version — cheap way to detect
+     * whether the world has changed (e.g. for editor sync). Bumped on entity
+     * create/destroy and component attach/detach, not on per-frame field edits.
+     */
+    public function version(): int
+    {
+        return $this->structuralVersion;
+    }
+
     // --- Component operations ---
 
     public function attachComponent(int $entityId, ComponentInterface $component): void
@@ -163,6 +188,7 @@ class World
             $this->components[$class][$entityId] = $component;
         }
         $this->entityComponents[$entityId][$class] = $component;
+        $this->structuralVersion++;
 
         $component->onAttach($this->entity($entityId));
     }
@@ -181,6 +207,7 @@ class World
         unset($this->components[$componentClass][$entityId]);
         unset($this->dormantComponents[$componentClass][$entityId]);
         unset($this->entityComponents[$entityId][$componentClass]);
+        $this->structuralVersion++;
     }
 
     /**
