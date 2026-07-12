@@ -82,6 +82,13 @@ class UIContext
     private float $viewportOffsetX = 0.0;
     private float $viewportOffsetY = 0.0;
 
+    /**
+     * Virtual/design viewport height, in the same coordinate space widgets are
+     * laid out in (0 = unknown). Lets a dropdown flip its option list upward when
+     * opening downward would run past the bottom of the screen.
+     */
+    private float $viewportHeight = 0.0;
+
     /** Content scale for resolution-independent rendering (e.g. 2.0 = game renders at 2x) */
     private float $contentScale = 1.0;
 
@@ -892,6 +899,15 @@ class UIContext
 
             $listY = $fieldRect->y + $h + 2.0;
             $listH = $rowH * $visibleCount;
+            // Flip the list upward when opening downward would run past the bottom
+            // of the viewport and there is room above the field — so a dropdown
+            // near the screen edge stays fully visible instead of being clipped.
+            if ($this->viewportHeight > 0.0
+                && $listY + $listH > $this->viewportHeight
+                && $fieldRect->y - $listH - 2.0 >= 0.0
+            ) {
+                $listY = $fieldRect->y - $listH - 2.0;
+            }
             $listRect = new Rect($fieldRect->x, $listY, $w, $listH);
 
             $listHovered = $this->isHovered($listRect);
@@ -1101,6 +1117,17 @@ class UIContext
     }
 
     /**
+     * Whether a dropdown's option list is currently open. Persistent across frames
+     * (set on open, cleared on select/dismiss), so a scrollable container drawn
+     * behind the dropdown can suppress its own mouse-wheel handling while the list
+     * is open — otherwise the wheel scrolls both the list and the container.
+     */
+    public function hasOpenDropdown(): bool
+    {
+        return $this->openDropdown !== '';
+    }
+
+    /**
      * Check if any text field currently has input focus.
      */
     public function hasTextFieldFocus(): bool
@@ -1146,6 +1173,16 @@ class UIContext
     {
         $this->viewportOffsetX = $x;
         $this->viewportOffsetY = $y;
+    }
+
+    /**
+     * Set the virtual viewport height (design-space units). When set, a dropdown
+     * whose option list would extend past this height opens upward instead, so a
+     * dropdown near the bottom of the screen stays fully visible.
+     */
+    public function setViewportHeight(float $height): void
+    {
+        $this->viewportHeight = $height;
     }
 
     /**

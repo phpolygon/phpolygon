@@ -102,6 +102,87 @@ class UIContextTest extends TestCase
         $this->assertFalse($result);
     }
 
+    // ── dropdown open-state + upward flip near the viewport bottom ──
+
+    public function testHasOpenDropdownDefaultsFalse(): void
+    {
+        $this->assertFalse($this->ctx->hasOpenDropdown());
+    }
+
+    public function testHasOpenDropdownIsTrueAfterOpening(): void
+    {
+        $this->openDropdownNearBottom(680.0);
+        $this->assertTrue($this->ctx->hasOpenDropdown());
+    }
+
+    public function testDropdownFlipsUpWhenItWouldOverflowTheViewportBottom(): void
+    {
+        $this->ctx->setViewportHeight(720.0);
+        $fieldY = 680.0;
+        $listY = $this->openDropdownAndCaptureListY($fieldY);
+        $this->assertLessThan($fieldY, $listY,
+            'a dropdown near the bottom must open its option list upward, not off-screen');
+    }
+
+    public function testDropdownOpensDownwardWithoutAKnownViewportHeight(): void
+    {
+        // No setViewportHeight() → legacy behaviour: the list opens below the field.
+        $fieldY = 680.0;
+        $listY = $this->openDropdownAndCaptureListY($fieldY);
+        $this->assertGreaterThan($fieldY, $listY,
+            'without a known viewport height the list opens downward as before');
+    }
+
+    /** Open a 10-option dropdown whose field sits at $fieldY (press + release). */
+    private function openDropdownNearBottom(float $fieldY): void
+    {
+        $options = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j'];
+        $fy = $fieldY + 5.0; // cursor inside the field row
+
+        // Frame 1: press over the field.
+        $this->input->handleCursorPosEvent(120.0, $fy);
+        $this->input->handleMouseButtonEvent(0, 1);
+        $this->ctx->begin(100.0, $fieldY, 200.0);
+        $this->ctx->dropdown('dd', $options, 0, 180.0, 8);
+        $this->ctx->end();
+
+        // Frame 2: release over the field → toggles the dropdown open.
+        $this->input->unsuppress();
+        $this->input->endFrame();
+        $this->input->handleCursorPosEvent(120.0, $fy);
+        $this->input->handleMouseButtonEvent(0, 0);
+        $this->ctx->begin(100.0, $fieldY, 200.0);
+        $this->ctx->dropdown('dd', $options, 0, 180.0, 8);
+        $this->ctx->end();
+    }
+
+    /** Open the dropdown, render one more frame with it open, and return the Y of
+     *  the option-list background (the tall rounded rect drawn by the overlay). */
+    private function openDropdownAndCaptureListY(float $fieldY): float
+    {
+        $this->openDropdownNearBottom($fieldY);
+
+        // Frame 3: list is open → the overlay is deferred; flush + capture.
+        $this->input->unsuppress();
+        $this->input->endFrame();
+        $this->input->handleCursorPosEvent(120.0, $fieldY + 5.0);
+        $this->drawCalls = [];
+        $this->ctx->begin(100.0, $fieldY, 200.0);
+        $this->ctx->dropdown('dd', ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j'], 0, 180.0, 8);
+        $this->ctx->end();
+        $this->ctx->flushOverlays();
+
+        // The list background is the tall rounded rect (height >> a single row).
+        $listYs = [];
+        foreach ($this->drawCalls as $c) {
+            if ($c['method'] === 'drawRoundedRect' && (float) $c['args'][3] > 100.0) {
+                $listYs[] = (float) $c['args'][1];
+            }
+        }
+        $this->assertNotEmpty($listYs, 'the open dropdown should draw its option-list background');
+        return $listYs[0];
+    }
+
     public function testButtonReturnsTrueOnClick(): void
     {
         // Frame 1: mouse hovers button, press occurs
