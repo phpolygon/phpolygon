@@ -144,6 +144,35 @@ class TranspilerTest extends TestCase
         $this->assertStringContainsString('new SpriteRenderer(', $php);
     }
 
+    public function testClassNameAndNamespaceComeFromSceneFqcn(): void
+    {
+        $php = $this->transpiler->fromArray([
+            '_version' => 1,
+            '_scene' => 'Acme\\Game\\Scenes\\LevelOneScene',
+            'name' => 'level_one',
+            'systems' => [],
+            'entities' => [],
+        ]);
+
+        // The original class/namespace is preserved so re-saving an edited
+        // scene updates the same class/file (not a name-derived duplicate).
+        $this->assertStringContainsString('namespace Acme\\Game\\Scenes;', $php);
+        $this->assertStringContainsString('class LevelOneScene extends Scene', $php);
+        $this->assertStringContainsString("return 'level_one'", $php);
+    }
+
+    public function testClassNameFallsBackToSceneNameWithoutFqcn(): void
+    {
+        $php = $this->transpiler->fromArray([
+            '_version' => 1,
+            'name' => 'my_level',
+            'systems' => [],
+            'entities' => [],
+        ]);
+
+        $this->assertStringContainsString('class MyLevel extends Scene', $php);
+    }
+
     public function testFromArrayIncludesUseStatements(): void
     {
         $scene = new SampleScene();
@@ -175,7 +204,7 @@ class TranspilerTest extends TestCase
         $namespace = 'Proto\\Gen\\S' . bin2hex(random_bytes(5));
         $data = [
             '_version' => 1,
-            '_scene' => $namespace . '\\Ignored',
+            '_scene' => $namespace . '\\GenScene',
             'name' => 'gen_scene',
             'config' => [
                 '_class' => SceneConfig::class,
@@ -260,7 +289,7 @@ class TranspilerTest extends TestCase
         $namespace = 'Proto\\Gen\\E' . bin2hex(random_bytes(5));
         $data = [
             '_version' => 1,
-            '_scene' => $namespace . '\\Ignored',
+            '_scene' => $namespace . '\\EnumScene',
             'name' => 'enum_scene',
             'systems' => [],
             'entities' => [
@@ -318,7 +347,7 @@ class TranspilerTest extends TestCase
         $namespace = 'Proto\\Gen\\H' . bin2hex(random_bytes(5));
         $data = [
             '_version' => 1,
-            '_scene' => $namespace . '\\X',
+            '_scene' => $namespace . '\\HierScene',
             'name' => 'hier_scene',
             'systems' => [],
             'entities' => [

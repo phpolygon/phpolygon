@@ -36,8 +36,14 @@ class PhpCodeGenerator
     public function generate(array $data, string $buildPrelude = '', array $extraUses = []): string
     {
         $sceneName = is_string($data['name'] ?? null) ? $data['name'] : '';
-        $className = $this->nameToClassName($sceneName);
         $sceneClass = isset($data['_scene']) && is_string($data['_scene']) ? $data['_scene'] : null;
+        // Preserve the original class name and namespace when the scene carries
+        // its source FQCN (`_scene`), so re-generating an edited scene updates
+        // the same class/file. Fall back to deriving a class name from the
+        // scene name for scenes authored fresh in the editor.
+        $className = $sceneClass !== null && $this->extractClassName($sceneClass) !== ''
+            ? $this->extractClassName($sceneClass)
+            : $this->nameToClassName($sceneName);
         $namespace = $sceneClass !== null ? $this->extractNamespace($sceneClass) : 'App\\Scene';
 
         /** @var list<string> $systems */
@@ -532,6 +538,12 @@ class PhpCodeGenerator
     {
         $pos = strrpos($fqcn, '\\');
         return $pos !== false ? substr($fqcn, 0, $pos) : '';
+    }
+
+    private function extractClassName(string $fqcn): string
+    {
+        $pos = strrpos($fqcn, '\\');
+        return $pos !== false ? substr($fqcn, $pos + 1) : $fqcn;
     }
 
     private function nameToClassName(string $name): string
