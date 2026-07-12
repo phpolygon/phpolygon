@@ -27,7 +27,7 @@ class SceneImportGeneratorTest extends TestCase
         $namespace = 'Proto\\Import\\S' . bin2hex(random_bytes(5));
         $import = [
             'name' => 'imported_demo',
-            '_scene' => $namespace . '\\Ignored',
+            '_scene' => $namespace . '\\ImportedDemo',
             'systems' => [],
             'meshes' => [
                 'box_6x12x5' => ['generator' => 'BoxMesh', 'args' => [6, 12, 5]],
