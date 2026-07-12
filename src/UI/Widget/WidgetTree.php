@@ -7,7 +7,7 @@ namespace PHPolygon\UI\Widget;
 use PHPolygon\Math\Rect;
 use PHPolygon\Math\Vec2;
 use PHPolygon\Rendering\Renderer2DInterface;
-use PHPolygon\Runtime\Input;
+use PHPolygon\Runtime\InputInterface;
 use PHPolygon\UI\UIStyle;
 
 /**
@@ -20,7 +20,7 @@ class WidgetTree
 {
     private Widget $root;
     private Renderer2DInterface $renderer;
-    private Input $input;
+    private InputInterface $input;
     private UIStyle $style;
 
     private ?Widget $hoveredWidget = null;
@@ -33,7 +33,7 @@ class WidgetTree
     public function __construct(
         Widget $root,
         Renderer2DInterface $renderer,
-        Input $input,
+        InputInterface $input,
         float $viewportWidth,
         float $viewportHeight,
         ?UIStyle $style = null,

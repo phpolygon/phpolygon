@@ -8,7 +8,7 @@ use PHPolygon\Math\Rect;
 use PHPolygon\Math\Vec2;
 use PHPolygon\Rendering\Color;
 use PHPolygon\Rendering\Renderer2DInterface;
-use PHPolygon\Runtime\Input;
+use PHPolygon\Runtime\InputInterface;
 use PHPolygon\UI\UIStyle;
 
 /**
@@ -127,7 +127,7 @@ class ScrollView extends Widget
     /**
      * Handle scroll input for this view. Call from WidgetTree's update.
      */
-    public function handleScroll(Input $input): void
+    public function handleScroll(InputInterface $input): void
     {
         $scrollDelta = $input->getScrollY();
         if (abs($scrollDelta) > 0.01) {

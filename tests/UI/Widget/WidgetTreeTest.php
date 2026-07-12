@@ -6,7 +6,9 @@ namespace PHPolygon\Tests\UI\Widget;
 
 use PHPUnit\Framework\TestCase;
 use PHPolygon\Math\Rect;
+use PHPolygon\Math\Vec2;
 use PHPolygon\Runtime\Input;
+use PHPolygon\Runtime\InputInterface;
 use PHPolygon\UI\UIStyle;
 use PHPolygon\UI\Widget\Button;
 use PHPolygon\UI\Widget\Checkbox;
@@ -43,6 +45,111 @@ class WidgetTreeTest extends TestCase
 
         $this->assertEquals(800.0, $root->getBounds()->width);
         $this->assertEquals(600.0, $root->getBounds()->height);
+    }
+
+    public function testAcceptsSiblingInputInterfaceNotJustConcreteInput(): void
+    {
+        // The game's VioInput implements InputInterface but does NOT extend the
+        // concrete Input — WidgetTree must accept it (this was the runtime blocker).
+        $input = new class implements InputInterface
+        {
+            public function isKeyDown(int $key): bool
+            {
+                return false;
+            }
+
+            public function isKeyPressed(int $key): bool
+            {
+                return false;
+            }
+
+            public function isKeyReleased(int $key): bool
+            {
+                return false;
+            }
+
+            public function isMouseButtonDown(int $button): bool
+            {
+                return false;
+            }
+
+            public function isMouseButtonPressed(int $button): bool
+            {
+                return false;
+            }
+
+            public function isMouseButtonReleased(int $button): bool
+            {
+                return false;
+            }
+
+            public function getMousePosition(): Vec2
+            {
+                return new Vec2(0.0, 0.0);
+            }
+
+            public function getMouseX(): float
+            {
+                return 0.0;
+            }
+
+            public function getMouseY(): float
+            {
+                return 0.0;
+            }
+
+            public function getScrollX(): float
+            {
+                return 0.0;
+            }
+
+            public function getScrollY(): float
+            {
+                return 0.0;
+            }
+
+            /** @return list<string> */
+            public function getCharsTyped(): array
+            {
+                return [];
+            }
+
+            public function getTextInput(): string
+            {
+                return '';
+            }
+
+            public function getBackspaceCount(): int
+            {
+                return 0;
+            }
+
+            public function showSoftKeyboard(): void {}
+
+            public function hideSoftKeyboard(): void {}
+
+            public function suppress(int $frames = 0, float $seconds = 0.0): void {}
+
+            public function unsuppress(): void {}
+
+            public function isSuppressed(): bool
+            {
+                return false;
+            }
+
+            public function clearKeyEdges(): void {}
+
+            public function endFrame(): void {}
+        };
+
+        $this->assertNotInstanceOf(Input::class, $input);
+
+        $root = new VBox();
+        $root->addChild(new Label('Hi'));
+        $tree = new WidgetTree($root, $this->renderer, $input, 800, 600, $this->style);
+        $tree->update(); // full input → layout → draw cycle must run
+
+        $this->assertInstanceOf(WidgetTree::class, $tree);
     }
 
     public function testDrawProducesRenderCalls(): void
