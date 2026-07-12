@@ -24,7 +24,8 @@ use ReflectionNamedType;
 final class WidgetCodeGenerator
 {
     /** Public properties that hold transient runtime state — never emitted. */
-    private const TRANSIENT = ['hovered', 'pressed', 'focused', 'open', 'scrollOffset', 'styleOverride'];
+    private const TRANSIENT = ['hovered', 'pressed', 'focused', 'open', 'scrollOffset', 'styleOverride',
+        'bindings', 'eventBindings', 'each', 'template'];
 
     /** @var array<class-string, true> FQCNs to import. */
     private array $uses = [];

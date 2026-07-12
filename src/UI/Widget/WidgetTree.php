@@ -26,6 +26,7 @@ class WidgetTree
     private ?Widget $hoveredWidget = null;
     private ?Widget $focusedWidget = null;
     private ?Widget $pressedWidget = null;
+    private ?WidgetBinder $binder = null;
 
     private float $viewportWidth;
     private float $viewportHeight;
@@ -44,6 +45,39 @@ class WidgetTree
         $this->viewportWidth = $viewportWidth;
         $this->viewportHeight = $viewportHeight;
         $this->style = $style ?? UIStyle::dark();
+    }
+
+    /**
+     * Load an editor-authored widget tree from a serialized `*.ui.json`.
+     */
+    public static function fromFile(
+        string $path,
+        Renderer2DInterface $renderer,
+        InputInterface $input,
+        float $viewportWidth,
+        float $viewportHeight,
+        ?UIStyle $style = null,
+    ): self {
+        $raw = is_file($path) ? file_get_contents($path) : false;
+        $data = $raw !== false ? json_decode($raw, true) : null;
+        if (! is_array($data)) {
+            throw new \RuntimeException("Invalid widget layout: {$path}");
+        }
+        /** @var array<string, mixed> $data */
+        $root = (new WidgetSerializer)->fromArray($data);
+
+        return new self($root, $renderer, $input, $viewportWidth, $viewportHeight, $style);
+    }
+
+    /**
+     * Bind (or re-bind) this tree to a {@see WidgetContext} — the seam to game
+     * logic. Resolves value bindings, wires two-way inputs and action bindings,
+     * and expands repeaters. Call after the bound data may have changed.
+     */
+    public function bind(WidgetContext $context): void
+    {
+        $this->binder ??= new WidgetBinder;
+        $this->binder->bind($this->root, $context);
     }
 
     public function getRoot(): Widget

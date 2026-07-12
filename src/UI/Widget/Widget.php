@@ -41,6 +41,24 @@ abstract class Widget
     public bool $enabled = true;
     public ?UIStyle $styleOverride = null;
 
+    /**
+     * Editor-authored value bindings: widget property name => context path.
+     * Resolved by {@see WidgetBinder} against a {@see WidgetContext}; two-way for
+     * input widgets. Not persisted as a literal — the serializer emits each as
+     * `<prop>: {"$bind": <path>}`.
+     *
+     * @var array<string, string>
+     */
+    public array $bindings = [];
+
+    /**
+     * Editor-authored event bindings: event name (e.g. 'click', 'change') =>
+     * context action. Serialized as `"$on": { <event>: <action> }`.
+     *
+     * @var array<string, string>
+     */
+    public array $eventBindings = [];
+
     /** @var array<string, list<callable>> */
     private array $eventListeners = [];
 
@@ -163,6 +181,15 @@ abstract class Widget
         foreach ($this->eventListeners[$event] ?? [] as $listener) {
             $listener(...$args);
         }
+    }
+
+    /**
+     * Drop all event listeners. Used by {@see WidgetBinder} before re-wiring a
+     * bound widget so repeated binds never stack duplicate handlers.
+     */
+    public function clearEventListeners(): void
+    {
+        $this->eventListeners = [];
     }
 
     /**

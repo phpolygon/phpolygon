@@ -34,6 +34,13 @@ final class WidgetSerializer
     /** Public properties that hold transient runtime state, never persisted. */
     private const TRANSIENT = ['hovered', 'pressed', 'focused', 'open', 'scrollOffset'];
 
+    /**
+     * Public properties serialized specially, not as literals: bindings/actions
+     * become `$bind`/`$on`, and a Repeater's collection/template become
+     * `$each`/`template`.
+     */
+    private const SPECIAL = ['bindings', 'eventBindings', 'each', 'template'];
+
     /** @var array<class-string, Widget|null> Cached default instances for compaction. */
     private array $defaults = [];
 
@@ -52,6 +59,10 @@ final class WidgetSerializer
             if (! $prop->isInitialized($widget)) {
                 continue;
             }
+            // A bound property is emitted as a `$bind`, not its (stale) literal.
+            if (isset($widget->bindings[$prop->getName()])) {
+                continue;
+            }
             $value = $this->serializeValue($prop->getValue($widget));
 
             if ($default !== null && $prop->isInitialized($default)) {
@@ -62,6 +73,21 @@ final class WidgetSerializer
             }
 
             $result[$prop->getName()] = $value;
+        }
+
+        foreach ($widget->bindings as $prop => $path) {
+            $result[$prop] = ['$bind' => $path];
+        }
+        if ($widget->eventBindings !== []) {
+            $result['$on'] = $widget->eventBindings;
+        }
+        if ($widget instanceof Repeater) {
+            if ($widget->each !== '') {
+                $result['$each'] = $widget->each;
+            }
+            if ($widget->template !== []) {
+                $result['template'] = $widget->template;
+            }
         }
 
         $children = array_map(fn (Widget $c) => $this->toArray($c, $compact), $widget->getChildren());
@@ -99,12 +125,44 @@ final class WidgetSerializer
 
         $widget = $this->instantiate($class);
 
+        // Event/action bindings: { "$on": { "click": "confirmSetup" } }
+        if (isset($data['$on']) && is_array($data['$on'])) {
+            $on = [];
+            foreach ($data['$on'] as $event => $action) {
+                if (is_string($event) && is_string($action)) {
+                    $on[$event] = $action;
+                }
+            }
+            $widget->eventBindings = $on;
+        }
+
+        // Data-driven list: collection path + row template (kept raw, cloned at bind).
+        if ($widget instanceof Repeater) {
+            if (isset($data['$each']) && is_string($data['$each'])) {
+                $widget->each = $data['$each'];
+            }
+            if (isset($data['template']) && is_array($data['template'])) {
+                /** @var array<string, mixed> $template */
+                $template = $data['template'];
+                $widget->template = $template;
+            }
+        }
+
         foreach ($this->persistentProperties($class) as $prop) {
             $key = $prop->getName();
             if (! array_key_exists($key, $data)) {
                 continue;
             }
-            $prop->setValue($widget, $this->deserializeValue($data[$key], $prop->getType()));
+            $value = $data[$key];
+            // Value binding: { "text": { "$bind": "selectedClient.companyName" } }
+            if (is_array($value) && array_key_exists('$bind', $value)) {
+                if (is_string($value['$bind'])) {
+                    $widget->bindings[$key] = $value['$bind'];
+                }
+
+                continue; // no literal for a bound property
+            }
+            $prop->setValue($widget, $this->deserializeValue($value, $prop->getType()));
         }
 
         $children = $data['children'] ?? [];
@@ -130,7 +188,11 @@ final class WidgetSerializer
     {
         $props = [];
         foreach ((new ReflectionClass($class))->getProperties(ReflectionProperty::IS_PUBLIC) as $prop) {
-            if ($prop->isStatic() || in_array($prop->getName(), self::TRANSIENT, true)) {
+            $name = $prop->getName();
+            if ($prop->isStatic()
+                || in_array($name, self::TRANSIENT, true)
+                || in_array($name, self::SPECIAL, true)
+            ) {
                 continue;
             }
             $props[] = $prop;
