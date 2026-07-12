@@ -37,21 +37,17 @@ final class WorldImporter
     public function apply(World $world, array $data): array
     {
         $created = [];
+        /** @var list<array<string, mixed>> $entities */
         $entities = is_array($data['entities'] ?? null) ? $data['entities'] : [];
 
         foreach ($entities as $entityData) {
-            if (! is_array($entityData)) {
-                continue;
-            }
             $entity = $world->createEntity();
             $name = is_string($entityData['name'] ?? null) ? $entityData['name'] : 'entity_'.$entity->id;
 
             $hasNameTag = false;
+            /** @var list<array<string, mixed>> $components */
             $components = is_array($entityData['components'] ?? null) ? $entityData['components'] : [];
             foreach ($components as $componentData) {
-                if (! is_array($componentData)) {
-                    continue;
-                }
                 $class = $componentData['_class'] ?? null;
                 if (! is_string($class) || ! class_exists($class) || ! $this->isSerializable($class)) {
                     continue;

@@ -68,7 +68,8 @@ final class WidgetCodeGenerator
      */
     private function emitNode(array $node, string &$body): string
     {
-        $class = is_string($node['_widget'] ?? null) ? $node['_widget'] : Widget::class;
+        $widgetClass = $node['_widget'] ?? null;
+        $class = is_string($widgetClass) && is_a($widgetClass, Widget::class, true) ? $widgetClass : Widget::class;
         $this->uses[$class] = true;
         $var = '$w'.$this->counter++;
 
@@ -88,18 +89,18 @@ final class WidgetCodeGenerator
             }
         }
 
+        /** @var list<array<string, mixed>> $children */
         $children = is_array($node['children'] ?? null) ? $node['children'] : [];
         foreach ($children as $child) {
-            if (is_array($child)) {
-                $childVar = $this->emitNode($child, $body);
-                $body .= "        {$var}->addChild({$childVar});\n";
-            }
+            $childVar = $this->emitNode($child, $body);
+            $body .= "        {$var}->addChild({$childVar});\n";
         }
 
         return $var;
     }
 
     /**
+     * @param  class-string<Widget>  $class
      * @param  array<string, mixed>  $node
      * @return array{0: string, 1: list<string>} Rendered args and consumed keys.
      */
@@ -131,6 +132,9 @@ final class WidgetCodeGenerator
         return [implode(', ', $args), $consumed];
     }
 
+    /**
+     * @param  class-string<Widget>  $class
+     */
     private function renderProp(string $class, string $key, mixed $value): ?string
     {
         $ref = new ReflectionClass($class);
@@ -148,14 +152,19 @@ final class WidgetCodeGenerator
             return 'null';
         }
 
+        if (in_array($typeName, [Color::class, Vec2::class, Rect::class, Sizing::class, EdgeInsets::class], true)) {
+            if (! is_array($value)) {
+                return null;
+            }
+            /** @var array<string, mixed> $value */
+            return $this->renderValueObject($typeName, $value);
+        }
+
         return match ($typeName) {
             'int' => (string) (int) (is_numeric($value) ? $value : 0),
             'float' => $this->float((float) (is_numeric($value) ? $value : 0)),
             'bool' => $value ? 'true' : 'false',
-            'string' => var_export((string) $value, true),
-            Color::class, Vec2::class, Rect::class, Sizing::class, EdgeInsets::class => is_array($value)
-                ? $this->renderValueObject($typeName, $value)
-                : null,
+            'string' => var_export(is_scalar($value) ? (string) $value : '', true),
             default => null,
         };
     }
@@ -164,6 +173,7 @@ final class WidgetCodeGenerator
      * `new Class(named: args)`, emitting only args that differ from the class's
      * own constructor defaults (keeps e.g. Sizing terse).
      *
+     * @param  class-string  $fqcn
      * @param  array<string, mixed>  $data
      */
     private function renderValueObject(string $fqcn, array $data): string

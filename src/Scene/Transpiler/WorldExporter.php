@@ -54,10 +54,10 @@ final class WorldExporter
             $entities[] = ['name' => $this->nameOf($world, $id), 'components' => $components];
         }
 
-        $declaredSystems = $systems ?? array_values(array_map(
+        $declaredSystems = $systems ?? array_map(
             static fn (object $s): string => $s::class,
             $world->getSystems(),
-        ));
+        );
 
         return [
             '_version' => JsonSceneFormat::VERSION,
