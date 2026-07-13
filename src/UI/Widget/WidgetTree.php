@@ -146,6 +146,12 @@ class WidgetTree
      */
     public function processInput(): void
     {
+        // Clear stale hover/press flags first. A host may rebuild the tree every
+        // frame while the widget instances persist (cached root); a fresh tree's
+        // hoveredWidget is null, so updateHover would never reset a button that
+        // was hovered on an earlier frame — leaving it stuck "hovered" (filled).
+        $this->clearInteractionFlags($this->root);
+
         $mouse = $this->input->getMousePosition();
 
         // Hit test
@@ -221,6 +227,18 @@ class WidgetTree
     }
 
     // ── Internals ────────────────────────────────────────────────
+
+    /** Recursively clear transient hover/press flags before this frame's input. */
+    private function clearInteractionFlags(Widget $widget): void
+    {
+        if ($widget instanceof Button) {
+            $widget->hovered = false;
+            $widget->pressed = false;
+        }
+        foreach ($widget->getChildren() as $child) {
+            $this->clearInteractionFlags($child);
+        }
+    }
 
     private function updateHover(?Widget $hit): void
     {

@@ -288,6 +288,25 @@ class WidgetTreeTest extends TestCase
         $this->assertSame(12.0, $texts[1]['args'][1], 'left-aligned label draws at padding.left');
     }
 
+    public function testHoverFlagClearsAcrossRebuiltTrees(): void
+    {
+        // The data-bound host rebuilds the tree each frame while the widget
+        // instances persist. Hovering a button then moving away on a fresh tree
+        // must clear its hover flag — otherwise it stays stuck "filled".
+        $root = new VBox();
+        $btn = (new Button('OK'))->size(Sizing::fixed(100, 30));
+        $root->addChild($btn);
+
+        $this->input->handleCursorPosEvent(10.0, 10.0);
+        $this->tree($root)->update();
+        $this->assertTrue($btn->hovered, 'hovered while the pointer is over it');
+
+        // New tree, same root, pointer moved away.
+        $this->input->handleCursorPosEvent(400.0, 400.0);
+        $this->tree($root)->update();
+        $this->assertFalse($btn->hovered, 'hover clears on a rebuilt tree when the pointer leaves');
+    }
+
     public function testHoveringControlSuppressesInput(): void
     {
         $root = new VBox();
