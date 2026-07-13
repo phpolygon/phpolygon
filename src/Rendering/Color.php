@@ -72,6 +72,17 @@ class Color
         return new self($this->r, $this->g, $this->b, $alpha);
     }
 
+    /** Lighten each RGB channel by an additive amount (clamped to 1.0). */
+    public function lighten(float $amount): self
+    {
+        return new self(
+            min(1.0, $this->r + $amount),
+            min(1.0, $this->g + $amount),
+            min(1.0, $this->b + $amount),
+            $this->a,
+        );
+    }
+
     public function lerp(Color $target, float $t): self
     {
         return new self(
