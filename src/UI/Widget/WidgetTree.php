@@ -277,13 +277,21 @@ class WidgetTree
 
     private function handleRelease(?Widget $hit): void
     {
-        // Button click
+        // Release over an enabled Button = click. This intentionally does NOT
+        // require the release to land on the same instance a press captured:
+        // a retained host may rebuild the tree and re-expand repeater rows every
+        // frame (the click's press and release then fall on different Button
+        // instances), which would make a press+release pairing never fire.
+        // Release-only also matches the immediate-mode UIContext and sidesteps
+        // macOS's phantom synthetic PRESS events. The press frame still sets
+        // Button::$pressed for visual feedback when the tree does persist.
         if ($this->pressedWidget instanceof Button) {
             $this->pressedWidget->pressed = false;
-            if ($hit === $this->pressedWidget) {
-                $this->pressedWidget->emit('click');
-            }
-            $this->pressedWidget = null;
+        }
+        $this->pressedWidget = null;
+
+        if ($hit instanceof Button && $hit->enabled) {
+            $hit->emit('click');
         }
 
         // Dropdown option selection

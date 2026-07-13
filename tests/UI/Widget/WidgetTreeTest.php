@@ -196,6 +196,42 @@ class WidgetTreeTest extends TestCase
         $this->assertFalse($btn->pressed);
     }
 
+    public function testButtonClickFiresOnReleaseWithoutMatchingPress(): void
+    {
+        // Models a retained host that rebuilds the tree / re-expands repeater
+        // rows each frame: the press frame's Button instance is gone by the
+        // release frame, so there is no pressedWidget to match. A release over an
+        // enabled button must still fire click (release-only, like UIContext).
+        $root = new VBox();
+        $btn = (new Button('OK'))->size(Sizing::fixed(100, 30));
+        $root->addChild($btn);
+
+        $tree = $this->tree($root);
+        $tree->performLayout();
+
+        $clicked = false;
+        $btn->on('click', function () use (&$clicked) { $clicked = true; });
+
+        // Press OUTSIDE the button so no pressedWidget is captured for it
+        // (stands in for a press that landed on a now-discarded instance).
+        $this->input->handleCursorPosEvent(400.0, 400.0);
+        $this->input->handleMouseButtonEvent(0, 1);
+        $tree->processInput();
+        $this->assertFalse($btn->pressed, 'press outside did not arm the button');
+
+        // Release OVER the button on the next frame — must still click.
+        $this->input->unsuppress();
+        $this->input->endFrame();
+        $this->input->handleCursorPosEvent(
+            $btn->getBounds()->x + 5,
+            $btn->getBounds()->y + 5,
+        );
+        $this->input->handleMouseButtonEvent(0, 0);
+        $tree->processInput();
+
+        $this->assertTrue($clicked, 'release over an enabled button clicks it without a matching press');
+    }
+
     public function testCheckboxToggleViaTree(): void
     {
         $root = new VBox();
