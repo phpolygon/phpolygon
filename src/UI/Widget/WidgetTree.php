@@ -131,8 +131,13 @@ class WidgetTree
      */
     public function update(): void
     {
-        $this->processInput();
+        // Layout BEFORE input: hit-testing reads each widget's bounds, and a
+        // host that rebuilds the tree every frame (the data-bound pattern) has
+        // not laid it out yet on this instance — so processing input first would
+        // hit-test against zero bounds and never register a click. Draw last so
+        // it reflects the hover/pressed state this frame's input produced.
         $this->performLayout();
+        $this->processInput();
         $this->draw();
     }
 

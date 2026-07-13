@@ -232,6 +232,30 @@ class WidgetTreeTest extends TestCase
         $this->assertTrue($clicked, 'release over an enabled button clicks it without a matching press');
     }
 
+    public function testUpdateLaysOutBeforeInputSoAFreshTreeClicks(): void
+    {
+        // The data-bound host builds + binds a NEW tree each frame and calls a
+        // single update() — it never calls performLayout() itself. update() must
+        // lay out before hit-testing, or the click tests against zero bounds and
+        // misses. This is the exact desktop-launcher regression.
+        $root = new VBox();
+        $btn = (new Button('OK'))->size(Sizing::fixed(100, 30));
+        $root->addChild($btn);
+
+        $clicked = false;
+        $btn->on('click', function () use (&$clicked) { $clicked = true; });
+
+        $tree = $this->tree($root); // deliberately NOT laid out
+
+        $this->input->handleCursorPosEvent(10.0, 10.0);
+        $this->input->handleMouseButtonEvent(0, 1);
+        $this->input->endFrame();
+        $this->input->handleMouseButtonEvent(0, 0);
+        $tree->update(); // performLayout() must run before processInput()
+
+        $this->assertTrue($clicked, 'a fresh tree lays out before input so the release hits the button');
+    }
+
     public function testCheckboxToggleViaTree(): void
     {
         $root = new VBox();
