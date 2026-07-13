@@ -49,6 +49,35 @@ class LayoutTest extends TestCase
         $this->assertEquals(40.0, $overlay->getBounds()->height);
     }
 
+    public function testWrappingLabelGrowsHeightWithLineCount(): void
+    {
+        // A single-line label reserves one line; the same text wrapped to a
+        // narrow width reserves several — height scales with the wrapped lines.
+        $text = 'the quick brown fox jumps over the lazy dog again and again';
+
+        $single = (new Label($text))->size(Sizing::fillWidth());
+        $single->measure(120, 400, $this->style);
+
+        $wrapped = new Label($text);
+        $wrapped->wrap = true;
+        $wrapped->size(Sizing::fillWidth());
+        $wrapped->measure(120, 400, $this->style);
+
+        $this->assertGreaterThan($single->getMeasuredHeight(), $wrapped->getMeasuredHeight());
+    }
+
+    public function testWrappingLabelHonoursHardBreaks(): void
+    {
+        $label = new Label("line one\nline two\nline three");
+        $label->wrap = true;
+        $label->size(Sizing::fillWidth());
+        $label->measure(4000, 400, $this->style); // wide enough that only \n breaks
+
+        // 3 hard-broken lines at fontSize * lineHeight each.
+        $expected = 3 * $this->style->fontSize * $label->lineHeight;
+        $this->assertEqualsWithDelta($expected, $label->getMeasuredHeight(), 0.01);
+    }
+
     // ── VBox ─────────────────────────────────────────────────────
 
     public function testVBoxStacksVertically(): void
