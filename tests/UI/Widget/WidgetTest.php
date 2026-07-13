@@ -56,6 +56,29 @@ class WidgetTest extends TestCase
         $this->assertEquals('Test', array_values($textCalls)[0]['args'][0]);
     }
 
+    public function testLabelFontOverrideIsScopedAndRestored(): void
+    {
+        $label = new Label('body');
+        $label->font = 'body-face';
+        $label->setBounds(new Rect(0, 0, 200, 40));
+        $label->draw($this->renderer, $this->style);
+
+        $fontCalls = array_values(array_filter($this->renderer->calls, fn ($c) => $c['method'] === 'setFont'));
+        $this->assertCount(2, $fontCalls, 'a scoped font override sets its face then restores the default');
+        $this->assertSame('body-face', $fontCalls[0]['args'][0], 'the override face is selected before drawing');
+        $this->assertSame($this->style->fontName, $fontCalls[1]['args'][0], 'the tree default is restored afterwards');
+    }
+
+    public function testLabelWithoutFontOverrideTouchesNoFont(): void
+    {
+        $label = new Label('plain');
+        $label->setBounds(new Rect(0, 0, 200, 40));
+        $label->draw($this->renderer, $this->style);
+
+        $fontCalls = array_filter($this->renderer->calls, fn ($c) => $c['method'] === 'setFont');
+        $this->assertEmpty($fontCalls, 'a plain label must not touch the sticky global font');
+    }
+
     public function testLabelCustomFontSize(): void
     {
         $label = new Label('Big');

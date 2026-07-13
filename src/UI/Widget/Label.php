@@ -26,6 +26,14 @@ class Label extends Widget
     /** Line advance as a multiple of the font size, used when wrapping. */
     public float $lineHeight = 1.3;
 
+    /**
+     * Optional font name for this label only (e.g. a lighter body face for long
+     * prose while the surrounding UI uses a heavier default). When set, draw()
+     * selects it, renders, then restores the tree's default font so sibling
+     * widgets are unaffected. Null keeps the current tree font.
+     */
+    public ?string $font = null;
+
     public function __construct(string $text = '')
     {
         parent::__construct();
@@ -88,6 +96,12 @@ class Label extends Widget
         // CENTER|MIDDLE and render offset from its top-left origin.
         $renderer->setTextAlign(TextAlign::LEFT | TextAlign::TOP);
 
+        // Per-label font override — set it, and restore the tree default after
+        // drawing so the sticky global font doesn't leak to sibling widgets.
+        if ($this->font !== null) {
+            $renderer->setFont($this->font);
+        }
+
         $x = $this->bounds->x + $this->padding->left;
         $y = $this->bounds->y + $this->padding->top;
 
@@ -100,11 +114,13 @@ class Label extends Widget
                 }
                 $y += $step;
             }
-
-            return;
+        } else {
+            $renderer->drawText($this->text, $x, $y, $fs, $color);
         }
 
-        $renderer->drawText($this->text, $x, $y, $fs, $color);
+        if ($this->font !== null) {
+            $renderer->setFont($style->fontName);
+        }
     }
 
     /**
