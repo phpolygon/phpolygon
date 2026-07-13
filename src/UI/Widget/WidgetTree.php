@@ -185,8 +185,18 @@ class WidgetTree
             }
         }
 
-        // Suppress game input when UI is interacted with
-        if ($this->hoveredWidget !== null || $this->focusedWidget !== null) {
+        // Suppress game input only when the pointer is over an actual control
+        // (or a text field has focus) — not merely over a layout container. A
+        // full-screen panel's root/box/labels would otherwise suppress the whole
+        // frame's remaining input, killing immediate-mode UI drawn on top of the
+        // panel (dialogs, toasts, the tutorial strip) in the same frame.
+        $hoverIsControl = $this->hoveredWidget instanceof Button
+            || $this->hoveredWidget instanceof Slider
+            || $this->hoveredWidget instanceof Checkbox
+            || $this->hoveredWidget instanceof Toggle
+            || $this->hoveredWidget instanceof Dropdown
+            || $this->hoveredWidget instanceof TextInput;
+        if ($hoverIsControl || $this->focusedWidget !== null) {
             $this->input->suppress();
         }
     }

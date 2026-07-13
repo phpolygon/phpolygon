@@ -256,6 +256,33 @@ class WidgetTreeTest extends TestCase
         $this->assertTrue($clicked, 'a fresh tree lays out before input so the release hits the button');
     }
 
+    public function testHoveringPlainContainerDoesNotSuppressInput(): void
+    {
+        // Hovering a non-control (label/layout) must NOT suppress the frame's
+        // remaining input — a full-screen panel would otherwise kill any
+        // immediate-mode UI (dialogs, toasts) drawn on top of it this frame.
+        $root = new VBox();
+        $root->addChild((new Label('Hi'))->size(Sizing::fixed(100, 20)));
+        $tree = $this->tree($root);
+
+        $this->input->handleCursorPosEvent(10.0, 10.0);
+        $tree->update();
+
+        $this->assertFalse($this->input->isSuppressed(), 'hovering a non-control does not suppress');
+    }
+
+    public function testHoveringControlSuppressesInput(): void
+    {
+        $root = new VBox();
+        $root->addChild((new Button('OK'))->size(Sizing::fixed(100, 30)));
+        $tree = $this->tree($root);
+
+        $this->input->handleCursorPosEvent(10.0, 10.0);
+        $tree->update();
+
+        $this->assertTrue($this->input->isSuppressed(), 'hovering an interactive control suppresses game input');
+    }
+
     public function testCheckboxToggleViaTree(): void
     {
         $root = new VBox();
