@@ -73,6 +73,11 @@ class NullRenderer2D implements Renderer2DInterface
         return new TextMetrics(min($totalCharsWidth, $lineWidth), $lines * $size * 1.2);
     }
 
+    // Headless: no real font rasterisation, so report full coverage (never block
+    // a game's font selection) and prefer the first candidate.
+    public function fontCoversScript(string $font, Script $script): bool { return true; }
+    public function fontForScript(Script $script, array $candidates): ?string { return $candidates[0] ?? null; }
+
     public function addFallbackFont(string $baseFont, string $fallbackFont): void {}
     public function clearFallbackFonts(?string $baseFont = null): void {}
     public function setGlobalAlpha(float $alpha): void {}

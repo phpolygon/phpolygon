@@ -10,6 +10,7 @@ use PHPolygon\Math\Vec2;
 use PHPolygon\Rendering\Color;
 use PHPolygon\Rendering\NullRenderer2D;
 use PHPolygon\Rendering\Renderer2DInterface;
+use PHPolygon\Rendering\Script;
 use PHPolygon\Rendering\TextAlign;
 use PHPolygon\Rendering\TextMetrics;
 use PHPolygon\Rendering\Texture;
@@ -440,6 +441,12 @@ class GdRenderer2D implements Renderer2DInterface
 
         return new TextMetrics($maxWidth, $totalHeight);
     }
+
+    // Structural approximation renderer — GD/FreeType renders missing glyphs as
+    // .notdef boxes with a real bbox, so it can't tell coverage apart. Report
+    // full coverage; games only query this on the live vio path.
+    public function fontCoversScript(string $font, Script $script): bool { return true; }
+    public function fontForScript(Script $script, array $candidates): ?string { return $candidates[0] ?? null; }
 
     public function addFallbackFont(string $baseFont, string $fallbackFont): void
     {

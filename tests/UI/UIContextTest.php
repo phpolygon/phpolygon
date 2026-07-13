@@ -64,6 +64,8 @@ class UIContextTest extends TestCase
             public function setTextAlign(int $align): void {}
             public function measureText(string $text, float $size): TextMetrics { return new TextMetrics(strlen($text) * $size * 0.6, $size); }
             public function measureTextBox(string $text, float $breakWidth, float $size): TextMetrics { return new TextMetrics($breakWidth, $size); }
+            public function fontCoversScript(string $font, \PHPolygon\Rendering\Script $script): bool { return true; }
+            public function fontForScript(\PHPolygon\Rendering\Script $script, array $candidates): ?string { return $candidates[0] ?? null; }
             public function addFallbackFont(string $baseFont, string $fallbackFont): void {}
             public function setGlobalAlpha(float $alpha): void {}
             public function drawArc(float $cx, float $cy, float $r, float $startAngle, float $endAngle, Color $color, int $direction = 0): void {}

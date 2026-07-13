@@ -1045,6 +1045,45 @@ class VioRenderer2D implements Renderer2DInterface
         return new TextMetrics($maxWidth, $totalHeight);
     }
 
+    /** @var array<string, array<string, bool>> font name -> script value -> covered */
+    private array $scriptCoverage = [];
+
+    /** Font size used for coverage probes; any size answers has-glyph identically. */
+    private const COVERAGE_PROBE_SIZE = 16.0;
+
+    public function fontCoversScript(string $font, Script $script): bool
+    {
+        if (isset($this->scriptCoverage[$font][$script->value])) {
+            return $this->scriptCoverage[$font][$script->value];
+        }
+
+        $vf = $this->resolveFontByName($font, self::COVERAGE_PROBE_SIZE);
+        if ($vf === null) {
+            // Not loaded (or still packing async) — don't cache a false negative;
+            // re-probe once the face is available.
+            return false;
+        }
+
+        // A face that lacks the glyph measures it to zero advance (the same
+        // signal planTextRuns() uses to claim characters); a real glyph has a
+        // positive advance.
+        $covered = ((float) $this->measureCached($vf, $script->sampleChar())['width']) > 0.001;
+        $this->scriptCoverage[$font][$script->value] = $covered;
+
+        return $covered;
+    }
+
+    public function fontForScript(Script $script, array $candidates): ?string
+    {
+        foreach ($candidates as $font) {
+            if ($this->fontCoversScript($font, $script)) {
+                return $font;
+            }
+        }
+
+        return null;
+    }
+
     public function addFallbackFont(string $baseFont, string $fallbackFont): void
     {
         if (!isset($this->fallbackFonts[$baseFont]) || !in_array($fallbackFont, $this->fallbackFonts[$baseFont], true)) {

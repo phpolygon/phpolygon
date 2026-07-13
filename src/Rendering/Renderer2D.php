@@ -283,6 +283,37 @@ class Renderer2D implements Renderer2DInterface
         return new TextMetrics($bounds->z - $bounds->x, $bounds->w - $bounds->y);
     }
 
+    /** @var array<string, array<string, bool>> font -> script value -> covered */
+    private array $scriptCoverage = [];
+
+    /**
+     * Probe via the named font's own measurement — a missing glyph measures to
+     * (near) zero width. The probe selects the font, so call during font setup,
+     * not mid-frame. Cached per (font, script).
+     */
+    public function fontCoversScript(string $font, Script $script): bool
+    {
+        if (isset($this->scriptCoverage[$font][$script->value])) {
+            return $this->scriptCoverage[$font][$script->value];
+        }
+        $this->setFont($font);
+        $covered = $this->measureText($script->sampleChar(), 16.0)->width > 0.001;
+        $this->scriptCoverage[$font][$script->value] = $covered;
+
+        return $covered;
+    }
+
+    public function fontForScript(Script $script, array $candidates): ?string
+    {
+        foreach ($candidates as $font) {
+            if ($this->fontCoversScript($font, $script)) {
+                return $font;
+            }
+        }
+
+        return null;
+    }
+
     public function addFallbackFont(string $baseFont, string $fallbackFont): void
     {
         $this->vg->addFallbackFont($baseFont, $fallbackFont);

@@ -104,6 +104,27 @@ interface Renderer2DInterface extends RenderContextInterface
     public function measureTextBox(string $text, float $breakWidth, float $size): TextMetrics;
 
     /**
+     * Whether the loaded font $font can render $script — i.e. it has a glyph for
+     * the script's representative character. Lets a game ask the engine "which
+     * of my fonts covers this language's script?" instead of hardcoding
+     * "font X can't render language Y". Latin is covered by every UI font.
+     *
+     * Backends resolve this from the actual font (a missing glyph measures to
+     * zero width); headless/record renderers report full coverage. Results are
+     * cached per (font, script).
+     */
+    public function fontCoversScript(string $font, Script $script): bool;
+
+    /**
+     * The first of $candidates whose font covers $script, or null if none do.
+     * Handy for picking a locale's body face: fontForScript(Script::Cyrillic,
+     * ['inconsolata-regular', 'inter-regular']).
+     *
+     * @param list<string> $candidates font names in preference order
+     */
+    public function fontForScript(Script $script, array $candidates): ?string;
+
+    /**
      * Registers a fallback font to be used when glyphs are missing from the base font.
      * Primarily used for CJK character support.
      */
