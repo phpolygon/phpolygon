@@ -84,24 +84,23 @@ class WidgetTest extends TestCase
         $btn = new Button('OK');
         $btn->setBounds(new Rect(0, 0, 100, 30));
 
-        // Normal
-        $btn->draw($this->renderer, $this->style);
-        $roundedCalls = array_filter($this->renderer->calls, fn($c) => $c['method'] === 'drawRoundedRect');
-        $this->assertNotEmpty($roundedCalls);
+        $rounded = fn () => array_filter($this->renderer->calls, fn ($c) => $c['method'] === 'drawRoundedRect');
 
-        // Hovered
+        // Ghost: resting draws NO fill (transparent) — only the label.
+        $btn->draw($this->renderer, $this->style);
+        $this->assertEmpty($rounded(), 'resting button is transparent');
+
+        // Hovered: filled.
         $this->renderer->reset();
         $btn->hovered = true;
         $btn->draw($this->renderer, $this->style);
-        $roundedCalls = array_filter($this->renderer->calls, fn($c) => $c['method'] === 'drawRoundedRect');
-        $this->assertNotEmpty($roundedCalls);
+        $this->assertNotEmpty($rounded(), 'hovered button is filled');
 
-        // Pressed
+        // Pressed: filled.
         $this->renderer->reset();
         $btn->pressed = true;
         $btn->draw($this->renderer, $this->style);
-        $roundedCalls = array_filter($this->renderer->calls, fn($c) => $c['method'] === 'drawRoundedRect');
-        $this->assertNotEmpty($roundedCalls);
+        $this->assertNotEmpty($rounded(), 'pressed button is filled');
     }
 
     // ── Checkbox ─────────────────────────────────────────────────

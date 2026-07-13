@@ -59,16 +59,15 @@ class Button extends Widget
         $style = $this->resolveStyle($style);
         $b = $this->bounds;
 
-        if (!$this->flat) {
-            // Resting fill is the style's hoverColor; hover/press progressively
-            // LIGHTEN it so the highlight reads on any surface. (Previously hover
-            // used backgroundColor, which on a dark-surface theme is darker than
-            // the resting fill — so hovering appeared to dim the button.)
-            $bg = !$this->enabled ? $style->disabledColor
-                : ($this->pressed ? $style->hoverColor->lighten(0.14)
-                    : ($this->hovered ? $style->hoverColor->lighten(0.07) : $style->hoverColor));
-
-            $renderer->drawRoundedRect($b->x, $b->y, $b->width, $b->height, $style->borderRadius, $bg);
+        // Ghost buttons: transparent at rest, FILLED on hover (style hoverColor),
+        // a touch brighter while pressed. Disabled and resting draw no fill —
+        // only the (dimmed) label shows. `flat` never fills (invisible target).
+        if (!$this->flat && $this->enabled) {
+            $fill = $this->pressed ? $style->hoverColor->lighten(0.10)
+                : ($this->hovered ? $style->hoverColor : null);
+            if ($fill !== null) {
+                $renderer->drawRoundedRect($b->x, $b->y, $b->width, $b->height, $style->borderRadius, $fill);
+            }
         }
 
         if ($this->label === '') {

@@ -130,7 +130,9 @@ class TabView extends Widget
             $tabW = $this->tabWidth($title, $style);
             $active = $i === $selectedIndex;
 
-            $bg = $active ? $style->activeColor : $style->hoverColor;
+            // Active tab highlighted with activeColor; inactive tabs blend into
+            // the bar background (hoverColor is reserved for button hover fills).
+            $bg = $active ? $style->activeColor : $style->backgroundColor;
             $renderer->drawRect($x, $content->y, $tabW, $this->tabBarHeight, $bg);
 
             $textColor = $active ? $style->textColor : $style->textColor->withAlpha(0.7);
