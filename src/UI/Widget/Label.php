@@ -26,6 +26,17 @@ class Label extends Widget
         $style = $this->resolveStyle($style);
         $fs = $this->fontSize ?? $style->fontSize;
 
+        // An empty auto-sized label collapses to zero height so optional lines
+        // (warnings, requirements, hints) reserve no space when unset, rather
+        // than leaving a blank row that inflates every card.
+        if ($this->text === '' && !$this->sizing->fillHeight && $this->sizing->height <= 0.0) {
+            $this->measuredWidth = $this->sizing->fillWidth ? $availableWidth
+                : ($this->sizing->width > 0 ? $this->sizing->width : 0.0);
+            $this->measuredHeight = 0.0;
+
+            return;
+        }
+
         // Approximate text width: chars * fontSize * 0.62 (avg glyph advance for
         // the UI font; 0.55 under-measured and clipped auto-sized text).
         $textW = mb_strlen($this->text) * $fs * 0.62;
