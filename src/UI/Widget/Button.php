@@ -21,6 +21,15 @@ class Button extends Widget
      */
     public string $align = 'center';
 
+    /**
+     * When true the button draws no background/fill — only its label (if any).
+     * Use for an invisible click target that covers a card: layer a flat,
+     * fill-sized button over the card content so clicking anywhere on the card
+     * fires the button, while the content (Labels, which are transparent to
+     * hit-testing) shows through and stays visible.
+     */
+    public bool $flat = false;
+
     public function __construct(string $label = '')
     {
         parent::__construct();
@@ -31,7 +40,10 @@ class Button extends Widget
     public function measure(float $availableWidth, float $availableHeight, UIStyle $style): void
     {
         $style = $this->resolveStyle($style);
-        $textW = mb_strlen($this->label) * $style->fontSize * 0.55;
+        // 0.62 avg glyph-advance / font-size for the semibold UI font. The old
+        // 0.55 under-measured, so auto-sized buttons were narrower than their
+        // (often longer, German) labels and clipped the text.
+        $textW = mb_strlen($this->label) * $style->fontSize * 0.62;
         $textH = $style->fontSize;
 
         $this->measuredWidth = $this->sizing->fillWidth ? $availableWidth
@@ -47,11 +59,17 @@ class Button extends Widget
         $style = $this->resolveStyle($style);
         $b = $this->bounds;
 
-        $bg = !$this->enabled ? $style->disabledColor
-            : ($this->pressed ? $style->activeColor
-                : ($this->hovered ? $style->backgroundColor : $style->hoverColor));
+        if (!$this->flat) {
+            $bg = !$this->enabled ? $style->disabledColor
+                : ($this->pressed ? $style->activeColor
+                    : ($this->hovered ? $style->backgroundColor : $style->hoverColor));
 
-        $renderer->drawRoundedRect($b->x, $b->y, $b->width, $b->height, $style->borderRadius, $bg);
+            $renderer->drawRoundedRect($b->x, $b->y, $b->width, $b->height, $style->borderRadius, $bg);
+        }
+
+        if ($this->label === '') {
+            return;
+        }
 
         $textColor = $this->enabled ? $style->textColor : $style->textColor->withAlpha(0.5);
         // Label is vertically centered; horizontal anchor follows $align. Set the

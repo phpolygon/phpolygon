@@ -26,8 +26,9 @@ class Label extends Widget
         $style = $this->resolveStyle($style);
         $fs = $this->fontSize ?? $style->fontSize;
 
-        // Approximate text width: chars * fontSize * 0.55 (monospace approximation)
-        $textW = mb_strlen($this->text) * $fs * 0.55;
+        // Approximate text width: chars * fontSize * 0.62 (avg glyph advance for
+        // the UI font; 0.55 under-measured and clipped auto-sized text).
+        $textW = mb_strlen($this->text) * $fs * 0.62;
         $textH = $fs;
 
         $this->measuredWidth = $this->sizing->fillWidth ? $availableWidth
