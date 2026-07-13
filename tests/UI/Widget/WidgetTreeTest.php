@@ -271,6 +271,23 @@ class WidgetTreeTest extends TestCase
         $this->assertFalse($this->input->isSuppressed(), 'hovering a non-control does not suppress');
     }
 
+    public function testButtonLabelAlignment(): void
+    {
+        $center = (new Button('Hi'))->size(Sizing::fixed(200, 30));
+        $center->setBounds(new Rect(0.0, 0.0, 200.0, 30.0));
+        $center->draw($this->renderer, $this->style);
+
+        $left = (new Button('Hi'))->size(Sizing::fixed(200, 30));
+        $left->align = 'left';
+        $left->setBounds(new Rect(0.0, 0.0, 200.0, 30.0));
+        $left->draw($this->renderer, $this->style);
+
+        $texts = array_values(array_filter($this->renderer->calls, fn ($c) => $c['method'] === 'drawText'));
+        $this->assertCount(2, $texts);
+        $this->assertSame(100.0, $texts[0]['args'][1], 'centered label draws at the box center');
+        $this->assertSame(12.0, $texts[1]['args'][1], 'left-aligned label draws at padding.left');
+    }
+
     public function testHoveringControlSuppressesInput(): void
     {
         $root = new VBox();

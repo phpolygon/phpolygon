@@ -14,6 +14,13 @@ class Button extends Widget
     public bool $hovered = false;
     public bool $pressed = false;
 
+    /**
+     * Horizontal label alignment: 'center' (default, for action buttons),
+     * 'left' or 'right'. A full-width button used as a list row wants 'left' so
+     * its text reads like a row rather than a centered caption.
+     */
+    public string $align = 'center';
+
     public function __construct(string $label = '')
     {
         parent::__construct();
@@ -47,13 +54,19 @@ class Button extends Widget
         $renderer->drawRoundedRect($b->x, $b->y, $b->width, $b->height, $style->borderRadius, $bg);
 
         $textColor = $this->enabled ? $style->textColor : $style->textColor->withAlpha(0.5);
-        // A button label is centered in its box. Set the alignment explicitly —
-        // the renderer's text align is sticky global state, so a sibling widget
-        // (or prior immediate-mode draw) must not be able to leave it elsewhere.
-        $renderer->setTextAlign(TextAlign::CENTER | TextAlign::MIDDLE);
+        // Label is vertically centered; horizontal anchor follows $align. Set the
+        // alignment explicitly — the renderer's text align is sticky global
+        // state, so a sibling widget (or a prior immediate-mode draw) must not be
+        // able to leave it elsewhere.
+        [$hAlign, $tx] = match ($this->align) {
+            'left'  => [TextAlign::LEFT,  $b->x + $this->padding->left],
+            'right' => [TextAlign::RIGHT, $b->x + $b->width - $this->padding->right],
+            default => [TextAlign::CENTER, $b->x + $b->width / 2.0],
+        };
+        $renderer->setTextAlign($hAlign | TextAlign::MIDDLE);
         $renderer->drawText(
             $this->label,
-            $b->x + $b->width / 2.0,
+            $tx,
             $b->y + $b->height / 2.0,
             $style->fontSize,
             $textColor,
