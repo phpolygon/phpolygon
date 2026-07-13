@@ -13,6 +13,7 @@ use PHPolygon\UI\Widget\Label;
 use PHPolygon\UI\Widget\Separator;
 use PHPolygon\UI\Widget\Sizing;
 use PHPolygon\UI\Widget\Spacer;
+use PHPolygon\UI\Widget\Stack;
 use PHPolygon\UI\Widget\VBox;
 
 class LayoutTest extends TestCase
@@ -22,6 +23,30 @@ class LayoutTest extends TestCase
     protected function setUp(): void
     {
         $this->style = UIStyle::dark();
+    }
+
+    // ── Stack ────────────────────────────────────────────────────
+
+    public function testStackSizesToIntrinsicChildNotFillOverlay(): void
+    {
+        // A full-size overlay (e.g. a card-wide click target) fills the stack
+        // and must NOT drive its measured size — otherwise it would balloon to
+        // the full available height. The intrinsic content sets the extent.
+        $stack = new Stack();
+        $content = (new Label('content'))->size(Sizing::fixed(120, 40));
+        $overlay = (new Label('overlay'))->size(Sizing::fill());
+        $stack->addChild($content)->addChild($overlay);
+
+        $stack->measure(800, 600, $this->style);
+
+        $this->assertEquals(120.0, $stack->getMeasuredWidth());
+        $this->assertEquals(40.0, $stack->getMeasuredHeight());
+
+        // In layout the fill overlay still stretches to the stack's bounds.
+        $stack->setBounds(new Rect(0, 0, 120, 40));
+        $stack->layout($this->style);
+        $this->assertEquals(120.0, $overlay->getBounds()->width);
+        $this->assertEquals(40.0, $overlay->getBounds()->height);
     }
 
     // ── VBox ─────────────────────────────────────────────────────

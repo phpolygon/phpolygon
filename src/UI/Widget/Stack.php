@@ -30,10 +30,19 @@ class Stack extends Widget
         foreach ($this->children as $child) {
             if (!$child->visible) continue;
             $child->measure($contentW, $contentH, $style);
-            $w = $child->getMeasuredWidth() + $child->margin->horizontal();
-            $h = $child->getMeasuredHeight() + $child->margin->vertical();
-            if ($w > $maxW) $maxW = $w;
-            if ($h > $maxH) $maxH = $h;
+            // A fill child conforms TO the stack in that axis (it fills the
+            // content rect in layout()), so it must not drive the stack's own
+            // size — otherwise an overlay like a full-card click target measured
+            // at the full available height would balloon the stack. Only
+            // intrinsically-sized children establish the stack's extent.
+            if (!$child->sizing->fillWidth) {
+                $w = $child->getMeasuredWidth() + $child->margin->horizontal();
+                if ($w > $maxW) $maxW = $w;
+            }
+            if (!$child->sizing->fillHeight) {
+                $h = $child->getMeasuredHeight() + $child->margin->vertical();
+                if ($h > $maxH) $maxH = $h;
+            }
         }
 
         $this->measuredWidth = $this->sizing->fillWidth ? $availableWidth
