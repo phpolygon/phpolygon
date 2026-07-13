@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace PHPolygon\UI\Widget;
 
 use PHPolygon\Rendering\Renderer2DInterface;
+use PHPolygon\Rendering\TextAlign;
 use PHPolygon\UI\UIStyle;
 
 class Checkbox extends Widget
@@ -56,6 +57,7 @@ class Checkbox extends Widget
             );
         }
 
+        $renderer->setTextAlign(TextAlign::LEFT | TextAlign::TOP);
         $renderer->drawText(
             $this->label,
             $boxX + $boxSize + 6.0,

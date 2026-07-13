@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace PHPolygon\UI\Widget;
 
 use PHPolygon\Rendering\Renderer2DInterface;
+use PHPolygon\Rendering\TextAlign;
 use PHPolygon\UI\UIStyle;
 
 class Button extends Widget
@@ -46,10 +47,14 @@ class Button extends Widget
         $renderer->drawRoundedRect($b->x, $b->y, $b->width, $b->height, $style->borderRadius, $bg);
 
         $textColor = $this->enabled ? $style->textColor : $style->textColor->withAlpha(0.5);
+        // A button label is centered in its box. Set the alignment explicitly —
+        // the renderer's text align is sticky global state, so a sibling widget
+        // (or prior immediate-mode draw) must not be able to leave it elsewhere.
+        $renderer->setTextAlign(TextAlign::CENTER | TextAlign::MIDDLE);
         $renderer->drawText(
             $this->label,
-            $b->x + $this->padding->left,
-            $b->y + $this->padding->top,
+            $b->x + $b->width / 2.0,
+            $b->y + $b->height / 2.0,
             $style->fontSize,
             $textColor,
         );

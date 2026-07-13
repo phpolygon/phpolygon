@@ -6,6 +6,7 @@ namespace PHPolygon\UI\Widget;
 
 use PHPolygon\Math\Rect;
 use PHPolygon\Rendering\Renderer2DInterface;
+use PHPolygon\Rendering\TextAlign;
 use PHPolygon\UI\UIStyle;
 
 /**
@@ -85,6 +86,7 @@ class Panel extends Widget
         // Title bar
         if ($this->title !== '') {
             $renderer->drawRoundedRect($b->x, $b->y, $b->width, $titleH, $style->borderRadius, $style->activeColor);
+            $renderer->setTextAlign(TextAlign::LEFT | TextAlign::TOP);
             $renderer->drawText($this->title, $b->x + $this->padding->left, $b->y + $this->padding->top, $style->fontSize, $style->textColor);
         }
 

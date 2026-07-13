@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace PHPolygon\UI\Widget;
 
 use PHPolygon\Rendering\Renderer2DInterface;
+use PHPolygon\Rendering\TextAlign;
 use PHPolygon\UI\UIStyle;
 
 class TextInput extends Widget
@@ -45,6 +46,10 @@ class TextInput extends Widget
         $b = $this->bounds;
 
         $labelH = $this->label !== '' ? $style->fontSize + 4.0 : 0.0;
+
+        // All text here is left/top anchored; set it once (renderer align is
+        // sticky global state shared with every other widget).
+        $renderer->setTextAlign(TextAlign::LEFT | TextAlign::TOP);
 
         // Label
         if ($this->label !== '') {

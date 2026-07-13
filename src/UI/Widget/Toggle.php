@@ -6,6 +6,7 @@ namespace PHPolygon\UI\Widget;
 
 use PHPolygon\Rendering\Color;
 use PHPolygon\Rendering\Renderer2DInterface;
+use PHPolygon\Rendering\TextAlign;
 use PHPolygon\UI\UIStyle;
 
 class Toggle extends Widget
@@ -61,6 +62,7 @@ class Toggle extends Widget
         $renderer->drawCircle($thumbX, $thumbY, $thumbR, Color::white());
 
         // Label
+        $renderer->setTextAlign(TextAlign::LEFT | TextAlign::TOP);
         $renderer->drawText(
             $this->label,
             $trackX + $trackW + 8.0,

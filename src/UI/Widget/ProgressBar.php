@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace PHPolygon\UI\Widget;
 
 use PHPolygon\Rendering\Renderer2DInterface;
+use PHPolygon\Rendering\TextAlign;
 use PHPolygon\UI\UIStyle;
 
 class ProgressBar extends Widget
@@ -43,6 +44,7 @@ class ProgressBar extends Widget
         $labelH = $this->label !== '' ? $style->fontSize + 4.0 : 0.0;
 
         if ($this->label !== '') {
+            $renderer->setTextAlign(TextAlign::LEFT | TextAlign::TOP);
             $renderer->drawText($this->label, $b->x + $this->padding->left, $b->y + $this->padding->top, $style->fontSize, $style->textColor);
         }
 

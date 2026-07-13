@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace PHPolygon\UI\Widget;
 
 use PHPolygon\Rendering\Renderer2DInterface;
+use PHPolygon\Rendering\TextAlign;
 use PHPolygon\UI\UIStyle;
 
 class Slider extends Widget
@@ -47,6 +48,7 @@ class Slider extends Widget
         $barH = $style->fontSize * 0.5;
 
         // Label + value
+        $renderer->setTextAlign(TextAlign::LEFT | TextAlign::TOP);
         $renderer->drawText(
             sprintf('%s: %.2f', $this->label, $this->value),
             $b->x + $this->padding->left,

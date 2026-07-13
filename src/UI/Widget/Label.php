@@ -6,6 +6,7 @@ namespace PHPolygon\UI\Widget;
 
 use PHPolygon\Rendering\Color;
 use PHPolygon\Rendering\Renderer2DInterface;
+use PHPolygon\Rendering\TextAlign;
 use PHPolygon\UI\UIStyle;
 
 class Label extends Widget
@@ -46,6 +47,10 @@ class Label extends Widget
         $fs = $this->fontSize ?? $style->fontSize;
         $color = $this->color ?? $style->textColor;
 
+        // Explicit left/top anchor: the renderer's text align is sticky global
+        // state, so without this a Label after a centered widget would inherit
+        // CENTER|MIDDLE and render offset from its top-left origin.
+        $renderer->setTextAlign(TextAlign::LEFT | TextAlign::TOP);
         $renderer->drawText(
             $this->text,
             $this->bounds->x + $this->padding->left,
