@@ -264,6 +264,14 @@ class WidgetTree
             $hit->open = !$hit->open;
         }
 
+        // TabView — clicking a tab in the bar switches the active child.
+        if ($hit instanceof TabView) {
+            $tab = $hit->tabIndexAt($mouse);
+            if ($tab !== null) {
+                $hit->selectTab($tab);
+            }
+        }
+
         $hit->emit('press');
     }
 

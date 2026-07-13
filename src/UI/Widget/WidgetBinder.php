@@ -108,6 +108,7 @@ final class WidgetBinder
             $widget instanceof Toggle => 'on',
             $widget instanceof TextInput => 'text',
             $widget instanceof Dropdown => 'selectedIndex',
+            $widget instanceof TabView => 'selectedIndex',
             default => null,
         };
     }
@@ -123,6 +124,10 @@ final class WidgetBinder
             'int' => is_numeric($value) ? (int) $value : 0,
             'float' => is_numeric($value) ? (float) $value : 0.0,
             'bool' => (bool) $value,
+            // A property declared `array` must never receive a bare Traversable
+            // (would TypeError on assignment). Materialize iterables to a list;
+            // pass a real array through untouched.
+            'array' => is_array($value) ? $value : (is_iterable($value) ? iterator_to_array($value) : []),
             default => $value, // pass through (nullable objects, arrays, mixed)
         };
     }
