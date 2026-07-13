@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace PHPolygon\Tests\UI\Widget;
 
+use PHPolygon\Math\Rect;
+use PHPolygon\UI\UIStyle;
 use PHPolygon\UI\Widget\Button;
 use PHPolygon\UI\Widget\DataWidgetContext;
 use PHPolygon\UI\Widget\Label;
@@ -142,6 +144,51 @@ class WidgetBindingTest extends TestCase
         $vm->clients[] = (object) ['name' => 'Globex'];
         $binder->bind($repeater, new DataWidgetContext($vm));
         $this->assertCount(2, $repeater->getChildren(), 'rows track the collection on rebind');
+    }
+
+    public function testHorizontalRepeaterLaysItemsLeftToRight(): void
+    {
+        $repeater = new Repeater;
+        $repeater->each = 'cells';
+        $repeater->horizontal = true;
+        $repeater->spacing = 10.0;
+        $repeater->template = ['_widget' => Button::class, 'label' => ['$bind' => 'name'], 'sizing' => ['width' => 100]];
+
+        $vm = (object) ['cells' => [(object) ['name' => 'A'], (object) ['name' => 'B'], (object) ['name' => 'C']]];
+        (new WidgetBinder)->bind($repeater, new DataWidgetContext($vm));
+
+        $style = UIStyle::dark();
+        $repeater->measure(1000.0, 200.0, $style);
+        $repeater->setBounds(new Rect(0.0, 0.0, 1000.0, 200.0));
+        $repeater->layout($style);
+
+        $rows = $repeater->getChildren();
+        $this->assertCount(3, $rows);
+        // Left-to-right: strictly increasing x, identical y (this is the bug the
+        // desktop launcher hit — a vertical Repeater stacked its icons instead).
+        $this->assertGreaterThan($rows[0]->getBounds()->x, $rows[1]->getBounds()->x);
+        $this->assertGreaterThan($rows[1]->getBounds()->x, $rows[2]->getBounds()->x);
+        $this->assertSame($rows[0]->getBounds()->y, $rows[1]->getBounds()->y);
+        $this->assertSame($rows[0]->getBounds()->y, $rows[2]->getBounds()->y);
+    }
+
+    public function testVerticalRepeaterStillStacksTopToBottom(): void
+    {
+        $repeater = new Repeater;
+        $repeater->each = 'cells';
+        $repeater->template = ['_widget' => Button::class, 'label' => 'x', 'sizing' => ['width' => 100]];
+
+        $vm = (object) ['cells' => [(object) ['n' => 1], (object) ['n' => 2]]];
+        (new WidgetBinder)->bind($repeater, new DataWidgetContext($vm));
+
+        $style = UIStyle::dark();
+        $repeater->measure(1000.0, 200.0, $style);
+        $repeater->setBounds(new Rect(0.0, 0.0, 1000.0, 200.0));
+        $repeater->layout($style);
+
+        $rows = $repeater->getChildren();
+        $this->assertGreaterThan($rows[0]->getBounds()->y, $rows[1]->getBounds()->y, 'default stays vertical');
+        $this->assertSame($rows[0]->getBounds()->x, $rows[1]->getBounds()->x);
     }
 
     public function testBindingsSurviveSerializationRoundTrip(): void
