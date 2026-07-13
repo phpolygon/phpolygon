@@ -71,11 +71,36 @@ class HBox extends Widget
     {
         $style = $this->resolveStyle($style);
         $content = $this->contentRect();
-        $x = $content->x;
 
+        // Re-distribute the fillWidth share against the ACTUAL content width.
+        // measure() may have run with a different available width than the final
+        // bounds (e.g. this HBox sits in a fixed-width ScrollView whose parent
+        // measured it against the full window), so using each child's measured
+        // width here would overflow. Mirrors VBox's fillHeight re-fit.
+        $fixedW = 0.0;
+        $fillCount = 0;
+        $visible = 0;
+        foreach ($this->children as $child) {
+            if (!$child->visible) continue;
+            $visible++;
+            if ($child->sizing->fillWidth) {
+                $fillCount++;
+            } else {
+                $fixedW += $child->getMeasuredWidth() + $child->margin->horizontal();
+            }
+        }
+        if ($visible > 1) {
+            $fixedW += $this->spacing * ($visible - 1);
+        }
+        $perFill = $fillCount > 0 ? max(0.0, ($content->width - $fixedW) / $fillCount) : 0.0;
+
+        $x = $content->x;
         foreach ($this->children as $child) {
             if (!$child->visible) continue;
 
+            $childW = $child->sizing->fillWidth
+                ? max(0.0, $perFill - $child->margin->horizontal())
+                : $child->getMeasuredWidth();
             $childH = $child->sizing->fillHeight
                 ? $content->height - $child->margin->vertical()
                 : $child->getMeasuredHeight();
@@ -83,10 +108,10 @@ class HBox extends Widget
             $childX = $x + $child->margin->left;
             $childY = $content->y + $child->margin->top;
 
-            $child->setBounds(new Rect($childX, $childY, $child->getMeasuredWidth(), $childH));
+            $child->setBounds(new Rect($childX, $childY, $childW, $childH));
             $child->layout($style);
 
-            $x = $childX + $child->getMeasuredWidth() + $child->margin->right + $this->spacing;
+            $x = $childX + $childW + $child->margin->right + $this->spacing;
         }
     }
 
