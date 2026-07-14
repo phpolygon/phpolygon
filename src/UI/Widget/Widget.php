@@ -49,6 +49,14 @@ abstract class Widget
     public string $tooltip = '';
 
     /**
+     * Anchor within a parent {@see Stack} as an {@see Anchor} value string
+     * (e.g. 'bottom_left', 'top_right'). Lets a declarative layout pin an
+     * overlay child to a corner without the imperative addAnchored() call.
+     * Empty falls back to the Stack's default (top-left).
+     */
+    public string $stackAnchor = '';
+
+    /**
      * Editor-authored value bindings: widget property name => context path.
      * Resolved by {@see WidgetBinder} against a {@see WidgetContext}; two-way for
      * input widgets. Not persisted as a literal — the serializer emits each as

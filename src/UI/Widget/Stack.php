@@ -71,7 +71,8 @@ class Stack extends Widget
         foreach ($this->children as $i => $child) {
             if (!$child->visible) continue;
 
-            $anchor = $this->childAnchors[$i] ?? Anchor::TopLeft;
+            $anchor = $this->childAnchors[$i]
+                ?? ($child->stackAnchor !== '' ? (Anchor::tryFrom($child->stackAnchor) ?? Anchor::TopLeft) : Anchor::TopLeft);
             $cw = $child->sizing->fillWidth ? $content->width - $child->margin->horizontal() : $child->getMeasuredWidth();
             $ch = $child->sizing->fillHeight ? $content->height - $child->margin->vertical() : $child->getMeasuredHeight();
 
