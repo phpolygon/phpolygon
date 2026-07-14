@@ -52,4 +52,27 @@ class LabelBackgroundTest extends TestCase
 
         $this->assertSame(0, $this->roundedRects($this->draw($label)), 'a plain label has no pill');
     }
+
+    private function drawTextY(WidgetTestHelper $r): float
+    {
+        $dt = array_values(array_filter($r->calls, static fn($c) => $c['method'] === 'drawText'));
+        self::assertNotEmpty($dt, 'text was drawn');
+        return (float) $dt[0]['args'][2]; // [text, x, y, size, color]
+    }
+
+    public function testValignCenterMiddlesTextInBounds(): void
+    {
+        // Bounds are (10, 10, 24, 18) -> vertical middle is 10 + 18/2 = 19.
+        $label = new Label('3');
+        $label->valign = 'center';
+
+        self::assertEqualsWithDelta(19.0, $this->drawTextY($this->draw($label)), 0.01, 'text centred vertically');
+    }
+
+    public function testDefaultValignIsTop(): void
+    {
+        $label = new Label('3'); // default valign 'top' -> y at bounds.y + padding.top
+
+        self::assertLessThan(19.0, $this->drawTextY($this->draw($label)), 'default sits above the middle');
+    }
 }

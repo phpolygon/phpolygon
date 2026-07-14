@@ -51,6 +51,13 @@ class Label extends Widget
      */
     public string $align = 'left';
 
+    /**
+     * Vertical alignment of a single-line label within its bounds: 'top'
+     * (default), 'center' or 'bottom'. Use 'center' to middle text inside a
+     * padded pill/badge or a fixed-height row. Ignored when wrapping.
+     */
+    public string $valign = 'top';
+
     public function __construct(string $text = '')
     {
         parent::__construct();
@@ -145,8 +152,13 @@ class Label extends Widget
                 'center' => [TextAlign::CENTER, $this->bounds->x + $this->bounds->width / 2.0],
                 default  => [TextAlign::LEFT, $x],
             };
-            $renderer->setTextAlign($hAlign | TextAlign::TOP);
-            $renderer->drawText($this->text, $tx, $y, $fs, $color);
+            [$vAlign, $ty] = match ($this->valign) {
+                'center' => [TextAlign::MIDDLE, $this->bounds->y + $this->bounds->height / 2.0],
+                'bottom' => [TextAlign::BOTTOM, $this->bounds->y + $this->bounds->height - $this->padding->bottom],
+                default  => [TextAlign::TOP, $y],
+            };
+            $renderer->setTextAlign($hAlign | $vAlign);
+            $renderer->drawText($this->text, $tx, $ty, $fs, $color);
         }
 
         if ($this->font !== null) {
