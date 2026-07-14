@@ -32,7 +32,7 @@ use RuntimeException;
 final class WidgetSerializer
 {
     /** Public properties that hold transient runtime state, never persisted. */
-    private const TRANSIENT = ['hovered', 'pressed', 'focused', 'open', 'scrollOffset'];
+    private const TRANSIENT = ['hovered', 'pressed', 'focused', 'open', 'scrollOffset', 'templateFactory'];
 
     /**
      * Public properties serialized specially, not as literals: bindings/actions

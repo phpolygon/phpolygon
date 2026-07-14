@@ -68,11 +68,14 @@ final class WidgetBinder
         // state forward from the previous frame.
         //
         // Rebuild only when the shape actually changed: a different row count, or
-        // an authored template swapped underneath us.
-        if (count($rows) !== count($items) || ! $repeater->rowsMatchTemplate()) {
+        // an authored template swapped underneath us. A transpiled layout supplies
+        // a templateFactory whose shape is fixed at codegen time, so the array
+        // template-equality check is redundant there — only the count can change.
+        $factory = $repeater->templateFactory;
+        if (count($rows) !== count($items) || ($factory === null && ! $repeater->rowsMatchTemplate())) {
             $repeater->clearChildren();
             foreach ($items as $_) {
-                $repeater->addChild($this->serializer->fromArray($repeater->template));
+                $repeater->addChild($factory !== null ? ($factory)() : $this->serializer->fromArray($repeater->template));
             }
             $repeater->markRowsBuilt();
             $rows = $repeater->getChildren();

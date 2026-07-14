@@ -78,10 +78,38 @@ final class WidgetCodeGenerator
         $body .= "        {$var} = new {$this->short($class)}({$ctorArgs});\n";
 
         foreach ($node as $key => $value) {
-            if (in_array($key, ['_widget', '_id', 'children'], true)
-                || in_array($key, self::TRANSIENT, true)
-                || in_array($key, $consumed, true)
-            ) {
+            if ($key === '_widget' || $key === '_id' || $key === 'children') {
+                continue;
+            }
+            // Event/action bindings: { "$on": { "click": "confirmSetup" } }
+            if ($key === '$on' && is_array($value)) {
+                $body .= "        {$var}->eventBindings = {$this->renderArrayLiteral($value)};\n";
+
+                continue;
+            }
+            // Repeater collection path: { "$each": "clients" }
+            if ($key === '$each') {
+                $each = is_scalar($value) ? (string) $value : '';
+                $body .= "        {$var}->each = ".var_export($each, true).";\n";
+
+                continue;
+            }
+            // Repeater row template -> a zero-parse row factory. The raw `template`
+            // array is left empty so WidgetBinder builds rows by calling the
+            // factory instead of reflecting the array once per item per frame.
+            if ($key === 'template' && is_array($value)) {
+                /** @var array<string, mixed> $value */
+                $body .= $this->emitTemplateFactory($var, $value);
+
+                continue;
+            }
+            // Value binding: { "text": { "$bind": "selectedClient.companyName" } }
+            if (is_array($value) && array_key_exists('$bind', $value) && is_string($value['$bind'])) {
+                $body .= "        {$var}->bindings[".var_export($key, true)."] = ".var_export($value['$bind'], true).";\n";
+
+                continue;
+            }
+            if (in_array($key, self::TRANSIENT, true) || in_array($key, $consumed, true)) {
                 continue;
             }
             $expr = $this->renderProp($class, $key, $value);
@@ -101,6 +129,58 @@ final class WidgetCodeGenerator
     }
 
     /**
+     * Emit a Repeater's row template as a `static function (): Widget` factory,
+     * re-indented one level deeper than the surrounding builder statements.
+     *
+     * @param  array<string, mixed>  $template
+     */
+    private function emitTemplateFactory(string $var, array $template): string
+    {
+        $tplBody = '';
+        $tplRoot = $this->emitNode($template, $tplBody);
+        // Push each non-empty builder line one indent level deeper for readability.
+        $indented = (string) preg_replace('/^(?=.)/m', '    ', $tplBody);
+
+        return "        {$var}->templateFactory = static function (): Widget {\n"
+            .$indented
+            ."            return {$tplRoot};\n"
+            ."        };\n";
+    }
+
+    /**
+     * Emit a PHP array literal for a plain data array (e.g. an `$on` map or an
+     * `array`-typed widget property), recursing into nested arrays and scalars.
+     * List arrays emit positionally; maps emit `key => value`.
+     */
+    private function renderArrayLiteral(mixed $value): string
+    {
+        if (is_array($value)) {
+            $isList = array_is_list($value);
+            $parts = [];
+            foreach ($value as $k => $v) {
+                $item = $this->renderArrayLiteral($v);
+                $parts[] = $isList ? $item : var_export((string) $k, true).' => '.$item;
+            }
+
+            return '['.implode(', ', $parts).']';
+        }
+        if ($value === null) {
+            return 'null';
+        }
+        if (is_bool($value)) {
+            return $value ? 'true' : 'false';
+        }
+        if (is_int($value)) {
+            return (string) $value;
+        }
+        if (is_float($value)) {
+            return $this->float($value);
+        }
+
+        return var_export(is_scalar($value) ? (string) $value : '', true);
+    }
+
+    /**
      * @param  class-string<Widget>  $class
      * @param  array<string, mixed>  $node
      * @return array{0: string, 1: list<string>} Rendered args and consumed keys.
@@ -117,6 +197,11 @@ final class WidgetCodeGenerator
         foreach ($ctor->getParameters() as $param) {
             $name = $param->getName();
             if (! array_key_exists($name, $node)) {
+                continue;
+            }
+            // A bound constructor arg ({ "$bind": ... }) is not a literal — leave
+            // it for the property-binding path so it becomes a `bindings[...]`.
+            if (is_array($node[$name]) && array_key_exists('$bind', $node[$name])) {
                 continue;
             }
             if ($param->isDefaultValueAvailable() && $this->scalarEquals($node[$name], $param->getDefaultValue())) {
@@ -166,6 +251,7 @@ final class WidgetCodeGenerator
             'float' => $this->float((float) (is_numeric($value) ? $value : 0)),
             'bool' => $value ? 'true' : 'false',
             'string' => var_export(is_scalar($value) ? (string) $value : '', true),
+            'array' => is_array($value) ? $this->renderArrayLiteral($value) : '[]',
             default => null,
         };
     }

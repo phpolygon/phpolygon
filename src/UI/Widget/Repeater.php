@@ -34,6 +34,16 @@ class Repeater extends VBox
     /** @var array<string, mixed> Serialized template subtree, cloned per item. */
     public array $template = [];
 
+    /**
+     * Zero-parse row builder. When a transpiled layout sets this, the binder
+     * calls it to build each row instead of reflecting {@see $template} once per
+     * item per frame. Transient: describes how rows are built, not persisted
+     * layout data, so the serializer never emits it.
+     *
+     * @var (\Closure(): Widget)|null
+     */
+    public ?\Closure $templateFactory = null;
+
     /** Lay generated items left-to-right instead of top-to-bottom. */
     public bool $horizontal = false;
 
