@@ -43,6 +43,15 @@ class BuildConfig
     /** @var array<string, array<string, mixed>> Build type definitions with constant overrides */
     public array $buildTypes = [];
 
+    /**
+     * UI-layout transpile config (build.json `ui.transpile`): when set, the build
+     * regenerates `<dir>/*.ui.json` into `<output>/<Studly>Layout.php` (namespace
+     * `namespace`) on the staged tree, so the PHAR always ships zero-parse PHP.
+     *
+     * @var array{dir: string, output: string, namespace: string}|null
+     */
+    public ?array $uiTranspile = null;
+
     public string $projectRoot;
 
     private function __construct(string $projectRoot)
@@ -121,6 +130,20 @@ class BuildConfig
             /** @var array<string> $additionalRequires */
             $additionalRequires = $phar['additionalRequires'];
             $this->additionalRequires = $additionalRequires;
+        }
+
+        $ui = isset($data['ui']) && is_array($data['ui']) ? $data['ui'] : [];
+        if (isset($ui['transpile']) && is_array($ui['transpile'])) {
+            $transpile = $ui['transpile'];
+            $namespace = isset($transpile['namespace']) && is_string($transpile['namespace']) ? $transpile['namespace'] : '';
+            $output = isset($transpile['output']) && is_string($transpile['output']) ? $transpile['output'] : '';
+            if ($namespace !== '' && $output !== '') {
+                $this->uiTranspile = [
+                    'dir' => isset($transpile['dir']) && is_string($transpile['dir']) ? $transpile['dir'] : 'resources/ui',
+                    'output' => $output,
+                    'namespace' => $namespace,
+                ];
+            }
         }
 
         $resources = isset($data['resources']) && is_array($data['resources']) ? $data['resources'] : [];

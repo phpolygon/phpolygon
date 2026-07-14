@@ -114,6 +114,18 @@ class GameBuilder
                     $this->log('info', "Applied build type '{$buildType}' constants");
                 }
 
+                // Phase 2c: Transpile UI layouts to PHP so the PHAR ships
+                // zero-parse builder classes regardless of what is committed.
+                if ($this->config->uiTranspile !== null) {
+                    $ui = $this->config->uiTranspile;
+                    $written = (new \PHPolygon\UI\Widget\UiLayoutTranspiler())->transpileDir(
+                        $stagingDir . '/' . $ui['dir'],
+                        $stagingDir . '/' . $ui['output'],
+                        $ui['namespace'],
+                    );
+                    $this->log('info', 'Transpiled ' . count($written) . ' UI layout(s) to PHP');
+                }
+
                 // iOS branch: no phar / micro.sfx / combine. Link the staged tree
                 // against an embed libphp.a in a UIKit/Metal wrapper via Xcode.
                 if ($isIos) {

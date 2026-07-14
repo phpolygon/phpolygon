@@ -64,6 +64,7 @@ use PHPolygon\Scene\Scene;
 use PHPolygon\Scene\Transpiler\GameEntryGenerator;
 use PHPolygon\Scene\Transpiler\SceneImportGenerator;
 use PHPolygon\Scene\Transpiler\SceneTranspiler;
+use PHPolygon\UI\Widget\UiLayoutTranspiler;
 
 // --- Parse CLI arguments ---
 
@@ -164,6 +165,11 @@ if ($command === 'prototype:import') {
 
 if ($command === 'prototype:scaffold') {
     prototypeScaffold($options['output']);
+    exit(0);
+}
+
+if ($command === 'build:transpile') {
+    uiTranspile(in_array('--check', $args, true));
     exit(0);
 }
 
@@ -465,7 +471,9 @@ Usage:
   phpolygon prototype:import <file.tsx|file.jsx> [--out Scene.php]
 
 Commands:
-  build              Build game for distribution
+  build              Build game for distribution (auto-transpiles UI layouts)
+  build:transpile    Transpile resources/ui/*.ui.json into PHP builder classes
+                     (--check verifies they are in sync instead of writing)
   editor             Launch the PHPolygon scene editor
   perf:report        Diff two benchmark JSON results in benchmarks/results/
   prototype:scaffold Copy the WebGL/JSX prototyping playground into this project
@@ -511,6 +519,8 @@ Examples:
   phpolygon build ios-arm64 --ipa                Export an App Store Connect .ipa
   phpolygon build --php-version 8.4              Build with PHP 8.4 runtime
   phpolygon build --dry-run                      Show config without building
+  phpolygon build:transpile                      Regenerate UI PHP from *.ui.json
+  phpolygon build:transpile --check              Fail if UI PHP is out of sync
   phpolygon editor                       Launch the scene editor
   phpolygon prototype:export             Export the WebGL/JSX prototyping bundle to .phpolygon/prototype
   phpolygon prototype:export --out web   Export the bundle to ./web
@@ -838,6 +848,54 @@ function sceneTranspile(string $input, string $outputOption): void
     }
 
     echo $php . "\n";
+}
+
+/**
+ * Transpile the project's UI layouts (resources/ui/*.ui.json) into zero-parse
+ * PHP builder classes under the build.json `ui.transpile` output/namespace, so
+ * the runtime builds panels from compiled PHP instead of deserializing JSON.
+ * With --check, verify the committed classes are in sync (exit 1 on drift)
+ * instead of writing — the build runs this automatically during staging.
+ */
+function uiTranspile(bool $check): void
+{
+    $projectRoot = getcwd() ?: dirname(__DIR__);
+    $config = BuildConfig::load($projectRoot);
+    $t = $config->uiTranspile;
+    if ($t === null) {
+        fwrite(STDERR, "\033[31mError:\033[0m No \"ui.transpile\" section in build.json.\n");
+        fwrite(STDERR, "  Add:  \"ui\": { \"transpile\": { \"output\": \"src/UI/Generated\", \"namespace\": \"App\\\\UI\\\\Generated\" } }\n");
+        exit(1);
+    }
+
+    $uiDir = $projectRoot . '/' . $t['dir'];
+    $outDir = $projectRoot . '/' . $t['output'];
+    $transpiler = new UiLayoutTranspiler();
+
+    if ($check) {
+        $drift = [];
+        foreach (glob(rtrim($uiDir, '/\\') . '/*.ui.json') ?: [] as $path) {
+            $php = $transpiler->transpileFile($path, $t['namespace']);
+            if ($php === null) {
+                continue;
+            }
+            $name = UiLayoutTranspiler::layoutName($path);
+            $file = rtrim($outDir, '/\\') . '/' . UiLayoutTranspiler::className($name) . '.php';
+            if ((is_file($file) ? file_get_contents($file) : null) !== $php) {
+                $drift[] = $name;
+            }
+        }
+        if ($drift !== []) {
+            fwrite(STDERR, "\033[31mUI layouts out of sync:\033[0m " . implode(', ', $drift) . "\n");
+            fwrite(STDERR, "  Run: vendor/bin/phpolygon build:transpile\n");
+            exit(1);
+        }
+        echo "\033[32m✓\033[0m UI layouts in sync\n";
+        return;
+    }
+
+    $written = $transpiler->transpileDir($uiDir, $outDir, $t['namespace']);
+    echo "\033[32m✓\033[0m Transpiled " . count($written) . " UI layout(s) → {$t['output']}\n";
 }
 
 /**
