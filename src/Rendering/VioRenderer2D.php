@@ -578,56 +578,83 @@ class VioRenderer2D implements Renderer2DInterface
 
     public function drawTextBox(string $text, float $x, float $y, float $breakWidth, float $size, Color $color): void
     {
-        $font = $this->resolveFont($size);
-        if ($font === null) {
+        $chain = $this->resolveFontChain($size);
+        if ($chain === []) {
             return;
         }
         $argb = $this->colorToArgb($color);
         $z = $this->nextZ();
         $align = $this->textAlign;
         $lineHeight = $size * 1.2;
-        // vio_text renders from baseline — offset each line by ascender
-        $ascender = $size * 0.65;
-        $lineY = $y + $ascender;
+        // vio_text renders from baseline — offset each line by ascender.
+        $lineY = $y + $size * 0.65;
 
-        // Split on hard line breaks first so explicit \n in the source forces
-        // a new line. Word-wrap then runs *within* each paragraph. Without this
-        // step "10 LET X = 5\n20 LET Y = X + 3" would render as one long line
-        // because explode(' ', ...) preserves \n inside the resulting tokens.
+        // Wrap and draw across the whole font chain, exactly like drawText():
+        // each line's break point AND its rendered runs honour fallback glyph
+        // widths. A single-font path measured a CJK/Arabic body to ~0 in the
+        // primary, so it never wrapped and then drew every glyph as a .notdef
+        // box. The chain-aware width here matches what measureTextBox() reports.
+        $lineWidth = fn (string $s): float => $this->measureTextWithChain($chain, $s)->width;
+
+        foreach (self::wrapTextLines($text, $breakWidth, $lineWidth) as $line) {
+            if ($line !== '') {
+                $lx = $x;
+                if ($align & TextAlign::CENTER) {
+                    $lx = $x + ($breakWidth - $lineWidth($line)) / 2.0;
+                } elseif ($align & TextAlign::RIGHT) {
+                    $lx = $x + $breakWidth - $lineWidth($line);
+                }
+                $this->drawTextWithChain($chain, $line, $lx, $lineY, $argb, $z);
+            }
+            // A '' entry is a blank line from consecutive newlines; it still
+            // advances one line height to produce the visible gap.
+            $lineY += $lineHeight;
+        }
+    }
+
+    /**
+     * Greedy word-wrap $text into rendered lines at $breakWidth. Hard line
+     * breaks (\r\n / \r / \n) always split; an empty paragraph yields a ''
+     * entry (a blank line). $lineWidth measures a candidate line — pass a
+     * chain-aware measurer so wrapping agrees with what drawTextBox() renders.
+     * A single word wider than $breakWidth is kept on its own line (never split).
+     *
+     * @param  callable(string): float  $lineWidth
+     * @return list<string>
+     */
+    private static function wrapTextLines(string $text, float $breakWidth, callable $lineWidth): array
+    {
+        // Split on hard line breaks first so an explicit \n forces a new line;
+        // word-wrap then runs within each paragraph. Without this "…X = 5\n20…"
+        // would render as one line (explode(' ') keeps \n inside a token).
         $paragraphs = preg_split('/\r\n?|\n/', $text);
         if ($paragraphs === false) {
             $paragraphs = [$text];
         }
 
+        $lines = [];
         foreach ($paragraphs as $paragraph) {
             if ($paragraph === '') {
-                // Empty paragraph (e.g. consecutive \n\n) advances by one
-                // line height to produce a visible blank line.
-                $lineY += $lineHeight;
+                $lines[] = '';
                 continue;
             }
 
-            $words = explode(' ', $paragraph);
             $line = '';
-
-            foreach ($words as $word) {
+            foreach (explode(' ', $paragraph) as $word) {
                 $testLine = $line === '' ? $word : $line . ' ' . $word;
-                $metrics = $this->measureCached($font, $testLine);
-                if ($metrics['width'] > $breakWidth && $line !== '') {
-                    $lx = $this->alignTextX($font, $line, $x, $breakWidth, $align);
-                    vio_text($this->ctx, $font, $line, $lx, $lineY, ['color' => $argb, 'z' => $z]);
-                    $lineY += $lineHeight;
+                if ($line !== '' && $lineWidth($testLine) > $breakWidth) {
+                    $lines[] = $line;
                     $line = $word;
                 } else {
                     $line = $testLine;
                 }
             }
             if ($line !== '') {
-                $lx = $this->alignTextX($font, $line, $x, $breakWidth, $align);
-                vio_text($this->ctx, $font, $line, $lx, $lineY, ['color' => $argb, 'z' => $z]);
-                $lineY += $lineHeight;
+                $lines[] = $line;
             }
         }
+
+        return $lines;
     }
 
     public function drawSprite(Texture $texture, ?Rect $srcRegion, float $x, float $y, float $w, float $h, float $opacity = 1.0): void
@@ -996,53 +1023,26 @@ class VioRenderer2D implements Renderer2DInterface
 
     public function measureTextBox(string $text, float $breakWidth, float $size): TextMetrics
     {
-        $font = $this->resolveFont($size);
-        if ($font === null) {
+        $chain = $this->resolveFontChain($size);
+        if ($chain === []) {
             return new TextMetrics($breakWidth, $size);
         }
 
-        // Word-wrap and measure each line, same algorithm as drawTextBox.
-        // Must honour explicit \n breaks so measureTextBox() agrees with what
-        // drawTextBox() actually renders. Empty paragraphs contribute one
-        // lineHeight just like an empty visible line would.
+        // Same chain-aware wrap as drawTextBox() so the reported box matches what
+        // is rendered: line width is the per-claiming-font advance sum, height is
+        // one lineHeight per emitted line (blank lines included).
         $lineHeight = $size * 1.2;
+        $lineWidth = fn (string $s): float => $this->measureTextWithChain($chain, $s)->width;
+
+        $lines = self::wrapTextLines($text, $breakWidth, $lineWidth);
         $maxWidth = 0.0;
-        $totalHeight = 0.0;
-
-        $paragraphs = preg_split('/\r\n?|\n/', $text);
-        if ($paragraphs === false) {
-            $paragraphs = [$text];
-        }
-
-        foreach ($paragraphs as $paragraph) {
-            if ($paragraph === '') {
-                $totalHeight += $lineHeight;
-                continue;
-            }
-
-            $words = explode(' ', $paragraph);
-            $line = '';
-
-            foreach ($words as $word) {
-                $testLine = $line === '' ? $word : $line . ' ' . $word;
-                $metrics = $this->measureCached($font, $testLine);
-                if ($metrics['width'] > $breakWidth && $line !== '') {
-                    $lineMetrics = $this->measureCached($font, $line);
-                    $maxWidth = max($maxWidth, (float)$lineMetrics['width']);
-                    $totalHeight += $lineHeight;
-                    $line = $word;
-                } else {
-                    $line = $testLine;
-                }
-            }
+        foreach ($lines as $line) {
             if ($line !== '') {
-                $lineMetrics = $this->measureCached($font, $line);
-                $maxWidth = max($maxWidth, (float)$lineMetrics['width']);
-                $totalHeight += $lineHeight;
+                $maxWidth = max($maxWidth, $lineWidth($line));
             }
         }
 
-        return new TextMetrics($maxWidth, $totalHeight);
+        return new TextMetrics($maxWidth, count($lines) * $lineHeight);
     }
 
     /** @var array<string, array<string, bool>> font name -> script value -> covered */
@@ -1153,22 +1153,6 @@ class VioRenderer2D implements Renderer2DInterface
     public function getContext(): VioContext
     {
         return $this->ctx;
-    }
-
-    /**
-     * Adjust X position for horizontal text alignment within a text box.
-     */
-    private function alignTextX(VioFont $font, string $text, float $x, float $boxWidth, int $align): float
-    {
-        if ($align & TextAlign::CENTER) {
-            $metrics = $this->measureCached($font, $text);
-            return $x + ($boxWidth - (float)$metrics['width']) / 2.0;
-        }
-        if ($align & TextAlign::RIGHT) {
-            $metrics = $this->measureCached($font, $text);
-            return $x + $boxWidth - (float)$metrics['width'];
-        }
-        return $x;
     }
 
     private function resolveFont(float $size): ?VioFont
