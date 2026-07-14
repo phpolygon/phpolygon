@@ -128,6 +128,27 @@ class Dropdown extends Widget
     }
 
     /**
+     * Bounding rect of the whole expanded option list (for hit-testing the
+     * floating list, which lives outside this widget's own bounds). Null when
+     * the dropdown is closed or has no options.
+     */
+    public function listBounds(): ?\PHPolygon\Math\Rect
+    {
+        if (!$this->open || $this->options === []) {
+            return null;
+        }
+        $first = $this->getOptionRect(0);
+        $last = $this->getOptionRect(count($this->options) - 1);
+
+        return new \PHPolygon\Math\Rect(
+            $first->x,
+            $first->y,
+            $first->width,
+            ($last->y + $last->height) - $first->y,
+        );
+    }
+
+    /**
      * Get the option rect at a given index (for hit testing the dropdown list).
      */
     public function getOptionRect(int $index): \PHPolygon\Math\Rect

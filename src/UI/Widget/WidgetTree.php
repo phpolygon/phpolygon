@@ -159,9 +159,33 @@ class WidgetTree
 
         $mouse = $this->input->getMousePosition();
 
+        // An open dropdown's option list floats above the tree in BOTH draw and
+        // input: a point inside the expanded list belongs to the dropdown, not
+        // whatever sibling (a ScrollView, a card list) happens to sit beneath it.
+        // Resolve that first, otherwise widgetAt() would hand the click to the
+        // widget underneath and the list could be neither clicked nor scrolled.
+        $listDropdown = $this->openDropdownListAt($mouse);
+
         // Hit test
-        $hit = $this->root->widgetAt($mouse);
+        $hit = $listDropdown ?? $this->root->widgetAt($mouse);
         $this->updateHover($hit);
+
+        if ($listDropdown !== null) {
+            // Release selects the option under the cursor. Press is swallowed so
+            // it neither toggles the list shut (the field's job) nor reaches the
+            // sibling below; the scroll wheel is consumed for the same reason.
+            if ($this->input->isMouseButtonReleased(0)) {
+                $this->selectDropdownOption($listDropdown, $mouse);
+            }
+            $this->input->suppress();
+            return;
+        }
+
+        // A press outside every open dropdown (its field or its list) dismisses
+        // it — the field being clicked is exempted so it can still toggle.
+        if ($this->input->isMouseButtonPressed(0)) {
+            $this->closeOpenDropdownsExcept($hit instanceof Dropdown ? $hit : null);
+        }
 
         // Mouse press
         if ($this->input->isMouseButtonPressed(0)) {
@@ -485,5 +509,60 @@ class WidgetTree
             $current = $current->getParent();
         }
         return null;
+    }
+
+    /**
+     * The open dropdown whose floating option list contains $mouse, or null.
+     * Descends children-first so a deeper dropdown wins over an ancestor.
+     */
+    private function openDropdownListAt(Vec2 $mouse): ?Dropdown
+    {
+        return $this->findOpenDropdownList($this->root, $mouse);
+    }
+
+    private function findOpenDropdownList(Widget $widget, Vec2 $mouse): ?Dropdown
+    {
+        foreach ($widget->getChildren() as $child) {
+            $found = $this->findOpenDropdownList($child, $mouse);
+            if ($found !== null) {
+                return $found;
+            }
+        }
+        if ($widget instanceof Dropdown && $widget->open) {
+            $list = $widget->listBounds();
+            if ($list !== null && $list->contains($mouse)) {
+                return $widget;
+            }
+        }
+        return null;
+    }
+
+    /** Pick the option under the cursor in an open dropdown's floating list. */
+    private function selectDropdownOption(Dropdown $dropdown, Vec2 $mouse): void
+    {
+        foreach ($dropdown->options as $i => $opt) {
+            if ($dropdown->getOptionRect($i)->contains($mouse)) {
+                $dropdown->selectedIndex = $i;
+                $dropdown->open = false;
+                $dropdown->emit('change', $i);
+                return;
+            }
+        }
+    }
+
+    /** Close every open dropdown except $keep (the one being clicked). */
+    private function closeOpenDropdownsExcept(?Dropdown $keep): void
+    {
+        $this->closeDropdowns($this->root, $keep);
+    }
+
+    private function closeDropdowns(Widget $widget, ?Dropdown $keep): void
+    {
+        if ($widget instanceof Dropdown && $widget !== $keep) {
+            $widget->open = false;
+        }
+        foreach ($widget->getChildren() as $child) {
+            $this->closeDropdowns($child, $keep);
+        }
     }
 }
