@@ -16,6 +16,15 @@ class Label extends Widget
     public ?float $fontSize = null;
 
     /**
+     * Optional filled rounded background drawn behind the text — turns a Label
+     * into a badge/pill/tag. Nothing is drawn when null or when the text is
+     * empty (so a data-bound badge simply vanishes at zero). Combine with
+     * padding for breathing room and align/sizing to shape the pill.
+     */
+    public ?Color $backgroundColor = null;
+    public float $backgroundRadius = 4.0;
+
+    /**
      * Word-wrap the text to the label's width and draw it as multiple lines.
      * Each line is emitted with drawText (per-glyph fallback chain — so non-Latin
      * bodies render correctly, unlike a single drawTextBox call). Honours hard
@@ -98,6 +107,14 @@ class Label extends Widget
         $style = $this->resolveStyle($style);
         $fs = $this->fontSize ?? $style->fontSize;
         $color = $this->color ?? $style->textColor;
+
+        // Badge/pill background behind the text. Skipped for empty text so a
+        // bound badge shows nothing at zero without the view-model juggling the
+        // colour too.
+        if ($this->backgroundColor !== null && $this->text !== '') {
+            $b = $this->bounds;
+            $renderer->drawRoundedRect($b->x, $b->y, $b->width, $b->height, $this->backgroundRadius, $this->backgroundColor);
+        }
 
         // Explicit left/top anchor: the renderer's text align is sticky global
         // state, so without this a Label after a centered widget would inherit
