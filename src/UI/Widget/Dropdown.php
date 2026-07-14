@@ -85,22 +85,45 @@ class Dropdown extends Widget
         $arrowY = $fieldY + $fieldH * 0.5 - $style->fontSize * 0.25;
         $renderer->drawText($this->open ? '^' : 'v', $arrowX, $arrowY, $style->fontSize * 0.7, $style->textColor);
 
-        // Dropdown list (when open)
-        if ($this->open) {
-            $listY = $fieldY + $fieldH + 2.0;
-            $rowH = $style->fontSize + $this->padding->vertical();
-            $listH = $rowH * count($this->options);
+        // The open list is NOT drawn here: it must float above any following
+        // sibling (a ScrollView, a card list) instead of being painted over by
+        // them. WidgetTree draws it in a final top-most overlay pass via
+        // drawOpenList(), the same way tooltips float above the tree.
+    }
 
-            $renderer->drawRoundedRect($b->x, $listY, $b->width, $listH, $style->borderRadius, $style->backgroundColor);
-            $renderer->drawRectOutline($b->x, $listY, $b->width, $listH, $style->borderColor, $style->borderWidth);
+    /**
+     * Draw the expanded option list. Called by {@see WidgetTree} in a top-most
+     * overlay pass (after the whole tree) so the list is never covered by later
+     * siblings. No-op unless the dropdown is open.
+     */
+    public function drawOpenList(Renderer2DInterface $renderer, UIStyle $style): void
+    {
+        if (!$this->open) {
+            return;
+        }
 
-            foreach ($this->options as $i => $opt) {
-                $optY = $listY + $i * $rowH;
-                if ($i === $this->selectedIndex) {
-                    $renderer->drawRect($b->x + 1.0, $optY, $b->width - 2.0, $rowH, $style->accentColor->withAlpha(0.3));
-                }
-                $renderer->drawText($opt, $b->x + $this->padding->left, $optY + $this->padding->top, $style->fontSize, $style->textColor);
+        $style = $this->resolveStyle($style);
+        $b = $this->bounds;
+
+        $labelH = $this->label !== '' ? $style->fontSize + 4.0 : 0.0;
+        $fieldY = $b->y + $labelH;
+        $fieldH = $b->height - $labelH;
+
+        $renderer->setTextAlign(TextAlign::LEFT | TextAlign::TOP);
+
+        $listY = $fieldY + $fieldH + 2.0;
+        $rowH = $style->fontSize + $this->padding->vertical();
+        $listH = $rowH * count($this->options);
+
+        $renderer->drawRoundedRect($b->x, $listY, $b->width, $listH, $style->borderRadius, $style->backgroundColor);
+        $renderer->drawRectOutline($b->x, $listY, $b->width, $listH, $style->borderColor, $style->borderWidth);
+
+        foreach ($this->options as $i => $opt) {
+            $optY = $listY + $i * $rowH;
+            if ($i === $this->selectedIndex) {
+                $renderer->drawRect($b->x + 1.0, $optY, $b->width - 2.0, $rowH, $style->accentColor->withAlpha(0.3));
             }
+            $renderer->drawText($opt, $b->x + $this->padding->left, $optY + $this->padding->top, $style->fontSize, $style->textColor);
         }
     }
 

@@ -229,7 +229,33 @@ class WidgetTree
     {
         $this->renderer->setFont($this->style->fontName);
         $this->root->draw($this->renderer, $this->style);
+        // Open dropdown lists and tooltips float above the whole tree so they
+        // are never covered by a sibling drawn later (e.g. a ScrollView below
+        // the filter row). Dropdowns first, tooltip last (truly top-most).
+        $this->drawOpenDropdowns();
         $this->drawTooltip();
+    }
+
+    /**
+     * Top-most overlay pass for expanded dropdown lists. A Dropdown draws only
+     * its field inline; the open list is drawn here, after the entire tree, so
+     * it floats above any following sibling instead of being painted over.
+     * Draws every open dropdown (opening one does not force-close others).
+     */
+    private function drawOpenDropdowns(): void
+    {
+        $this->renderer->setFont($this->style->fontName);
+        $this->forEachOpenDropdown($this->root);
+    }
+
+    private function forEachOpenDropdown(Widget $widget): void
+    {
+        if ($widget instanceof Dropdown && $widget->open) {
+            $widget->drawOpenList($this->renderer, $this->style);
+        }
+        foreach ($widget->getChildren() as $child) {
+            $this->forEachOpenDropdown($child);
+        }
     }
 
     /**
