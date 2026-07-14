@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace PHPolygon\UI\Widget;
 
 use PHPolygon\Math\Rect;
+use PHPolygon\Rendering\Color;
 use PHPolygon\Rendering\Renderer2DInterface;
 use PHPolygon\UI\UIStyle;
 
@@ -15,6 +16,17 @@ use PHPolygon\UI\UIStyle;
  */
 class Stack extends Widget
 {
+    /**
+     * Optional card-hover fill: when set, the whole stack tints with this colour
+     * while the pointer is over it, drawn BEHIND the children. This lets a rich
+     * card (content widgets + a flat whole-card click overlay) highlight on hover
+     * the way a single ghost Button does, without the fill covering its content.
+     */
+    public ?Color $hoverColor = null;
+
+    /** True while the pointer is over the stack; set each frame by {@see WidgetTree}. */
+    public bool $hovered = false;
+
     /** @var array<int, Anchor> child index → anchor */
     private array $childAnchors = [];
 
@@ -73,6 +85,10 @@ class Stack extends Widget
     public function draw(Renderer2DInterface $renderer, UIStyle $style): void
     {
         $style = $this->resolveStyle($style);
+        if ($this->hovered && $this->hoverColor !== null) {
+            $b = $this->bounds;
+            $renderer->drawRoundedRect($b->x, $b->y, $b->width, $b->height, $style->borderRadius, $this->hoverColor);
+        }
         foreach ($this->children as $child) {
             if (!$child->visible) continue;
             $child->draw($renderer, $style);

@@ -7,10 +7,12 @@ namespace PHPolygon\Tests\UI\Widget;
 use PHPUnit\Framework\TestCase;
 use PHPolygon\Math\Rect;
 use PHPolygon\Math\Vec2;
+use PHPolygon\Rendering\Color;
 use PHPolygon\Runtime\Input;
 use PHPolygon\Runtime\InputInterface;
 use PHPolygon\UI\UIStyle;
 use PHPolygon\UI\Widget\Button;
+use PHPolygon\UI\Widget\Stack;
 use PHPolygon\UI\Widget\Checkbox;
 use PHPolygon\UI\Widget\Label;
 use PHPolygon\UI\Widget\Sizing;
@@ -305,6 +307,30 @@ class WidgetTreeTest extends TestCase
         $this->input->handleCursorPosEvent(400.0, 400.0);
         $this->tree($root)->update();
         $this->assertFalse($btn->hovered, 'hover clears on a rebuilt tree when the pointer leaves');
+    }
+
+    public function testHoverableStackHighlightsWhilePointerOverCard(): void
+    {
+        // A rich card — content + a flat whole-card click overlay — opts into a
+        // hover tint via Stack::$hoverColor. The overlay is the hit target; its
+        // ancestor Stack is what highlights, so the fill sits behind the content.
+        $root = new VBox();
+        $card = new Stack();
+        $card->hoverColor = new Color(0.1, 0.4, 0.25, 1.0);
+        $card->sizing = Sizing::fixed(120, 40);
+        $overlay = new Button('');
+        $overlay->flat = true;
+        $overlay->sizing = new Sizing(fillWidth: true, fillHeight: true);
+        $card->addChild($overlay);
+        $root->addChild($card);
+
+        $this->input->handleCursorPosEvent(10.0, 10.0);
+        $this->tree($root)->update();
+        $this->assertTrue($card->hovered, 'card highlights while the pointer is over it');
+
+        $this->input->handleCursorPosEvent(400.0, 400.0);
+        $this->tree($root)->update();
+        $this->assertFalse($card->hovered, 'card highlight clears when the pointer leaves');
     }
 
     public function testHoveringControlSuppressesInput(): void

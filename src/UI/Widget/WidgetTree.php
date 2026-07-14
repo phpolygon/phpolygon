@@ -24,6 +24,9 @@ class WidgetTree
     private UIStyle $style;
 
     private ?Widget $hoveredWidget = null;
+
+    /** The hoverable-card Stack (if any) currently under the pointer. */
+    private ?Stack $hoveredStack = null;
     private ?Widget $focusedWidget = null;
     private ?Widget $pressedWidget = null;
     private ?WidgetBinder $binder = null;
@@ -235,6 +238,9 @@ class WidgetTree
             $widget->hovered = false;
             $widget->pressed = false;
         }
+        if ($widget instanceof Stack) {
+            $widget->hovered = false;
+        }
         foreach ($widget->getChildren() as $child) {
             $this->clearInteractionFlags($child);
         }
@@ -253,6 +259,31 @@ class WidgetTree
                 $hit->emit('hoverstart');
             }
         }
+
+        // Card-hover: tint the nearest ancestor Stack that opted in via hoverColor
+        // (e.g. a rich list card whose whole-card click target is a flat overlay).
+        $stack = $hit !== null ? $this->hoverableStackAncestor($hit) : null;
+        if ($stack !== $this->hoveredStack) {
+            if ($this->hoveredStack !== null) {
+                $this->hoveredStack->hovered = false;
+            }
+            $this->hoveredStack = $stack;
+            if ($stack !== null) {
+                $stack->hovered = true;
+            }
+        }
+    }
+
+    /** The nearest ancestor (or self) Stack that set a hoverColor, or null. */
+    private function hoverableStackAncestor(Widget $widget): ?Stack
+    {
+        for ($node = $widget; $node !== null; $node = $node->getParent()) {
+            if ($node instanceof Stack && $node->hoverColor !== null) {
+                return $node;
+            }
+        }
+
+        return null;
     }
 
     private function handlePress(?Widget $hit, Vec2 $mouse): void
