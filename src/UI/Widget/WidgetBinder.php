@@ -47,15 +47,40 @@ final class WidgetBinder
 
     private function expandRepeater(Repeater $repeater, WidgetContext $context): void
     {
-        $repeater->clearChildren();
         $collection = $context->get($repeater->each);
         if (! is_iterable($collection)) {
+            $repeater->clearChildren();
+
             return;
         }
-        foreach ($collection as $item) {
-            $row = $this->serializer->fromArray($repeater->template);
-            $this->bind($row, new ScopedWidgetContext($item, $context));
-            $repeater->addChild($row);
+
+        // Materialize once: the count decides whether we can recycle, and a
+        // Generator would be exhausted by a second pass.
+        $items = is_array($collection) ? $collection : iterator_to_array($collection);
+        $rows  = $repeater->getChildren();
+
+        // Deserializing the template once per item per frame is the most expensive
+        // thing a data-bound tree does — a 29-row list rebuilt 200+ widgets from
+        // scratch on every single frame. But between frames it is almost always
+        // only the item DATA that moved: same rows, same shape. In that case reuse
+        // the existing widgets and just re-bind them; bind() overwrites every bound
+        // property and re-wires listeners from clean, so a recycled row carries no
+        // state forward from the previous frame.
+        //
+        // Rebuild only when the shape actually changed: a different row count, or
+        // an authored template swapped underneath us.
+        if (count($rows) !== count($items) || ! $repeater->rowsMatchTemplate()) {
+            $repeater->clearChildren();
+            foreach ($items as $_) {
+                $repeater->addChild($this->serializer->fromArray($repeater->template));
+            }
+            $repeater->markRowsBuilt();
+            $rows = $repeater->getChildren();
+        }
+
+        $i = 0;
+        foreach ($items as $item) {
+            $this->bind($rows[$i++], new ScopedWidgetContext($item, $context));
         }
     }
 

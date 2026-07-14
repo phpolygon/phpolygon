@@ -37,6 +37,28 @@ class Repeater extends VBox
     /** Lay generated items left-to-right instead of top-to-bottom. */
     public bool $horizontal = false;
 
+    /**
+     * Snapshot of the template the current rows were deserialized from, so the
+     * binder can tell "same shape, new data" (recycle the rows) from "different
+     * shape" (rebuild them). Private, so the serializer never persists it — it
+     * describes the live children, not the widget's authored definition.
+     *
+     * @var array<string, mixed>|null
+     */
+    private ?array $rowsBuiltFrom = null;
+
+    /** True when the existing children were built from the template in force now. */
+    public function rowsMatchTemplate(): bool
+    {
+        return $this->rowsBuiltFrom !== null && $this->rowsBuiltFrom === $this->template;
+    }
+
+    /** Record that the current children were just built from the current template. */
+    public function markRowsBuilt(): void
+    {
+        $this->rowsBuiltFrom = $this->template;
+    }
+
     public function measure(float $availableWidth, float $availableHeight, UIStyle $style): void
     {
         if (!$this->horizontal) {

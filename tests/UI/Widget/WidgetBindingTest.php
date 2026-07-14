@@ -146,6 +146,97 @@ class WidgetBindingTest extends TestCase
         $this->assertCount(2, $repeater->getChildren(), 'rows track the collection on rebind');
     }
 
+    public function testRepeaterRecyclesRowsWhenOnlyTheDataChanged(): void
+    {
+        $repeater = new Repeater;
+        $repeater->each = 'clients';
+        $repeater->template = ['_widget' => Label::class, 'text' => ['$bind' => 'name']];
+
+        $vm = (object) ['clients' => [(object) ['name' => 'Acme'], (object) ['name' => 'Globex']]];
+        $binder = new WidgetBinder;
+        $binder->bind($repeater, new DataWidgetContext($vm));
+        $first = $repeater->getChildren();
+
+        // Same row count, same template — only the values moved.
+        $vm->clients = [(object) ['name' => 'Initech'], (object) ['name' => 'Umbrella']];
+        $binder->bind($repeater, new DataWidgetContext($vm));
+        $second = $repeater->getChildren();
+
+        $this->assertSame($first[0], $second[0], 'row widgets are reused, not rebuilt');
+        $this->assertSame($first[1], $second[1]);
+        $this->assertSame('Initech', $second[0]->text, 'a recycled row still shows the new data');
+        $this->assertSame('Umbrella', $second[1]->text);
+    }
+
+    public function testRepeaterRebuildsRowsWhenTheTemplateChanges(): void
+    {
+        $repeater = new Repeater;
+        $repeater->each = 'rows';
+        $repeater->template = ['_widget' => Label::class, 'text' => ['$bind' => 'name']];
+
+        $vm = (object) ['rows' => [(object) ['name' => 'a']]];
+        $binder = new WidgetBinder;
+        $binder->bind($repeater, new DataWidgetContext($vm));
+        $this->assertInstanceOf(Label::class, $repeater->getChildren()[0]);
+
+        // Row count is unchanged, so only the template tells us to rebuild.
+        $repeater->template = ['_widget' => Button::class, 'label' => ['$bind' => 'name']];
+        $binder->bind($repeater, new DataWidgetContext($vm));
+
+        $this->assertInstanceOf(Button::class, $repeater->getChildren()[0], 'a swapped template rebuilds the rows');
+    }
+
+    public function testRecycledRowDoesNotStackEventListeners(): void
+    {
+        $clicks = 0;
+        $vm = new class($clicks)
+        {
+            public array $rows;
+
+            public function __construct(public int &$clicks)
+            {
+                $this->rows = [(object) ['id' => 'x']];
+            }
+
+            public function pick(): void
+            {
+                $this->clicks++;
+            }
+        };
+
+        $repeater = new Repeater;
+        $repeater->each = 'rows';
+        $repeater->template = ['_widget' => Button::class, 'label' => 'go', '$on' => ['click' => 'pick']];
+
+        $binder = new WidgetBinder;
+        $ctx = new DataWidgetContext($vm);
+
+        // Re-bind repeatedly, as a retained host does every frame.
+        $binder->bind($repeater, $ctx);
+        $binder->bind($repeater, $ctx);
+        $binder->bind($repeater, $ctx);
+
+        $repeater->getChildren()[0]->emit('click');
+
+        $this->assertSame(1, $vm->clicks, 'one click fires the action once, however often the row was re-bound');
+    }
+
+    public function testRepeaterShrinksToAnEmptyCollection(): void
+    {
+        $repeater = new Repeater;
+        $repeater->each = 'rows';
+        $repeater->template = ['_widget' => Label::class, 'text' => ['$bind' => 'name']];
+
+        $vm = (object) ['rows' => [(object) ['name' => 'a'], (object) ['name' => 'b']]];
+        $binder = new WidgetBinder;
+        $binder->bind($repeater, new DataWidgetContext($vm));
+        $this->assertCount(2, $repeater->getChildren());
+
+        $vm->rows = [];
+        $binder->bind($repeater, new DataWidgetContext($vm));
+        $this->assertCount(0, $repeater->getChildren(), 'rows drain when the collection empties');
+    }
+
     public function testHorizontalRepeaterLaysItemsLeftToRight(): void
     {
         $repeater = new Repeater;
