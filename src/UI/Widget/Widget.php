@@ -62,12 +62,56 @@ abstract class Widget
     /** @var array<string, list<callable>> */
     private array $eventListeners = [];
 
+    /**
+     * Clip rects pushed by clipping containers (see {@see ScrollView}).
+     *
+     * A clipping container only ever has a handful of direct children — usually
+     * one layout box — so testing those against the viewport culls nothing: that
+     * single child spans the full content height and always intersects. The rows
+     * worth skipping sit one level deeper, inside that box. Container widgets
+     * therefore consult the innermost clip rect via {@see isClipped()} and skip
+     * children that fall entirely outside it, however deeply nested they are.
+     *
+     * Draw-only. measure() and layout() must still visit every child, or a
+     * ScrollView cannot know its content height or size its scrollbar.
+     *
+     * @var list<Rect>
+     */
+    private static array $clipStack = [];
+
     public function __construct()
     {
         $this->bounds = new Rect();
         $this->sizing = Sizing::wrap();
         $this->padding = EdgeInsets::zero();
         $this->margin = EdgeInsets::zero();
+    }
+
+    // ── Draw-time clipping ───────────────────────────────────────
+
+    /** Push a clip rect. Must be paired with {@see popClip()} via try/finally. */
+    protected static function pushClip(Rect $rect): void
+    {
+        self::$clipStack[] = $rect;
+    }
+
+    protected static function popClip(): void
+    {
+        array_pop(self::$clipStack);
+    }
+
+    /**
+     * True when $child lies entirely outside the innermost clip rect, i.e. it
+     * would be scissored away anyway and drawing it is pure waste. False when
+     * nothing is clipping (no container pushed a rect).
+     */
+    protected static function isClipped(Widget $child): bool
+    {
+        $clip = end(self::$clipStack);
+        if ($clip === false) {
+            return false;
+        }
+        return !$clip->intersects($child->bounds);
     }
 
     // ── Tree operations ──────────────────────────────────────────

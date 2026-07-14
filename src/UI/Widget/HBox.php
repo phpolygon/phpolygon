@@ -120,6 +120,7 @@ class HBox extends Widget
         $style = $this->resolveStyle($style);
         foreach ($this->children as $child) {
             if (!$child->visible) continue;
+            if (self::isClipped($child)) continue;
             $child->draw($renderer, $style);
         }
     }

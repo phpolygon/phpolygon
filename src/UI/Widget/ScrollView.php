@@ -92,20 +92,28 @@ class ScrollView extends Widget
 
         $renderer->pushScissor($b->x, $b->y, $b->width, $b->height);
 
-        foreach ($this->children as $child) {
-            if (!$child->visible) continue;
-            $cb = $child->getBounds();
-            // Skip children entirely outside visible area
-            if ($cb->bottom() < $b->y || $cb->top() > $b->bottom()) continue;
-            $child->draw($renderer, $style);
-        }
+        // Publish the viewport so nested containers can cull too. Testing only
+        // our own children is not enough: a scroll view's direct child is
+        // typically a single layout box spanning the whole content height, which
+        // always intersects and so never gets skipped — while the rows inside it,
+        // the ones actually off-screen, would all still be drawn.
+        self::pushClip($b);
 
-        // Draw scrollbar
-        if ($this->scrollBarVisible) {
-            $this->drawScrollBar($renderer, $style);
-        }
+        try {
+            foreach ($this->children as $child) {
+                if (!$child->visible) continue;
+                if (self::isClipped($child)) continue;
+                $child->draw($renderer, $style);
+            }
 
-        $renderer->popScissor();
+            // Draw scrollbar
+            if ($this->scrollBarVisible) {
+                $this->drawScrollBar($renderer, $style);
+            }
+        } finally {
+            self::popClip();
+            $renderer->popScissor();
+        }
     }
 
     private function drawScrollBar(Renderer2DInterface $renderer, UIStyle $style): void
