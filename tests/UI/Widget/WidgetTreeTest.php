@@ -12,6 +12,7 @@ use PHPolygon\Runtime\Input;
 use PHPolygon\Runtime\InputInterface;
 use PHPolygon\UI\UIStyle;
 use PHPolygon\UI\Widget\Button;
+use PHPolygon\UI\Widget\HBox;
 use PHPolygon\UI\Widget\Stack;
 use PHPolygon\UI\Widget\Checkbox;
 use PHPolygon\UI\Widget\Label;
@@ -351,6 +352,38 @@ class WidgetTreeTest extends TestCase
             array_filter($this->renderer->calls, fn ($c) => $c['method'] === 'drawText'),
         );
         $this->assertContains('Health', $texts, 'the tooltip heading (first line) is drawn');
+    }
+
+    public function testLabelRightAlignAnchorsTextAtTheRightEdge(): void
+    {
+        $label = new Label('X');
+        $label->align = 'right';
+        $label->setBounds(new Rect(10.0, 0.0, 100.0, 20.0));
+        $label->draw($this->renderer, $this->style);
+
+        $draw = array_values(array_filter($this->renderer->calls, fn ($c) => $c['method'] === 'drawText'))[0];
+        // (text, x, y, size, color): right-aligned text anchors at the bounds' right edge.
+        $this->assertEqualsWithDelta(110.0, $draw['args'][1], 0.01);
+    }
+
+    public function testHBoxCrossAlignCentersShorterChildren(): void
+    {
+        $hbox = new HBox();
+        $hbox->crossAlign = 'center';
+        $short = new Label('a');
+        $short->sizing = Sizing::fixed(20, 10);
+        $tall = new Label('b');
+        $tall->sizing = Sizing::fixed(20, 40);
+        $hbox->addChild($short);
+        $hbox->addChild($tall);
+
+        $hbox->measure(200.0, 100.0, $this->style);
+        $hbox->setBounds(new Rect(0.0, 0.0, 200.0, 40.0));
+        $hbox->layout($this->style);
+
+        // The 10-tall child centers in the 40-tall row; the 40-tall child stays at the top.
+        $this->assertEqualsWithDelta(15.0, $short->getBounds()->y, 0.5);
+        $this->assertEqualsWithDelta(0.0, $tall->getBounds()->y, 0.5);
     }
 
     public function testHoveringControlSuppressesInput(): void

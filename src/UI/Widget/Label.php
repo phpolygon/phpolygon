@@ -34,6 +34,14 @@ class Label extends Widget
      */
     public ?string $font = null;
 
+    /**
+     * Horizontal text alignment within the label's bounds: 'left' (default),
+     * 'right', or 'center'. Give a value column a fixed width and 'right' so
+     * every row's value lines up flush at the same edge. Applies to the
+     * single-line path (wrapped text stays left-aligned).
+     */
+    public string $align = 'left';
+
     public function __construct(string $text = '')
     {
         parent::__construct();
@@ -115,7 +123,13 @@ class Label extends Widget
                 $y += $step;
             }
         } else {
-            $renderer->drawText($this->text, $x, $y, $fs, $color);
+            [$hAlign, $tx] = match ($this->align) {
+                'right'  => [TextAlign::RIGHT, $this->bounds->x + $this->bounds->width - $this->padding->right],
+                'center' => [TextAlign::CENTER, $this->bounds->x + $this->bounds->width / 2.0],
+                default  => [TextAlign::LEFT, $x],
+            };
+            $renderer->setTextAlign($hAlign | TextAlign::TOP);
+            $renderer->drawText($this->text, $tx, $y, $fs, $color);
         }
 
         if ($this->font !== null) {

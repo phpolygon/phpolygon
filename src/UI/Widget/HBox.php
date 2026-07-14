@@ -15,6 +15,13 @@ class HBox extends Widget
 {
     public float $spacing = 4.0;
 
+    /**
+     * Vertical alignment of children within the row: 'top' (default), 'center'
+     * or 'bottom'. Use 'center' to line up items of different heights — e.g. a
+     * short text label next to a taller progress bar.
+     */
+    public string $crossAlign = 'top';
+
     public function __construct(float $spacing = 4.0)
     {
         parent::__construct();
@@ -106,7 +113,11 @@ class HBox extends Widget
                 : $child->getMeasuredHeight();
 
             $childX = $x + $child->margin->left;
-            $childY = $content->y + $child->margin->top;
+            $childY = match ($this->crossAlign) {
+                'center' => $content->y + max(0.0, ($content->height - $childH) / 2.0),
+                'bottom' => $content->y + $content->height - $childH - $child->margin->bottom,
+                default  => $content->y + $child->margin->top,
+            };
 
             $child->setBounds(new Rect($childX, $childY, $childW, $childH));
             $child->layout($style);
