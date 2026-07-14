@@ -70,6 +70,13 @@ class BarChart extends Widget
     /** Fill colour for the second series (the first uses the style accent). */
     public Color $barColor2;
 
+    /**
+     * Headroom applied to the AUTO-detected maximum so the tallest bar stops
+     * short of the plot ceiling instead of touching it (which reads as clipped).
+     * Ignored when {@see $maxValue} is set explicitly.
+     */
+    private const AUTO_HEADROOM = 1.12;
+
     public function __construct()
     {
         parent::__construct();
@@ -175,7 +182,8 @@ class BarChart extends Widget
             }
         }
 
-        return $max;
+        // Top headroom so the tallest auto-scaled bar stops short of the ceiling.
+        return $max * self::AUTO_HEADROOM;
     }
 
     /**
