@@ -179,6 +179,31 @@ final class WidgetSerializer
     }
 
     /**
+     * Reflection is memoized per class because deserialization is a hot path, not
+     * a one-off: a Repeater re-expands its template once per item per frame, so a
+     * list of N rows re-enters this code N x (widgets per row) times every frame.
+     * The shape of a class cannot change at runtime, so caching it is free.
+     *
+     * @var array<class-string<Widget>, list<ReflectionProperty>>
+     */
+    private static array $propertyCache = [];
+
+    /** @var array<class-string<Widget>, ReflectionClass<Widget>> */
+    private static array $classCache = [];
+
+    /** @var array<class-string<Widget>, bool> True when the ctor takes no required args. */
+    private static array $ctorlessCache = [];
+
+    /**
+     * @param class-string<Widget> $class
+     * @return ReflectionClass<Widget>
+     */
+    private function reflect(string $class): ReflectionClass
+    {
+        return self::$classCache[$class] ??= new ReflectionClass($class);
+    }
+
+    /**
      * Public, non-static, non-transient properties of a widget class.
      *
      * @param class-string<Widget> $class
@@ -186,8 +211,12 @@ final class WidgetSerializer
      */
     private function persistentProperties(string $class): array
     {
+        if (isset(self::$propertyCache[$class])) {
+            return self::$propertyCache[$class];
+        }
+
         $props = [];
-        foreach ((new ReflectionClass($class))->getProperties(ReflectionProperty::IS_PUBLIC) as $prop) {
+        foreach ($this->reflect($class)->getProperties(ReflectionProperty::IS_PUBLIC) as $prop) {
             $name = $prop->getName();
             if ($prop->isStatic()
                 || in_array($name, self::TRANSIENT, true)
@@ -198,7 +227,7 @@ final class WidgetSerializer
             $props[] = $prop;
         }
 
-        return $props;
+        return self::$propertyCache[$class] = $props;
     }
 
     /**
@@ -206,10 +235,14 @@ final class WidgetSerializer
      */
     private function instantiate(string $class): Widget
     {
-        $ref = new ReflectionClass($class);
+        $ref = $this->reflect($class);
+
         // Prefer the real constructor so transient state (bounds, sizing,
         // padding, margin) is initialized; fall back for arg-requiring types.
-        if (($ref->getConstructor()?->getNumberOfRequiredParameters() ?? 0) === 0) {
+        $ctorless = self::$ctorlessCache[$class]
+            ??= ($ref->getConstructor()?->getNumberOfRequiredParameters() ?? 0) === 0;
+
+        if ($ctorless) {
             /** @var Widget */
             return $ref->newInstance();
         }
