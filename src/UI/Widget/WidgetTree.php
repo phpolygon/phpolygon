@@ -6,7 +6,9 @@ namespace PHPolygon\UI\Widget;
 
 use PHPolygon\Math\Rect;
 use PHPolygon\Math\Vec2;
+use PHPolygon\Rendering\Color;
 use PHPolygon\Rendering\Renderer2DInterface;
+use PHPolygon\Rendering\TextAlign;
 use PHPolygon\Runtime\InputInterface;
 use PHPolygon\UI\UIStyle;
 
@@ -227,6 +229,53 @@ class WidgetTree
     {
         $this->renderer->setFont($this->style->fontName);
         $this->root->draw($this->renderer, $this->style);
+        $this->drawTooltip();
+    }
+
+    /**
+     * Render the hovered widget's tooltip (if any) as a word-wrapped box near the
+     * cursor, clamped to the viewport. Drawn after the tree — so it floats above
+     * everything, including a ScrollView's clipped content — with the first line
+     * shown as a heading.
+     */
+    private function drawTooltip(): void
+    {
+        $text = $this->hoveredWidget !== null ? $this->hoveredWidget->tooltip : '';
+        if ($text === '') {
+            return;
+        }
+
+        $r = $this->renderer;
+        $r->setFont($this->style->fontName);
+
+        $fontSize = 13.0;
+        $pad = 8.0;
+        $boxW = 270.0;
+        $inner = $boxW - $pad * 2.0;
+
+        // Split heading (first line) from the body so the heading can stand out.
+        $nl = strpos($text, "\n");
+        $heading = $nl === false ? $text : substr($text, 0, $nl);
+        $body = $nl === false ? '' : substr($text, $nl + 1);
+
+        $headingH = $fontSize + 6.0;
+        $bodyH = $body !== '' ? $r->measureTextBox($body, $inner, $fontSize)->height : 0.0;
+        $boxH = $pad * 2.0 + $headingH + $bodyH;
+
+        $mouse = $this->input->getMousePosition();
+        $tx = min($mouse->x + 16.0, $this->viewportWidth - $boxW - 8.0);
+        $ty = min($mouse->y + 18.0, $this->viewportHeight - $boxH - 8.0);
+        $tx = max(8.0, $tx);
+        $ty = max(8.0, $ty);
+
+        $r->drawRoundedRect($tx, $ty, $boxW, $boxH, 6.0, new Color(0.04, 0.07, 0.06, 0.98));
+
+        $r->setTextAlign(TextAlign::LEFT | TextAlign::TOP);
+        $r->drawText($heading, $tx + $pad, $ty + $pad, $fontSize, $this->style->accentColor);
+        if ($body !== '') {
+            $r->setTextAlign(TextAlign::LEFT | TextAlign::TOP);
+            $r->drawTextBox($body, $tx + $pad, $ty + $pad + $headingH, $inner, $fontSize, $this->style->textColor);
+        }
     }
 
     // ── Internals ────────────────────────────────────────────────

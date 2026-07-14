@@ -42,6 +42,13 @@ abstract class Widget
     public ?UIStyle $styleOverride = null;
 
     /**
+     * Optional hover tooltip. When non-empty, {@see WidgetTree} renders it near
+     * the cursor while this widget is hovered (word-wrapped, first line as a
+     * heading). Bind it per element (e.g. a metric label) to explain a value.
+     */
+    public string $tooltip = '';
+
+    /**
      * Editor-authored value bindings: widget property name => context path.
      * Resolved by {@see WidgetBinder} against a {@see WidgetContext}; two-way for
      * input widgets. Not persisted as a literal — the serializer emits each as

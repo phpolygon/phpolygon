@@ -333,6 +333,26 @@ class WidgetTreeTest extends TestCase
         $this->assertFalse($card->hovered, 'card highlight clears when the pointer leaves');
     }
 
+    public function testHoveredWidgetTooltipRendersNearCursor(): void
+    {
+        $root = new VBox();
+        $label = new Label('Health');
+        $label->tooltip = "Health\nExplains the health metric";
+        $label->sizing = Sizing::fixed(120, 30);
+        $root->addChild($label);
+
+        $this->input->handleCursorPosEvent(20.0, 15.0);
+        $this->tree($root)->update();
+
+        $rects = array_filter($this->renderer->calls, fn ($c) => $c['method'] === 'drawRoundedRect');
+        $this->assertNotEmpty($rects, 'a tooltip box is drawn while hovering a widget with a tooltip');
+        $texts = array_map(
+            fn ($c) => $c['args'][0],
+            array_filter($this->renderer->calls, fn ($c) => $c['method'] === 'drawText'),
+        );
+        $this->assertContains('Health', $texts, 'the tooltip heading (first line) is drawn');
+    }
+
     public function testHoveringControlSuppressesInput(): void
     {
         $root = new VBox();
