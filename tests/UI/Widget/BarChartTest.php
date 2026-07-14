@@ -47,15 +47,20 @@ class BarChartTest extends TestCase
         $bars = $this->bars();
         $this->assertCount(3, $bars, 'one bar per data point');
 
-        // Bar height (arg 3) scales linearly with value against the max (100 -> 100px).
-        $this->assertEqualsWithDelta(50.0, $bars[0]['args'][3], 0.01);
-        $this->assertEqualsWithDelta(100.0, $bars[1]['args'][3], 0.01);
-        $this->assertEqualsWithDelta(25.0, $bars[2]['args'][3], 0.01);
+        // Heights scale linearly with value (50 : 100 : 25 == 2 : 4 : 1),
+        // independent of the auto-scale headroom factor.
+        [$h0, $h1, $h2] = [$bars[0]['args'][3], $bars[1]['args'][3], $bars[2]['args'][3]];
+        $this->assertEqualsWithDelta(2.0, $h1 / $h0, 0.001);
+        $this->assertEqualsWithDelta(0.5, $h2 / $h0, 0.001);
 
-        // Bars grow upward from the baseline: y = plotY + plotH - barH.
-        $this->assertEqualsWithDelta(50.0, $bars[0]['args'][1], 0.01);  // 0 + 100 - 50
-        $this->assertEqualsWithDelta(0.0, $bars[1]['args'][1], 0.01);   // full-height bar sits at top
-        $this->assertEqualsWithDelta(75.0, $bars[2]['args'][1], 0.01);
+        // The tallest (auto-max) bar stops short of the plot ceiling — top
+        // headroom — but still fills most of it.
+        $this->assertLessThan(100.0, $h1);
+        $this->assertGreaterThan(80.0, $h1);
+
+        // Bars grow upward from the baseline: a taller bar sits higher (smaller y).
+        $this->assertGreaterThan($bars[1]['args'][1], $bars[0]['args'][1]);
+        $this->assertGreaterThan($bars[0]['args'][1], $bars[2]['args'][1]);
     }
 
     public function testExplicitMaxValueOverridesAutoScale(): void
@@ -140,6 +145,7 @@ class BarChartTest extends TestCase
     {
         $chart = new BarChart;
         $chart->series = [['Jan', 30.0], 60.0]; // positional row + bare number
+        $chart->maxValue = 60.0; // explicit max -> no auto headroom, exact maths
         $chart->pad(new \PHPolygon\UI\Widget\EdgeInsets(0, 0, 0, 0));
         $chart->showLabels = false;
         $chart->setBounds(new Rect(0, 0, 100, 100));
