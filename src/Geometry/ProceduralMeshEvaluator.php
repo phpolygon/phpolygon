@@ -89,11 +89,15 @@ final class ProceduralMeshEvaluator
         $rawInputs = is_array($node['inputs'] ?? null) ? $node['inputs'] : [];
         foreach ($rawInputs as $slot => $sourceId) {
             if (is_string($sourceId)) {
-                $inputs[$slot] = $this->evalNode($sourceId, $byId, $cache, $visiting);
+                $inputs[(string) $slot] = $this->evalNode($sourceId, $byId, $cache, $visiting);
             }
         }
 
-        $params = is_array($node['params'] ?? null) ? $node['params'] : [];
+        $params = [];
+        $rawParams = is_array($node['params'] ?? null) ? $node['params'] : [];
+        foreach ($rawParams as $key => $value) {
+            $params[(string) $key] = $value;
+        }
         $type = is_string($node['type'] ?? null) ? $node['type'] : '';
 
         $mesh = $this->build($type, $id, $params, $inputs);

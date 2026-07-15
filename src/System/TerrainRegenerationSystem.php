@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace PHPolygon\System;
 
 use PHPolygon\ECS\AbstractSystem;
+use PHPolygon\ECS\ComponentInterface;
 use PHPolygon\ECS\Serializer\AttributeSerializer;
 use PHPolygon\ECS\World;
 use PHPolygon\Terrain\RegenerableTerrain;
@@ -33,7 +34,7 @@ use PHPolygon\Terrain\RegenerableTerrain;
  */
 final class TerrainRegenerationSystem extends AbstractSystem
 {
-    /** @var list<class-string> */
+    /** @var list<class-string<ComponentInterface>> */
     private array $terrainClasses;
 
     private float $debounceSeconds;
@@ -50,14 +51,14 @@ final class TerrainRegenerationSystem extends AbstractSystem
     private array $stableFor = [];
 
     /**
-     * @param list<class-string> $terrainClasses Concrete components implementing RegenerableTerrain.
+     * @param list<class-string<ComponentInterface>> $terrainClasses Concrete components implementing RegenerableTerrain.
      */
     public function __construct(
         array $terrainClasses,
         float $debounceSeconds = 0.15,
         ?AttributeSerializer $serializer = null,
     ) {
-        $this->terrainClasses = array_values($terrainClasses);
+        $this->terrainClasses = $terrainClasses;
         $this->debounceSeconds = $debounceSeconds;
         $this->serializer = $serializer ?? new AttributeSerializer();
     }
