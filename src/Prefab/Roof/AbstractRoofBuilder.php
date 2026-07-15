@@ -6,6 +6,8 @@ namespace PHPolygon\Prefab\Roof;
 
 use PHPolygon\Component\MeshRenderer;
 use PHPolygon\Component\Transform3D;
+use PHPolygon\Geometry\MeshRegistry;
+use PHPolygon\Geometry\WedgeMesh;
 use PHPolygon\Math\Quaternion;
 use PHPolygon\Math\Vec3;
 use PHPolygon\Scene\SceneBuilder;
@@ -162,6 +164,13 @@ abstract class AbstractRoofBuilder
         float $frontSpan,
         float $backSpan,
     ): void {
+        // Self-contained: register the wedge primitive this builder relies on,
+        // so a scene using roofs doesn't have to pre-register it (previously it
+        // only worked if another scene happened to register it first).
+        if (! MeshRegistry::has('wedge_right_neg')) {
+            MeshRegistry::register('wedge_right_neg', WedgeMesh::generate(-1.0));
+        }
+
         // Two right-triangle wedges: each matches the exact slope of its roof panel.
         // Front half: peak at ridge (Z=0), base at front eave (Z=+frontSpan).
         //   Uses wedge_right_neg (peak at Z=-1 → after scale, peak at Z=0 edge).
