@@ -70,6 +70,12 @@ RUN set -eux; \
     printf '#!/usr/bin/env bash\nexec /opt/steamcmd/steamcmd.sh "$@"\n' > /usr/local/bin/steamcmd; \
     chmod +x /usr/local/bin/steamcmd
 
+# steamcmd aborts at startup ("Unable to determine CPU Frequency" / SPEW_ABORT)
+# when the CPU clock is unreadable - which is the case whenever this amd64 image
+# runs emulated (e.g. Apple Silicon / QEMU). A CPU_MHZ value lets it start; the
+# figure is cosmetic. Override at runtime with `docker run -e CPU_MHZ=...`.
+ENV CPU_MHZ=3500
+
 # PHPolygon's PharBuilder needs phar.readonly off; the build script also passes
 # `-d phar.readonly=0`, this is just a belt-and-braces default.
 RUN echo "phar.readonly=0" > /usr/local/etc/php/conf.d/zz-phar.ini
