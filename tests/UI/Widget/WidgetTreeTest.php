@@ -482,6 +482,34 @@ class WidgetTreeTest extends TestCase
         $this->assertEquals('Hi', $ti->text);
     }
 
+    public function testFocusReadoptedFromWidgetStateAcrossRebuiltTrees(): void
+    {
+        // The data-bound host rebuilds a fresh WidgetTree every frame around a
+        // cached root, so each tree starts with focusedWidget === null. Focus
+        // lives on the widget instance (->focused) and must be re-adopted, or
+        // keyboard input only lands on the exact frame the field is clicked.
+        $root = new VBox();
+        $ti = (new TextInput('', ''))->size(Sizing::fixed(200, 30));
+        $root->addChild($ti);
+
+        // Simulate: focused on a previous frame (cached widget carries ->focused),
+        // but this frame's tree is brand new and never received the click.
+        $ti->focused = true;
+
+        $tree = $this->tree($root);
+        $tree->performLayout();
+
+        $this->input->handleCharEvent(72);  // H
+        $this->input->handleCharEvent(105); // i
+        $tree->processInput();
+
+        // Re-adopted → keystrokes land, and the focus suppresses game input so
+        // global hotkeys can't eat the typed characters.
+        $this->assertSame($ti, $tree->getFocusedWidget());
+        $this->assertEquals('Hi', $ti->text);
+        $this->assertTrue($this->input->isSuppressed());
+    }
+
     public function testInputSuppressedWhenHovering(): void
     {
         $root = new VBox();

@@ -157,6 +157,16 @@ class WidgetTree
         // was hovered on an earlier frame — leaving it stuck "hovered" (filled).
         $this->clearInteractionFlags($this->root);
 
+        // Re-adopt text-field focus from the persistent widget state. The same
+        // rebuild-every-frame host starts each tree with focusedWidget === null,
+        // but a focused TextInput carries ->focused on the cached instance. Without
+        // this, keyboard input (below) and the focus-based input suppression only
+        // fire on the exact frame the field is clicked — so typing appears dead and
+        // game hotkeys leak through while a field is focused.
+        if ($this->focusedWidget === null) {
+            $this->focusedWidget = $this->findFocusedTextInput($this->root);
+        }
+
         $mouse = $this->input->getMousePosition();
 
         // An open dropdown's option list floats above the tree in BOTH draw and
@@ -343,6 +353,26 @@ class WidgetTree
         foreach ($widget->getChildren() as $child) {
             $this->clearInteractionFlags($child);
         }
+    }
+
+    /**
+     * Find the focused TextInput in the tree, if any. Focus lives on the widget
+     * instance (->focused), which survives a host that rebuilds the tree every
+     * frame around a cached root; this re-derives the tree's focusedWidget from
+     * that persistent state. Returns the first match in pre-order.
+     */
+    private function findFocusedTextInput(Widget $widget): ?TextInput
+    {
+        if ($widget instanceof TextInput && $widget->focused) {
+            return $widget;
+        }
+        foreach ($widget->getChildren() as $child) {
+            $found = $this->findFocusedTextInput($child);
+            if ($found !== null) {
+                return $found;
+            }
+        }
+        return null;
     }
 
     private function updateHover(?Widget $hit): void
