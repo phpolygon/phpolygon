@@ -762,6 +762,7 @@ static inline float3 dispatchSurfacePattern(int code, float2 uv) {
 // tone-map, gamma encode, vignette. Keeps the four exits in lock-step
 // with the GLSL `finalize()` helper.
 struct LightingUBO; // forward declared above
+static inline float3 toneMapACES(float3 x); // defined below; finalizeColor uses it first
 static inline float3 finalizeColor(float3 color, constant LightingUBO& light, float2 fragCoord) {
     color = applyColorGrading(max(color, float3(0.0)),
                               float3(light.grade_lift),
