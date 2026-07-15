@@ -11,7 +11,7 @@ use Metal\RenderPipelineDescriptor;
 use Metal\RenderPipelineState;
 use Metal\SamplerDescriptor;
 use Metal\SamplerState;
-use Metal\ShaderFunction;
+use Metal\MetalFunction;
 use Metal\Texture;
 
 /**
@@ -143,7 +143,7 @@ final class MetalFxaaPass
         $this->initialised = true;
     }
 
-    private function buildPipeline(Library $library, ShaderFunction $vertexFn, ShaderFunction $fragmentFn): RenderPipelineState
+    private function buildPipeline(Library $library, MetalFunction $vertexFn, MetalFunction $fragmentFn): RenderPipelineState
     {
         // The library reference is only kept for the duration of pipeline
         // creation; Metal retains the underlying functions internally.

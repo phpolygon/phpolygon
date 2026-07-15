@@ -19,10 +19,11 @@ vertex VS_OUT vertex_fxaa(uint vid [[vertex_id]])
     float2 ndc = float2(vid == 1 ? 3.0 : -1.0,
                         vid == 2 ? 3.0 : -1.0);
     o.position = float4(ndc, 0.0, 1.0);
-    // Metal Y-up matches OpenGL: NDC->UV with (ndc+1)/2 sets v=0 at the
-    // bottom of the texture. Our offscreen colour texture is rendered with
-    // Metal Y-up too (no flip in uploadFrameUbo()), so this UV is correct.
-    o.uv = (ndc + 1.0) * 0.5;
+    // Metal textures use a top-left origin (v=0 is the TOP row), so the
+    // offscreen colour texture's first row sits at v=0. NDC y=+1 is the top
+    // of the drawable, so v must be flipped relative to ndc.y — otherwise the
+    // presented image is vertically mirrored.
+    o.uv = float2((ndc.x + 1.0) * 0.5, (1.0 - ndc.y) * 0.5);
     return o;
 }
 
