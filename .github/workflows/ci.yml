@@ -67,16 +67,59 @@ jobs:
           cd php-glfw
           sudo phpize
           ./configure --enable-glfw
-          make -j$(nproc)
+          make -j"$(nproc)"
           sudo make install
           cd ..
-          echo 'extension=glfw.so' | sudo tee -a $(php -r "echo php_ini_loaded_file();")
+          echo 'extension=glfw.so' | sudo tee -a "$(php -r 'echo php_ini_loaded_file();')"
 
       - name: Install Composer dependencies
         run: composer install --no-interaction --ignore-platform-reqs
 
       - name: Run PHPUnit with GPU (exclude font VRT)
         run: xvfb-run --auto-servernum vendor/bin/phpunit --exclude-group font-vrt
+
+  gl-matrix:
+    name: OpenGL version matrix (Mesa 3.0-4.6)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.5'
+          extensions: gd, mbstring, dom, xml
+          coverage: none
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential cmake \
+            libglfw3-dev xvfb xauth \
+            libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev \
+            libgl1-mesa-dri mesa-utils
+
+      - name: Build php-glfw
+        run: |
+          git clone https://github.com/mario-deluna/php-glfw
+          cd php-glfw
+          sudo phpize
+          ./configure --enable-glfw
+          make -j"$(nproc)"
+          sudo make install
+          cd ..
+          echo 'extension=glfw.so' | sudo tee -a "$(php -r 'echo php_ini_loaded_file();')"
+
+      - name: Install Composer dependencies
+        run: composer install --no-interaction --ignore-platform-reqs
+
+      - name: Run OpenGL version matrix (forced GL 3.0/3.1/3.3/4.1/4.6 via Mesa)
+        env:
+          LIBGL_ALWAYS_SOFTWARE: '1'
+          GALLIUM_DRIVER: llvmpipe
+        run: sh .docker/gl-matrix.sh
 
   shaders:
     name: Shader validation
@@ -126,10 +169,10 @@ jobs:
           cd php-glfw
           sudo phpize
           ./configure --enable-glfw
-          make -j$(nproc)
+          make -j"$(nproc)"
           sudo make install
           cd ..
-          echo 'extension=glfw.so' | sudo tee -a $(php -r "echo php_ini_loaded_file();")
+          echo 'extension=glfw.so' | sudo tee -a "$(php -r 'echo php_ini_loaded_file();')"
 
       - name: Install Composer dependencies
         run: composer install --no-interaction --ignore-platform-reqs
