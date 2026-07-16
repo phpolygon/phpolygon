@@ -68,6 +68,24 @@ public function testPhpDistrictBuildsCorrectly(): void
 Pixel-level VRT for 3D scenes (OpenGL framebuffer capture) is performed
 locally, not in CI headless mode.
 
+### OpenGL version matrix (Docker + Mesa)
+
+The standalone php-glfw OpenGL backend is exercised across every GL version
+(3.0 → 4.6) without a GPU using Mesa's `llvmpipe` software rasteriser under
+Xvfb, with `MESA_GL_VERSION_OVERRIDE` forcing the reported version per rung.
+This validates context creation, GLSL `#version` injection (150 core / 140 /
+130), shader compilation and rendering (plain + instanced) at each version —
+the CI-friendly substitute for real old-hardware testing. See
+`.docker/README.md` (`gl.Dockerfile` + `gl-matrix.sh` + `gl-harness.php`):
+
+```sh
+docker build -f .docker/gl.Dockerfile -t phpolygon-gl .
+docker run --rm -v "$(pwd)":/app -w /app phpolygon-gl .docker/gl-matrix.sh
+```
+
+Mesa's stricter GLSL compiler also catches shader portability bugs that lenient
+GPU drivers silently accept (e.g. call-before-definition).
+
 ---
 
 ## VRT workflow (Playwright-style, 2D)

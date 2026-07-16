@@ -1390,6 +1390,21 @@ class OpenGLRenderer3D implements Renderer3DInterface
         return $this->caps;
     }
 
+    /**
+     * Force-compile a registered shader now (normally shaders compile lazily on
+     * first use). Throws on compile/link failure. Used by tooling — e.g. the
+     * GL version-matrix harness — to verify every built-in shader compiles at
+     * the injected #version on a given GL context.
+     */
+    public function warmCompileShader(string $shaderId): void
+    {
+        $definition = ShaderRegistry::get($shaderId);
+        if ($definition === null) {
+            throw new \RuntimeException("Shader '{$shaderId}' is not registered");
+        }
+        $this->compileShader($shaderId, $definition);
+    }
+
     private function getUniformLocation(string $name): int
     {
         $program = $this->activeProgram;
