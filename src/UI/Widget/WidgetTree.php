@@ -169,6 +169,12 @@ class WidgetTree
 
         $mouse = $this->input->getMousePosition();
 
+        // Clamp every open dropdown's floating list to the viewport so a long
+        // option set becomes a scrollable window rather than running off the
+        // bottom of the screen. Must run before hit-testing the list below, since
+        // listBounds() depends on the clamp.
+        $this->clampOpenDropdownLists($this->root);
+
         // An open dropdown's option list floats above the tree in BOTH draw and
         // input: a point inside the expanded list belongs to the dropdown, not
         // whatever sibling (a ScrollView, a card list) happens to sit beneath it.
@@ -183,9 +189,14 @@ class WidgetTree
         if ($listDropdown !== null) {
             // Release selects the option under the cursor. Press is swallowed so
             // it neither toggles the list shut (the field's job) nor reaches the
-            // sibling below; the scroll wheel is consumed for the same reason.
+            // sibling below. The wheel scrolls the floating list (and is consumed
+            // so it doesn't also scroll a ScrollView beneath it).
             if ($this->input->isMouseButtonReleased(0)) {
                 $this->selectDropdownOption($listDropdown, $mouse);
+            }
+            $scrollDelta = $this->input->getScrollY();
+            if (abs($scrollDelta) > 0.01) {
+                $listDropdown->scrollListBy(-$scrollDelta * 30.0);
             }
             $this->input->suppress();
             return;
@@ -455,6 +466,10 @@ class WidgetTree
         // Dropdown
         if ($hit instanceof Dropdown) {
             $hit->open = !$hit->open;
+            if ($hit->open) {
+                // Reopen at the top of the list, not wherever it was last scrolled.
+                $hit->listScrollY = 0.0;
+            }
         }
 
         // TabView — clicking a tab in the bar switches the active child.
@@ -539,6 +554,20 @@ class WidgetTree
             $current = $current->getParent();
         }
         return null;
+    }
+
+    /**
+     * Clamp every open dropdown's floating list to the viewport height so a long
+     * option set scrolls within a bounded window instead of overflowing offscreen.
+     */
+    private function clampOpenDropdownLists(Widget $widget): void
+    {
+        if ($widget instanceof Dropdown && $widget->open) {
+            $widget->clampListToViewport($this->viewportHeight);
+        }
+        foreach ($widget->getChildren() as $child) {
+            $this->clampOpenDropdownLists($child);
+        }
     }
 
     /**

@@ -85,13 +85,13 @@ class DropdownOverlayTest extends TestCase
     }
 
     /** @return array{0: WidgetTree, 1: Input, 2: Dropdown} */
-    private function interactiveTree(Dropdown $dd): array
+    private function interactiveTree(Dropdown $dd, float $viewportHeight = 600.0): array
     {
         $input = new Input();
         $root = new VBox();
         $root->addChild($dd);                  // filter row
         $root->addChild(new Label('CONTENT')); // sibling the open list overlaps
-        $tree = new WidgetTree($root, new WidgetTestHelper(), $input, 800, 600, UIStyle::dark());
+        $tree = new WidgetTree($root, new WidgetTestHelper(), $input, 800, $viewportHeight, UIStyle::dark());
         $tree->performLayout();
         return [$tree, $input, $dd];
     }
@@ -140,5 +140,48 @@ class DropdownOverlayTest extends TestCase
         $tree->processInput();
 
         $this->assertFalse($dd->open, 'clicking outside dismisses the open dropdown');
+    }
+
+    /** A tall option list is clamped to the viewport and scrolls instead of overflowing. */
+    public function testLongListIsClampedAndScrolls(): void
+    {
+        $options = [];
+        for ($i = 0; $i < 60; $i++) {
+            $options[] = 'Employee ' . $i;
+        }
+        $dd = new Dropdown('', $options, 0);
+        $dd->open = true;
+        // 200px-tall viewport: the 60-row list can't possibly fit, so it must clamp.
+        [$tree, $input] = $this->interactiveTree($dd, 200);
+
+        // processInput() runs the per-frame viewport clamp.
+        $input->handleCursorPosEvent(700.0, 190.0); // clear of field and list
+        $tree->processInput();
+
+        $bounds = $dd->listBounds();
+        $this->assertNotNull($bounds);
+        $this->assertLessThanOrEqual(200.0, $bounds->y + $bounds->height, 'clamped list must fit the viewport');
+        $this->assertGreaterThan(0.0, $dd->maxListScroll(), 'a clamped-away list must be scrollable');
+    }
+
+    public function testWheelScrollsTheOpenList(): void
+    {
+        $options = [];
+        for ($i = 0; $i < 60; $i++) {
+            $options[] = 'Employee ' . $i;
+        }
+        $dd = new Dropdown('', $options, 0);
+        $dd->open = true;
+        [$tree, $input] = $this->interactiveTree($dd, 200);
+
+        // Point the cursor into the open list, then scroll the wheel down.
+        $list = $dd->listBounds();
+        $this->assertNotNull($list);
+        $input->handleCursorPosEvent($list->x + 4.0, $list->y + 4.0);
+        $input->handleScrollEvent(0.0, -3.0); // wheel down
+        $tree->processInput();
+
+        $this->assertGreaterThan(0.0, $dd->listScrollY, 'the wheel must scroll the open list down');
+        $this->assertLessThanOrEqual($dd->maxListScroll(), $dd->listScrollY, 'scroll stays within range');
     }
 }

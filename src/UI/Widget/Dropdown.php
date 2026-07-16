@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace PHPolygon\UI\Widget;
 
+use PHPolygon\Math\Rect;
 use PHPolygon\Rendering\Renderer2DInterface;
 use PHPolygon\Rendering\TextAlign;
 use PHPolygon\UI\UIStyle;
@@ -15,6 +16,29 @@ class Dropdown extends Widget
     public array $options;
     public int $selectedIndex;
     public bool $open = false;
+
+    /**
+     * Scroll offset of the open option list, in pixels. A list taller than its
+     * clamped viewport window ({@see $maxListHeight}) scrolls instead of running
+     * off the bottom of the screen.
+     */
+    public float $listScrollY = 0.0;
+
+    /**
+     * Upper bound (px) on the open list's on-screen height, so it never spills
+     * past the viewport. 0 = unbounded (the list draws its full height). Set each
+     * frame by {@see clampListToViewport()} from the host's viewport height.
+     */
+    public float $maxListHeight = 0.0;
+
+    /**
+     * The style the widget was last measured/drawn with. Hit-test geometry
+     * ({@see getOptionRect}, {@see listBounds}) has no style argument, so it reads
+     * this to stay pixel-identical to what {@see drawOpenList} rendered — using a
+     * hard-coded fallback here would desync clickable rows from drawn rows when
+     * the host theme's font size differs from the default.
+     */
+    private ?UIStyle $lastStyle = null;
 
     /**
      * @param list<string> $options
@@ -36,6 +60,7 @@ class Dropdown extends Widget
     public function measure(float $availableWidth, float $availableHeight, UIStyle $style): void
     {
         $style = $this->resolveStyle($style);
+        $this->lastStyle = $style;
         $labelH = $this->label !== '' ? $style->fontSize + 4.0 : 0.0;
         $rowH = $style->fontSize + $this->padding->vertical();
 
@@ -57,6 +82,7 @@ class Dropdown extends Widget
     public function draw(Renderer2DInterface $renderer, UIStyle $style): void
     {
         $style = $this->resolveStyle($style);
+        $this->lastStyle = $style;
         $b = $this->bounds;
 
         $labelH = $this->label !== '' ? $style->fontSize + 4.0 : 0.0;
@@ -95,6 +121,10 @@ class Dropdown extends Widget
      * Draw the expanded option list. Called by {@see WidgetTree} in a top-most
      * overlay pass (after the whole tree) so the list is never covered by later
      * siblings. No-op unless the dropdown is open.
+     *
+     * The list is clamped to {@see $maxListHeight} and clipped to that window;
+     * a taller option set scrolls (via {@see $listScrollY}) with a scrollbar,
+     * rather than running off the bottom of the screen unreachably.
      */
     public function drawOpenList(Renderer2DInterface $renderer, UIStyle $style): void
     {
@@ -103,67 +133,148 @@ class Dropdown extends Widget
         }
 
         $style = $this->resolveStyle($style);
+        $this->lastStyle = $style;
         $b = $this->bounds;
-
-        $labelH = $this->label !== '' ? $style->fontSize + 4.0 : 0.0;
-        $fieldY = $b->y + $labelH;
-        $fieldH = $b->height - $labelH;
 
         $renderer->setTextAlign(TextAlign::LEFT | TextAlign::TOP);
 
-        $listY = $fieldY + $fieldH + 2.0;
-        $rowH = $style->fontSize + $this->padding->vertical();
-        $listH = $rowH * count($this->options);
+        $listY = $this->listTopY();
+        $rowH = $this->rowHeight();
+        $visibleH = $this->visibleListHeight();
 
-        $renderer->drawRoundedRect($b->x, $listY, $b->width, $listH, $style->borderRadius, $style->backgroundColor);
-        $renderer->drawRectOutline($b->x, $listY, $b->width, $listH, $style->borderColor, $style->borderWidth);
+        $renderer->drawRoundedRect($b->x, $listY, $b->width, $visibleH, $style->borderRadius, $style->backgroundColor);
+        $renderer->drawRectOutline($b->x, $listY, $b->width, $visibleH, $style->borderColor, $style->borderWidth);
 
-        foreach ($this->options as $i => $opt) {
-            $optY = $listY + $i * $rowH;
-            if ($i === $this->selectedIndex) {
-                $renderer->drawRect($b->x + 1.0, $optY, $b->width - 2.0, $rowH, $style->accentColor->withAlpha(0.3));
+        // Clip to the visible window so scrolled-away rows never bleed past it.
+        $renderer->pushScissor($b->x, $listY, $b->width, $visibleH);
+        try {
+            foreach ($this->options as $i => $opt) {
+                $optY = $listY + $i * $rowH - $this->listScrollY;
+                if ($optY + $rowH < $listY || $optY > $listY + $visibleH) {
+                    continue; // fully outside the clip window — skip
+                }
+                if ($i === $this->selectedIndex) {
+                    $renderer->drawRect($b->x + 1.0, $optY, $b->width - 2.0, $rowH, $style->accentColor->withAlpha(0.3));
+                }
+                $renderer->drawText($opt, $b->x + $this->padding->left, $optY + $this->padding->top, $style->fontSize, $style->textColor);
             }
-            $renderer->drawText($opt, $b->x + $this->padding->left, $optY + $this->padding->top, $style->fontSize, $style->textColor);
+        } finally {
+            $renderer->popScissor();
+        }
+
+        if ($this->maxListScroll() > 0.0) {
+            $this->drawListScrollBar($renderer, $style, $listY, $visibleH);
         }
     }
 
+    private function drawListScrollBar(Renderer2DInterface $renderer, UIStyle $style, float $listY, float $visibleH): void
+    {
+        $full = $this->fullListHeight();
+        $barW = 6.0;
+        $barH = max(20.0, $visibleH * ($visibleH / $full));
+        $maxScroll = $this->maxListScroll();
+        $barY = $listY + ($maxScroll > 0.0 ? ($visibleH - $barH) * ($this->listScrollY / $maxScroll) : 0.0);
+        $barX = $this->bounds->right() - $barW - 2.0;
+        $renderer->drawRoundedRect($barX, $barY, $barW, $barH, $barW * 0.5, $style->borderColor->withAlpha(0.4));
+    }
+
     /**
-     * Bounding rect of the whole expanded option list (for hit-testing the
+     * Clamp the open list to the host viewport so it becomes a scrollable window
+     * instead of overflowing the screen. Call once per frame (after layout) from
+     * the host for each open dropdown, passing the viewport height.
+     */
+    public function clampListToViewport(float $viewportHeight): void
+    {
+        $bottomMargin = 8.0;
+        $available = $viewportHeight - $this->listTopY() - $bottomMargin;
+        // Always leave room for at least one row so the list never collapses.
+        $this->maxListHeight = max($this->rowHeight(), $available);
+        // A shrunk window (or list) may leave the offset out of range.
+        $this->listScrollY = max(0.0, min($this->listScrollY, $this->maxListScroll()));
+    }
+
+    /** Scroll the open list by $delta px, clamped to its valid range. */
+    public function scrollListBy(float $delta): void
+    {
+        $this->listScrollY = max(0.0, min($this->listScrollY + $delta, $this->maxListScroll()));
+    }
+
+    /** Height of one option row. */
+    private function rowHeight(): float
+    {
+        return $this->metricsStyle()->fontSize + $this->padding->vertical();
+    }
+
+    /** Absolute Y where the (unscrolled) option list begins, just below the field. */
+    private function listTopY(): float
+    {
+        $style = $this->metricsStyle();
+        $labelH = $this->label !== '' ? $style->fontSize + 4.0 : 0.0;
+        $fieldH = $this->bounds->height - $labelH;
+        return $this->bounds->y + $labelH + $fieldH + 2.0;
+    }
+
+    /** Total height of all option rows, ignoring the viewport clamp. */
+    private function fullListHeight(): float
+    {
+        return $this->rowHeight() * count($this->options);
+    }
+
+    /** On-screen height of the list window (full height, or the clamp if smaller). */
+    public function visibleListHeight(): float
+    {
+        $full = $this->fullListHeight();
+        if ($this->maxListHeight > 0.0 && $this->maxListHeight < $full) {
+            // Snap to whole rows so no half-row peeks past the clip edge.
+            $rows = max(1, (int) floor($this->maxListHeight / $this->rowHeight()));
+            return $rows * $this->rowHeight();
+        }
+        return $full;
+    }
+
+    /** Maximum scroll offset (0 when the whole list fits its window). */
+    public function maxListScroll(): float
+    {
+        return max(0.0, $this->fullListHeight() - $this->visibleListHeight());
+    }
+
+    private function metricsStyle(): UIStyle
+    {
+        return $this->lastStyle ?? UIStyle::dark();
+    }
+
+    /**
+     * Bounding rect of the visible option-list window (for hit-testing the
      * floating list, which lives outside this widget's own bounds). Null when
      * the dropdown is closed or has no options.
      */
-    public function listBounds(): ?\PHPolygon\Math\Rect
+    public function listBounds(): ?Rect
     {
         if (!$this->open || $this->options === []) {
             return null;
         }
-        $first = $this->getOptionRect(0);
-        $last = $this->getOptionRect(count($this->options) - 1);
 
-        return new \PHPolygon\Math\Rect(
-            $first->x,
-            $first->y,
-            $first->width,
-            ($last->y + $last->height) - $first->y,
+        return new Rect(
+            $this->bounds->x,
+            $this->listTopY(),
+            $this->bounds->width,
+            $this->visibleListHeight(),
         );
     }
 
     /**
      * Get the option rect at a given index (for hit testing the dropdown list).
+     * Offset by the current scroll so it lines up with the drawn row; a row
+     * scrolled outside {@see listBounds()} simply won't contain any cursor that
+     * is itself inside the (clipped) window.
      */
-    public function getOptionRect(int $index): \PHPolygon\Math\Rect
+    public function getOptionRect(int $index): Rect
     {
-        $style = $this->styleOverride ?? UIStyle::dark();
-        $labelH = $this->label !== '' ? $style->fontSize + 4.0 : 0.0;
-        $fieldH = $this->bounds->height - $labelH;
-        $rowH = $style->fontSize + $this->padding->vertical();
-        $listY = $this->bounds->y + $labelH + $fieldH + 2.0;
-
-        return new \PHPolygon\Math\Rect(
+        return new Rect(
             $this->bounds->x,
-            $listY + $index * $rowH,
+            $this->listTopY() + $index * $this->rowHeight() - $this->listScrollY,
             $this->bounds->width,
-            $rowH,
+            $this->rowHeight(),
         );
     }
 }
