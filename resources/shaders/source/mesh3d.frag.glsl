@@ -1,5 +1,4 @@
-#version 410 core
-
+#version 150 core
 in vec3 v_normal;
 in vec3 v_worldPos;
 in vec2 v_uv;

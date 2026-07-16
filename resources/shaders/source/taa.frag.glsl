@@ -1,5 +1,4 @@
-#version 410 core
-
+#version 150 core
 // Temporal anti-aliasing composite.
 //
 //   - u_color_texture   : the current frame, rendered with a sub-pixel

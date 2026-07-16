@@ -1,5 +1,4 @@
-#version 410 core
-
+#version 150 core
 // Fieldtracing fullscreen pass — OpenGL variant. Uses the classic
 // gl_VertexID fullscreen-triangle trick (drawn with glDrawArrays(TRIANGLES,0,3),
 // no VBO). Outputs v_uv in [0,1] so the fragment shader is byte-identical to the

@@ -1,6 +1,5 @@
-#version 410 core
-
-layout(location = 0) in vec3 a_position;
+#version 150 core
+in vec3 a_position;
 
 uniform mat4 u_view;
 uniform mat4 u_projection;

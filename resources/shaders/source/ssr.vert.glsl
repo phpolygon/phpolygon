@@ -1,5 +1,4 @@
-#version 410 core
-
+#version 150 core
 // Fullscreen triangle, screen-space (no VBO required - gl_VertexID drives the
 // vertex positions). Same trick as fxaa.vert.glsl. v_uv covers [0, 1] over
 // the visible part of the triangle that intersects the [-1, 1] clip square.

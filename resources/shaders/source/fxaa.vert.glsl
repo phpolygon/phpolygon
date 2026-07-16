@@ -1,5 +1,4 @@
-#version 410 core
-
+#version 150 core
 // Fullscreen-triangle FXAA vertex shader.
 // Drawn with glDrawArrays(GL_TRIANGLES, 0, 3) and gl_VertexID -> NDC corners.
 // No vertex buffer required.

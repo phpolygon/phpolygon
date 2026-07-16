@@ -1,5 +1,4 @@
-#version 410 core
-
+#version 150 core
 in vec3 v_normal;
 
 out vec4 frag_color;

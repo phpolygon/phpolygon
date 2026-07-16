@@ -55,17 +55,16 @@ class Window
         if ($this->noApi) {
             // Vulkan / Metal: no OpenGL context — the native backend manages the swapchain
             glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
+            glfwWindowHint(GLFW_RESIZABLE, $this->resizable ? GL_TRUE : GL_FALSE);
+            glfwWindowHint(GLFW_VISIBLE, GL_FALSE);
+            $handle = glfwCreateWindow($this->width, $this->height, $this->title, null, null);
+            if ($handle === null) {
+                throw new RuntimeException('Failed to create GLFW window (no-API surface)');
+            }
+            $this->handle = $handle;
         } else {
-            glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
-            glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 1);
-            glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
-            glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GL_TRUE);
-            glfwWindowHint(GLFW_SAMPLES, 4);
+            $this->handle = $this->createOpenGLWindow();
         }
-        glfwWindowHint(GLFW_RESIZABLE, $this->resizable ? GL_TRUE : GL_FALSE);
-        glfwWindowHint(GLFW_VISIBLE, GL_FALSE);
-
-        $this->handle = glfwCreateWindow($this->width, $this->height, $this->title, null, null);
 
         if (!$this->noApi) {
             glfwMakeContextCurrent($this->handle);
@@ -91,6 +90,50 @@ class Window
 
         glfwShowWindow($this->handle);
         $this->initialized = true;
+    }
+
+    /**
+     * Create the OpenGL window by probing a version ladder from newest to a
+     * GL 3.0 floor. The engine no longer hard-requires GL 4.1: the standalone
+     * renderer authors GLSL at 150 core and rewrites the `#version` directive to
+     * match whatever context is obtained (down to 130), so older iGPUs
+     * (Sandy Bridge / Mesa reporting 3.0–3.3) can still run 3D.
+     *
+     * A core profile (with forward-compat) is requested from GL 3.2 up — the
+     * first version with the `core` keyword. Below 3.2 no profile hint is set
+     * (the driver's default/compatibility profile is accepted), because 3.0/3.1
+     * predate the core/compatibility split.
+     */
+    private function createOpenGLWindow(): \GLFWwindow
+    {
+        /** @var array<int, array{int, int}> newest → oldest */
+        $ladder = [
+            [4, 6], [4, 5], [4, 3], [4, 1], [3, 3], [3, 2], [3, 1], [3, 0],
+        ];
+
+        foreach ($ladder as [$major, $minor]) {
+            glfwDefaultWindowHints();
+            glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, $major);
+            glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, $minor);
+
+            if ($major * 10 + $minor >= 32) {
+                glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
+                glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GL_TRUE);
+            }
+
+            glfwWindowHint(GLFW_SAMPLES, 4);
+            glfwWindowHint(GLFW_RESIZABLE, $this->resizable ? GL_TRUE : GL_FALSE);
+            glfwWindowHint(GLFW_VISIBLE, GL_FALSE);
+
+            $handle = glfwCreateWindow($this->width, $this->height, $this->title, null, null);
+            if ($handle !== null) {
+                return $handle;
+            }
+        }
+
+        throw new RuntimeException(
+            'Failed to create an OpenGL context — no version between 4.6 and 3.0 available'
+        );
     }
 
     public function shouldClose(): bool

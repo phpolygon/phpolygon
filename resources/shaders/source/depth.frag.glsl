@@ -1,5 +1,4 @@
-#version 410 core
-
+#version 150 core
 uniform float u_fog_near;
 uniform float u_fog_far;
 

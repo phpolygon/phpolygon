@@ -1,5 +1,4 @@
-#version 410 core
-
+#version 150 core
 // =============================================================================
 // Fieldtracing — SDF sphere-trace pass (OpenGL variant, Tier B fragment fallback)
 // =============================================================================

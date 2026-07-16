@@ -29,8 +29,14 @@ use PHPolygon\Rendering\Quality\TaaJitter;
 use PHPolygon\Rendering\Quality\AntiAliasing;
 
 /**
- * OpenGL 4.1 3D renderer. Translates a RenderCommandList into GL draw calls.
- * Supports GPU instancing via glDrawElementsInstanced for DrawMeshInstanced commands.
+ * OpenGL 3D renderer. Translates a RenderCommandList into GL draw calls.
+ *
+ * Targets a GL version ladder from 4.6 down to a 3.0 floor (see
+ * {@see \PHPolygon\Runtime\Window} for context creation and {@see GlCapabilities}
+ * for what the obtained version unlocks). GLSL is authored at 150 core and the
+ * `#version` directive is rewritten per detected context at compile time.
+ * GPU instancing (glVertexAttribDivisor, core since GL 3.3) degrades to a
+ * per-instance CPU draw loop on older contexts.
  */
 class OpenGLRenderer3D implements Renderer3DInterface
 {
@@ -148,11 +154,22 @@ class OpenGLRenderer3D implements Renderer3DInterface
      */
     private GraphicsSettings $settings;
 
+    /**
+     * Capabilities of the GL context obtained by the window's version ladder.
+     * Detected once at construction (context is current here). Drives the GLSL
+     * `#version` injection and the instancing / post-process fallback paths.
+     */
+    private GlCapabilities $caps;
+
+    /** Set once when the instancing CPU fallback first kicks in (low-end GL). */
+    private bool $loggedInstancingFallback = false;
+
     public function __construct(int $width = 1280, int $height = 720, ?GraphicsSettings $settings = null)
     {
         $this->width  = $width;
         $this->height = $height;
         $this->settings = $settings ?? new GraphicsSettings();
+        $this->caps = GlCapabilities::detect();
 
         // Register all built-in shaders (games can override by registering before construction)
         $builtins = [
@@ -664,6 +681,38 @@ class OpenGLRenderer3D implements Renderer3DInterface
     }
 
     /**
+     * DrawMeshInstanced fallback for GL contexts without core instanced arrays
+     * (< GL 3.3). Each instance is drawn with an individual glDrawElements +
+     * u_model uniform. Correct on any GL 3.0+ context, but O(n) draw calls —
+     * far slower than the instanced path. Only reached on legacy hardware.
+     */
+    private function drawInstancedCpuFallback(DrawMeshInstanced $command, int $instanceCount): void
+    {
+        if (!$this->loggedInstancingFallback) {
+            fwrite(STDERR, sprintf(
+                "[OpenGLRenderer3D] GL %d.%d has no core instanced arrays; "
+                . "DrawMeshInstanced degraded to per-instance CPU draws (%d instances).\n",
+                $this->caps->major,
+                $this->caps->minor,
+                $instanceCount,
+            ));
+            $this->loggedInstancingFallback = true;
+        }
+
+        $isFlat = $command->flatMatrices !== [];
+        for ($i = 0; $i < $instanceCount; $i++) {
+            if ($isFlat) {
+                $model = new Mat4(array_slice($command->flatMatrices, $i * 16, 16));
+            } elseif (isset($command->matrices[$i])) {
+                $model = $command->matrices[$i];
+            } else {
+                continue;
+            }
+            $this->drawMeshCommand($command->meshId, $command->materialId, $model);
+        }
+    }
+
+    /**
      * Draw multiple instances of the same mesh in a single GPU call.
      * Uses the original shared-VAO architecture (one VAO + one VBO per meshId).
      *
@@ -686,6 +735,14 @@ class OpenGLRenderer3D implements Renderer3DInterface
         if ($instanceCount <= 0) {
             return;
         }
+
+        // GPU instancing (glVertexAttribDivisor) is core only from GL 3.3.
+        // On an older context, degrade to a per-instance CPU draw loop.
+        if (!$this->caps->hasCoreInstancing()) {
+            $this->drawInstancedCpuFallback($command, $instanceCount);
+            return;
+        }
+
         $isFlat = $command->flatMatrices !== [];
 
         $meshId    = $command->meshId;
@@ -1149,8 +1206,8 @@ class OpenGLRenderer3D implements Renderer3DInterface
      */
     private function compileShader(string $shaderId, ShaderDefinition $definition): int
     {
-        $vertSource = $this->loadShaderSource($definition->vertexPath);
-        $fragSource = $this->loadShaderSource($definition->fragmentPath);
+        $vertSource = $this->injectVersion($this->loadShaderSource($definition->vertexPath));
+        $fragSource = $this->injectVersion($this->loadShaderSource($definition->fragmentPath));
 
         $vert = glCreateShader(GL_VERTEX_SHADER);
         glShaderSource($vert, $vertSource);
@@ -1177,6 +1234,13 @@ class OpenGLRenderer3D implements Renderer3DInterface
         $program = glCreateProgram();
         glAttachShader($program, $vert);
         glAttachShader($program, $frag);
+
+        // Attribute locations are bound by name rather than via layout(location=N)
+        // in the shader, because explicit attribute locations are GLSL 3.30+.
+        // Binding names not present in a given shader is harmless (ignored), so
+        // the same call covers every built-in vertex layout. Must run before link.
+        $this->bindStandardAttribLocations($program);
+
         glLinkProgram($program);
 
         $linkStatus = 0;
@@ -1287,6 +1351,43 @@ class OpenGLRenderer3D implements Renderer3DInterface
             throw new \RuntimeException("Cannot read shader file: {$path}");
         }
         return $source;
+    }
+
+    /**
+     * Rewrite the leading `#version` directive to match the detected GL context.
+     * Shaders are authored at 150 core; on a GL 3.1 / 3.0 context this rewrites
+     * it to 140 / 130 so the same source compiles everywhere. If a shader has no
+     * `#version` line, the directive is prepended.
+     */
+    private function injectVersion(string $source): string
+    {
+        $directive = $this->caps->glslVersionDirective();
+        if (preg_match('/^\s*#version[^\n]*\n/', $source) === 1) {
+            return (string) preg_replace('/^\s*#version[^\n]*\n/', $directive . "\n", $source, 1);
+        }
+        return $directive . "\n" . $source;
+    }
+
+    /**
+     * Bind the standard vertex attribute locations by name. Mirrors the layout
+     * that was previously declared via layout(location=N) in the shaders
+     * (0-2: position/normal/uv, 3-6: per-instance model matrix columns).
+     */
+    private function bindStandardAttribLocations(int $program): void
+    {
+        glBindAttribLocation($program, 0, 'a_position');
+        glBindAttribLocation($program, 1, 'a_normal');
+        glBindAttribLocation($program, 2, 'a_uv');
+        glBindAttribLocation($program, 3, 'a_instance_model_col0');
+        glBindAttribLocation($program, 4, 'a_instance_model_col1');
+        glBindAttribLocation($program, 5, 'a_instance_model_col2');
+        glBindAttribLocation($program, 6, 'a_instance_model_col3');
+    }
+
+    /** Detected capabilities of the active GL context (version, feature tier). */
+    public function capabilities(): GlCapabilities
+    {
+        return $this->caps;
     }
 
     private function getUniformLocation(string $name): int
@@ -1897,6 +1998,14 @@ class OpenGLRenderer3D implements Renderer3DInterface
 
     private function offscreenIsActive(): bool
     {
+        // The off-screen chain (render-scale blit, MSAA resolve, FXAA/TAA/SSR)
+        // and its 150-core post-process shaders require GL 3.3+. On an older
+        // context the scene renders straight into the backbuffer; quality knobs
+        // that depend on the off-screen target are inert.
+        if (!$this->caps->hasPostProcessing()) {
+            return false;
+        }
+
         if ($this->settings->renderScale !== 1.0) {
             return true;
         }

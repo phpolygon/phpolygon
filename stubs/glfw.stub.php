@@ -115,6 +115,7 @@ namespace {
     const GL_RGBA = 0x1908;
     const GL_RGBA8 = 0x8058;
     const GL_UNSIGNED_BYTE = 0x1401;
+    const GL_VERSION = 0x1F02;
     const GL_FRAMEBUFFER = 0x8D40;
     const GL_DRAW_FRAMEBUFFER = 0x8CA9;
     const GL_READ_FRAMEBUFFER = 0x8CA8;
@@ -154,6 +155,8 @@ namespace {
     function glDepthMask(bool $flag): void {}
     function glFrontFace(int $mode): void {}
     function glGetError(): int {}
+    function glGetString(int $name): string {}
+    function glBindAttribLocation(int $program, int $index, string $name): void {}
     // Out-param left untyped: callers defensively is_int()-check the result, so a
     // precise &int would make those guards "always true" under PHPStan.
     function glGetIntegerv(int $pname, mixed &$data): void {}
@@ -183,7 +186,8 @@ namespace {
     function glfwPollEvents(): void {}
     function glfwSwapInterval(int $interval): void {}
     function glfwWindowHint(int $hint, int $value): void {}
-    function glfwCreateWindow(int $width, int $height, string $title, ?object $monitor = null, ?object $share = null): \GLFWwindow {}
+    function glfwDefaultWindowHints(): void {}
+    function glfwCreateWindow(int $width, int $height, string $title, ?object $monitor = null, ?object $share = null): ?\GLFWwindow {}
     function glfwDestroyWindow(\GLFWwindow $window): void {}
     function glfwMakeContextCurrent(\GLFWwindow $window): void {}
     function glfwSwapBuffers(\GLFWwindow $window): void {}

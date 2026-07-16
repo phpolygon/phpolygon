@@ -1982,11 +1982,27 @@ class Engine
                 $this->renderer3D instanceof VioRenderer3D => 'Vio 3D (' . ucfirst($this->getVioBackendName()) . ')',
                 $this->renderer3D instanceof VulkanRenderer3D => 'Vulkan',
                 $this->renderer3D instanceof MetalRenderer3D => 'Metal',
-                $this->renderer3D instanceof OpenGLRenderer3D => 'OpenGL 3D',
+                $this->renderer3D instanceof OpenGLRenderer3D => 'OpenGL 3D ('
+                    . $this->renderer3D->capabilities()->major . '.'
+                    . $this->renderer3D->capabilities()->minor . ')',
                 default => null,
             };
         }
         return implode(' · ', array_filter($parts));
+    }
+
+    /**
+     * Capabilities of the active standalone OpenGL context (version + feature
+     * tier), or null when the 3D backend is not the standalone GL renderer
+     * (Vio / Vulkan / Metal / headless). Games can use this to gate features
+     * that only exist on newer GL contexts.
+     */
+    public function glFeatureTier(): ?\PHPolygon\Rendering\GlCapabilities
+    {
+        if ($this->renderer3D instanceof OpenGLRenderer3D) {
+            return $this->renderer3D->capabilities();
+        }
+        return null;
     }
 
     private function getVioBackendName(): string

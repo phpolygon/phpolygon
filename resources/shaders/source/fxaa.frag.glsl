@@ -1,5 +1,4 @@
-#version 410 core
-
+#version 150 core
 // Fast Approximate Anti-Aliasing (FXAA 3.11-equivalent simplified port).
 // Public-domain reference: NVIDIA FXAA 3.11 by Timothy Lottes (Apache 2.0).
 // This is a self-contained quality preset with hard-coded edge thresholds

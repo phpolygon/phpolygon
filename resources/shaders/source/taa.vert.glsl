@@ -1,5 +1,4 @@
-#version 410 core
-
+#version 150 core
 // Fullscreen triangle, identical to ssr.vert.glsl - kept separate so
 // shader-tooling that diffs the post-process stack stays readable.
 out vec2 v_uv;

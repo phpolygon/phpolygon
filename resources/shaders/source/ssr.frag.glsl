@@ -1,5 +1,4 @@
-#version 410 core
-
+#version 150 core
 // Screen-space reflections composite pass. Reads the resolved scene
 // colour + depth, ray-marches reflections in screen space, and writes
 // scene + reflection back to the bound framebuffer.

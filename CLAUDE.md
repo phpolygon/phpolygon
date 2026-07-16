@@ -14,9 +14,18 @@ no external 3D modelling tools (Blender, Maya, etc.) and no imported model files
 from PHP code.
 
 Render backends:
-- **2D:** php-vio (primary) or OpenGL 4.1 via php-glfw / NanoVG (fallback)
-- **3D:** php-vio, Vulkan via php-vulkan, Metal via MoltenVK, or OpenGL 4.1 via
+- **2D:** php-vio (primary) or OpenGL via php-glfw / NanoVG (fallback)
+- **3D:** php-vio, Vulkan via php-vulkan, Metal via MoltenVK, or OpenGL via
   php-glfw — all behind a unified `Renderer3DInterface` / `RenderCommandList`
+
+The OpenGL (php-glfw) backend is not pinned to a single GL version. The window
+probes a context ladder from 4.6 down to a **GL 3.0 floor** (see
+`GlCapabilities` + `Window::createOpenGLWindow()`); GLSL is authored at
+`150 core` and the `#version` directive is rewritten per detected context
+(150 core / 140 / 130). Features above the obtained tier degrade automatically:
+GPU instancing (core since GL 3.3) falls back to per-instance CPU draws, and the
+off-screen post-process chain (render-scale, MSAA resolve, FXAA/TAA/SSR) is
+disabled below GL 3.3.
 
 The engine auto-detects php-vio at startup. When available, it provides the window,
 input, audio, 2D renderer, 3D renderer, and texture manager through a single
@@ -177,8 +186,8 @@ shader does not declare are silently ignored — a minimal shader only needs
 | Backend | Status | Target |
 |---|---|---|
 | php-vio (2D + 3D unified) | **Primary** | All platforms when php-vio is loaded. vio internally dispatches to Metal (macOS), D3D11/D3D12 (Windows), Vulkan, or OpenGL via `vio_create('auto', ...)` |
-| OpenGL 4.1 via php-glfw (2D/NanoVG) | Fallback | 2D games when php-vio unavailable |
-| OpenGL 4.1 via php-glfw (3D) | Fallback | 3D games when php-vio unavailable |
+| OpenGL via php-glfw (2D/NanoVG) | Fallback | 2D games when php-vio unavailable (GL 3.0–4.6 ladder) |
+| OpenGL via php-glfw (3D) | Fallback | 3D games when php-vio unavailable (GL 3.0–4.6 ladder, feature-tiered) |
 | Vulkan via php-vulkan | Standalone | 3D native Vulkan backend, used when vio is not loaded |
 | Metal via php-metal | Standalone | 3D native Metal backend on macOS, used when vio is not loaded |
 
@@ -337,7 +346,7 @@ Benefits of this approach over file-based assets:
 | Extension | Purpose | Status |
 |---|---|---|
 | php-vio | Unified backend: window, input, audio, 2D/3D rendering, textures | **Primary** |
-| php-glfw | OpenGL 4.1 + NanoVG (2D and 3D rendering) | Fallback when php-vio unavailable |
+| php-glfw | OpenGL (3.0–4.6 ladder) + NanoVG (2D and 3D rendering) | Fallback when php-vio unavailable |
 | php-vulkan | Vulkan (3D native backend) | Active |
 | php-steamworks | Steamworks SDK integration | Published on Packagist |
 
