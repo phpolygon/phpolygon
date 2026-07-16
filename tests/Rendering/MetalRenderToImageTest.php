@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace PHPolygon\Tests\Rendering;
 
+use PHPUnit\Framework\Attributes\Group;
 use PHPUnit\Framework\Attributes\RequiresOperatingSystem;
 use PHPUnit\Framework\Attributes\RequiresPhpExtension;
 use PHPUnit\Framework\TestCase;
@@ -33,6 +34,7 @@ use PHPolygon\Testing\VisualTestCase;
  */
 #[RequiresPhpExtension('metal')]
 #[RequiresOperatingSystem('Darwin')]
+#[Group('native-gpu')]
 class MetalRenderToImageTest extends TestCase
 {
     use VisualTestCase;

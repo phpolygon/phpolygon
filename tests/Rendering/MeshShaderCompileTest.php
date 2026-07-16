@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace PHPolygon\Tests\Rendering;
 
 use PHPolygon\Rendering\BackendConventions;
+use PHPUnit\Framework\Attributes\Group;
 use PHPUnit\Framework\TestCase;
 
 /**
@@ -12,7 +13,12 @@ use PHPUnit\Framework\TestCase;
  * regressions (e.g. D3D12 "X4610: SRV binding ranges overlap") are caught here
  * instead of crashing the game at startup. Skips where vio isn't loaded (CI
  * Linux) — it runs on the Windows/D3D12 dev + CI machines that have the backend.
+ *
+ * Grouped native-gpu: needs a hardware/real backend. Mesa's software Vulkan
+ * (lavapipe) rejects the shader's sampler-register layout, so the VRT-vio Docker
+ * image (which runs on lavapipe) excludes this group.
  */
+#[Group('native-gpu')]
 final class MeshShaderCompileTest extends TestCase
 {
     public function testVioMeshShaderCompiles(): void

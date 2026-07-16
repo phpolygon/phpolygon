@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace PHPolygon\Tests\Rendering;
 
+use PHPUnit\Framework\Attributes\Group;
 use PHPUnit\Framework\Attributes\RequiresPhpExtension;
 use PHPUnit\Framework\TestCase;
 use PHPolygon\Geometry\BoxMesh;
@@ -33,6 +34,7 @@ use PHPolygon\Rendering\VioRenderer3D;
  * Skipped where the vio extension is absent.
  */
 #[RequiresPhpExtension('vio')]
+#[Group('native-gpu')]
 class VioRenderToImageTest extends TestCase
 {
     protected function setUp(): void

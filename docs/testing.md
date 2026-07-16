@@ -86,6 +86,27 @@ docker run --rm -v "$(pwd)":/app -w /app phpolygon-gl .docker/gl-matrix.sh
 Mesa's stricter GLSL compiler also catches shader portability bugs that lenient
 GPU drivers silently accept (e.g. call-before-definition).
 
+### VRT with the real php-vio backend (Docker)
+
+vio is the engine's primary backend, so the suite should run against it — not
+only the GD rasteriser or standalone php-glfw. `.docker/vrt-vio.Dockerfile`
+builds php-vio (Vulkan + OpenGL backends) and runs the suite headlessly on Mesa
+`lavapipe` (Vulkan) + `llvmpipe` (OpenGL) under Xvfb — GPU-free. On Linux
+`vio_create('auto')` selects Vulkan → lavapipe.
+
+```sh
+docker build -f .docker/vrt-vio.Dockerfile -t phpolygon-vrt-vio .
+docker run --rm -v "$(pwd)":/app -w /app phpolygon-vrt-vio .docker/vrt-vio-run.sh
+```
+
+The full suite runs green with vio loaded (CI job `vrt-vio`). Two groups are
+excluded on this software-Mesa path: `font-vrt` (deterministic fonts belong to
+the Alpine image) and `native-gpu` — tests needing a hardware backend, because
+lavapipe rejects the mesh shader's sampler-register layout and per-backend pixel
+baselines are taken on the target GPU. (Building php-vio requires `-std=c++17`
+for its VMA wrapper on Linux — a C++14 build aborts on a VMA aligned_alloc
+assertion the moment a Vulkan context is created.)
+
 ### Native-backend pixel VRT (Metal / D3D / Vulkan) — status & plan
 
 Docker (Linux) can only reach the OpenGL and Vulkan software stacks. Windows

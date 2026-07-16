@@ -37,7 +37,14 @@ jobs:
       - name: Install php-metal-gpu (macOS, best-effort)
         if: runner.os == 'macOS'
         continue-on-error: true
-        run: pie install hmennen90/php-metal-gpu:@dev
+        # pie builds + installs the .so but does not enable it, so append it to
+        # php.ini — only on install success (&&) so a failed build never writes a
+        # broken ini line. continue-on-error keeps the job green either way; the
+        # Metal VRT test skips via its RequiresPhpExtension guard when absent.
+        run: |
+          pie install hmennen90/php-metal-gpu:@dev \
+            && echo "extension=metal" >> "$(php -r 'echo php_ini_loaded_file();')" \
+            && php -m | grep -qi metal && echo "metal extension enabled"
 
       - name: Install Composer dependencies
         run: composer install --no-interaction --ignore-platform-reqs
@@ -242,3 +249,19 @@ jobs:
             echo "    sh -c 'composer install --ignore-platform-reqs && PHPOLYGON_UPDATE_SNAPSHOTS=1 vendor/bin/phpunit tests/Testing/'"
             exit 1
           fi
+
+  vrt-vio:
+    name: VRT with php-vio (Docker, Mesa software)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v5
+
+      # Builds php-vio from source (Vulkan + OpenGL backends) and runs the suite
+      # against it headlessly on Mesa lavapipe/llvmpipe — the engine's primary
+      # backend, GPU-free. native-gpu + font-vrt are excluded inside the runner.
+      - name: Build php-vio VRT image
+        run: docker build -f .docker/vrt-vio.Dockerfile -t phpolygon-vrt-vio .
+
+      - name: Run test suite against the vio backend
+        run: docker run --rm -v "$PWD":/app -w /app phpolygon-vrt-vio .docker/vrt-vio-run.sh
