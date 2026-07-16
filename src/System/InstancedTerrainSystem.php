@@ -15,6 +15,16 @@ use PHPolygon\Rendering\RenderCommandList;
  * Renders instanced terrain using batched DrawMeshInstanced commands.
  * Each material group becomes one GPU draw call via glDrawElementsInstanced.
  *
+ * ORDERING CONTRACT: this system shares its {@see RenderCommandList} with
+ * {@see Renderer3DSystem}, which is the ONLY system that submits the list to
+ * the renderer and then clears it (see Renderer3DSystem::render()). Systems
+ * render in registration order (World::render()), so InstancedTerrainSystem
+ * MUST be added to the world BEFORE Renderer3DSystem — otherwise its
+ * DrawMeshInstanced commands are appended to a list that has already been
+ * submitted and cleared this frame, and the terrain never appears despite the
+ * commands looking correct. Register it right after Camera3DSystem and before
+ * Renderer3DSystem.
+ *
  * Materials passed here must be opaque (alpha == 1.0). Renderer3DSystem
  * sorts transparent {@see DrawMesh} draws back-to-front, but transparent
  * instanced draws would need per-instance distance sorting (which defeats
