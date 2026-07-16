@@ -103,19 +103,27 @@ The engine primitive this needs is a `renderToImage(RenderCommandList, w, h)` on
 existing `ScreenshotComparer`, with **per-backend baselines** (Metal ≠ WARP ≠
 lavapipe — like the font platform suffix).
 
-**Blockers (why this is not wired into CI yet):**
-1. **vio Metal headless readback is broken.** In a headless context `vio_read_pixels`
-   returns a uniform buffer with `vsync: true` and segfaults with `vsync: false`.
-   `vio_metal_setup_context_native()` also requires a non-NULL `CAMetalLayer`, so
-   there is no layer-less offscreen path; the hidden-window render/present/readback
-   interaction needs fixing in `php-vio` (`src/backends/metal/vio_metal.m`).
-   D3D12/Vulkan readback are unaffected.
-2. **Building php-vio on the CI runners** (it bundles Metal/D3D/Vulkan +
-   SPIRV-Cross) is a large per-platform build, heavier than the php-glfw build.
+**Status per backend (from investigating php-vio directly):**
 
-Until both land, native-backend pixel VRT stays out of CI to avoid red,
-unverifiable jobs. The Docker OpenGL matrix above is the shipping pixel-capable
-path; `GdRenderer2D` covers 2D layout regression.
+- **vio Metal headless readback: FIXED** (`php-vio` commit — blit the Private
+  source texture into a Shared buffer instead of an invalid `getBytes` on
+  Private storage). A cleared headless frame now round-trips its exact colour
+  and the vsync-off path no longer segfaults. This unblocks **2D** pixel VRT on
+  real Metal.
+- **vio Metal 3D is stubbed** (`vio_metal.m`: "3D pipeline / buffer / texture /
+  draw: not yet wired" — `metal_create_pipeline`/`metal_draw`/… are no-ops).
+  So **3D** pixel VRT on macOS via vio is not possible until vio's Metal 3D
+  pipeline lands. Alternatives for macOS 3D: the standalone `MetalRenderer3D`
+  (php-metal) or the vio **OpenGL** backend.
+- **D3D12 + Vulkan** ship real 3D pipelines *and* golden-compare `read_pixels`,
+  so **Windows (D3D12/WARP)** and **Linux (Vulkan/lavapipe)** are the viable
+  paths for native 3D pixel VRT.
+
+**Remaining blocker for CI:** building php-vio on the runners (it bundles
+Metal/D3D/Vulkan + SPIRV-Cross) is a large per-platform build, heavier than the
+php-glfw build. Until that is wired, native-backend pixel VRT stays out of CI to
+avoid red, unverifiable jobs. The Docker OpenGL matrix above is the shipping
+pixel-capable path; `GdRenderer2D` covers 2D layout regression.
 
 ---
 
