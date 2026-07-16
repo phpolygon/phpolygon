@@ -9,7 +9,3 @@ parameters:
         - stubs/metal.stub.php
         - stubs/vio.stub.php
         - stubs/glfw.stub.php
-    ignoreErrors:
-        -
-            identifier: trait.unused
-            path: src/Testing/VisualTestCase.php

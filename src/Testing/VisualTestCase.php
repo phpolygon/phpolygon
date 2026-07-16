@@ -33,16 +33,6 @@ namespace PHPolygon\Testing;
 trait VisualTestCase
 {
     /**
-     * Assert that the rendered frame matches the reference screenshot.
-     *
-     * @param GdRenderer2D $renderer The renderer with the current frame
-     * @param string $name Screenshot name (e.g. 'main-menu', 'hud-layout')
-     * @param float $threshold Per-pixel color threshold in YIQ space (0.0–1.0)
-     * @param int|null $maxDiffPixels Absolute pixel count tolerance
-     * @param float|null $maxDiffPixelRatio Ratio tolerance (0.0–1.0)
-     * @param array<array{x: int, y: int, w: int, h: int}> $mask Rectangles to mask (filled with magenta)
-     */
-    /**
      * Whether to include a platform suffix in snapshot filenames.
      * Override in your test class if you use fonts or other platform-dependent features.
      *
@@ -53,6 +43,16 @@ trait VisualTestCase
         return false;
     }
 
+    /**
+     * Assert that the rendered frame matches the reference screenshot.
+     *
+     * @param GdRenderer2D $renderer The renderer with the current frame
+     * @param string $name Screenshot name (e.g. 'main-menu', 'hud-layout')
+     * @param float $threshold Per-pixel color threshold in YIQ space (0.0–1.0)
+     * @param int|null $maxDiffPixels Absolute pixel count tolerance
+     * @param float|null $maxDiffPixelRatio Ratio tolerance (0.0–1.0)
+     * @param array<array{x: int, y: int, w: int, h: int}> $mask Rectangles to mask (filled with magenta)
+     */
     protected function assertScreenshot(
         GdRenderer2D $renderer,
         string $name,
