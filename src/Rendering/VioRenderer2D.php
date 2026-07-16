@@ -384,7 +384,7 @@ class VioRenderer2D implements Renderer2DInterface
 
     public function drawText(string $text, float $x, float $y, float $size, Color $color): void
     {
-        $chain = $this->resolveFontChain($size);
+        $chain = $this->resolveFontChain($size, $text);
         if (empty($chain)) {
             return;
         }
@@ -414,7 +414,7 @@ class VioRenderer2D implements Renderer2DInterface
 
     public function drawTextCentered(string $text, float $cx, float $cy, float $size, Color $color): void
     {
-        $chain = $this->resolveFontChain($size);
+        $chain = $this->resolveFontChain($size, $text);
         if (empty($chain)) {
             return;
         }
@@ -585,7 +585,7 @@ class VioRenderer2D implements Renderer2DInterface
 
     public function drawTextBox(string $text, float $x, float $y, float $breakWidth, float $size, Color $color): void
     {
-        $chain = $this->resolveFontChain($size);
+        $chain = $this->resolveFontChain($size, $text);
         if ($chain === []) {
             return;
         }
@@ -895,7 +895,7 @@ class VioRenderer2D implements Renderer2DInterface
 
     public function measureText(string $text, float $size): TextMetrics
     {
-        $chain = $this->resolveFontChain($size);
+        $chain = $this->resolveFontChain($size, $text);
         if (empty($chain)) {
             return new TextMetrics(mb_strlen($text) * $size * 0.6, $size);
         }
@@ -905,7 +905,10 @@ class VioRenderer2D implements Renderer2DInterface
     /** Whether the vio backend exposes vio_font_has_glyph (older builds lack it). */
     private ?bool $hasGlyphFn = null;
 
-    /** Memoized per-(font,char) glyph coverage — see {@see fontCoversChar}. */
+    /**
+     * Memoized per-(font,char) glyph coverage — see {@see fontCoversChar}.
+     * @var array<string, bool>
+     */
     private array $coverageCache = [];
 
     /**
@@ -927,8 +930,10 @@ class VioRenderer2D implements Renderer2DInterface
 
         $this->hasGlyphFn ??= \function_exists('vio_font_has_glyph');
         if ($this->hasGlyphFn) {
-            $cp = \mb_ord($ch, 'UTF-8');
-            $covered = $cp !== false && \vio_font_has_glyph($font, $cp);
+            // (int) cast: mb_ord returns int|false; an undecodable char maps to 0
+            // (glyph 0 = .notdef = not covered), which is the correct answer.
+            $cp = (int) \mb_ord($ch, 'UTF-8');
+            $covered = \vio_font_has_glyph($font, $cp);
         } else {
             $covered = ((float) $this->measureCached($font, $ch)['width']) > 0.001;
         }
@@ -1071,7 +1076,7 @@ class VioRenderer2D implements Renderer2DInterface
 
     public function measureTextBox(string $text, float $breakWidth, float $size): TextMetrics
     {
-        $chain = $this->resolveFontChain($size);
+        $chain = $this->resolveFontChain($size, $text);
         if ($chain === []) {
             return new TextMetrics($breakWidth, $size);
         }
@@ -1258,13 +1263,24 @@ class VioRenderer2D implements Renderer2DInterface
      * Get the primary font plus all registered fallback fonts for the current font.
      * @return list<\VioFont>
      */
-    private function resolveFontChain(float $size): array
+    private function resolveFontChain(float $size, string $text = ''): array
     {
         $primary = $this->resolveFont($size);
         if ($primary === null) {
             return [];
         }
         $chain = [$primary];
+        // Lazy fallback resolution: only resolve (and thereby rasterise + upload)
+        // the fallback atlases when the text actually contains a codepoint the
+        // primary can't cover. Resolving them eagerly meant every drawText() of
+        // plain Latin/Western text still loaded the full CJK/Arabic/Thai fallback
+        // chain (~16 MB atlas each) — pure waste, and the trigger for a per-atlas
+        // allocation that accumulates when the GL context is recreated. When the
+        // caller passes no text (measurement without a string) keep the eager
+        // behaviour so nothing that relies on the full chain regresses.
+        if ($text !== '' && !self::textNeedsFallback($text)) {
+            return $chain;
+        }
         $fallbacks = $this->fallbackFonts[$this->currentFontName] ?? [];
         foreach ($fallbacks as $fbName) {
             $fb = $this->resolveFontByName($fbName, $size);

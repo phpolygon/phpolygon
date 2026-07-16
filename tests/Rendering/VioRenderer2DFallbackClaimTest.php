@@ -49,8 +49,14 @@ final class VioRenderer2DFallbackClaimTest extends TestCase
     {
         $m = new ReflectionMethod(VioRenderer2D::class, 'planTextRuns');
 
+        // planTextRuns() now claims by real glyph coverage rather than advance
+        // width. In this fake, a font covers a char exactly when the spec gives
+        // it a positive width — so derive $charCovers from the same width map,
+        // preserving every existing claim/positioning assertion.
+        $charCovers = static fn (int $fontIndex, string $ch): bool => $charWidth($fontIndex, $ch) > 0.0;
+
         /** @var array{runs: list<array{font: int, text: string, x: float}>, width: float} $result */
-        $result = $m->invoke(null, $chars, $chainSize, $charWidth, $originX);
+        $result = $m->invoke(null, $chars, $chainSize, $charWidth, $charCovers, $originX);
 
         return $result;
     }

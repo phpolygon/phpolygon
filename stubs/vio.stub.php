@@ -298,6 +298,8 @@ function vio_pop_scissor(VioContext $ctx): void {}
  */
 function vio_font(VioContext $ctx, string $path, float $size = 24.0, float $scale = 1.0): VioFont|false {}
 
+function vio_font_has_glyph(VioFont $font, int $codepoint): bool {}
+
 /**
  * @param array<string, mixed> $options
  * @return array{width: float, height: float}
