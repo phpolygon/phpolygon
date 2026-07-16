@@ -326,6 +326,11 @@ vec3 fresnelSchlick(float cosTheta, vec3 F0) {
 // vignette is applied to the display-encoded value (where the radial
 // darkening is most perceptually linear).
 vec3 finalize(vec3 color);
+// Forward declaration: finalize() calls toneMapACES() (defined further down).
+// Without this prototype, strict GLSL drivers (Mesa/llvmpipe) reject the
+// call-before-definition — lenient GPU drivers accept it, which is why this
+// only surfaces on the software rasteriser / older Mesa stacks.
+vec3 toneMapACES(vec3 x);
 
 // Volumetric fog: short ray-march from camera to fragment. Density
 // drops with height (atmospheric profile) and the in-scatter is
