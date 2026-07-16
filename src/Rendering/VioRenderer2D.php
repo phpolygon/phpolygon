@@ -478,6 +478,7 @@ class VioRenderer2D implements Renderer2DInterface
         array $chars,
         int $chainSize,
         callable $charWidth,
+        callable $charCovers,
         float $originX,
     ): array {
         $runs = [];
@@ -493,7 +494,7 @@ class VioRenderer2D implements Renderer2DInterface
             // is — never on top of a neighbour.
             $claim = 0;
             for ($i = 0; $i < $chainSize; $i++) {
-                if ($charWidth($i, $ch) > 0.001) {
+                if ($charCovers($i, $ch)) {
                     $claim = $i;
                     break;
                 }
@@ -547,13 +548,18 @@ class VioRenderer2D implements Renderer2DInterface
         }
 
         // If the primary already covers every glyph, one call still suffices.
-        $primaryW = (float)$this->measureCached($primary, $text)['width'];
-        $chainW = 0.0;
-        foreach ($chain as $font) {
-            $w = (float)$this->measureCached($font, $text)['width'];
-            if ($w > $chainW) { $chainW = $w; }
+        // Coverage is a real per-glyph presence check (see fontCoversChar) — not
+        // advance width, whose .notdef box can be non-zero and wrongly signal
+        // "covered", making the primary swallow CJK/Arabic/Thai as tofu.
+        $chars = mb_str_split($text);
+        $primaryCoversAll = true;
+        foreach ($chars as $ch) {
+            if (!$this->fontCoversChar($primary, $ch)) {
+                $primaryCoversAll = false;
+                break;
+            }
         }
-        if ($primaryW >= $chainW - 0.01) {
+        if ($primaryCoversAll) {
             vio_text($this->ctx, $primary, $text, $x, $y, ['color' => $argb, 'z' => $z]);
             return;
         }
@@ -567,11 +573,12 @@ class VioRenderer2D implements Renderer2DInterface
         //
         // The (font, char) advance is memoised through measureCached, so each
         // probe is paid at most once across the whole frame.
-        $chars = mb_str_split($text);
         $charWidth = fn (int $fontIndex, string $ch): float
             => (float)$this->measureCached($chain[$fontIndex], $ch)['width'];
+        $charCovers = fn (int $fontIndex, string $ch): bool
+            => $this->fontCoversChar($chain[$fontIndex], $ch);
 
-        foreach (self::planTextRuns($chars, $chainSize, $charWidth, $x)['runs'] as $draw) {
+        foreach (self::planTextRuns($chars, $chainSize, $charWidth, $charCovers, $x)['runs'] as $draw) {
             vio_text($this->ctx, $chain[$draw['font']], $draw['text'], $draw['x'], $y, ['color' => $argb, 'z' => $z]);
         }
     }
@@ -895,6 +902,45 @@ class VioRenderer2D implements Renderer2DInterface
         return $this->measureTextWithChain($chain, $text);
     }
 
+    /** Whether the vio backend exposes vio_font_has_glyph (older builds lack it). */
+    private ?bool $hasGlyphFn = null;
+
+    /** Memoized per-(font,char) glyph coverage — see {@see fontCoversChar}. */
+    private array $coverageCache = [];
+
+    /**
+     * True if $font carries a real glyph for the first character of $ch.
+     *
+     * Coverage detection for the font fallback chain. Prefers vio_font_has_glyph
+     * (HarfBuzz nominal-glyph lookup, reliable) and only falls back to the
+     * advance-width heuristic on older vio builds without the primitive. That
+     * heuristic is unreliable where a font's .notdef box has a positive advance
+     * — the signal that made the primary font wrongly claim uncovered
+     * CJK/Arabic/Thai codepoints and render tofu. Memoized like {@see measureCached}.
+     */
+    private function fontCoversChar(\VioFont $font, string $ch): bool
+    {
+        $key = \spl_object_id($font) . '|' . $ch;
+        if (isset($this->coverageCache[$key])) {
+            return $this->coverageCache[$key];
+        }
+
+        $this->hasGlyphFn ??= \function_exists('vio_font_has_glyph');
+        if ($this->hasGlyphFn) {
+            $cp = \mb_ord($ch, 'UTF-8');
+            $covered = $cp !== false && \vio_font_has_glyph($font, $cp);
+        } else {
+            $covered = ((float) $this->measureCached($font, $ch)['width']) > 0.001;
+        }
+
+        $this->coverageCache[$key] = $covered;
+        if (\count($this->coverageCache) > $this->measureCacheCap) {
+            \array_shift($this->coverageCache);
+        }
+
+        return $covered;
+    }
+
     /**
      * Memoized {@see vio_text_measure}. UI/HUD text re-measures the same
      * strings every frame across the whole font fallback chain — including
@@ -1016,7 +1062,9 @@ class VioRenderer2D implements Renderer2DInterface
         // run layout the renderer draws).
         $charWidth = fn (int $fontIndex, string $ch): float
             => (float)$this->measureCached($chain[$fontIndex], $ch)['width'];
-        $width = self::planTextRuns(mb_str_split($text), $chainSize, $charWidth, 0.0)['width'];
+        $charCovers = fn (int $fontIndex, string $ch): bool
+            => $this->fontCoversChar($chain[$fontIndex], $ch);
+        $width = self::planTextRuns(mb_str_split($text), $chainSize, $charWidth, $charCovers, 0.0)['width'];
 
         return new TextMetrics($width, $maxH);
     }
@@ -1064,10 +1112,10 @@ class VioRenderer2D implements Renderer2DInterface
             return false;
         }
 
-        // A face that lacks the glyph measures it to zero advance (the same
-        // signal planTextRuns() uses to claim characters); a real glyph has a
-        // positive advance.
-        $covered = ((float) $this->measureCached($vf, $script->sampleChar())['width']) > 0.001;
+        // Real glyph-presence check (vio_font_has_glyph), matching how
+        // planTextRuns() now claims characters. Advance width is unreliable — a
+        // font's .notdef box can measure non-zero and falsely report coverage.
+        $covered = $this->fontCoversChar($vf, $script->sampleChar());
         $this->scriptCoverage[$font][$script->value] = $covered;
 
         return $covered;

@@ -365,7 +365,13 @@ class Engine
                     if (!is_file($path)) {
                         continue;
                     }
-                    $engine->renderer2D->preloadFontAsync($faceId, $path);
+                    // VRT is headless + single-frame with no splash thread to
+                    // protect, so load CJK faces synchronously. The async path
+                    // (preloadFontAsync) has resolveFontByName() return null until
+                    // a worker finishes, so a one-shot capture would drop the face
+                    // from the fallback chain and render tofu. loadFont() builds
+                    // the atlas on demand at draw time instead.
+                    $engine->renderer2D->loadFont($faceId, $path);
                     $engine->renderer2D->addFallbackFont('regular', $faceId);
                     $engine->renderer2D->addFallbackFont('semibold', $faceId);
                 }
