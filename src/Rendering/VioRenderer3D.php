@@ -1043,6 +1043,52 @@ class VioRenderer3D implements Renderer3DInterface
     }
 
     /**
+     * Render a command list off-screen and return the framebuffer as raw RGBA
+     * bytes (width * height * 4). The generic vio path for native-backend pixel
+     * VRT — runs on whatever backend the context uses: D3D11/D3D12 (WARP-capable
+     * headless on Windows), Vulkan (lavapipe headless on Linux), or OpenGL.
+     *
+     * Requires a backend with a wired 3D pipeline: geometry renders on
+     * D3D12 / Vulkan / OpenGL; on vio-Metal (3D pipeline stubbed) only the clear
+     * and the read-back plumbing run, so the frame comes back as the clear
+     * colour. The context should be sized to width×height (headless
+     * vio_create(..., ['headless' => true, 'vsync' => false])).
+     *
+     * Assumes default graphics settings (no render-scale / AA / bloom), so the
+     * renderer draws straight into the bound target with no intermediate
+     * post-process offscreen. The caller must NOT already have an open frame.
+     */
+    public function renderToImage(
+        RenderCommandList $commandList,
+        int $width,
+        int $height,
+        ?Color $clear = null,
+    ): string {
+        $width  = max(1, $width);
+        $height = max(1, $height);
+
+        $rt = vio_render_target($this->ctx, ['width' => $width, 'height' => $height]);
+        if ($rt === false) {
+            return '';
+        }
+
+        // Clear colour must be set before vio_begin() opens the render pass.
+        if ($clear !== null) {
+            vio_clear($this->ctx, $clear->r, $clear->g, $clear->b, $clear->a);
+        }
+
+        vio_begin($this->ctx);
+        vio_bind_render_target($this->ctx, $rt);
+        $this->beginFrame();
+        $this->render($commandList);
+        $this->endFrame();
+        vio_unbind_render_target($this->ctx);
+        vio_end($this->ctx);
+
+        return (string) vio_read_pixels($this->ctx);
+    }
+
+    /**
      * Debug overlay (env PHPOLYGON_DEBUG_SHADOWMAP=1): blit each CSM cascade's
      * RAW stored depth into a tile across the top-left of the screen, using a
      * plain sampler2D (no PCF comparison). See {@see VioShadowDebugPass}. This

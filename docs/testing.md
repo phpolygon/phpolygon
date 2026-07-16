@@ -120,7 +120,14 @@ lavapipe — like the font platform suffix).
   `#[RequiresPhpExtension('metal')]`, skipped elsewhere).
 - **D3D12 + Vulkan** ship real 3D pipelines *and* golden-compare `read_pixels`,
   so **Windows (D3D12/WARP)** and **Linux (Vulkan/lavapipe)** are the viable
-  paths for native 3D pixel VRT.
+  paths for native 3D pixel VRT. The generic entry point is
+  `VioRenderer3D::renderToImage(RenderCommandList, $w, $h): string` — same
+  pattern as the Metal one, running on whatever backend the vio context uses.
+  `VioRenderToImageTest` verifies the clear + read-back plumbing on any vio
+  backend (geometry only renders where the 3D pipeline is wired — D3D12 /
+  Vulkan / OpenGL, not vio-Metal). Full-geometry snapshots are taken on the
+  runner that has the target backend; wiring a Windows/Linux vio build into CI
+  is the remaining step.
 
 **Remaining blocker for CI:** building php-vio on the runners (it bundles
 Metal/D3D/Vulkan + SPIRV-Cross) is a large per-platform build, heavier than the
