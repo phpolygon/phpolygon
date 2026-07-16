@@ -86,6 +86,37 @@ docker run --rm -v "$(pwd)":/app -w /app phpolygon-gl .docker/gl-matrix.sh
 Mesa's stricter GLSL compiler also catches shader portability bugs that lenient
 GPU drivers silently accept (e.g. call-before-definition).
 
+### Native-backend pixel VRT (Metal / D3D / Vulkan) — status & plan
+
+Docker (Linux) can only reach the OpenGL and Vulkan software stacks. Windows
+D3D11/D3D12 and macOS Metal render through **vio** and need their own runners:
+
+- **Windows** `windows-latest`: D3D via **WARP** (`D3D_DRIVER_TYPE_WARP`) — vio
+  already selects WARP when the context is created with `headless: true`
+  (`src/backends/d3d11/vio_d3d11.c`, `d3d12` via `EnumWarpAdapter`). D3D12 +
+  Vulkan ship a purpose-built golden-compare `read_pixels` readback.
+- **Linux** Vulkan via **lavapipe** (software Vulkan) — same readback path.
+- **macOS** `macos-14`: Metal on the runner's real GPU.
+
+The engine primitive this needs is a `renderToImage(RenderCommandList, w, h)` on
+`VioRenderer3D` (frame bracket + `vio_read_pixels`), then encode/compare with the
+existing `ScreenshotComparer`, with **per-backend baselines** (Metal ≠ WARP ≠
+lavapipe — like the font platform suffix).
+
+**Blockers (why this is not wired into CI yet):**
+1. **vio Metal headless readback is broken.** In a headless context `vio_read_pixels`
+   returns a uniform buffer with `vsync: true` and segfaults with `vsync: false`.
+   `vio_metal_setup_context_native()` also requires a non-NULL `CAMetalLayer`, so
+   there is no layer-less offscreen path; the hidden-window render/present/readback
+   interaction needs fixing in `php-vio` (`src/backends/metal/vio_metal.m`).
+   D3D12/Vulkan readback are unaffected.
+2. **Building php-vio on the CI runners** (it bundles Metal/D3D/Vulkan +
+   SPIRV-Cross) is a large per-platform build, heavier than the php-glfw build.
+
+Until both land, native-backend pixel VRT stays out of CI to avoid red,
+unverifiable jobs. The Docker OpenGL matrix above is the shipping pixel-capable
+path; `GdRenderer2D` covers 2D layout regression.
+
 ---
 
 ## VRT workflow (Playwright-style, 2D)
