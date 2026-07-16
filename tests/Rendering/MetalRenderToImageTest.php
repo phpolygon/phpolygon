@@ -19,6 +19,7 @@ use PHPolygon\Rendering\Material;
 use PHPolygon\Rendering\MaterialRegistry;
 use PHPolygon\Rendering\MetalRenderer3D;
 use PHPolygon\Rendering\RenderCommandList;
+use PHPolygon\Testing\VisualTestCase;
 
 /**
  * Native-Metal headless pixel VRT (macOS only). Renders a lit box off-screen
@@ -34,6 +35,11 @@ use PHPolygon\Rendering\RenderCommandList;
 #[RequiresOperatingSystem('Darwin')]
 class MetalRenderToImageTest extends TestCase
 {
+    use VisualTestCase;
+
+    private const W = 128;
+    private const H = 128;
+
     protected function setUp(): void
     {
         if (!extension_loaded('metal')) {
@@ -43,25 +49,30 @@ class MetalRenderToImageTest extends TestCase
         MaterialRegistry::clear();
     }
 
-    public function testRendersLitBoxOffscreen(): void
+    /** Render the shared "lit box on blue clear" scene off-screen → RGBA. */
+    private function renderBoxScene(): string
     {
-        $w = 128;
-        $h = 128;
-
-        $renderer = new MetalRenderer3D($w, $h, 0); // handle 0 = headless
+        $renderer = new MetalRenderer3D(self::W, self::H, 0); // handle 0 = headless
 
         MeshRegistry::register('box', BoxMesh::generate(1.0, 1.0, 1.0));
         MaterialRegistry::register('mat', new Material(albedo: new Color(0.9, 0.4, 0.15)));
 
         $view = Mat4::lookAt(new Vec3(2.5, 2.5, 3.5), new Vec3(0, 0, 0), new Vec3(0, 1, 0));
-        $proj = Mat4::perspective(deg2rad(55.0), $w / $h, 0.1, 100.0);
+        $proj = Mat4::perspective(deg2rad(55.0), self::W / self::H, 0.1, 100.0);
 
         $list = new RenderCommandList();
         $list->add(new SetCamera($view, $proj));
         $list->add(new SetDirectionalLight(new Vec3(-0.4, -1.0, -0.5), new Color(1, 1, 1), 1.2));
         $list->add(new DrawMesh('box', 'mat', Mat4::identity()));
 
-        $rgba = $renderer->renderToImage($list, $w, $h, new Color(0.10, 0.50, 0.90, 1.0));
+        return $renderer->renderToImage($list, self::W, self::H, new Color(0.10, 0.50, 0.90, 1.0));
+    }
+
+    public function testRendersLitBoxOffscreen(): void
+    {
+        $w = self::W;
+        $h = self::H;
+        $rgba = $this->renderBoxScene();
 
         self::assertSame($w * $h * 4, strlen($rgba), 'read-back size must be width*height*4');
 
@@ -81,6 +92,25 @@ class MetalRenderToImageTest extends TestCase
 
         // A real 3D render has many shades (lighting across faces), not a flat fill.
         self::assertGreaterThan(3, $this->distinctColors($rgba), 'expected shaded geometry');
+    }
+
+    /**
+     * Pixel snapshot of the same scene. A generous tolerance absorbs minor
+     * GPU-model differences (AA / rounding) between Macs — the reference is
+     * per-backend (`-metal-...`). Regenerate with PHPOLYGON_UPDATE_SNAPSHOTS=1.
+     */
+    public function testBoxSnapshot(): void
+    {
+        $rgba = $this->renderBoxScene();
+        $this->assertRgbaScreenshot(
+            $rgba,
+            self::W,
+            self::H,
+            'metal-box',
+            'metal',
+            threshold: 0.15,
+            maxDiffPixelRatio: 0.03,
+        );
     }
 
     /** @return array{0:int,1:int,2:int} */

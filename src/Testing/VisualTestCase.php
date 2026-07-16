@@ -78,10 +78,98 @@ trait VisualTestCase
         @mkdir($snapshotDir, 0755, true);
         $renderer->savePng($actualPath);
 
-        $updateMode = $this->isUpdateSnapshotsMode();
+        $this->compareAgainstSnapshot(
+            $name,
+            $expectedPath,
+            $actualPath,
+            $diffPath,
+            $threshold,
+            $maxDiffPixels,
+            $maxDiffPixelRatio,
+        );
+    }
 
+    /**
+     * Assert that a raw RGBA byte buffer (top-down, width*height*4) matches the
+     * reference snapshot. This is the backend-agnostic entry point for GPU
+     * read-back VRT: feed it the bytes from a native renderer's off-screen read
+     * (e.g. MetalRenderer3D::renderToImage()). A platform/backend suffix is
+     * appended (Metal ≠ WARP ≠ lavapipe never share a baseline), so pass a
+     * distinct $backend like 'metal'.
+     *
+     * @param string $rgba   width*height*4 RGBA bytes, top-down row order
+     */
+    protected function assertRgbaScreenshot(
+        string $rgba,
+        int $width,
+        int $height,
+        string $name,
+        string $backend,
+        float $threshold = 0.1,
+        ?int $maxDiffPixels = null,
+        ?float $maxDiffPixelRatio = null,
+    ): void {
+        if ($width < 1 || $height < 1) {
+            $this->fail("assertRgbaScreenshot('{$name}') needs positive dimensions");
+        }
+        self::assertSame(
+            $width * $height * 4,
+            strlen($rgba),
+            "RGBA buffer for '{$name}' must be width*height*4 bytes",
+        );
+
+        $snapshotDir = $this->resolveSnapshotDir();
+        @mkdir($snapshotDir, 0755, true);
+
+        $suffix       = "-{$backend}-" . $this->detectPlatformSuffix();
+        $expectedPath = $snapshotDir . '/' . "{$name}{$suffix}.png";
+        $actualPath   = $snapshotDir . '/' . "{$name}{$suffix}.actual.png";
+        $diffPath     = $snapshotDir . '/' . "{$name}{$suffix}.diff.png";
+
+        $image = imagecreatetruecolor($width, $height);
+        for ($y = 0; $y < $height; $y++) {
+            for ($x = 0; $x < $width; $x++) {
+                $i = ($y * $width + $x) * 4;
+                $color = imagecolorallocate(
+                    $image,
+                    ord($rgba[$i]),
+                    ord($rgba[$i + 1]),
+                    ord($rgba[$i + 2]),
+                );
+                if ($color !== false) {
+                    imagesetpixel($image, $x, $y, $color);
+                }
+            }
+        }
+        imagepng($image, $actualPath);
+
+        $this->compareAgainstSnapshot(
+            $name,
+            $expectedPath,
+            $actualPath,
+            $diffPath,
+            $threshold,
+            $maxDiffPixels,
+            $maxDiffPixelRatio,
+        );
+    }
+
+    /**
+     * Shared compare-or-record step: on first run / update mode the actual PNG
+     * becomes the reference and the test passes; otherwise it is diffed against
+     * the committed reference within the given tolerances.
+     */
+    private function compareAgainstSnapshot(
+        string $name,
+        string $expectedPath,
+        string $actualPath,
+        string $diffPath,
+        float $threshold,
+        ?int $maxDiffPixels,
+        ?float $maxDiffPixelRatio,
+    ): void {
         // First run or update mode: save as reference
-        if (!file_exists($expectedPath) || $updateMode) {
+        if (!file_exists($expectedPath) || $this->isUpdateSnapshotsMode()) {
             copy($actualPath, $expectedPath);
             @unlink($actualPath);
             @unlink($diffPath);
@@ -95,18 +183,15 @@ trait VisualTestCase
             return;
         }
 
-        // Compare
         $result = ScreenshotComparer::compare($expectedPath, $actualPath, $diffPath, $threshold);
 
         if ($result->passes($maxDiffPixels, $maxDiffPixelRatio)) {
-            // Clean up actual/diff on success
             @unlink($actualPath);
             @unlink($diffPath);
             $this->addToAssertionCount(1);
             return;
         }
 
-        // Build failure message
         $msg = "Visual regression detected for '{$name}'.\n";
         $msg .= $result->summary() . "\n\n";
         $msg .= "  Expected: {$expectedPath}\n";

@@ -28,6 +28,16 @@ jobs:
           php-version: ${{ matrix.php }}
           extensions: gd, mbstring, dom, xml
           coverage: none
+          tools: pie
+
+      # Best-effort: build the native Metal extension so the macOS leg exercises
+      # the native-Metal pixel VRT (MetalRenderToImageTest). If it fails to
+      # build, the test skips via its #[RequiresPhpExtension('metal')] guard and
+      # the job stays green — hence continue-on-error.
+      - name: Install php-metal-gpu (macOS, best-effort)
+        if: runner.os == 'macOS'
+        continue-on-error: true
+        run: pie install hmennen90/php-metal-gpu:@dev
 
       - name: Install Composer dependencies
         run: composer install --no-interaction --ignore-platform-reqs
