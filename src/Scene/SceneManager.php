@@ -74,10 +74,19 @@ class SceneManager implements SceneManagerInterface
         }
         $this->sceneSystems[$name] = $systems;
 
-        // Build and materialize entities
+        // Build and materialize entities. A failure in build()/materialize()
+        // must not leave the world with the scene's systems registered but no
+        // entities — roll back and rethrow with context instead of silently
+        // continuing with a half-built scene.
         $builder = new SceneBuilder();
-        $scene->build($builder);
-        $entityMap = $builder->materialize($world);
+        try {
+            $scene->build($builder);
+            $entityMap = $builder->materialize($world);
+        } catch (\Throwable $e) {
+            $this->rollbackFailedLoad($name);
+            Engine::logError((new SceneBuildException($name, $e))->getMessage());
+            throw new SceneBuildException($name, $e);
+        }
         $this->sceneEntities[$name] = $entityMap;
 
         // Track persistent entities
@@ -138,13 +147,21 @@ class SceneManager implements SceneManagerInterface
         $this->sceneSystems[$name] = $systems;
 
         // Build entities phase by phase, re-yielding each phase to the caller.
+        // As in loadScene(), any failure during the generator or materialize()
+        // rolls back the partially registered scene and rethrows with context.
         $builder = new SceneBuilder();
-        foreach ($scene->buildProgressive($builder) as $phase) {
-            yield $phase;
-        }
+        try {
+            foreach ($scene->buildProgressive($builder) as $phase) {
+                yield $phase;
+            }
 
-        // Materialize entities (single heavy step) once the build completes.
-        $entityMap = $builder->materialize($world);
+            // Materialize entities (single heavy step) once the build completes.
+            $entityMap = $builder->materialize($world);
+        } catch (\Throwable $e) {
+            $this->rollbackFailedLoad($name);
+            Engine::logError((new SceneBuildException($name, $e))->getMessage());
+            throw new SceneBuildException($name, $e);
+        }
         $this->sceneEntities[$name] = $entityMap;
 
         // Track persistent entities
@@ -276,6 +293,22 @@ class SceneManager implements SceneManagerInterface
         $scene = $this->loaded[$name];
         $scene->onActivate($this->engine);
         $events->dispatch(new SceneActivated($name, $scene));
+    }
+
+    /**
+     * Undo the side effects a loadScene()/loadSceneProgressive() call made
+     * before build()/materialize() failed: the scene's systems were already
+     * registered on the world (and would otherwise keep ticking against a
+     * non-existent scene). The scene itself was never added to $this->loaded,
+     * so there is nothing else to unwind.
+     */
+    private function rollbackFailedLoad(string $name): void
+    {
+        $world = $this->engine->world;
+        foreach ($this->sceneSystems[$name] ?? [] as $system) {
+            $world->removeSystem($system);
+        }
+        unset($this->sceneSystems[$name], $this->sceneEntities[$name]);
     }
 
     private function unloadAllScenes(): void
