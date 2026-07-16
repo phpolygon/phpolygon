@@ -110,11 +110,14 @@ lavapipe — like the font platform suffix).
   Private storage). A cleared headless frame now round-trips its exact colour
   and the vsync-off path no longer segfaults. This unblocks **2D** pixel VRT on
   real Metal.
-- **vio Metal 3D is stubbed** (`vio_metal.m`: "3D pipeline / buffer / texture /
-  draw: not yet wired" — `metal_create_pipeline`/`metal_draw`/… are no-ops).
-  So **3D** pixel VRT on macOS via vio is not possible until vio's Metal 3D
-  pipeline lands. Alternatives for macOS 3D: the standalone `MetalRenderer3D`
-  (php-metal) or the vio **OpenGL** backend.
+- **macOS 3D pixel VRT works** via the standalone `MetalRenderer3D` +
+  php-metalgpu (NOT vio — vio's Metal 3D pipeline is stubbed). Construct it
+  headless (`new MetalRenderer3D($w, $h, 0)`) and call
+  `renderToImage(RenderCommandList, $w, $h): string` — it renders the scene into
+  a Shared off-screen texture and reads it back as RGBA via `Metal\Texture::getBytes()`.
+  No window or drawable needed. Verified: `MetalRenderToImageTest` renders a lit
+  box off-screen on macOS runners (`#[RequiresOperatingSystem('Darwin')]` +
+  `#[RequiresPhpExtension('metal')]`, skipped elsewhere).
 - **D3D12 + Vulkan** ship real 3D pipelines *and* golden-compare `read_pixels`,
   so **Windows (D3D12/WARP)** and **Linux (Vulkan/lavapipe)** are the viable
   paths for native 3D pixel VRT.

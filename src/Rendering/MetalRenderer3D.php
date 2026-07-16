@@ -11,6 +11,7 @@ use Metal\DepthStencilState;
 use Metal\Device;
 use Metal\Layer;
 use Metal\Library;
+use Metal\RenderCommandEncoder;
 use Metal\RenderPassDescriptor;
 use Metal\RenderPipelineDescriptor;
 use Metal\RenderPipelineState;
@@ -60,7 +61,10 @@ class MetalRenderer3D implements Renderer3DInterface
     private int $height;
 
     private Device $device;
-    private Layer $layer;
+    /** Null in headless mode (renderToImage() only — no window/drawable). */
+    private ?Layer $layer = null;
+    /** True when constructed with no native window (offscreen readback only). */
+    private bool $headless = false;
     private CommandQueue $commandQueue;
     private RenderPipelineState $pipeline;
     private DepthStencilState $depthStencilState;
@@ -273,13 +277,151 @@ class MetalRenderer3D implements Renderer3DInterface
     {
         $this->width  = $width;
         $this->height = $height;
-        $this->layer->setDrawableSize($width, $height);
+        $this->layer?->setDrawableSize($width, $height);
     }
 
     public function getWidth(): int  { return $this->width; }
     public function getHeight(): int { return $this->height; }
 
-    public function render(RenderCommandList $commandList): void
+    /**
+     * Render a command list off-screen and return the framebuffer as raw RGBA
+     * bytes (width * height * 4), top-down. No window or drawable required — the
+     * native-Metal path for headless pixel VRT on macOS (construct with
+     * nativeWindowHandle 0). Encode the returned bytes to a PNG or feed them to
+     * ScreenshotComparer upstream.
+     *
+     * The colour target is StorageModeShared so getBytes() reads it directly
+     * (valid on Apple Silicon's unified memory, which macOS CI runners use).
+     */
+    public function renderToImage(
+        RenderCommandList $commandList,
+        int $width,
+        int $height,
+        ?Color $clear = null,
+    ): string {
+        $width  = max(1, $width);
+        $height = max(1, $height);
+
+        $colorDesc = new TextureDescriptor();
+        $colorDesc->setPixelFormat($this->offscreenColorPixelFormat); // BGRA8Unorm
+        $colorDesc->setWidth($width);
+        $colorDesc->setHeight($height);
+        $colorDesc->setUsage(\Metal\TextureUsageRenderTarget | \Metal\TextureUsageShaderRead);
+        $colorDesc->setStorageMode(\Metal\StorageModeShared);
+        $colorTex = $this->device->createTexture($colorDesc);
+
+        $depthDesc = new TextureDescriptor();
+        $depthDesc->setPixelFormat($this->offscreenDepthPixelFormat);
+        $depthDesc->setWidth($width);
+        $depthDesc->setHeight($height);
+        $depthDesc->setUsage(\Metal\TextureUsageRenderTarget);
+        $depthDesc->setStorageMode(\Metal\StorageModePrivate);
+        $depthTex = $this->device->createTexture($depthDesc);
+
+        $this->collectFrameState($commandList);
+        // Headless readback skips the atmospheric sky pass (multi-pass cubemap
+        // work not needed for mesh VRT).
+        $this->pendingSky = null;
+
+        if ($clear !== null) {
+            $this->clearR = $clear->r;
+            $this->clearG = $clear->g;
+            $this->clearB = $clear->b;
+        }
+
+        $pass = new RenderPassDescriptor();
+        $pass->setColorAttachmentTexture(0, $colorTex);
+        $pass->setColorAttachmentLoadAction(0, \Metal\LoadActionClear);
+        $pass->setColorAttachmentClearColor(0, $this->clearR, $this->clearG, $this->clearB, 1.0);
+        $pass->setColorAttachmentStoreAction(0, \Metal\StoreActionStore);
+        $pass->setDepthAttachmentTexture($depthTex);
+        $pass->setDepthAttachmentLoadAction(\Metal\LoadActionClear);
+        $pass->setDepthAttachmentStoreAction(\Metal\StoreActionStore);
+        $pass->setDepthAttachmentClearDepth(1.0);
+
+        $cmd     = $this->commandQueue->createCommandBuffer();
+        $encoder = $cmd->createRenderCommandEncoder($pass);
+        $encoder->setViewport(0.0, 0.0, (float)$width, (float)$height, 0.0, 1.0);
+        $encoder->setScissorRect(0, 0, $width, $height);
+        $encoder->setRenderPipelineState($this->ensurePipelineForSampleCount(1));
+        $encoder->setDepthStencilState($this->depthStencilState);
+        $encoder->setCullMode(\Metal\CullModeNone);
+        $encoder->setFrontFacingWinding(\Metal\WindingCounterClockwise);
+        $encoder->setVertexBuffer($this->frameUbo, 0, 1); // slot 1: FrameUBO
+        $this->encodeSceneDraws($encoder, $commandList);
+        $encoder->endEncoding();
+
+        $cmd->commit();
+        $cmd->waitUntilCompleted();
+
+        // BGRA8 read-back → RGBA. gmp-free byte swizzle; test-path only.
+        $bgra = (string) $colorTex->getBytes([0, 0, $width, $height], 0, $width * 4);
+        $n = strlen($bgra);
+        $rgba = str_repeat("\0", $n);
+        for ($i = 0; $i + 3 < $n; $i += 4) {
+            $rgba[$i]     = $bgra[$i + 2]; // R
+            $rgba[$i + 1] = $bgra[$i + 1]; // G
+            $rgba[$i + 2] = $bgra[$i];     // B
+            $rgba[$i + 3] = $bgra[$i + 3]; // A
+        }
+        return $rgba;
+    }
+
+    /**
+     * Encode every DrawMesh / DrawMeshInstanced command in the list into the
+     * given render encoder. Shared by the windowed and headless paths.
+     */
+    private function encodeSceneDraws(RenderCommandEncoder $encoder, RenderCommandList $commandList): void
+    {
+        foreach ($commandList->getCommands() as $command) {
+            if ($command instanceof DrawMesh) {
+                $this->resolveMaterial($command->materialId);
+                $this->bindMeshAabb($command->meshId);
+                $uboBytes = $this->buildLightingUboBytes();
+                $encoder->setFragmentBytes($uboBytes, 2);
+                // Cloth animation runs in the vertex shader and reads
+                // from the same struct, so bind it to the vertex stage too.
+                $encoder->setVertexBytes($uboBytes, 2);
+                $this->drawMeshCommand($encoder, $command->meshId, $command->modelMatrix);
+            } elseif ($command instanceof DrawMeshInstanced) {
+                $this->resolveMaterial($command->materialId);
+                $this->bindMeshAabb($command->meshId);
+                $uboBytes = $this->buildLightingUboBytes();
+                $encoder->setFragmentBytes($uboBytes, 2);
+                // Cloth animation runs in the vertex shader and reads
+                // from the same struct, so bind it to the vertex stage too.
+                $encoder->setVertexBytes($uboBytes, 2);
+                if ($command->flatMatrices !== []) {
+                    // Flat path: stream 16 floats per instance straight to
+                    // setVertexBytes - no intermediate Mat4 allocation.
+                    $count = $command->instanceCount >= 0 ? $command->instanceCount : count($command->matrices);
+                    $flat = $command->flatMatrices;
+                    for ($i = 0; $i < $count; $i++) {
+                        $base = $i * 16;
+                        $bytes = pack(
+                            'f16',
+                            $flat[$base + 0],  $flat[$base + 1],  $flat[$base + 2],  $flat[$base + 3],
+                            $flat[$base + 4],  $flat[$base + 5],  $flat[$base + 6],  $flat[$base + 7],
+                            $flat[$base + 8],  $flat[$base + 9],  $flat[$base + 10], $flat[$base + 11],
+                            $flat[$base + 12], $flat[$base + 13], $flat[$base + 14], $flat[$base + 15],
+                        );
+                        $this->drawMeshCommandRaw($encoder, $command->meshId, $bytes);
+                    }
+                } else {
+                    foreach ($command->matrices as $matrix) {
+                        $this->drawMeshCommand($encoder, $command->meshId, $matrix);
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * Reset per-frame state and fold the command list's camera / lights / fog /
+     * sky / wind into member state, then upload the frame UBO. Shared by the
+     * windowed {@see render()} path and the headless {@see renderToImage()} path.
+     */
+    private function collectFrameState(RenderCommandList $commandList): void
     {
         $this->globalTime = microtime(true) - $this->bootTime;
 
@@ -380,9 +522,21 @@ class MetalRenderer3D implements Renderer3DInterface
         }
 
         $this->uploadFrameUbo();
+    }
+
+    public function render(RenderCommandList $commandList): void
+    {
+        $layer = $this->layer;
+        if ($this->headless || $layer === null) {
+            throw new \RuntimeException(
+                'MetalRenderer3D::render() requires a window; use renderToImage() in headless mode'
+            );
+        }
+
+        $this->collectFrameState($commandList);
 
         // ── Acquire drawable ───────────────────────────────────────────────
-        $drawable     = $this->layer->nextDrawable();
+        $drawable     = $layer->nextDrawable();
         $drawableTex  = $drawable->getTexture();
 
         // ── Phase 1.5: decide whether to render off-screen ─────────────────
@@ -496,47 +650,7 @@ class MetalRenderer3D implements Renderer3DInterface
         // and rewriting it would race with in-flight draws and cause every
         // mesh to render with the LAST draw's material colour (the bug we
         // had before this rewrite).
-        foreach ($commandList->getCommands() as $command) {
-            if ($command instanceof DrawMesh) {
-                $this->resolveMaterial($command->materialId);
-                $this->bindMeshAabb($command->meshId);
-                $uboBytes = $this->buildLightingUboBytes();
-                $encoder->setFragmentBytes($uboBytes, 2);
-                // Cloth animation runs in the vertex shader and reads
-                // from the same struct, so bind it to the vertex stage too.
-                $encoder->setVertexBytes($uboBytes, 2);
-                $this->drawMeshCommand($encoder, $command->meshId, $command->modelMatrix);
-            } elseif ($command instanceof DrawMeshInstanced) {
-                $this->resolveMaterial($command->materialId);
-                $this->bindMeshAabb($command->meshId);
-                $uboBytes = $this->buildLightingUboBytes();
-                $encoder->setFragmentBytes($uboBytes, 2);
-                // Cloth animation runs in the vertex shader and reads
-                // from the same struct, so bind it to the vertex stage too.
-                $encoder->setVertexBytes($uboBytes, 2);
-                if ($command->flatMatrices !== []) {
-                    // Flat path: stream 16 floats per instance straight to
-                    // setVertexBytes - no intermediate Mat4 allocation.
-                    $count = $command->instanceCount >= 0 ? $command->instanceCount : count($command->matrices);
-                    $flat = $command->flatMatrices;
-                    for ($i = 0; $i < $count; $i++) {
-                        $base = $i * 16;
-                        $bytes = pack(
-                            'f16',
-                            $flat[$base + 0],  $flat[$base + 1],  $flat[$base + 2],  $flat[$base + 3],
-                            $flat[$base + 4],  $flat[$base + 5],  $flat[$base + 6],  $flat[$base + 7],
-                            $flat[$base + 8],  $flat[$base + 9],  $flat[$base + 10], $flat[$base + 11],
-                            $flat[$base + 12], $flat[$base + 13], $flat[$base + 14], $flat[$base + 15],
-                        );
-                        $this->drawMeshCommandRaw($encoder, $command->meshId, $bytes);
-                    }
-                } else {
-                    foreach ($command->matrices as $matrix) {
-                        $this->drawMeshCommand($encoder, $command->meshId, $matrix);
-                    }
-                }
-            }
-        }
+        $this->encodeSceneDraws($encoder, $commandList);
 
         $encoder->endEncoding();
 
@@ -975,22 +1089,24 @@ class MetalRenderer3D implements Renderer3DInterface
 
     private function initMetal(int $nativeWindowHandle): void
     {
-        if ($nativeWindowHandle === 0) {
-            throw new \RuntimeException(
-                'MetalRenderer3D: native window handle is 0 — vio_native_window_handle() returned no NSWindow. '
-                . 'Ensure the engine runs on macOS with vio + GLFW windowing.'
-            );
-        }
+        // Handle 0 = headless: build the device + queue + pipelines but no
+        // CAMetalLayer. render() (the windowed drawable path) is unavailable;
+        // only renderToImage() (offscreen render + CPU read-back) works. Used
+        // for pixel VRT on macOS CI runners with no window.
+        $this->headless = $nativeWindowHandle === 0;
 
         $this->device       = \Metal\createSystemDefaultDevice();
         $this->commandQueue = $this->device->createCommandQueue();
 
-        // Attach CAMetalLayer to the GLFW window's NSView. The handle is the
-        // raw NSWindow pointer (uintptr_t cast to int), which Metal\Layer's
-        // constructor bridges back to an Objective-C NSWindow before
-        // installing the CAMetalLayer on its content view.
-        $this->layer = new Layer($nativeWindowHandle, $this->device, \Metal\PixelFormatBGRA8Unorm);
-        $this->layer->setDrawableSize($this->width, $this->height);
+        if (!$this->headless) {
+            // Attach CAMetalLayer to the GLFW window's NSView. The handle is the
+            // raw NSWindow pointer (uintptr_t cast to int), which Metal\Layer's
+            // constructor bridges back to an Objective-C NSWindow before
+            // installing the CAMetalLayer on its content view.
+            $layer = new Layer($nativeWindowHandle, $this->device, \Metal\PixelFormatBGRA8Unorm);
+            $layer->setDrawableSize($this->width, $this->height);
+            $this->layer = $layer;
+        }
 
         $this->createPipeline();
         $this->createDepthStencilState();

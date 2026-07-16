@@ -88,6 +88,10 @@ class Texture
 {
     public function getWidth(): int { return 0; }
     public function getHeight(): int { return 0; }
+    /** @param array{0:int,1:int,2:int,3:int} $region [x, y, width, height]. Returns raw pixel bytes. */
+    public function getBytes(array $region, int $mipmapLevel, int $bytesPerRow): string { return ''; }
+    /** @param array{0:int,1:int,2:int,3:int} $region [x, y, width, height] */
+    public function replaceRegion(array $region, int $mipmapLevel, string $data, int $bytesPerRow): void {}
 }
 
 class TextureDescriptor
