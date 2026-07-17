@@ -1274,11 +1274,24 @@ class VioRenderer2D implements Renderer2DInterface
         // the fallback atlases when the text actually contains a codepoint the
         // primary can't cover. Resolving them eagerly meant every drawText() of
         // plain Latin/Western text still loaded the full CJK/Arabic/Thai fallback
-        // chain (~16 MB atlas each) — pure waste, and the trigger for a per-atlas
-        // allocation that accumulates when the GL context is recreated. When the
-        // caller passes no text (measurement without a string) keep the eager
-        // behaviour so nothing that relies on the full chain regresses.
-        if ($text !== '' && !self::textNeedsFallback($text)) {
+        // chain (~16 MB atlas each) — pure waste, and a multi-second synchronous
+        // pack when the async worker can't start. Empty text has no glyphs at all
+        // (an immediate-mode button hit-tested with a '' label measures/draws it),
+        // so it never needs a fallback either — treat it like plain Latin.
+        if ($text === '' || !self::textNeedsFallback($text)) {
+            return $chain;
+        }
+        // The byte scan over-triggers: it flags any codepoint >= U+0500, but the
+        // primary font often still covers it — an em dash, ellipsis or curly
+        // quote all live in a Western UI face like Inter. Resolving the fallback
+        // chain for such a string needlessly loads the multi-megabyte
+        // CJK/Arabic/Thai atlases (a multi-second SYNCHRONOUS pack when the async
+        // worker can't start), which stalled the first frame that drew, say, a
+        // tagline with an em dash. Skip the chain when the primary already covers
+        // every flagged character. Per-(font,char) coverage is memoised in
+        // fontCoversChar(), so after the first frame this is a couple of cheap
+        // hashmap hits.
+        if ($text !== '' && $this->primaryCoversFlagged($primary, $text)) {
             return $chain;
         }
         $fallbacks = $this->fallbackFonts[$this->currentFontName] ?? [];
@@ -1289,6 +1302,24 @@ class VioRenderer2D implements Renderer2DInterface
             }
         }
         return $chain;
+    }
+
+    /**
+     * True if the primary font covers every character that
+     * {@see textNeedsFallback} would flag (codepoint >= U+0500). Lets a string
+     * the cheap byte scan flagged — but the primary actually renders (em dash,
+     * ellipsis, curly quotes) — skip the expensive fallback-chain resolution and
+     * the atlas loads it triggers. Only flagged characters are probed; ASCII /
+     * Latin-1 is always covered. Coverage is memoised in {@see fontCoversChar}.
+     */
+    private function primaryCoversFlagged(\VioFont $primary, string $text): bool
+    {
+        foreach (\mb_str_split($text) as $ch) {
+            if (self::textNeedsFallback($ch) && !$this->fontCoversChar($primary, $ch)) {
+                return false;
+            }
+        }
+        return true;
     }
 
     private function getVioTexture(Texture $texture): ?VioTexture
