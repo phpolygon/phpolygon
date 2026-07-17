@@ -17,12 +17,16 @@ use RuntimeException;
  * The starter node set:
  *
  *   Generators (no inputs):
- *     box       params: width, height, depth
- *     cylinder  params: radius, height, segments
- *     sphere    params: radius, stacks, slices
- *     plane     params: width, depth, subdivisions
+ *     box        params: width, height, depth
+ *     cylinder   params: radius, height, segments
+ *     sphere     params: radius, stacks, slices
+ *     plane      params: width, depth, subdivisions
+ *     torus      params: radius, tube, radialSegments, tubularSegments
+ *     octahedron params: radius
+ *     wedge      params: peakZ
  *   Operators (mesh inputs):
  *     transform input 'mesh'; params: tx,ty,tz  rx,ry,rz (degrees)  sx,sy,sz
+ *     mirror    input 'mesh'; params: axis (0=X,1=Y,2=Z) — mirror + merge
  *     combine   merges all of its inputs into one mesh
  *
  * New node types are added by extending {@see build()} — the graph format and
@@ -132,10 +136,66 @@ final class ProceduralMeshEvaluator
                 $this->f($params, 'depth', 1.0),
                 (int) $this->f($params, 'subdivisions', 1.0),
             ),
+            'torus' => TorusMesh::generate(
+                $this->f($params, 'radius', 1.0),
+                $this->f($params, 'tube', 0.4),
+                (int) $this->f($params, 'radialSegments', 12.0),
+                (int) $this->f($params, 'tubularSegments', 24.0),
+            ),
+            'octahedron' => OctahedronMesh::generate(
+                $this->f($params, 'radius', 1.0),
+            ),
+            'wedge' => WedgeMesh::generate(
+                $this->f($params, 'peakZ', 0.0),
+            ),
             'transform' => $this->applyTransform($this->requireInput($inputs, 'mesh', $id), $params),
+            'mirror' => $this->applyMirror($this->requireInput($inputs, 'mesh', $id), $params),
             'combine' => MeshData::merge(...array_values($inputs)),
             default => throw new RuntimeException("ProceduralMesh has unknown node type '{$type}' at '{$id}'"),
         };
+    }
+
+    /**
+     * Mirror the mesh across an axis-aligned plane through the origin and merge
+     * the mirrored copy with the original (a symmetric "mirror modifier").
+     * `axis`: 0 = X, 1 = Y, 2 = Z.
+     *
+     * @param array<string, mixed> $params
+     */
+    private function applyMirror(MeshData $mesh, array $params): MeshData
+    {
+        $axis = (int) $this->f($params, 'axis', 0.0);
+        $axis = max(0, min(2, $axis));
+
+        $vertices = $mesh->vertices;
+        $mirroredVertices = [];
+        for ($i = 0, $n = count($vertices); $i < $n; $i += 3) {
+            $mirroredVertices[] = $axis === 0 ? -$vertices[$i] : $vertices[$i];
+            $mirroredVertices[] = $axis === 1 ? -$vertices[$i + 1] : $vertices[$i + 1];
+            $mirroredVertices[] = $axis === 2 ? -$vertices[$i + 2] : $vertices[$i + 2];
+        }
+
+        $normals = $mesh->normals;
+        $mirroredNormals = [];
+        for ($i = 0, $n = count($normals); $i < $n; $i += 3) {
+            $mirroredNormals[] = $axis === 0 ? -$normals[$i] : $normals[$i];
+            $mirroredNormals[] = $axis === 1 ? -$normals[$i + 1] : $normals[$i + 1];
+            $mirroredNormals[] = $axis === 2 ? -$normals[$i + 2] : $normals[$i + 2];
+        }
+
+        // Reflection flips triangle orientation; swap two indices per triangle
+        // so the mirrored copy faces outward again.
+        $indices = $mesh->indices;
+        $mirroredIndices = [];
+        for ($i = 0, $n = count($indices); $i < $n; $i += 3) {
+            $mirroredIndices[] = $indices[$i];
+            $mirroredIndices[] = $indices[$i + 2];
+            $mirroredIndices[] = $indices[$i + 1];
+        }
+
+        $mirror = new MeshData($mirroredVertices, $mirroredNormals, $mesh->uvs, $mirroredIndices);
+
+        return MeshData::merge($mesh, $mirror);
     }
 
     /**

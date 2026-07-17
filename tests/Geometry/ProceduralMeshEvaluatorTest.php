@@ -69,6 +69,43 @@ class ProceduralMeshEvaluatorTest extends TestCase
         $this->assertSame(max($mesh->indices), 47, 'merge must offset the second box indices');
     }
 
+    public function testNewGeneratorsProduceGeometry(): void
+    {
+        foreach (['torus', 'octahedron', 'wedge'] as $type) {
+            $graph = new ProceduralMesh();
+            $graph->nodes = [['id' => 'g', 'type' => $type]];
+            $graph->output = 'g';
+
+            $mesh = (new ProceduralMeshEvaluator())->evaluate($graph);
+
+            $this->assertGreaterThan(0, $mesh->vertexCount(), "{$type} produces vertices");
+            $this->assertGreaterThan(0, $mesh->triangleCount(), "{$type} produces triangles");
+        }
+    }
+
+    public function testMirrorDoublesGeometryAndReflectsAcrossAxis(): void
+    {
+        // Box pushed to +X, then mirrored across X → a symmetric pair whose
+        // combined X coordinates cancel to ~0.
+        $graph = new ProceduralMesh();
+        $graph->nodes = [
+            ['id' => 'b', 'type' => 'box', 'params' => ['width' => 1.0, 'height' => 1.0, 'depth' => 1.0]],
+            ['id' => 't', 'type' => 'transform', 'inputs' => ['mesh' => 'b'], 'params' => ['tx' => 5.0]],
+            ['id' => 'm', 'type' => 'mirror', 'inputs' => ['mesh' => 't'], 'params' => ['axis' => 0.0]],
+        ];
+        $graph->output = 'm';
+
+        $mesh = (new ProceduralMeshEvaluator())->evaluate($graph);
+
+        $this->assertSame(48, $mesh->vertexCount(), 'mirror merges original + reflected copy (2 × 24)');
+
+        $sumX = 0.0;
+        for ($i = 0, $n = count($mesh->vertices); $i < $n; $i += 3) {
+            $sumX += $mesh->vertices[$i];
+        }
+        $this->assertEqualsWithDelta(0.0, $sumX, 1e-4, 'mirror across X makes the mesh X-symmetric');
+    }
+
     public function testUnknownNodeTypeThrows(): void
     {
         $graph = new ProceduralMesh();
