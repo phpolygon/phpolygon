@@ -83,6 +83,17 @@ class UIContext
     private float $viewportOffsetY = 0.0;
 
     /**
+     * Design-space translation applied to the content region while it is drawn
+     * through a renderer transform (e.g. a panel body shifted right past a
+     * navigation rail, via a renderer transform), the draws move but the cursor
+     * doesn't — so hit-testing subtracts this to bring the cursor into the same
+     * translated space. Does NOT affect drawing (the renderer transform already
+     * moves the draws). Zero = no region offset (default).
+     */
+    private float $contentOffsetX = 0.0;
+    private float $contentOffsetY = 0.0;
+
+    /**
      * Virtual/design viewport height, in the same coordinate space widgets are
      * laid out in (0 = unknown). Lets a dropdown flip its option list upward when
      * opening downward would run past the bottom of the screen.
@@ -510,7 +521,7 @@ class UIContext
             } elseif ($hovered) {
                 // Only track value while cursor is over the bar.
                 // If cursor leaves (e.g. phantom stuck press), slider deactivates next branch.
-                $mouseX = ($this->input->getMouseX() - $this->viewportOffsetX) / $this->contentScale;
+                $mouseX = ($this->input->getMouseX() - $this->viewportOffsetX) / $this->contentScale - $this->contentOffsetX;
                 $t = max(0.0, min(1.0, ($mouseX - $barX) / $barW));
                 $value = $min + ($max - $min) * $t;
             } else {
@@ -1176,6 +1187,17 @@ class UIContext
     }
 
     /**
+     * Set the design-space content-region offset applied to hit-testing only
+     * (see {@see $contentOffsetX}). Pass the same translation the renderer is
+     * transformed by while drawing into a sub-region; reset to (0, 0) afterwards.
+     */
+    public function setContentOffset(float $x, float $y): void
+    {
+        $this->contentOffsetX = $x;
+        $this->contentOffsetY = $y;
+    }
+
+    /**
      * Set the virtual viewport height (design-space units). When set, a dropdown
      * whose option list would extend past this height opens upward instead, so a
      * dropdown near the bottom of the screen stays fully visible.
@@ -1234,9 +1256,11 @@ class UIContext
         if (self::$rtlMirrorWidth !== null) {
             $mx = self::$rtlMirrorWidth - $mx;
         }
+        // Content-region translate (draws moved by a renderer transform): bring
+        // the cursor into that same space. Zero unless set by the consumer.
         $adjustedMouse = new Vec2(
-            $mx,
-            ($mouse->y - $this->viewportOffsetY) / $this->contentScale,
+            $mx - $this->contentOffsetX,
+            ($mouse->y - $this->viewportOffsetY) / $this->contentScale - $this->contentOffsetY,
         );
         return $rect->contains($adjustedMouse);
     }

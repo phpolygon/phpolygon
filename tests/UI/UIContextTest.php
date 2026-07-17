@@ -208,6 +208,54 @@ class UIContextTest extends TestCase
         $this->assertTrue($result);
     }
 
+    public function testContentOffsetShiftsHitTestToTheTranslatedDrawPosition(): void
+    {
+        // Region drawn through a renderer transform of +200 in X: the draws move
+        // but the cursor doesn't. setContentOffset(200,0) tells hit-testing to
+        // subtract that, so a click at the DRAWN position (design 10 + 200 = 210)
+        // resolves onto the widget's design rect (x 10..90).
+        $this->ctx->setContentOffset(200.0, 0.0);
+
+        $this->input->handleCursorPosEvent(215.0, 15.0);
+        $this->input->handleMouseButtonEvent(0, 1); // PRESS
+        $this->ctx->begin(10.0, 10.0, 300.0);
+        $this->ctx->button('btn1', 'Click me', 80.0);
+        $this->ctx->end();
+
+        $this->input->unsuppress();
+        $this->input->endFrame();
+        $this->input->handleCursorPosEvent(215.0, 15.0);
+        $this->input->handleMouseButtonEvent(0, 0); // RELEASE
+        $this->ctx->begin(10.0, 10.0, 300.0);
+        $result = $this->ctx->button('btn1', 'Click me', 80.0);
+        $this->ctx->end();
+
+        $this->assertTrue($result, 'click at the translated draw position must hit the widget');
+    }
+
+    public function testContentOffsetIgnoresClicksAtTheUntranslatedDesignPosition(): void
+    {
+        // With the same +200 offset, a click at the raw design position (x 15)
+        // must NOT fire — that spot is off the translated region.
+        $this->ctx->setContentOffset(200.0, 0.0);
+
+        $this->input->handleCursorPosEvent(15.0, 15.0);
+        $this->input->handleMouseButtonEvent(0, 1); // PRESS
+        $this->ctx->begin(10.0, 10.0, 300.0);
+        $this->ctx->button('btn1', 'Click me', 80.0);
+        $this->ctx->end();
+
+        $this->input->unsuppress();
+        $this->input->endFrame();
+        $this->input->handleCursorPosEvent(15.0, 15.0);
+        $this->input->handleMouseButtonEvent(0, 0); // RELEASE
+        $this->ctx->begin(10.0, 10.0, 300.0);
+        $result = $this->ctx->button('btn1', 'Click me', 80.0);
+        $this->ctx->end();
+
+        $this->assertFalse($result, 'click at the untranslated design position must miss');
+    }
+
     public function testPressAndReleaseOnSameButtonFiresExactlyOnce(): void
     {
         // Frame 1: press over button A's rect — must NOT fire yet.
