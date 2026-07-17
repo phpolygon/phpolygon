@@ -36,6 +36,16 @@ class WidgetTree
     private float $viewportWidth;
     private float $viewportHeight;
 
+    /**
+     * Top-left origin of the layout viewport in design space. Non-zero lets a
+     * host render a tree into a sub-region of the screen (e.g. a right-hand
+     * content pane beside a navigation rail) instead of filling from (0,0).
+     * Hit-testing is unaffected: input is mapped into the same absolute design
+     * space, so offsetting the root bounds is sufficient.
+     */
+    private float $viewportX;
+    private float $viewportY;
+
     public function __construct(
         Widget $root,
         Renderer2DInterface $renderer,
@@ -43,6 +53,8 @@ class WidgetTree
         float $viewportWidth,
         float $viewportHeight,
         ?UIStyle $style = null,
+        float $viewportX = 0.0,
+        float $viewportY = 0.0,
     ) {
         $this->root = $root;
         $this->renderer = $renderer;
@@ -50,6 +62,8 @@ class WidgetTree
         $this->viewportWidth = $viewportWidth;
         $this->viewportHeight = $viewportHeight;
         $this->style = $style ?? UIStyle::dark();
+        $this->viewportX = $viewportX;
+        $this->viewportY = $viewportY;
     }
 
     /**
@@ -129,6 +143,16 @@ class WidgetTree
     {
         $this->viewportWidth = $width;
         $this->viewportHeight = $height;
+    }
+
+    /**
+     * Move the layout viewport's top-left origin in design space. Defaults to
+     * (0,0); set non-zero to lay the tree out into a sub-region of the screen.
+     */
+    public function setViewportOrigin(float $x, float $y): void
+    {
+        $this->viewportX = $x;
+        $this->viewportY = $y;
     }
 
     /**
@@ -263,7 +287,7 @@ class WidgetTree
     public function performLayout(): void
     {
         $this->root->measure($this->viewportWidth, $this->viewportHeight, $this->style);
-        $this->root->setBounds(new Rect(0, 0, $this->viewportWidth, $this->viewportHeight));
+        $this->root->setBounds(new Rect($this->viewportX, $this->viewportY, $this->viewportWidth, $this->viewportHeight));
         $this->root->layout($this->style);
     }
 

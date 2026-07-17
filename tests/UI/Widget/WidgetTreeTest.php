@@ -50,6 +50,60 @@ class WidgetTreeTest extends TestCase
         $this->assertEquals(600.0, $root->getBounds()->height);
     }
 
+    public function testViewportOriginOffsetsRootBounds(): void
+    {
+        // A host renders the tree into a right-hand sub-region: the root bounds
+        // must start at the given origin, not (0,0), so the content lays out
+        // beside a navigation rail instead of overlapping it.
+        $root = new VBox();
+        $tree = new WidgetTree($root, $this->renderer, $this->input, 500, 400, $this->style, 300.0, 40.0);
+        $tree->performLayout();
+
+        $this->assertEquals(300.0, $root->getBounds()->x);
+        $this->assertEquals(40.0, $root->getBounds()->y);
+        $this->assertEquals(500.0, $root->getBounds()->width);
+        $this->assertEquals(400.0, $root->getBounds()->height);
+    }
+
+    public function testButtonInOffsetViewportStillClicks(): void
+    {
+        // Hit-testing must stay correct when the viewport is offset: input is in
+        // absolute design space, and the offset root bounds place the button at
+        // its true on-screen position, so a click at those coords fires.
+        $root = new VBox();
+        $btn = (new Button('OK'))->size(Sizing::fixed(100, 30));
+        $root->addChild($btn);
+
+        $tree = new WidgetTree($root, $this->renderer, $this->input, 500, 400, $this->style, 300.0, 40.0);
+        $tree->performLayout();
+
+        $this->assertGreaterThanOrEqual(300.0, $btn->getBounds()->x, 'button laid out inside the offset region');
+
+        $clicked = false;
+        $btn->on('click', function () use (&$clicked) { $clicked = true; });
+
+        $this->input->handleCursorPosEvent($btn->getBounds()->x + 5, $btn->getBounds()->y + 5);
+        $this->input->handleMouseButtonEvent(0, 1);
+        $tree->processInput();
+        $this->input->unsuppress();
+        $this->input->endFrame();
+        $this->input->handleMouseButtonEvent(0, 0);
+        $tree->processInput();
+
+        $this->assertTrue($clicked, 'a button in an offset viewport clicks at its true design-space coords');
+    }
+
+    public function testDefaultViewportOriginIsZero(): void
+    {
+        // Backward compatibility: omitting the origin keeps full-screen layout.
+        $root = new VBox();
+        $tree = $this->tree($root);
+        $tree->performLayout();
+
+        $this->assertEquals(0.0, $root->getBounds()->x);
+        $this->assertEquals(0.0, $root->getBounds()->y);
+    }
+
     public function testAcceptsSiblingInputInterfaceNotJustConcreteInput(): void
     {
         // The game's VioInput implements InputInterface but does NOT extend the
