@@ -54,6 +54,17 @@ class VioRenderer3D implements Renderer3DInterface
     /** @var array<string, VioShader> */
     private array $shaderCache = [];
 
+    /**
+     * Whether the built-in shaders have been compiled yet. Compilation is
+     * deferred out of the constructor ({@see warmShaders()}) because it is a
+     * multi-second synchronous cost (~25 shaders transpiled + compiled by the
+     * graphics driver). Compiling it in the constructor blocked the very first
+     * visible frame — the studio/engine splash could not appear until it
+     * finished. The engine now warms shaders behind the splash instead, and
+     * {@see render()} lazily warms as a safety net if that never happened.
+     */
+    private bool $shadersWarmed = false;
+
     /** @var array<string, VioPipeline> */
     private array $pipelineCache = [];
 
@@ -350,7 +361,10 @@ class VioRenderer3D implements Renderer3DInterface
         // provides vio_set_uniforms (new php-vio); otherwise fall back to
         // per-uniform vio_set_uniform so an older DLL still works.
         $this->batchUniforms = function_exists('vio_set_uniforms');
-        $this->initShaders();
+        // Shader compilation is DEFERRED to warmShaders() (called behind the
+        // splash) so construction is cheap and the first splash frame appears
+        // immediately. The other inits below allocate GPU resources but do not
+        // read the shader cache, so they are safe to run before compilation.
         $this->initShadowMap();
         $this->initSkyboxMesh();
         $this->initPostProcess();
@@ -1153,6 +1167,11 @@ class VioRenderer3D implements Renderer3DInterface
 
     public function render(RenderCommandList $commandList): void
     {
+        // Safety net: if the engine did not warm shaders behind the splash,
+        // compile them now so the first 3D frame still renders (at the cost of
+        // a one-time hitch on this frame). No-op once warmed.
+        $this->warmShaders();
+
         $commands = $commandList->getCommands();
 
         if (getenv('VIO_DEBUG') === '1') {
@@ -1488,6 +1507,23 @@ class VioRenderer3D implements Renderer3DInterface
     // ----------------------------------------------------------------
     // Shader management
     // ----------------------------------------------------------------
+
+    /**
+     * Compile the built-in shaders. Idempotent and safe to call repeatedly.
+     *
+     * Deferred out of the constructor so the multi-second synchronous compile
+     * runs behind the splash rather than blocking the first visible frame. The
+     * engine calls this during the splash; {@see render()} also calls it as a
+     * lazy fallback so a game that drives the renderer directly still works.
+     */
+    public function warmShaders(): void
+    {
+        if ($this->shadersWarmed) {
+            return;
+        }
+        $this->shadersWarmed = true;
+        $this->initShaders();
+    }
 
     private function initShaders(): void
     {

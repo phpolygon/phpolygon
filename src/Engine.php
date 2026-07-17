@@ -1604,6 +1604,21 @@ class Engine
             }
         }
 
+        // Warm the 3D shaders behind the splash. Their compilation is a
+        // multi-second synchronous cost that used to run in the VioRenderer3D
+        // constructor — i.e. before the very first splash frame, so the window
+        // sat blank for several seconds on launch. Deferring it here means the
+        // studio + engine splash are already on screen while the driver
+        // compiles. renderSplashFrame() paints the current (compiling) label so
+        // the last presented frame is the branded splash, not a blank buffer.
+        if (!$this->headless && $this->renderer3D instanceof VioRenderer3D) {
+            $this->splashFadeAlpha = 1.0;
+            $this->splashProgress = 0.4;
+            $this->splashLabel = 'Compiling shaders';
+            $this->renderSplashFrame();
+            $this->renderer3D->warmShaders();
+        }
+
         // Phase 2: Run game init with splash fully visible
         if (!$this->window->shouldClose() && $initFn !== null) {
             $this->splashFadeAlpha = 1.0;
