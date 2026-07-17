@@ -1367,7 +1367,7 @@ class VioRenderer3D implements Renderer3DInterface
         $this->uploadShadowUniforms($hasShadowMap, $dirLights);
         $this->uploadSsaoUniforms();
         $this->uploadSdfAoUniforms();
-        $this->frameUniformsShaderId = $this->shaderOverride ?? 'default';
+        $this->frameUniformsShaderId = $this->activeShaderId();
 
         // Collect opaque-eligible draws (resolving each material ONCE) and sort by
         // (materialId, meshId) so identical draws cluster — that makes the per-draw
@@ -1401,7 +1401,7 @@ class VioRenderer3D implements Renderer3DInterface
         // The opaque pass already uploaded the frame uniforms (+ probe/ssao/sdfao
         // texture binds) into this same shader object's sticky cbuffer; re-upload
         // only if the shader actually changed (it doesn't within a normal frame).
-        $transparentShaderId = $this->shaderOverride ?? 'default';
+        $transparentShaderId = $this->activeShaderId();
         if ($transparentShaderId !== $this->frameUniformsShaderId) {
             $this->uploadFrameUniforms($frameState);
             $this->uploadShadowUniforms($hasShadowMap, $dirLights);
@@ -1632,13 +1632,53 @@ class VioRenderer3D implements Renderer3DInterface
         $this->shaderCache[$id] = $shader;
     }
 
+    /**
+     * Resolve the shader id for the current frame. A game overrides the shader
+     * globally via Shader::use('id'); if that id isn't a built-in, look it up in
+     * the ShaderRegistry and compile it lazily (its GLSL is transpiled to the
+     * backend at runtime, like the built-ins). Falls back to 'default' if the
+     * shader is unknown or fails to compile, so an override never blanks the
+     * screen.
+     */
+    private function activeShaderId(): string
+    {
+        $id = $this->shaderOverride ?? 'default';
+        if ($id === 'default') {
+            return 'default';
+        }
+        $this->ensureShaderCompiled($id);
+        return isset($this->shaderCache[$id]) ? $id : 'default';
+    }
+
+    /** Lazily compile a registered custom shader into the shader cache. */
+    private function ensureShaderCompiled(string $id): void
+    {
+        if (isset($this->shaderCache[$id])) {
+            return;
+        }
+        $def = ShaderRegistry::get($id);
+        if ($def === null) {
+            return;
+        }
+        $vert = @file_get_contents($def->vertexPath);
+        $frag = @file_get_contents($def->fragmentPath);
+        if ($vert === false || $frag === false) {
+            return;
+        }
+        try {
+            $this->compileShader($id, $vert, $frag);
+        } catch (\Throwable) {
+            // Leave it uncompiled — activeShaderId() then falls back to 'default'.
+        }
+    }
+
     // ----------------------------------------------------------------
     // Pipeline management
     // ----------------------------------------------------------------
 
     private function bindPipeline(string $pass): void
     {
-        $shaderId = $this->shaderOverride ?? 'default';
+        $shaderId = $this->activeShaderId();
         $hdr = $this->sceneTargetIsHdr();
         // Cache LDR and HDR pipeline variants under distinct keys: on D3D12 the
         // PSO RTV format (R8 vs FP16) is baked in and must match the bound target.
