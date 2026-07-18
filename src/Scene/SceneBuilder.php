@@ -16,6 +16,8 @@ class SceneBuilder
     /** @var list<EntityDeclaration> */
     private array $declarations = [];
 
+    private ?PrefabRegistry $prefabRegistry = null;
+
     public function entity(string $name): EntityDeclaration
     {
         $decl = new EntityDeclaration($name, $this);
@@ -32,6 +34,91 @@ class SceneBuilder
         $prefab = new $prefabClass();
         $decl = $prefab->build($this);
         $decl->setPrefabSource($prefabClass);
+        return $decl;
+    }
+
+    /**
+     * Attach a prefab registry so {@see prefabByName()} can resolve prefabs by
+     * their registered name (as opposed to {@see prefab()}, which is handed a
+     * class-string directly).
+     */
+    public function setPrefabRegistry(?PrefabRegistry $registry): void
+    {
+        $this->prefabRegistry = $registry;
+    }
+
+    public function getPrefabRegistry(): ?PrefabRegistry
+    {
+        return $this->prefabRegistry;
+    }
+
+    /**
+     * Resolve a prefab by its registered name (via the attached
+     * {@see PrefabRegistry}), build it under $entityName, and tag the resulting
+     * declaration with its source class so the transpiler can round-trip it.
+     */
+    public function prefabByName(string $name, string $entityName): EntityDeclaration
+    {
+        if ($this->prefabRegistry === null) {
+            throw new \LogicException(
+                'SceneBuilder has no PrefabRegistry; call setPrefabRegistry() before prefabByName().'
+            );
+        }
+
+        $prefab = $this->prefabRegistry->create($name);
+
+        return $this->prefabInstance($prefab, $entityName);
+    }
+
+    /**
+     * Build an already-constructed prefab instance under $entityName and tag the
+     * resulting declaration with its source class.
+     *
+     * This is the seam the JSON scene loader uses: it constructs the prefab,
+     * feeds it authored components via {@see Prefab::withAuthored()} and a name
+     * via {@see Prefab::named()}, then hands the configured instance here so its
+     * build() runs against this builder. Geometry therefore always comes from
+     * the prefab's PHP build(), never from stored JSON.
+     */
+    public function prefabInstance(PrefabInterface $prefab, ?string $entityName = null): EntityDeclaration
+    {
+        if ($prefab instanceof Prefab) {
+            if ($entityName !== null) {
+                $prefab->named($entityName);
+            }
+            $prefab->bindBuilder($this);
+        }
+
+        $startIndex = count($this->declarations);
+        $decl = $prefab->build($this);
+        $decl->setPrefabSource($prefab::class);
+
+        // Flag every OTHER declaration build() emitted (the geometry parts) as
+        // prefab-generated so the transpiler serializes only the anchor reference
+        // and regenerates the parts from build() on load. Runtime materialize()
+        // ignores the flag, so the parts still exist in the live world.
+        $count = count($this->declarations);
+        for ($i = $startIndex; $i < $count; $i++) {
+            if ($this->declarations[$i] !== $decl) {
+                $this->declarations[$i]->markGeneratedByPrefab();
+            }
+        }
+
+        // Record the authored INPUT (placement + the components fed via
+        // withAuthored) so serialization stores the input, not build()'s derived
+        // output. This is what makes the round-trip clean: reload feeds the same
+        // input back into build().
+        if ($prefab instanceof Prefab) {
+            $authored = [
+                new Transform3D($prefab->getPosition(), $prefab->getRotation(), $prefab->getScale()),
+                ...array_values(array_filter(
+                    $prefab->getAuthored(),
+                    static fn ($c): bool => !$c instanceof Transform3D,
+                )),
+            ];
+            $decl->setPrefabAuthored($authored);
+        }
+
         return $decl;
     }
 

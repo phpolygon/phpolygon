@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace PHPolygon\Scene;
 
 use LogicException;
+use PHPolygon\ECS\ComponentInterface;
 use PHPolygon\Math\Quaternion;
 use PHPolygon\Math\Vec3;
 
@@ -31,6 +32,9 @@ abstract class Prefab implements PrefabInterface
     protected ?Quaternion $rotation = null;
     protected ?Vec3 $scale = null;
     protected ?string $instanceName = null;
+
+    /** @var list<ComponentInterface> */
+    private array $authored = [];
 
     private ?SceneBuilder $boundBuilder = null;
 
@@ -62,6 +66,43 @@ abstract class Prefab implements PrefabInterface
     {
         $this->instanceName = $name;
         return $this;
+    }
+
+    /**
+     * Supply authored components that build() may read as INPUT before it runs
+     * (e.g. a design-variant component that selects which geometry/material the
+     * prefab assembles). This is the seam that keeps geometry in PHP: the editor
+     * / JSON loader stores only the authored component, and build() turns it into
+     * geometry — the geometry itself is never serialized.
+     */
+    final public function withAuthored(ComponentInterface ...$components): static
+    {
+        array_push($this->authored, ...$components);
+        return $this;
+    }
+
+    /** @return list<ComponentInterface> */
+    final public function getAuthored(): array
+    {
+        return $this->authored;
+    }
+
+    /**
+     * The first authored component that is an instance of $class, or null.
+     *
+     * @template T of ComponentInterface
+     * @param class-string<T> $class
+     * @return T|null
+     */
+    final public function authoredComponent(string $class): ?ComponentInterface
+    {
+        foreach ($this->authored as $component) {
+            if ($component instanceof $class) {
+                return $component;
+            }
+        }
+
+        return null;
     }
 
     final public function getPosition(): Vec3

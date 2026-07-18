@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace PHPolygon\Scene\Transpiler;
 
+use PHPolygon\Component\Transform3D;
 use PHPolygon\ECS\Attribute\Property;
 use PHPolygon\ECS\Attribute\Serializable;
 use PHPolygon\Math\Quaternion;
@@ -131,18 +132,18 @@ class PhpCodeGenerator
         /** @var list<array<string, mixed>> $children */
         $children = is_array($entity['children'] ?? null) ? $entity['children'] : [];
 
-        $code = '';
-
         if ($prefab !== null) {
-            $short = $this->shortName($prefab);
-            $code .= "{$indent}{$builderVar}->prefab({$short}::class, " . var_export($name, true) . ")";
+            // A prefab entity reconstructs its authored INPUT and lets the
+            // prefab's build() regenerate the geometry — the placement Transform3D
+            // becomes ->at()/->rotated()/->scaled() and the rest ->withAuthored(),
+            // so the variant drives build() rather than being a post-build patch.
+            $code = $this->generatePrefabInstanceExpr($prefab, $name, $components, $indent, $builderVar);
         } else {
-            $code .= "{$indent}{$builderVar}->entity(" . var_export($name, true) . ")";
-        }
-
-        foreach ($components as $component) {
-            $componentCode = $this->generateComponentConstructor($component);
-            $code .= "\n{$indent}    ->with({$componentCode})";
+            $code = "{$indent}{$builderVar}->entity(" . var_export($name, true) . ")";
+            foreach ($components as $component) {
+                $componentCode = $this->generateComponentConstructor($component);
+                $code .= "\n{$indent}    ->with({$componentCode})";
+            }
         }
 
         if ($persistent) {
@@ -153,13 +154,67 @@ class PhpCodeGenerator
             $code .= "\n{$indent}    ->tag(" . var_export((string) $tag, true) . ")";
         }
 
-        // Children as chained ->child() calls
-        foreach ($children as $child) {
-            $code .= "\n" . $this->generateChildCode($child, $indent . '    ');
+        // Children as chained ->child() calls (non-prefab only: a prefab
+        // regenerates its own child geometry in build()).
+        if ($prefab === null) {
+            foreach ($children as $child) {
+                $code .= "\n" . $this->generateChildCode($child, $indent . '    ');
+            }
         }
 
         $code .= ";\n";
         return $code;
+    }
+
+    /**
+     * Render `$builder->prefabInstance((new Prefab())->at(...)->withAuthored(...), 'Name')`
+     * from a prefab entity's authored-input components. The placement Transform3D
+     * maps to the fluent transform setters; every other component is fed as a
+     * build() input via withAuthored().
+     *
+     * @param list<array<string, mixed>> $components
+     */
+    private function generatePrefabInstanceExpr(
+        string $prefab,
+        string $name,
+        array $components,
+        string $indent,
+        string $builderVar,
+    ): string {
+        $short = $this->shortName($prefab);
+
+        /** @var array<string, mixed>|null $transform */
+        $transform = null;
+        $authored = [];
+        foreach ($components as $component) {
+            $class = is_string($component['_class'] ?? null) ? $component['_class'] : null;
+            if ($class === Transform3D::class) {
+                $transform = $component;
+            } else {
+                $authored[] = $component;
+            }
+        }
+
+        $expr = "(new {$short}())";
+        if ($transform !== null) {
+            $position = is_array($transform['position'] ?? null) ? $transform['position'] : [];
+            $expr .= "->at({$this->renderVec3($position)})";
+            if (is_array($transform['rotation'] ?? null)) {
+                $expr .= "->rotated({$this->renderQuaternion($transform['rotation'])})";
+            }
+            if (is_array($transform['scale'] ?? null)) {
+                $expr .= "->scaled({$this->renderVec3($transform['scale'])})";
+            }
+        }
+        if ($authored !== []) {
+            $args = array_map(
+                fn(array $component): string => $this->generateComponentConstructor($component),
+                $authored,
+            );
+            $expr .= '->withAuthored(' . implode(', ', $args) . ')';
+        }
+
+        return "{$indent}{$builderVar}->prefabInstance({$expr}, " . var_export($name, true) . ')';
     }
 
     /**

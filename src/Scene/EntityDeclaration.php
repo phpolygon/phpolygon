@@ -21,6 +21,25 @@ class EntityDeclaration
 
     private ?string $prefabSource = null;
 
+    /**
+     * When this declaration was produced by a prefab's build() as a side entity
+     * (not the returned anchor), it is flagged here so the transpiler serializes
+     * only the prefab reference on the anchor and skips these — the prefab's
+     * build() regenerates them on load. Runtime materialize() ignores the flag
+     * (the parts are real entities that must exist at runtime).
+     */
+    private bool $generatedByPrefab = false;
+
+    /**
+     * The authored INPUT a prefab anchor was built from (placement Transform3D +
+     * the components fed via {@see Prefab::withAuthored()}), recorded so the
+     * transpiler serializes the input rather than build()'s derived output. null
+     * for non-prefab declarations.
+     *
+     * @var list<ComponentInterface>|null
+     */
+    private ?array $prefabAuthored = null;
+
     private ?EntityDeclaration $parent = null;
 
     public function __construct(
@@ -30,6 +49,25 @@ class EntityDeclaration
 
     public function with(ComponentInterface $component): self
     {
+        $this->components[] = $component;
+        return $this;
+    }
+
+    /**
+     * Replace an already-attached component of the same concrete class, or
+     * append it if none is present. Used to apply authored per-instance
+     * overrides on top of the components a prefab's build() produced, so the
+     * authored value wins without duplicating the component.
+     */
+    public function withOverride(ComponentInterface $component): self
+    {
+        foreach ($this->components as $i => $existing) {
+            if ($existing::class === $component::class) {
+                $this->components[$i] = $component;
+                return $this;
+            }
+        }
+
         $this->components[] = $component;
         return $this;
     }
@@ -80,6 +118,32 @@ class EntityDeclaration
     public function setPrefabSource(string $className): void
     {
         $this->prefabSource = $className;
+    }
+
+    public function markGeneratedByPrefab(): void
+    {
+        $this->generatedByPrefab = true;
+    }
+
+    public function isGeneratedByPrefab(): bool
+    {
+        return $this->generatedByPrefab;
+    }
+
+    /**
+     * @param list<ComponentInterface> $components
+     */
+    public function setPrefabAuthored(array $components): void
+    {
+        $this->prefabAuthored = $components;
+    }
+
+    /**
+     * @return list<ComponentInterface>|null
+     */
+    public function getPrefabAuthored(): ?array
+    {
+        return $this->prefabAuthored;
     }
 
     public function getName(): string
