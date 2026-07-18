@@ -1291,7 +1291,8 @@ class VioRenderer2D implements Renderer2DInterface
         // every flagged character. Per-(font,char) coverage is memoised in
         // fontCoversChar(), so after the first frame this is a couple of cheap
         // hashmap hits.
-        if ($text !== '' && $this->primaryCoversFlagged($primary, $text)) {
+        // $text is guaranteed non-empty here (the $text === '' case returned above).
+        if ($this->primaryCoversFlagged($primary, $text)) {
             return $chain;
         }
         $fallbacks = $this->fallbackFonts[$this->currentFontName] ?? [];

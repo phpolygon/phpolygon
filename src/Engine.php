@@ -1612,11 +1612,15 @@ class Engine
         // compiles. renderSplashFrame() paints the current (compiling) label so
         // the last presented frame is the branded splash, not a blank buffer.
         if (!$this->headless && $this->renderer3D instanceof VioRenderer3D) {
+            // Hold the narrowed type in a local: renderSplashFrame() below is a
+            // method call, after which PHPStan can no longer assume the
+            // $this->renderer3D property is still a VioRenderer3D.
+            $renderer3D = $this->renderer3D;
             $this->splashFadeAlpha = 1.0;
             $this->splashProgress = 0.4;
             $this->splashLabel = 'Compiling shaders';
             $this->renderSplashFrame();
-            $this->renderer3D->warmShaders();
+            $renderer3D->warmShaders();
         }
 
         // Phase 2: Run game init with splash fully visible
