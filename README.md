@@ -256,7 +256,7 @@ PHPOLYGON_UPDATE_SNAPSHOTS=1 vendor/bin/phpunit
 | 6 | Build & test — build pipeline, headless mode, visual regression testing | Done |
 | 7 | 3D pipeline — OpenGL, Vulkan, Metal backends, RenderCommandList, shadows, instancing | Done |
 | 8 | php-vio — unified backend for window, input, audio, 2D/3D rendering | Done |
-| 9 | First game — engine validation through real-world usage | Next |
+| 9 | First game — engine validation through real-world usage | Done (shipped on Steam) |
 
 ## Testing
 
