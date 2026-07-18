@@ -8,42 +8,9 @@ use PHPUnit\Framework\TestCase;
 use PHPolygon\ECS\World;
 use PHPolygon\Thread\NullThreadScheduler;
 use PHPolygon\Thread\ThreadScheduler;
-use PHPolygon\Thread\SubsystemInterface;
 use PHPolygon\Thread\ThreadSchedulerFactory;
 use PHPolygon\EngineConfig;
 use PHPolygon\Thread\ThreadingMode;
-
-class PingSubsystem implements SubsystemInterface
-{
-    public function prepareInput(World $world, float $dt): array
-    {
-        return ['dt' => $dt, 'entityCount' => $world->entityCount()];
-    }
-
-    public function applyDeltas(World $world, array $deltas): void
-    {
-        // No-op for test — just verify deltas are received
-    }
-
-    public static function threadEntry(string $channelPrefix): void
-    {
-        $in = \parallel\Channel::open("{$channelPrefix}_in");
-        $out = \parallel\Channel::open("{$channelPrefix}_out");
-
-        while (true) {
-            $input = $in->recv();
-            if ($input === null) {
-                break;
-            }
-            $out->send(self::compute($input));
-        }
-    }
-
-    public static function compute(array $input): array
-    {
-        return ['pong' => true, 'dt' => $input['dt'] * 2];
-    }
-}
 
 class ThreadSchedulerTest extends TestCase
 {
