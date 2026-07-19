@@ -154,7 +154,7 @@ final class ProcModeShaderRegistry
      */
     public static function setOrder(string $region, array $modeOrder): void
     {
-        self::$order[$region] = array_values($modeOrder);
+        self::$order[$region] = $modeOrder;
     }
 
     public static function glslHelpers(string $family = self::FAMILY_VIO): string
@@ -162,7 +162,7 @@ final class ProcModeShaderRegistry
         return self::assemble(
             self::$glslHelpers,
             self::REGION_GLSL_HELPERS,
-            static fn (array $entry): string => $entry[$family] ?? $entry[self::FAMILY_VIO],
+            static fn (mixed $entry): string => self::pickFamily($entry, $family),
         );
     }
 
@@ -171,7 +171,7 @@ final class ProcModeShaderRegistry
         return self::assemble(
             self::$glslBranch,
             self::REGION_GLSL_BRANCHES,
-            static fn (array $entry): string => $entry[$family] ?? $entry[self::FAMILY_VIO],
+            static fn (mixed $entry): string => self::pickFamily($entry, $family),
         );
     }
 
@@ -183,6 +183,21 @@ final class ProcModeShaderRegistry
     public static function mslBranches(): string
     {
         return self::assemble(self::$mslBranch, self::REGION_MSL_BRANCHES, static fn (string $s): string => $s);
+    }
+
+    /**
+     * Pick the per-family snippet for a GLSL entry, falling back to the VIO text
+     * when the requested family has none. Accepts the raw store value ({@see assemble}
+     * erases the entry shape to mixed) and returns '' for anything malformed.
+     */
+    private static function pickFamily(mixed $entry, string $family): string
+    {
+        if (!is_array($entry)) {
+            return '';
+        }
+        $value = $entry[$family] ?? $entry[self::FAMILY_VIO] ?? '';
+
+        return is_string($value) ? $value : '';
     }
 
     /**
@@ -198,7 +213,10 @@ final class ProcModeShaderRegistry
         $out = '';
         foreach ($order as $mode) {
             if (isset($store[$mode])) {
-                $out .= $pick($store[$mode]);
+                $piece = $pick($store[$mode]);
+                if (is_string($piece)) {
+                    $out .= $piece;
+                }
             }
         }
 
