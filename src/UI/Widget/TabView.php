@@ -134,12 +134,24 @@ class TabView extends Widget
         // Tab bar background
         $renderer->drawRect($content->x, $content->y, $content->width, $this->tabBarHeight, $style->backgroundColor);
 
-        $x = $content->x;
-        foreach ($this->tabTitles() as $i => $title) {
-            // Measure the real rendered width and cache it so tabWidth() /
-            // getTabRect() (used for layout + hit-testing) match what is drawn.
-            $tabW = $renderer->measureText($title, $style->fontSize)->width + $this->tabPadding * 2.0;
-            $this->tabWidthCache[$title] = $tabW;
+        // Measure + cache all tab widths first so the row can be centred and so
+        // tabWidth()/getTabRect() (layout + hit-testing) match exactly what is
+        // drawn here.
+        $titles = $this->tabTitles();
+        $widths = [];
+        $totalWidth = 0.0;
+        foreach ($titles as $i => $title) {
+            $w = $renderer->measureText($title, $style->fontSize)->width + $this->tabPadding * 2.0;
+            $this->tabWidthCache[$title] = $w;
+            $widths[$i] = $w;
+            $totalWidth += $w;
+        }
+
+        // Centre the tab row within the content width (clamped so a too-wide row
+        // still starts at the left edge). getTabRect() mirrors this offset.
+        $x = $content->x + max(0.0, ($content->width - $totalWidth) / 2.0);
+        foreach ($titles as $i => $title) {
+            $tabW = $widths[$i];
             $active = $i === $selectedIndex;
 
             // Active tab highlighted with activeColor; inactive tabs blend into
@@ -211,8 +223,15 @@ class TabView extends Widget
         $style = $this->styleOverride ?? UIStyle::dark();
         $content = $this->contentRect();
 
-        $x = $content->x;
-        foreach ($this->tabTitles() as $i => $title) {
+        // Mirror draw()'s centred tab row: sum the (measured) widths, then start
+        // centred so the hit rects line up exactly with the drawn tabs.
+        $titles = $this->tabTitles();
+        $totalWidth = 0.0;
+        foreach ($titles as $title) {
+            $totalWidth += $this->tabWidth($title, $style);
+        }
+        $x = $content->x + max(0.0, ($content->width - $totalWidth) / 2.0);
+        foreach ($titles as $i => $title) {
             $tabW = $this->tabWidth($title, $style);
             if ($i === $index) {
                 return new Rect($x, $content->y, $tabW, $this->tabBarHeight);
