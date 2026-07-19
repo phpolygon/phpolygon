@@ -40,6 +40,15 @@ class TabView extends Widget
     /** Horizontal padding inside each tab button. */
     public float $tabPadding = 12.0;
 
+    /**
+     * Measured tab widths (title => px), populated during draw() from the real
+     * rendered text width so the tab buttons, labels and hit-test rects align.
+     * The char-count heuristic in tabWidth() is only a first-frame fallback.
+     *
+     * @var array<string, float>
+     */
+    private array $tabWidthCache = [];
+
     public function __construct(float $tabBarHeight = 28.0)
     {
         parent::__construct();
@@ -127,7 +136,10 @@ class TabView extends Widget
 
         $x = $content->x;
         foreach ($this->tabTitles() as $i => $title) {
-            $tabW = $this->tabWidth($title, $style);
+            // Measure the real rendered width and cache it so tabWidth() /
+            // getTabRect() (used for layout + hit-testing) match what is drawn.
+            $tabW = $renderer->measureText($title, $style->fontSize)->width + $this->tabPadding * 2.0;
+            $this->tabWidthCache[$title] = $tabW;
             $active = $i === $selectedIndex;
 
             // Active tab highlighted with activeColor; inactive tabs blend into
@@ -255,9 +267,13 @@ class TabView extends Widget
 
     private function tabWidth(string $title, UIStyle $style): float
     {
-        $textW = mb_strlen($title) * $style->fontSize * 0.55;
+        // Prefer the width measured during draw(); fall back to a char-count
+        // heuristic only until the first draw has populated the cache.
+        if (isset($this->tabWidthCache[$title])) {
+            return $this->tabWidthCache[$title];
+        }
 
-        return $textW + $this->tabPadding * 2.0;
+        return mb_strlen($title) * $style->fontSize * 0.55 + $this->tabPadding * 2.0;
     }
 
     private function clampedIndex(): int
