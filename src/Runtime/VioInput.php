@@ -272,6 +272,16 @@ class VioInput implements InputInterface
         $this->charBuffer = [];
 
         if ($this->suppressed) {
+            // Suppression DISCARDS input, it does not merely defer it. isKeyPressed()
+            // returns false while suppressed WITHOUT consuming the buffered edge, so a
+            // key mashed during a suppress window (boot, menu or intro-skip handoff)
+            // would otherwise linger in keyJustPressed/keyJustReleased and fire the
+            // instant gameplay input resumes — reading as a phantom "held" key that no
+            // one is pressing. Drain the edge buffers every suppressed frame so nothing
+            // survives the window.
+            $this->keyJustPressed = [];
+            $this->keyJustReleased = [];
+
             if ($this->suppressFrames > 0) {
                 $this->suppressFrames--;
             }
