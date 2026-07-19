@@ -882,9 +882,6 @@ class OpenGLRenderer3D implements Renderer3DInterface
         $this->expandedVertexCount[$meshId] = $indexCount;
     }
 
-    /** @var array<string, int> Material prefix → proc_mode cache */
-    private static array $procModeCache = [];
-
     /**
      * @var array<string, array{min: array{0:float,1:float,2:float}, max: array{0:float,1:float,2:float}}>
      *      Mesh-id → local-space AABB cache. Computed on first access in
@@ -968,7 +965,7 @@ class OpenGLRenderer3D implements Renderer3DInterface
     private function applyMaterial(string $materialId): void
     {
         // Procedural material mode — cached lookup by prefix
-        $procMode = self::$procModeCache[$materialId] ?? $this->resolveProcMode($materialId);
+        $procMode = ProcModeRegistry::resolve($materialId);
         $this->setUniformInt('u_proc_mode', $procMode);
 
         // Moon phase: encoded in roughness of moon_disc material by DayNightSystem
@@ -1091,58 +1088,6 @@ class OpenGLRenderer3D implements Renderer3DInterface
         return $aabb;
     }
 
-    /**
-     * Resolve proc_mode from material ID prefix. Result is cached for performance.
-     */
-    private function resolveProcMode(string $materialId): int
-    {
-        // Extract prefix (first segment before '_' + number, or full ID)
-        $prefixRaw = strtok($materialId, '0123456789');
-        $prefix = $prefixRaw === false ? $materialId : $prefixRaw;
-
-        $mode = match (true) {
-            str_starts_with($prefix, 'sand_terrain') => 1,
-            str_starts_with($prefix, 'pool_water') => 11,
-            str_starts_with($prefix, 'water_') => 2,
-            str_starts_with($prefix, 'rock') => 3,
-            str_starts_with($prefix, 'palm_trunk') => 4,
-            str_starts_with($prefix, 'palm_branch'),
-            str_starts_with($prefix, 'palm_leaves'),
-            str_starts_with($prefix, 'palm_leaf'),
-            str_starts_with($prefix, 'palm_canopy'),
-            str_starts_with($prefix, 'palm_frond') => 5,
-            str_starts_with($prefix, 'cloud_') => 6,
-            str_starts_with($prefix, 'hut_wood'),
-            str_starts_with($prefix, 'hut_door'),
-            str_starts_with($prefix, 'hut_table'),
-            str_starts_with($prefix, 'hut_chair'),
-            str_starts_with($prefix, 'hut_floor'),
-            str_starts_with($prefix, 'hut_window') => 7,
-            str_starts_with($prefix, 'hut_thatch') => 8,
-            str_starts_with($prefix, 'moon_disc') => 9,
-            str_starts_with($prefix, 'car_paint') => 10,
-            // Ruined / not-yet-rebuilt buildings — weathered, cracked, moss/
-            // soot-stained concrete shading on the intact box geometry. Stays
-            // LIT. See mesh3d.frag.glsl proc_mode 13. Kept in lock-step with
-            // VioRenderer3D. 'district_ruined' has no digits → prefix == full id.
-            str_starts_with($prefix, 'district_ruined') => 13,
-            // Self-illuminated learning hologram (HologramBoardPrefab baked-text
-            // materials). Unlit. NOTE: the OpenGL mesh3d shader has no albedo
-            // texture sampler, so this emits flat u_albedo (no baked text); the
-            // baked-text hologram is a vio/D3D12-path feature. See proc_mode 12.
-            str_starts_with($prefix, 'hologram_text') => 12,
-            // Sci-fi holo-console accent surfaces (TerminalPrefab): screen panel,
-            // accent rim and input light-bar. Unlit — accent colour lives in
-            // albedo so it glows the same day and night (flat u_albedo here).
-            str_starts_with($prefix, 'terminal_screen_lit'),
-            str_starts_with($prefix, 'terminal_glow_edge'),
-            str_starts_with($prefix, 'terminal_lightbar') => 12,
-            default => 0,
-        };
-
-        self::$procModeCache[$materialId] = $mode;
-        return $mode;
-    }
 
     private function uploadMesh(string $meshId, MeshData $meshData): void
     {
@@ -1207,7 +1152,15 @@ class OpenGLRenderer3D implements Renderer3DInterface
     private function compileShader(string $shaderId, ShaderDefinition $definition): int
     {
         $vertSource = $this->injectVersion($this->loadShaderSource($definition->vertexPath));
-        $fragSource = $this->injectVersion($this->loadShaderSource($definition->fragmentPath));
+
+        $fragRaw = $this->loadShaderSource($definition->fragmentPath);
+        // Only the übershader (mesh3d = 'default' program) carries the u_proc_mode
+        // ladder; splice any game-registered proc_mode snippets into its sentinels
+        // (native-GL helper variant). No-op when nothing is registered.
+        if ($shaderId === 'default') {
+            $fragRaw = ProcModeShaderRegistry::spliceGlsl($fragRaw, ProcModeShaderRegistry::FAMILY_GL);
+        }
+        $fragSource = $this->injectVersion($fragRaw);
 
         $vert = glCreateShader(GL_VERTEX_SHADER);
         glShaderSource($vert, $vertSource);

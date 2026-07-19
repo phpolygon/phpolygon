@@ -102,9 +102,6 @@ class VioRenderer3D implements Renderer3DInterface
     /** Whether the php-vio build exposes the batch vio_set_uniforms helper. */
     private bool $batchUniforms = false;
 
-    /** @var array<string, int> Material prefix → proc_mode cache */
-    private static array $procModeCache = [];
-
     private ?Mat4 $currentViewMatrix = null;
     private ?Mat4 $currentProjectionMatrix = null;
     private ?Vec3 $cameraPosition = null;
@@ -1598,7 +1595,18 @@ class VioRenderer3D implements Renderer3DInterface
 
     private function compileShaderFromFiles(string $id, string $vertFile, string $fragFile): void
     {
-        $this->compileShader($id, $this->loadShader($vertFile), $this->loadShader($fragFile));
+        $vertSrc = $this->loadShader($vertFile);
+        $fragSrc = $this->loadShader($fragFile);
+
+        // Only the übershader (mesh3d = 'default' program) carries the per-material
+        // u_proc_mode ladder. Splice any game-registered proc_mode snippets into its
+        // two sentinels before transpilation; with none registered this is a no-op
+        // (sentinels resolve to empty). The other programs have no sentinels.
+        if ($id === 'default') {
+            $fragSrc = ProcModeShaderRegistry::spliceGlsl($fragSrc, ProcModeShaderRegistry::FAMILY_VIO);
+        }
+
+        $this->compileShader($id, $vertSrc, $fragSrc);
     }
 
     private function loadShader(string $relativeFile): string
@@ -2261,7 +2269,7 @@ class VioRenderer3D implements Renderer3DInterface
      */
     private function isReflectiveTransparent(string $materialId): bool
     {
-        $procMode = self::$procModeCache[$materialId] ?? $this->resolveProcMode($materialId);
+        $procMode = ProcModeRegistry::resolve($materialId);
         return $procMode === 2 || $procMode === 11;
     }
 
@@ -2514,7 +2522,7 @@ class VioRenderer3D implements Renderer3DInterface
      */
     private function applyGbufferVertexAnim(Material $material, string $materialId): void
     {
-        $procMode = self::$procModeCache[$materialId] ?? $this->resolveProcMode($materialId);
+        $procMode = ProcModeRegistry::resolve($materialId);
         vio_set_uniform($this->ctx, 'u_vertex_anim', $procMode === 2 ? 1 : 0);
         // gbuffer.frag uses u_proc_mode to apply the ocean's shoreline fade to
         // reflectivity (so the invisible inner ocean plane doesn't make the dry
@@ -3369,7 +3377,7 @@ class VioRenderer3D implements Renderer3DInterface
      */
     private function applyMaterialUniforms(Material $material, string $materialId = ''): void
     {
-        $procMode = self::$procModeCache[$materialId] ?? $this->resolveProcMode($materialId);
+        $procMode = ProcModeRegistry::resolve($materialId);
 
         // One batched upload of the ~28 material uniforms (was ~28 individual
         // native calls). Insertion order is irrelevant — each uniform writes its
@@ -3455,57 +3463,6 @@ class VioRenderer3D implements Renderer3DInterface
             'u_has_albedo_texture' => $hasTexture ? 1 : 0,
             'u_albedo_texture'     => 0,
         ]);
-    }
-
-    private function resolveProcMode(string $materialId): int
-    {
-        $prefixRaw = strtok($materialId, '0123456789');
-        $prefix = $prefixRaw === false ? $materialId : $prefixRaw;
-
-        $mode = match (true) {
-            str_starts_with($prefix, 'sand_terrain') => 1,
-            str_starts_with($prefix, 'pool_water') => 11,
-            str_starts_with($prefix, 'water_') => 2,
-            str_starts_with($prefix, 'rock') => 3,
-            str_starts_with($prefix, 'palm_trunk') => 4,
-            str_starts_with($prefix, 'palm_branch'),
-            str_starts_with($prefix, 'palm_leaves'),
-            str_starts_with($prefix, 'palm_leaf'),
-            str_starts_with($prefix, 'palm_canopy'),
-            str_starts_with($prefix, 'palm_frond') => 5,
-            str_starts_with($prefix, 'cloud_') => 6,
-            str_starts_with($prefix, 'hut_wood'),
-            str_starts_with($prefix, 'hut_door'),
-            str_starts_with($prefix, 'hut_table'),
-            str_starts_with($prefix, 'hut_chair'),
-            str_starts_with($prefix, 'hut_floor'),
-            str_starts_with($prefix, 'hut_window') => 7,
-            str_starts_with($prefix, 'hut_thatch') => 8,
-            str_starts_with($prefix, 'moon_disc') => 9,
-            str_starts_with($prefix, 'car_paint') => 10,
-            // Ruined / not-yet-rebuilt buildings. The intact box geometry is
-            // shaded as weathered, cracked, moss- and soot-stained concrete so a
-            // "ruined" variant reads as a ruin without any geometry/collider
-            // change. Stays fully LIT (modulates albedo/rough then falls through
-            // the normal PBR path). See mesh3d.frag.glsl proc_mode 13.
-            // 'district_ruined' has no digits → prefix == full id.
-            str_starts_with($prefix, 'district_ruined') => 13,
-            // Self-illuminated learning hologram (HologramBoardPrefab's baked-text
-            // materials, id 'hologram_text_<topic>_<locale>'). Unlit: shows only
-            // the baked texture, immune to sun/ambient/fog so the text never
-            // washes out in bright daylight. See mesh3d.frag.glsl proc_mode 12.
-            str_starts_with($prefix, 'hologram_text') => 12,
-            // Sci-fi holo-console accent surfaces (TerminalPrefab): the glowing
-            // screen panel, its accent rim and the input light-bar. Unlit so the
-            // accent colour (carried in albedo) glows the same day and night.
-            str_starts_with($prefix, 'terminal_screen_lit'),
-            str_starts_with($prefix, 'terminal_glow_edge'),
-            str_starts_with($prefix, 'terminal_lightbar') => 12,
-            default => 0,
-        };
-
-        self::$procModeCache[$materialId] = $mode;
-        return $mode;
     }
 
     private function resolveTexture(string $textureId): ?VioTexture

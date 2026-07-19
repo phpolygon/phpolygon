@@ -117,10 +117,6 @@ class MetalRenderer3D implements Renderer3DInterface
     /** True once the cubemap has been rendered at least once this session. */
     private bool $cubemapReady = false;
 
-    /** Material/proc_mode prefix → proc_mode int cache (mirrors VioRenderer3D::resolveProcMode). */
-    /** @var array<string, int> */
-    private static array $procModeCache = [];
-
     /** @var float[] */
     private array $viewMatrix = [];
     /** @var float[] */
@@ -768,7 +764,7 @@ class MetalRenderer3D implements Renderer3DInterface
             $this->clothAnchorTop = true;
         }
 
-        $this->procMode = self::$procModeCache[$materialId] ?? $this->resolveProcMode($materialId);
+        $this->procMode = ProcModeRegistry::resolve($materialId);
 
         // Moon material encodes its current phase in the roughness slot
         // (mirrors VioRenderer3D — the dedicated moon shader reads it as
@@ -777,50 +773,6 @@ class MetalRenderer3D implements Renderer3DInterface
         $this->moonPhase = $this->procMode === 9 && $material !== null
             ? $material->roughness
             : 0.0;
-    }
-
-    private function resolveProcMode(string $materialId): int
-    {
-        $prefixRaw = strtok($materialId, '0123456789');
-        $prefix    = $prefixRaw === false ? $materialId : $prefixRaw;
-
-        $mode = match (true) {
-            str_starts_with($prefix, 'sand_terrain')   => 1,
-            str_starts_with($prefix, 'pool_water')     => 11,
-            str_starts_with($prefix, 'water_')         => 2,
-            str_starts_with($prefix, 'rock')           => 3,
-            str_starts_with($prefix, 'palm_trunk')     => 4,
-            str_starts_with($prefix, 'palm_branch'),
-            str_starts_with($prefix, 'palm_leaves'),
-            str_starts_with($prefix, 'palm_leaf'),
-            str_starts_with($prefix, 'palm_canopy'),
-            str_starts_with($prefix, 'palm_frond')     => 5,
-            str_starts_with($prefix, 'cloud_')         => 6,
-            str_starts_with($prefix, 'hut_wood'),
-            str_starts_with($prefix, 'hut_door'),
-            str_starts_with($prefix, 'hut_table'),
-            str_starts_with($prefix, 'hut_chair'),
-            str_starts_with($prefix, 'hut_floor'),
-            str_starts_with($prefix, 'hut_window')     => 7,
-            str_starts_with($prefix, 'hut_thatch')     => 8,
-            str_starts_with($prefix, 'moon_disc')      => 9,
-            str_starts_with($prefix, 'car_paint')      => 10,
-            // Self-illuminated learning hologram (HologramBoardPrefab baked-text
-            // materials). Unlit. NOTE: the Metal mesh3d shader has no albedo
-            // texture binding, so this emits flat light.albedo (no baked text);
-            // the baked-text hologram is a vio/D3D12-path feature. proc_mode 12.
-            str_starts_with($prefix, 'hologram_text') => 12,
-            // Sci-fi holo-console accent surfaces (TerminalPrefab): screen panel,
-            // accent rim and input light-bar. Unlit — accent colour lives in
-            // albedo so it glows the same day and night (flat light.albedo here).
-            str_starts_with($prefix, 'terminal_screen_lit'),
-            str_starts_with($prefix, 'terminal_glow_edge'),
-            str_starts_with($prefix, 'terminal_lightbar') => 12,
-            default                                    => 0,
-        };
-
-        self::$procModeCache[$materialId] = $mode;
-        return $mode;
     }
 
     private function drawMeshCommand(\Metal\RenderCommandEncoder $encoder, string $meshId, Mat4 $modelMatrix): void
@@ -1126,6 +1078,10 @@ class MetalRenderer3D implements Renderer3DInterface
             );
         }
 
+        // Splice any game-registered proc_mode MSL branches into the mesh3d shader.
+        // No-op when nothing is registered (the MSL sentinel line disappears).
+        $mslSource = ProcModeShaderRegistry::spliceMsl($mslSource);
+
         $this->meshLibrary = $this->device->createLibraryWithSource($mslSource);
 
         // Build the single-sample pipeline up front so the legacy direct-to-
@@ -1141,7 +1097,7 @@ class MetalRenderer3D implements Renderer3DInterface
     {
         if ($this->meshLibrary === null) {
             // Should be impossible - createPipeline() populates this first.
-            $msl = (string)file_get_contents(self::SHADER_PATH);
+            $msl = ProcModeShaderRegistry::spliceMsl((string)file_get_contents(self::SHADER_PATH));
             $this->meshLibrary = $this->device->createLibraryWithSource($msl);
         }
 
