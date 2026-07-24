@@ -46,6 +46,7 @@ const VIO_WRAP_MIRROR = 2;
 
 const VIO_FEATURE_TEXTURE_3D = 22;
 const VIO_FEATURE_COMPUTE = 1;
+const VIO_FEATURE_VERTEX_STORAGE = 30;
 
 // ----------------------------------------------------------------
 // Backend info
@@ -394,6 +395,22 @@ function vio_compute_set_uniforms(VioContext $context, VioComputePipeline $pipel
 function vio_compute_dispatch(VioContext $context, VioComputePipeline $pipeline, int $gx, int $gy, int $gz): void {}
 
 function vio_storage_buffer_read(VioContext $context, VioBuffer $buffer): string|false {}
+
+/**
+ * Bind a compute-written storage buffer to the GRAPHICS pipeline so the vertex
+ * stage reads per-instance data via gl_InstanceIndex — no GPU->CPU readback.
+ * Requires VIO_FEATURE_VERTEX_STORAGE; no-op otherwise. Call between
+ * vio_bind_pipeline and vio_draw_instanced_from_buffer.
+ */
+function vio_bind_storage_buffer(VioContext $context, VioBuffer $buffer, int $binding, int $access): void {}
+
+/**
+ * Instanced draw whose per-instance data comes from a storage buffer bound via
+ * vio_bind_storage_buffer, not a CPU buffer. Eliminates the readback that
+ * vio_draw_instanced + vio_storage_buffer_read would need. Requires
+ * VIO_FEATURE_VERTEX_STORAGE; no-op otherwise.
+ */
+function vio_draw_instanced_from_buffer(VioContext $context, VioMesh $mesh, int $instanceCount): void {}
 
 /**
  * Batch form of vio_set_uniform — apply a map of ['u_name' => value, ...] in one
