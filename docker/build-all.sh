@@ -497,6 +497,40 @@ else
 fi
 echo ""
 
+# ── Build verification (project-provided, before any upload) ─────────────────
+# If the project ships scripts/verify_build.php, run it against each built target
+# so a binary whose baked identity contradicts its build type can never reach
+# Steam (e.g. a demo build that resolves to the full game). The container-native
+# linux binary is executed per build type via the game's --build-info self-check;
+# all desktop targets of a type share the same PHAR, so one native check per type
+# is authoritative. A failure bumps $fails and the upload guard below skips.
+if [ -n "$UPLOAD" ] && [ "$fails" -eq 0 ] && [ -f scripts/verify_build.php ]; then
+    echo "${C_B}=== Build verification ===${C_0}"
+    declare -A _verified=()
+    for rf in "${RESULTS[@]}"; do
+        [ -f "$rf" ] || continue
+        IFS=$'\t' read -r tgt typ dt st sz sg out < "$rf"
+        [ "$st" = "FAILED" ] && continue
+        [ "$tgt" = "linux-x86_64" ] || continue      # only the linux binary runs here
+        [ -n "${_verified[$typ]:-}" ] && continue     # one native check per build type
+        if php scripts/verify_build.php --type "$typ" --binary "${out}/${APP_NAME}"; then
+            _verified[$typ]=1
+        else
+            echo "  ${C_R}verification FAILED for type '${typ}' - aborting upload${C_0}"
+            fails=$((fails+1))
+        fi
+    done
+    # Fail closed: any upload target whose type was not natively verified still
+    # gets the source/config check so a bad build config cannot slip through.
+    for t in $UPLOAD; do
+        bt="$(steam_cfg_get ".uploads[\"$t\"].buildType")"; bt="${bt:-full}"
+        if [ -z "${_verified[$bt]:-}" ] && ! php scripts/verify_build.php --type "$bt"; then
+            fails=$((fails+1))
+        fi
+    done
+    echo ""
+fi
+
 # ── Steam upload (only when every build succeeded) ───────────────────────────
 if [ -n "$UPLOAD" ] && [ "$fails" -eq 0 ]; then
     echo "${C_B}=== Steam upload ===${C_0}"
