@@ -504,6 +504,8 @@ echo ""
 # linux binary is executed per build type via the game's --build-info self-check;
 # all desktop targets of a type share the same PHAR, so one native check per type
 # is authoritative. A failure bumps $fails and the upload guard below skips.
+# Package layout is nested: build/<target>-<variant>[-type]/<App>/<App> (the flat
+# package dir holds the executable + resources), so the binary is $out/$APP/$APP.
 if [ -n "$UPLOAD" ] && [ "$fails" -eq 0 ] && [ -f scripts/verify_build.php ]; then
     echo "${C_B}=== Build verification ===${C_0}"
     declare -A _verified=()
@@ -513,7 +515,7 @@ if [ -n "$UPLOAD" ] && [ "$fails" -eq 0 ] && [ -f scripts/verify_build.php ]; th
         [ "$st" = "FAILED" ] && continue
         [ "$tgt" = "linux-x86_64" ] || continue      # only the linux binary runs here
         [ -n "${_verified[$typ]:-}" ] && continue     # one native check per build type
-        if php scripts/verify_build.php --type "$typ" --binary "${out}/${APP_NAME}"; then
+        if php scripts/verify_build.php --type "$typ" --binary "${out}/${APP_NAME}/${APP_NAME}"; then
             _verified[$typ]=1
         else
             echo "  ${C_R}verification FAILED for type '${typ}' - aborting upload${C_0}"
