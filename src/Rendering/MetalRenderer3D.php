@@ -387,11 +387,13 @@ class MetalRenderer3D implements Renderer3DInterface
                 // Cloth animation runs in the vertex shader and reads
                 // from the same struct, so bind it to the vertex stage too.
                 $encoder->setVertexBytes($uboBytes, 2);
-                if ($command->flatMatrices !== []) {
-                    // Flat path: stream 16 floats per instance straight to
-                    // setVertexBytes - no intermediate Mat4 allocation.
+                if ($command->flatMatrices !== [] || $command->packedMatrices !== '') {
+                    // Flat / packed path: stream 16 floats per instance straight
+                    // to setVertexBytes - no intermediate Mat4 allocation. Packed
+                    // bytes (a compute readback) are unpacked once here; vio is
+                    // the only backend that forwards them without an unpack.
                     $count = $command->instanceCount >= 0 ? $command->instanceCount : count($command->matrices);
-                    $flat = $command->flatMatrices;
+                    $flat = $command->flatMatricesResolved();
                     for ($i = 0; $i < $count; $i++) {
                         $base = $i * 16;
                         $bytes = pack(

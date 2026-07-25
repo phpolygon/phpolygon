@@ -38,8 +38,18 @@ use PHPolygon\Rendering\RenderCommandList;
  */
 class ParticleSystem extends AbstractSystem
 {
+    /**
+     * @param \VioContext|null $ctx When a live vio context is passed AND the
+     *        backend supports readback-free instancing (VIO_FEATURE_VERTEX_STORAGE),
+     *        the per-particle billboard-matrix build is offloaded to the GPU and
+     *        the matrices are read straight from GPU memory — no PHP<->GPU
+     *        roundtrip. Null (headless, non-vio, or an older vio) keeps the
+     *        canonical CPU path, so behaviour is unchanged there. The CPU
+     *        integration in {@see update()} stays authoritative in every case.
+     */
     public function __construct(
         private readonly RenderCommandList $commandList,
+        private readonly ?\VioContext $ctx = null,
     ) {}
 
     public function update(World $world, float $dt): void
@@ -63,6 +73,24 @@ class ParticleSystem extends AbstractSystem
             $emitter = $entity->get(ParticleEmitter::class);
             $count = count($emitter->particles);
             if ($count === 0) continue;
+
+            // Readback-free path (Path B): offload the per-particle billboard
+            // build to the GPU and bind the result straight as the instance
+            // source — no float[N*16] built in PHP, no readback. Falls through
+            // to the CPU loop below when unavailable (headless, non-vio, older
+            // vio, or any GPU error → tryBillboardStep returns null).
+            if ($this->ctx !== null) {
+                $outBuf = GpuParticleBaker::tryBillboardStep($this->ctx, $emitter, $cameraPos);
+                if ($outBuf !== null) {
+                    $this->commandList->add(DrawMeshInstanced::fromStorageBuffer(
+                        meshId: $emitter->meshId,
+                        materialId: $emitter->materialId,
+                        storageBuffer: $outBuf,
+                        instanceCount: $count,
+                    ));
+                    continue;
+                }
+            }
 
             // Pre-size the instance buffer once via array_fill so PHPStan
             // can infer the array<int, float> shape and the underlying

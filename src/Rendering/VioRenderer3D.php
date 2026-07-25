@@ -3256,8 +3256,23 @@ class VioRenderer3D implements Renderer3DInterface
         }
         vio_set_uniform($this->ctx, 'u_use_instancing', 1);
 
-        [$packed, $count] = $this->resolveInstanceData($cmd->meshId, $material, $cmd);
-        vio_draw_instanced($this->ctx, $mesh, $packed, $count);
+        // Readback-free path (Path B): the instance matrices are a GPU-resident
+        // SSBO written by a compute pass. Bind it to the vertex stage and draw
+        // straight from it — no matrices cross the PHP<->GPU bus. Guarded by the
+        // producer (GpuParticleBaker only emits this when the backend reports
+        // VIO_FEATURE_VERTEX_STORAGE), and defensively re-checked here.
+        $storage = $cmd->storageBuffer;
+        if ($storage instanceof \VioBuffer
+            && function_exists('vio_draw_instanced_from_buffer')
+            && defined('VIO_FEATURE_VERTEX_STORAGE')
+            && vio_supports_feature($this->ctx, VIO_FEATURE_VERTEX_STORAGE)
+        ) {
+            vio_bind_storage_buffer($this->ctx, $storage, 0, VIO_COMPUTE_READ);
+            vio_draw_instanced_from_buffer($this->ctx, $mesh, $instanceCount);
+        } else {
+            [$packed, $count] = $this->resolveInstanceData($cmd->meshId, $material, $cmd);
+            vio_draw_instanced($this->ctx, $mesh, $packed, $count);
+        }
 
         vio_set_uniform($this->ctx, 'u_use_instancing', 0);
     }
@@ -3277,6 +3292,16 @@ class VioRenderer3D implements Renderer3DInterface
 
         if ($isStatic && isset($this->staticMatrixCache[$cacheKey])) {
             return [$this->staticMatrixCache[$cacheKey], $this->staticInstanceCountCache[$cacheKey]];
+        }
+
+        // Packed mode: the matrices already are a raw f32 byte buffer (a GPU
+        // compute readback). Forward verbatim - no unpack, no repack. This is
+        // the whole point of the packed path: the readback bytes reach
+        // vio_draw_instanced() untouched. Packed draws are never static, so
+        // they never hit the cache above.
+        if ($cmd->packedMatrices !== '') {
+            $count = $cmd->instanceCount >= 0 ? $cmd->instanceCount : 0;
+            return [$cmd->packedMatrices, $count];
         }
 
         if ($cmd->flatMatrices !== []) {

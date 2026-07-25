@@ -598,9 +598,12 @@ class VulkanRenderer3D implements Renderer3DInterface
             } elseif ($command instanceof DrawMeshInstanced) {
                 $this->resolveMaterial($command->materialId);
                 $this->uploadLightingUbo();
-                if ($command->flatMatrices !== []) {
+                if ($command->flatMatrices !== [] || $command->packedMatrices !== '') {
                     $count = $command->instanceCount >= 0 ? $command->instanceCount : count($command->matrices);
-                    $flat = $command->flatMatrices;
+                    // Packed bytes (a compute readback) unpack once here; the
+                    // per-instance Mat4 below is a transient cost that disappears
+                    // once Vulkan grows a real instance buffer like OpenGL/Vio.
+                    $flat = $command->flatMatricesResolved();
                     for ($i = 0; $i < $count; $i++) {
                         $base = $i * 16;
                         // Reconstruct one Mat4 per instance for the

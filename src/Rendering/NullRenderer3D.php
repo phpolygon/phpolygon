@@ -34,11 +34,24 @@ class NullRenderer3D implements Renderer3DInterface
     public function getWidth(): int { return $this->width; }
     public function getHeight(): int { return $this->height; }
 
+    /** Packed-mode DrawMeshInstanced commands whose byte length disagreed with instanceCount*16*4. */
+    private int $malformedPackedDraws = 0;
+
     public function render(RenderCommandList $commandList): void
     {
         // Store a snapshot so test assertions survive the post-render clear()
         $snapshot = new RenderCommandList();
         foreach ($commandList->getCommands() as $cmd) {
+            // Validate packed-mode instanced draws so headless tests can catch a
+            // compute readback that produced the wrong byte count. The command is
+            // still recorded (no-op render) - the command list must stay
+            // inspectable; we only tally the mismatch.
+            if ($cmd instanceof Command\DrawMeshInstanced && $cmd->hasPackedMatrices()) {
+                $expected = $cmd->effectiveInstanceCount() * 16 * 4;
+                if (strlen($cmd->packedMatrices) !== $expected) {
+                    $this->malformedPackedDraws++;
+                }
+            }
             $snapshot->add($cmd);
         }
         $this->lastCommandList = $snapshot;
@@ -47,6 +60,12 @@ class NullRenderer3D implements Renderer3DInterface
     public function getLastCommandList(): ?RenderCommandList
     {
         return $this->lastCommandList;
+    }
+
+    /** Number of packed instanced draws seen with a byte length != instanceCount*16*4. */
+    public function getMalformedPackedDrawCount(): int
+    {
+        return $this->malformedPackedDraws;
     }
 
     private ?GraphicsSettings $lastAppliedSettings = null;

@@ -699,10 +699,12 @@ class OpenGLRenderer3D implements Renderer3DInterface
             $this->loggedInstancingFallback = true;
         }
 
-        $isFlat = $command->flatMatrices !== [];
+        // Resolve packed bytes to a flat float[] once (empty in Mat4 mode).
+        $flat = $command->flatMatricesResolved();
+        $isFlat = $flat !== [];
         for ($i = 0; $i < $instanceCount; $i++) {
             if ($isFlat) {
-                $model = new Mat4(array_slice($command->flatMatrices, $i * 16, 16));
+                $model = new Mat4(array_slice($flat, $i * 16, 16));
             } elseif (isset($command->matrices[$i])) {
                 $model = $command->matrices[$i];
             } else {
@@ -743,7 +745,10 @@ class OpenGLRenderer3D implements Renderer3DInterface
             return;
         }
 
-        $isFlat = $command->flatMatrices !== [];
+        // Packed mode (a GPU compute readback) unpacks to flat once here; only
+        // vio forwards the raw bytes without an unpack. Resolve lazily below so
+        // the common Mat4/flat path pays nothing.
+        $isFlat = $command->flatMatrices !== [] || $command->packedMatrices !== '';
 
         $meshId    = $command->meshId;
         $materialId = $command->materialId;
@@ -765,10 +770,10 @@ class OpenGLRenderer3D implements Renderer3DInterface
             $instanceCount = $this->staticInstanceCountCache[$cacheKey];
         } else {
             if ($isFlat) {
-                // Flat path: caller already produced a column-major
-                // float[] of length instanceCount * 16. Skip the
-                // per-instance toArray() flatten loop entirely.
-                $buffer = new FloatBuffer($command->flatMatrices);
+                // Flat/packed path: caller already produced a column-major
+                // float[] (or raw f32 bytes) of length instanceCount * 16.
+                // Skip the per-instance toArray() flatten loop entirely.
+                $buffer = new FloatBuffer($command->flatMatricesResolved());
             } else {
                 $floats = [];
                 foreach ($command->matrices as $matrix) {
