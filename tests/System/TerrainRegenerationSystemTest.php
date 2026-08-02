@@ -88,6 +88,41 @@ class TerrainRegenerationSystemTest extends TestCase
         $world->update(0.016);
         $this->assertSame(0, $fresh->rebuildCount);
     }
+
+    public function testTracksTwoTerrainComponentsOnTheSameEntityIndependently(): void
+    {
+        // A terrain and its scatter live on one entity. Keying the change
+        // caches by entity id alone made them share a slot, so whichever ticked
+        // second wrote its signature over the first — and the first then looked
+        // "already built" and would never rebuild again.
+        $world = new World();
+        $world->addSystem(new TerrainRegenerationSystem(
+            [FakeTerrain::class, OtherFakeTerrain::class],
+            debounceSeconds: 0.1,
+        ));
+
+        $terrain = new FakeTerrain();
+        $other = new OtherFakeTerrain();
+        $entity = $world->createEntity();
+        $entity->attach($terrain);
+        $entity->attach($other);
+
+        $world->update(0.016); // adopt baselines for both
+
+        $terrain->height = 12.0;
+        $world->update(0.016);
+        $world->update(0.2);
+
+        $this->assertSame(1, $terrain->rebuildCount, 'the changed component must rebuild');
+        $this->assertSame(0, $other->rebuildCount, 'the untouched component must not');
+
+        $other->depth = 3.0;
+        $world->update(0.016);
+        $world->update(0.2);
+
+        $this->assertSame(1, $other->rebuildCount);
+        $this->assertSame(1, $terrain->rebuildCount, 'the first component must not rebuild again');
+    }
 }
 
 #[Serializable]
@@ -105,5 +140,20 @@ class FakeTerrain extends AbstractComponent implements RegenerableTerrain
     {
         $this->rebuildCount++;
         $this->rebuiltAtHeight = $this->height;
+    }
+}
+
+/** A second regenerable component, to exercise two of them on one entity. */
+#[Serializable]
+class OtherFakeTerrain extends AbstractComponent implements RegenerableTerrain
+{
+    #[Property]
+    public float $depth = 1.0;
+
+    public int $rebuildCount = 0;
+
+    public function rebuild(World $world, int $entityId): void
+    {
+        $this->rebuildCount++;
     }
 }

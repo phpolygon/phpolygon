@@ -41,13 +41,22 @@ final class TerrainRegenerationSystem extends AbstractSystem
 
     private AttributeSerializer $serializer;
 
-    /** @var array<int, string> entityId => signature the terrain was last built from */
+    /**
+     * Caches are keyed by "entityId|class", not by entity id alone: one entity
+     * can carry several regenerable terrain components — a
+     * {@see \PHPolygon\Component\Terrain} and its
+     * {@see \PHPolygon\Component\TerrainScatter}, say — and an entity-only key
+     * would let them overwrite each other's signature, so a change to one would
+     * be recorded as already built and never rebuild.
+     *
+     * @var array<string, string> key => signature the terrain was last built from
+     */
     private array $builtSignature = [];
 
-    /** @var array<int, string> entityId => signature currently waiting out the debounce */
+    /** @var array<string, string> key => signature currently waiting out the debounce */
     private array $pendingSignature = [];
 
-    /** @var array<int, float> entityId => seconds the pending signature has held steady */
+    /** @var array<string, float> key => seconds the pending signature has held steady */
     private array $stableFor = [];
 
     /**
@@ -69,7 +78,7 @@ final class TerrainRegenerationSystem extends AbstractSystem
             foreach ($world->query($class) as $entity) {
                 $terrain = $entity->get($class);
                 if ($terrain instanceof RegenerableTerrain) {
-                    $this->tick($world, $entity->id, $terrain, $dt);
+                    $this->tick($world, $entity->id, $class, $terrain, $dt);
                 }
             }
         }
@@ -84,39 +93,41 @@ final class TerrainRegenerationSystem extends AbstractSystem
         $this->stableFor = [];
     }
 
-    private function tick(World $world, int $entityId, RegenerableTerrain $terrain, float $dt): void
+    /** @param class-string<ComponentInterface> $class */
+    private function tick(World $world, int $entityId, string $class, RegenerableTerrain $terrain, float $dt): void
     {
+        $key = $entityId.'|'.$class;
         $signature = $this->signature($terrain);
 
         // First time we see this terrain: adopt its current values as the
         // baseline. The scene already built the meshes from them.
-        if (!isset($this->builtSignature[$entityId])) {
-            $this->builtSignature[$entityId] = $signature;
+        if (!isset($this->builtSignature[$key])) {
+            $this->builtSignature[$key] = $signature;
             return;
         }
 
         // Unchanged since the last rebuild — clear any pending debounce.
-        if ($signature === $this->builtSignature[$entityId]) {
-            unset($this->pendingSignature[$entityId], $this->stableFor[$entityId]);
+        if ($signature === $this->builtSignature[$key]) {
+            unset($this->pendingSignature[$key], $this->stableFor[$key]);
             return;
         }
 
         // Value is still moving (e.g. an active slider drag): (re)start the
         // debounce window and wait for it to settle.
-        if (($this->pendingSignature[$entityId] ?? null) !== $signature) {
-            $this->pendingSignature[$entityId] = $signature;
-            $this->stableFor[$entityId] = 0.0;
+        if (($this->pendingSignature[$key] ?? null) !== $signature) {
+            $this->pendingSignature[$key] = $signature;
+            $this->stableFor[$key] = 0.0;
             return;
         }
 
-        $this->stableFor[$entityId] += $dt;
-        if ($this->stableFor[$entityId] < $this->debounceSeconds) {
+        $this->stableFor[$key] += $dt;
+        if ($this->stableFor[$key] < $this->debounceSeconds) {
             return;
         }
 
         $terrain->rebuild($world, $entityId);
-        $this->builtSignature[$entityId] = $signature;
-        unset($this->pendingSignature[$entityId], $this->stableFor[$entityId]);
+        $this->builtSignature[$key] = $signature;
+        unset($this->pendingSignature[$key], $this->stableFor[$key]);
     }
 
     private function signature(RegenerableTerrain $terrain): string
