@@ -18,6 +18,7 @@ use ReflectionClass;
 use ReflectionEnum;
 use ReflectionEnumBackedCase;
 use ReflectionNamedType;
+use ReflectionProperty;
 use RuntimeException;
 
 class PhpCodeGenerator
@@ -260,12 +261,73 @@ class PhpCodeGenerator
 
         $short = $this->shortName($class);
         $args = $this->generateConstructorArgs($class, $data);
+        $expr = $args === '' ? "new {$short}()" : "new {$short}({$args})";
 
-        if (empty($args)) {
-            return "new {$short}()";
+        // Values the constructor cannot carry — a component that declares its
+        // state as public properties instead of constructor parameters, or a
+        // property that simply is not a parameter — are assigned afterwards.
+        // Without this they would vanish from the generated scene: the data is
+        // in the document, the emitted `new Component()` just drops it.
+        $assignments = $this->renderPropertyAssignments($class, $data);
+        if ($assignments === []) {
+            return $expr;
         }
 
-        return "new {$short}({$args})";
+        $body = "\$c = {$expr};";
+        foreach ($assignments as $assignment) {
+            $body .= " \$c->{$assignment['name']} = {$assignment['value']};";
+        }
+
+        return "(static function (): {$short} { {$body} return \$c; })()";
+    }
+
+    /**
+     * Public, writable properties present in $data that the constructor did not
+     * already consume, rendered as `name => php-literal`.
+     *
+     * @param array<string, mixed> $data
+     * @return list<array{name: string, value: string}>
+     */
+    private function renderPropertyAssignments(string $className, array $data): array
+    {
+        if (!class_exists($className)) {
+            return [];
+        }
+
+        $reflection = new ReflectionClass($className);
+        $consumed = [];
+        $constructor = $reflection->getConstructor();
+        if ($constructor !== null) {
+            foreach ($constructor->getParameters() as $param) {
+                $consumed[$param->getName()] = true;
+            }
+        }
+
+        $assignments = [];
+        foreach ($reflection->getProperties(ReflectionProperty::IS_PUBLIC) as $property) {
+            $name = $property->getName();
+            if ($property->isStatic() || $property->isReadOnly()) {
+                continue;
+            }
+            if (isset($consumed[$name]) || !array_key_exists($name, $data)) {
+                continue;
+            }
+
+            // A value equal to the declared default carries no information and
+            // would only pad every entity in the file.
+            $value = $data[$name];
+            if ($property->hasDefaultValue() && $property->getDefaultValue() == $value) {
+                continue;
+            }
+
+            $type = $property->getType();
+            $rendered = $this->renderValue($value, $type instanceof ReflectionNamedType ? $type->getName() : null);
+            if ($rendered !== null) {
+                $assignments[] = ['name' => $name, 'value' => $rendered];
+            }
+        }
+
+        return $assignments;
     }
 
     /**
@@ -339,7 +401,10 @@ class PhpCodeGenerator
         }
 
         if (is_int($value)) {
-            return (string)$value;
+            // A float target needs a float literal: generated scenes declare
+            // strict_types, where passing 64 to a float would be a TypeError.
+            // JSON has no way to say "64.0", so whole numbers arrive as ints.
+            return $typeName === 'float' ? $this->renderFloat((float)$value) : (string)$value;
         }
 
         if (is_float($value)) {
