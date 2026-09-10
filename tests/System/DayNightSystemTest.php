@@ -73,6 +73,32 @@ final class DayNightSystemTest extends TestCase
         return ['sky' => $skies[0], 'light' => $light, 'ambient' => $ambients[0]];
     }
 
+    public function testCelestialDiscAddedLaterIsStillPlaced(): void
+    {
+        $world = new World();
+        $world->createEntity()->attach(new DayNightCycle(timeOfDay: 0.5, paused: true));
+        $lightEntity = $world->createEntity();
+        $lightEntity->attach(new DirectionalLight());
+        $lightEntity->attach(new Transform3D());
+
+        $system = new DayNightSystem(new RenderCommandList());
+        $system->update($world, 0.016);
+        $system->render($world);
+
+        // The sun disc appears after the system has already rendered frames.
+        $sun = $world->createEntity();
+        $sunTransform = new Transform3D();
+        $sun->attach($sunTransform);
+        $sun->attach(new \PHPolygon\Component\MeshRenderer('sphere', 'sun_disc'));
+        $system->render($world);
+        $this->assertGreaterThan(100.0, $sunTransform->position->length(), 'noon sun disc sits on its orbit');
+
+        // And a destroyed disc is simply dropped.
+        $world->destroyEntity($sun->id);
+        $system->render($world);
+        $this->addToAssertionCount(1);
+    }
+
     public function testSeasonalTiltSteepensSunInSummer(): void
     {
         // Summer tilt (+15°) raises the sun -> the key light direction points

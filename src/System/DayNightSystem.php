@@ -138,6 +138,16 @@ class DayNightSystem extends AbstractSystem
     /** Accumulated real time for cloud drift animation. */
     private float $skyTime = 0.0;
 
+    /** @var list<int> entities whose MeshRenderer draws the sun or moon disc */
+    private array $celestialIds = [];
+
+    /**
+     * World structure (version, renderer count, last renderer id) the ids above
+     * were scanned from. A world has thousands of renderers and at most three
+     * discs, so the pool is rescanned only after a structural change.
+     */
+    private string $celestialScanKey = '';
+
     public function update(World $world, float $dt): void
     {
         // Clamp the cloud-clock step: a frame hitch must not teleport the
@@ -324,20 +334,38 @@ class DayNightSystem extends AbstractSystem
             break;
         }
 
-        foreach ($world->query(MeshRenderer::class, Transform3D::class) as $entity) {
-            $mesh = $entity->get(MeshRenderer::class);
+        /** @var array<int, MeshRenderer> $meshPool */
+        $meshPool = $world->componentPool(MeshRenderer::class);
+        $scanKey = $world->version() . ':' . count($meshPool) . ':' . (array_key_last($meshPool) ?? '');
+        if ($scanKey !== $this->celestialScanKey) {
+            $this->celestialIds = [];
+            foreach ($meshPool as $id => $renderer) {
+                $m = $renderer->materialId;
+                if ($m === 'sun_disc' || $m === 'moon_disc' || $m === 'moon_glow') {
+                    $this->celestialIds[] = $id;
+                }
+            }
+            $this->celestialScanKey = $scanKey;
+        }
+
+        foreach ($this->celestialIds as $id) {
+            $mesh = $meshPool[$id] ?? null;
+            $transform = $mesh === null ? null : $world->tryGetComponent($id, Transform3D::class);
+            if (!$transform instanceof Transform3D) {
+                continue;
+            }
             $mat = $mesh->materialId;
 
             // Sun — single sphere orbiting the camera at sunRadius
             if ($mat === 'sun_disc') {
-                $entity->get(Transform3D::class)->position = $sunVisible
+                $transform->position = $sunVisible
                     ? new Vec3($camPos->x + $sunWorldX, $sunWorldY, $camPos->z + $sunWorldZ)
                     : new Vec3(0.0, -100.0, 0.0);
             }
 
             // Moon layers — orbit around camera
             if ($mat === 'moon_disc' || $mat === 'moon_glow') {
-                $entity->get(Transform3D::class)->position = ($moonVisible && $moonY > 0)
+                $transform->position = ($moonVisible && $moonY > 0)
                     ? new Vec3($camPos->x + $moonX, $moonY, $camPos->z + $moonZ)
                     : new Vec3(0.0, -100.0, 0.0);
             }
