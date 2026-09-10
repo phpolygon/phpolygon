@@ -42,12 +42,35 @@ class Transform3DSystem extends AbstractSystem
         // recursion).
         /** @var array<int, Transform3D> $pool */
         $pool = $world->componentPool(Transform3D::class);
+        $cache = &$this->cache;
         foreach ($pool as $id => $transform) {
             if ($transform->parentEntityId !== null) {
                 continue;
             }
-            $this->updateHierarchy($world, $id, $transform, parentDirty: false);
+            if ($transform->childEntityIds !== []) {
+                $this->updateHierarchy($world, $id, $transform, parentDirty: false);
+                continue;
+            }
+
+            // Childless root - most of a built world. Same check as isDirty(),
+            // inlined: two method calls per entity per tick are a measurable
+            // share of the steady-state cost at a few thousand entities.
+            $p = $transform->position;
+            $r = $transform->rotation;
+            $s = $transform->scale;
+            $snap = $cache[$id] ?? null;
+            if ($snap !== null
+                && $snap['px'] === $p->x && $snap['py'] === $p->y && $snap['pz'] === $p->z
+                && $snap['rx'] === $r->x && $snap['ry'] === $r->y && $snap['rz'] === $r->z && $snap['rw'] === $r->w
+                && $snap['sx'] === $s->x && $snap['sy'] === $s->y && $snap['sz'] === $s->z
+                && $snap['parent'] === null
+            ) {
+                continue;
+            }
+            $transform->worldMatrix = $transform->getLocalMatrix();
+            $this->snapshot($id, $transform);
         }
+        unset($cache);
     }
 
     /**

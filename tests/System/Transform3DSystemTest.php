@@ -13,6 +13,32 @@ use PHPolygon\System\Transform3DSystem;
 
 class Transform3DSystemTest extends TestCase
 {
+    public function testInPlaceVectorWritesAreDetected(): void
+    {
+        $world = new World();
+        $world->addSystem(new Transform3DSystem());
+
+        $entity = $world->createEntity();
+        $t = new Transform3D(new Vec3(1.0, 2.0, 3.0));
+        $entity->attach($t);
+        $world->update(0.016);
+
+        // Game code writes into the vector object itself instead of assigning a
+        // new one (Vec3 is mutable) - the dirty check must still see it.
+        $t->position->y = 9.0;
+        $world->update(0.016);
+        $this->assertEqualsWithDelta(9.0, $t->getWorldPosition()->y, 1e-5);
+
+        $t->scale->x = 2.0;
+        $world->update(0.016);
+        $this->assertEqualsWithDelta(3.0, $t->getWorldMatrix()->transformPoint(new Vec3(1.0, 0.0, 0.0))->x, 1e-5);
+
+        // An untouched entity keeps the very same world matrix object.
+        $before = $t->worldMatrix;
+        $world->update(0.016);
+        $this->assertSame($before, $t->worldMatrix);
+    }
+
     public function testRootEntityWorldMatrixEqualsLocal(): void
     {
         $world = new World();
