@@ -26,6 +26,16 @@ final class VioEnvironmentCubemap
     private ?\VioRenderTarget $target = null;
     private ?\VioCubemap $cubemap = null;
     private string $lastSkyHash = '';
+
+    /**
+     * Seconds between two re-renders while the sky keeps changing. A running
+     * day/night cycle moves the sun every tick, and each re-render is six face
+     * passes plus a mip chain; a reflection probe does not need that 60 times a
+     * second. The first sky always renders immediately.
+     */
+    public const float MIN_UPDATE_INTERVAL = 0.25;
+
+    private ?float $lastRenderAt = null;
     private bool $unsupported = false;
 
     public function __construct(private readonly \VioContext $ctx)
@@ -73,14 +83,35 @@ final class VioEnvironmentCubemap
         return $this->cubemap;
     }
 
-    public function needsUpdate(SetSky $sky): bool
+    public function needsUpdate(SetSky $sky, ?float $now = null): bool
     {
-        return self::skyHash($sky) !== $this->lastSkyHash;
+        return self::shouldUpdate(self::skyHash($sky), $this->lastSkyHash, $this->lastRenderAt, $now ?? self::now());
     }
 
-    public function markRendered(SetSky $sky): void
+    /**
+     * Re-render when the (quantized) sky changed and the last render is at least
+     * {@see MIN_UPDATE_INTERVAL} old. Pure, so the policy is testable without a GPU.
+     */
+    public static function shouldUpdate(string $hash, string $lastHash, ?float $lastRenderAt, float $now): bool
+    {
+        if ($hash === $lastHash) {
+            return false;
+        }
+        if ($lastHash === '' || $lastRenderAt === null) {
+            return true;
+        }
+        return $now - $lastRenderAt >= self::MIN_UPDATE_INTERVAL;
+    }
+
+    public function markRendered(SetSky $sky, ?float $now = null): void
     {
         $this->lastSkyHash = self::skyHash($sky);
+        $this->lastRenderAt = $now ?? self::now();
+    }
+
+    private static function now(): float
+    {
+        return hrtime(true) / 1e9;
     }
 
     /** floor(log2(FACE_SIZE)) — the last mip level, for roughness → LOD mapping. */
@@ -128,21 +159,32 @@ final class VioEnvironmentCubemap
         return $out;
     }
 
-    /** Hash of every SetSky input that changes the rendered sky. */
+    /**
+     * Hash of every SetSky input that changes the rendered sky, quantized below
+     * what the probe can show: directions to 1e-3 (~0.06 degrees), everything
+     * else to 1/512. Per-tick drift of the sun or the cloud cover then no longer
+     * counts as a new sky.
+     */
     public static function skyHash(SetSky $sky): string
     {
         $md = $sky->moonDirection ?? new Vec3(0.0, -1.0, 0.0);
+        $dir = static fn (float $v): int => (int) round($v * 1000.0);
+        $val = static fn (float $v): int => (int) round($v * 512.0);
         return md5(pack(
-            'f*',
-            $sky->sunDirection->x, $sky->sunDirection->y, $sky->sunDirection->z, $sky->sunIntensity,
-            $sky->sunColor->r, $sky->sunColor->g, $sky->sunColor->b, $sky->sunSize,
-            $sky->zenithColor->r, $sky->zenithColor->g, $sky->zenithColor->b, $sky->sunGlowSize,
-            $sky->horizonColor->r, $sky->horizonColor->g, $sky->horizonColor->b, $sky->sunGlowIntensity,
-            $sky->groundColor->r, $sky->groundColor->g, $sky->groundColor->b, $sky->starBrightness,
-            $md->x, $md->y, $md->z, $sky->moonIntensity,
-            $sky->moonColor->r, $sky->moonColor->g, $sky->moonColor->b, $sky->cloudCover,
-            $sky->cloudAltitude, $sky->cloudDensity, $sky->cloudWindSpeed, $sky->fogDensity,
-            $sky->cloudWindDirection->x, $sky->cloudWindDirection->z,
+            'l*',
+            $dir($sky->sunDirection->x), $dir($sky->sunDirection->y), $dir($sky->sunDirection->z),
+            $dir($md->x), $dir($md->y), $dir($md->z),
+            $dir($sky->cloudWindDirection->x), $dir($sky->cloudWindDirection->z),
+            ...array_map($val, [
+                $sky->sunIntensity, $sky->sunSize, $sky->sunGlowSize, $sky->sunGlowIntensity,
+                $sky->sunColor->r, $sky->sunColor->g, $sky->sunColor->b,
+                $sky->zenithColor->r, $sky->zenithColor->g, $sky->zenithColor->b,
+                $sky->horizonColor->r, $sky->horizonColor->g, $sky->horizonColor->b,
+                $sky->groundColor->r, $sky->groundColor->g, $sky->groundColor->b,
+                $sky->starBrightness, $sky->moonIntensity,
+                $sky->moonColor->r, $sky->moonColor->g, $sky->moonColor->b,
+                $sky->cloudCover, $sky->cloudAltitude, $sky->cloudDensity, $sky->cloudWindSpeed, $sky->fogDensity,
+            ]),
         ));
     }
 
@@ -151,5 +193,6 @@ final class VioEnvironmentCubemap
         $this->cubemap = null;
         $this->target = null;
         $this->lastSkyHash = '';
+        $this->lastRenderAt = null;
     }
 }

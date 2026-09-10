@@ -67,6 +67,23 @@ final class VioEnvironmentCubemapTest extends TestCase
         self::assertSame(7.0, VioEnvironmentCubemap::mipMax()); // 128² → levels 0..7
     }
 
+    public function testSkyHashIgnoresDriftTooSmallToSee(): void
+    {
+        // A running day/night cycle nudges the sun a tiny step every tick; that
+        // alone must not re-render six cube faces and a mip chain.
+        self::assertSame(VioEnvironmentCubemap::skyHash(self::sky(0.3)), VioEnvironmentCubemap::skyHash(self::sky(0.3 + 1e-5)));
+        self::assertNotSame(VioEnvironmentCubemap::skyHash(self::sky(0.3)), VioEnvironmentCubemap::skyHash(self::sky(0.32)));
+    }
+
+    public function testUpdatesAreRateLimited(): void
+    {
+        $interval = VioEnvironmentCubemap::MIN_UPDATE_INTERVAL;
+        self::assertTrue(VioEnvironmentCubemap::shouldUpdate('b', '', null, 10.0), 'the first sky renders immediately');
+        self::assertFalse(VioEnvironmentCubemap::shouldUpdate('a', 'a', 1.0, 100.0), 'an unchanged sky never re-renders');
+        self::assertFalse(VioEnvironmentCubemap::shouldUpdate('b', 'a', 10.0, 10.0 + $interval * 0.5), 'a changed sky waits for the interval');
+        self::assertTrue(VioEnvironmentCubemap::shouldUpdate('b', 'a', 10.0, 10.0 + $interval), 'a changed sky renders once the interval passed');
+    }
+
     #[RequiresPhpExtension('vio')]
     #[Group('native-gpu')]
     public function testSkyFrameProducesABindableCubemapOnCubeCapableBackends(): void
