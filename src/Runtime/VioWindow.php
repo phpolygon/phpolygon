@@ -27,6 +27,8 @@ class VioWindow extends Window
         int $frameLatency = 0,
         bool $hdrOutput = false,
         float $hdrPaperWhite = 200.0,
+        int $shaderModel = 0,
+        string $dxcDir = '',
     ) {
         parent::__construct($width, $height, $title, $vsync, $resizable);
         $this->backend = $backend;
@@ -35,7 +37,13 @@ class VioWindow extends Window
         $this->frameLatency = $frameLatency;
         $this->hdrOutput = $hdrOutput;
         $this->hdrPaperWhite = $hdrPaperWhite;
+        $this->shaderModel = $shaderModel;
+        $this->dxcDir = $dxcDir;
     }
+
+    /** vio_create 'shader_model' / 'dxc_dir' (EngineConfig::$vioShaderModel). */
+    private int $shaderModel = 0;
+    private string $dxcDir = '';
 
     /** vio_create 'hdr_output' / 'hdr_paper_white' (GraphicsSettings::$hdrOutput). */
     private bool $hdrOutput = false;
@@ -81,6 +89,13 @@ class VioWindow extends Window
         if ($this->hdrOutput) {
             $config['hdr_output'] = 1;
             $config['hdr_paper_white'] = $this->hdrPaperWhite;
+        }
+        // D3D12 shader model (php-vio >= 2.16): 6 = DXC / DXIL, honest fallback to FXC.
+        if ($this->shaderModel > 0) {
+            $config['shader_model'] = $this->shaderModel;
+            if ($this->dxcDir !== '') {
+                $config['dxc_dir'] = $this->dxcDir;
+            }
         }
 
         // Try the requested backend first; on failure, walk a platform-aware

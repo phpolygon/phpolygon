@@ -295,6 +295,8 @@ class Engine
                 $this->graphics->settings()->lowLatency ? 1 : 0,
                 $this->graphics->settings()->hdrOutput,
                 $this->graphics->settings()->hdrPaperWhite,
+                $config->vioShaderModel,
+                $config->vioDxcDir,
             );
         } else {
             $noApi = $config->is3D && in_array($config->renderBackend3D, ['vulkan', 'metal'], true);

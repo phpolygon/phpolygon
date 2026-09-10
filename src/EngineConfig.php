@@ -47,6 +47,15 @@ class EngineConfig
          * file reads. '' disables the cache. Created on demand.
          */
         public readonly string $shaderCachePath = 'saves/shader-cache',
+        /**
+         * D3D12 shader model (php-vio >= 2.16 'shader_model'): 6 compiles the
+         * shaders with DXC to DXIL (needs dxcompiler.dll + dxil.dll next to the
+         * executable or in $vioDxcDir), the prerequisite for wave intrinsics,
+         * 16-bit types and mesh shaders; 0 keeps the backend default (FXC 5.1).
+         * php-vio falls back to FXC when DXC is unavailable, so 6 is safe to ask for.
+         */
+        public readonly int $vioShaderModel = 0,
+        public readonly string $vioDxcDir = '',
         public readonly bool $skipSplash = false,
         public readonly float $splashDuration = 2.5,
         public readonly string $vioBackend = 'auto',
