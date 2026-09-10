@@ -25,13 +25,21 @@ class VioWindow extends Window
         bool $debug = false,
         string $shaderCachePath = '',
         int $frameLatency = 0,
+        bool $hdrOutput = false,
+        float $hdrPaperWhite = 200.0,
     ) {
         parent::__construct($width, $height, $title, $vsync, $resizable);
         $this->backend = $backend;
         $this->debug = $debug;
         $this->shaderCachePath = $shaderCachePath;
         $this->frameLatency = $frameLatency;
+        $this->hdrOutput = $hdrOutput;
+        $this->hdrPaperWhite = $hdrPaperWhite;
     }
+
+    /** vio_create 'hdr_output' / 'hdr_paper_white' (GraphicsSettings::$hdrOutput). */
+    private bool $hdrOutput = false;
+    private float $hdrPaperWhite = 200.0;
 
     /** vio_create 'frame_latency' (0 = driver default; 1 = GraphicsSettings::$lowLatency). */
     private int $frameLatency = 0;
@@ -66,6 +74,13 @@ class VioWindow extends Window
         // run-ahead. Backends without the feature ignore the option.
         if ($this->frameLatency > 0) {
             $config['frame_latency'] = $this->frameLatency;
+        }
+        // HDR10 output (php-vio >= 2.15, D3D11 / D3D12): a 10-bit ST 2084
+        // backbuffer when the display is in HDR mode; vio's 2D batch PQ-encodes
+        // itself, the 3D resolve reads vio_swapchain_info() and does the same.
+        if ($this->hdrOutput) {
+            $config['hdr_output'] = 1;
+            $config['hdr_paper_white'] = $this->hdrPaperWhite;
         }
 
         // Try the requested backend first; on failure, walk a platform-aware

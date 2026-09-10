@@ -46,7 +46,7 @@ final class VioFxaaPass
      * `$sourceWidth`/`$sourceHeight` are its pixel dimensions (for the
      * `1/resolution` uniform).
      *
-     * @param array{lift: list<float>, gamma: list<float>, gain: list<float>, saturation: float, vignette: float, viewport: list<float>, hdr: int, exposure: float}|null $post
+     * @param array{lift: list<float>, gamma: list<float>, gain: list<float>, saturation: float, vignette: float, viewport: list<float>, hdr: int, exposure: float, pq: int, paperWhite: float}|null $post
      */
     public function apply(
         VioTexture $inputTexture,
@@ -98,6 +98,9 @@ final class VioFxaaPass
         // before grade/vignette. Off → LDR behaviour, unchanged.
         vio_set_uniform($this->ctx, 'u_hdr_resolve', $p['hdr']      ?? 0);
         vio_set_uniform($this->ctx, 'u_exposure',    $p['exposure'] ?? 1.0);
+        // HDR10 backbuffer: PQ-encode the finished image (see passthrough_blit).
+        vio_set_uniform($this->ctx, 'u_output_pq',   $p['pq']         ?? 0);
+        vio_set_uniform($this->ctx, 'u_paper_white', $p['paperWhite'] ?? 200.0);
 
         vio_draw($this->ctx, $screenQuad);
     }

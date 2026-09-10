@@ -293,6 +293,8 @@ class Engine
                 // GraphicsSettings are loaded above, so the low-latency toggle
                 // reaches the swapchain at creation (it cannot change at runtime).
                 $this->graphics->settings()->lowLatency ? 1 : 0,
+                $this->graphics->settings()->hdrOutput,
+                $this->graphics->settings()->hdrPaperWhite,
             );
         } else {
             $noApi = $config->is3D && in_array($config->renderBackend3D, ['vulkan', 'metal'], true);

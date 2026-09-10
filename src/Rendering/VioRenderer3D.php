@@ -940,12 +940,17 @@ class VioRenderer3D implements Renderer3DInterface
      * composited image (geometry + sky + bloom) so they cover everything
      * uniformly — the mesh shader no longer bakes them per-fragment.
      *
-     * @return array{lift: list<float>, gamma: list<float>, gain: list<float>, saturation: float, vignette: float, viewport: list<float>, hdr: int, exposure: float}
+     * @return array{lift: list<float>, gamma: list<float>, gain: list<float>, saturation: float, vignette: float, viewport: list<float>, hdr: int, exposure: float, pq: int, paperWhite: float}
      */
     private function postFinishParams(): array
     {
         $g = $this->settings->colorGrading->params();
         return [
+            // HDR10 backbuffer (vio_create 'hdr_output' active): the resolve
+            // PQ-encodes its display-referred result, with paperWhite nits as
+            // the luminance of display white. 0 on an sRGB backbuffer.
+            'pq'         => $this->outputIsHdr10() ? 1 : 0,
+            'paperWhite' => $this->settings->hdrPaperWhite,
             'lift'       => $g['lift'],
             'gamma'      => $g['gamma'],
             'gain'       => $g['gain'],
@@ -961,13 +966,35 @@ class VioRenderer3D implements Renderer3DInterface
         ];
     }
 
+    /** Cached vio_swapchain_info()['hdr_output'] (null = not probed yet). */
+    private ?bool $hdr10Output = null;
+
+    /**
+     * Whether the swapchain presents HDR10 (10-bit ST 2084) this session —
+     * php-vio decided that at window creation from GraphicsSettings::$hdrOutput
+     * and the display's HDR mode.
+     */
+    public function outputIsHdr10(): bool
+    {
+        if ($this->hdr10Output === null) {
+            $this->hdr10Output = false;
+            if (function_exists('vio_swapchain_info')) {
+                $info = vio_swapchain_info($this->ctx);
+                $this->hdr10Output = (bool) ($info['hdr_output'] ?? false);
+            }
+        }
+        return $this->hdr10Output;
+    }
+
     /**
      * Upload the {@see postFinishParams} onto the currently bound present shader.
      *
-     * @param array{lift: list<float>, gamma: list<float>, gain: list<float>, saturation: float, vignette: float, viewport: list<float>, hdr: int, exposure: float} $post
+     * @param array{lift: list<float>, gamma: list<float>, gain: list<float>, saturation: float, vignette: float, viewport: list<float>, hdr: int, exposure: float, pq: int, paperWhite: float} $post
      */
     private function setPostFinishUniforms(array $post): void
     {
+        vio_set_uniform($this->ctx, 'u_output_pq', $post['pq']);
+        vio_set_uniform($this->ctx, 'u_paper_white', $post['paperWhite']);
         vio_set_uniform($this->ctx, 'u_grade_lift', $post['lift']);
         vio_set_uniform($this->ctx, 'u_grade_gamma', $post['gamma']);
         vio_set_uniform($this->ctx, 'u_grade_gain', $post['gain']);

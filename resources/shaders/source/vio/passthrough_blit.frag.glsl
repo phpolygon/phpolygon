@@ -12,6 +12,23 @@ uniform float     u_bloom_intensity;
 // before. See VioRenderer3D::setPostFinishUniforms().
 uniform int   u_hdr_resolve;
 uniform float u_exposure;
+// HDR10 output (u_output_pq == 1): the backbuffer is 10-bit ST 2084. The finished
+// display-referred colour (sRGB-encoded 0..1) is linearised, mapped to BT.2020 and
+// PQ-encoded with u_paper_white nits as the luminance of display white — the same
+// transform php-vio's 2D batch applies to the UI, so both layers match.
+uniform int   u_output_pq;
+uniform float u_paper_white;
+vec3 outputEncode(vec3 c) {
+    if (u_output_pq != 1) return c;
+    vec3 lin = pow(max(c, vec3(0.0)), vec3(2.2));
+    // BT.709 -> BT.2020 (columns: red, green, blue primaries).
+    mat3 toBT2020 = mat3(0.6274, 0.0691, 0.0164,
+                         0.3293, 0.9195, 0.0880,
+                         0.0433, 0.0114, 0.8956);
+    vec3 nits = (toBT2020 * lin) * (max(u_paper_white, 1.0) / 10000.0);
+    vec3 y = pow(max(nits, vec3(0.0)), vec3(0.1593017578125));
+    return pow((0.8359375 + 18.8515625 * y) / (1.0 + 18.6875 * y), vec3(78.84375));
+}
 // Full-screen finishing (identity when grade is Neutral + vignette 0).
 uniform vec3  u_grade_lift;
 uniform vec3  u_grade_gamma;
@@ -63,6 +80,6 @@ void main() {
         // LDR legacy: bloom is already display-referred, add post-tonemap.
         c += texture(u_bloom, v_uv).rgb * u_bloom_intensity;
     }
-    c = applyVignette(applyColorGrade(c));
+    c = outputEncode(applyVignette(applyColorGrade(c)));
     frag_color = vec4(c, 1.0);
 }

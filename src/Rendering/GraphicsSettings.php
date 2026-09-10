@@ -53,6 +53,15 @@ final class GraphicsSettings
          * so a change takes effect on the next start.
          */
         public readonly bool $lowLatency = false,
+        /**
+         * HDR10 display output (php-vio 'hdr_output', D3D11 / D3D12): a 10-bit
+         * ST 2084 backbuffer when the display is in HDR mode; the resolve
+         * shaders then PQ-encode the tonemapped image with hdrPaperWhite nits
+         * as display white. Applied at window creation. Independent of $hdr
+         * (the FP16 scene target), which stays the source of the highlights.
+         */
+        public readonly bool $hdrOutput = false,
+        public readonly float $hdrPaperWhite = 200.0,
         public readonly bool $fog = true,
         public readonly MeshLodTier $meshLod = MeshLodTier::High,
         public readonly ScreenSpaceAO $ambientOcclusion = ScreenSpaceAO::Medium,
@@ -85,6 +94,8 @@ final class GraphicsSettings
         ?bool $bloom = null,
         ?bool $hdr = null,
         ?bool $lowLatency = null,
+        ?bool $hdrOutput = null,
+        ?float $hdrPaperWhite = null,
         ?bool $fog = null,
         ?MeshLodTier $meshLod = null,
         ?ScreenSpaceAO $ambientOcclusion = null,
@@ -111,6 +122,8 @@ final class GraphicsSettings
             bloom: $bloom ?? $this->bloom,
             hdr: $hdr ?? $this->hdr,
             lowLatency: $lowLatency ?? $this->lowLatency,
+            hdrOutput: $hdrOutput ?? $this->hdrOutput,
+            hdrPaperWhite: max(80.0, min(1000.0, $hdrPaperWhite ?? $this->hdrPaperWhite)),
             fog: $fog ?? $this->fog,
             meshLod: $meshLod ?? $this->meshLod,
             ambientOcclusion: $ambientOcclusion ?? $this->ambientOcclusion,
@@ -144,6 +157,8 @@ final class GraphicsSettings
             'bloom' => $this->bloom,
             'hdr' => $this->hdr,
             'lowLatency' => $this->lowLatency,
+            'hdrOutput' => $this->hdrOutput,
+            'hdrPaperWhite' => $this->hdrPaperWhite,
             'fog' => $this->fog,
             'meshLod' => $this->meshLod->value,
             'ambientOcclusion' => $this->ambientOcclusion->value,
@@ -178,6 +193,8 @@ final class GraphicsSettings
             bloom: self::asBool($data['bloom'] ?? null) ?? $defaults->bloom,
             hdr: self::asBool($data['hdr'] ?? null) ?? $defaults->hdr,
             lowLatency: self::asBool($data['lowLatency'] ?? null) ?? $defaults->lowLatency,
+            hdrOutput: self::asBool($data['hdrOutput'] ?? null) ?? $defaults->hdrOutput,
+            hdrPaperWhite: max(80.0, min(1000.0, self::asFloat($data['hdrPaperWhite'] ?? null) ?? $defaults->hdrPaperWhite)),
             fog: self::asBool($data['fog'] ?? null) ?? $defaults->fog,
             meshLod: self::enumFrom(MeshLodTier::class, $data['meshLod'] ?? null) ?? $defaults->meshLod,
             ambientOcclusion: self::enumFrom(ScreenSpaceAO::class, $data['ambientOcclusion'] ?? null) ?? $defaults->ambientOcclusion,
