@@ -12,6 +12,7 @@ use PHPolygon\Math\Vec3;
 use PHPolygon\Rendering\Command\AddPointLight;
 use PHPolygon\Rendering\Command\AddSpotLight;
 use PHPolygon\Rendering\Command\DrawMesh;
+use PHPolygon\Rendering\Command\DrawOutline;
 use PHPolygon\Rendering\Command\DrawMeshInstanced;
 use PHPolygon\Rendering\Command\SetAmbientLight;
 use PHPolygon\Rendering\Command\SetCamera;
@@ -98,6 +99,20 @@ class VioRenderer3D implements Renderer3DInterface
      * pass reads it, so it never goes stale across frames.
      */
     private ?string $frameUniformsShaderId = null;
+
+    /** Scene pass whose regular pipeline is bound ('opaque', 'transparent', 'transparent_water'). */
+    private string $currentScenePass = 'opaque';
+
+    /**
+     * Frame uniform inputs of the current frame ([frameState, hasShadowMap,
+     * dirLights]), re-uploaded when a storage-instance draw switches programs.
+     *
+     * @var array{0: array{ambientColor: Color, ambientIntensity: float, dirLights: list<SetDirectionalLight>, pointLights: list<AddPointLight>, spotLights: list<AddSpotLight>, fogColor: Color, fogNear: float, fogFar: float, waveEnabled: bool, waveAmplitude: float, waveFrequency: float, wavePhase: float, ftMode: \PHPolygon\Rendering\Quality\FieldtracingMode, ftIntensity: float, ftAoRadius: float}, 1: bool, 2: list<SetDirectionalLight>}|null
+     */
+    private ?array $sceneUniformInputs = null;
+
+    /** Storage-instance programs compiled (true), unavailable (false) or not tried yet (null). */
+    private ?bool $storageInstancingReady = null;
 
     /** Whether the php-vio build exposes the batch vio_set_uniforms helper. */
     private bool $batchUniforms = false;
@@ -1308,6 +1323,8 @@ class VioRenderer3D implements Renderer3DInterface
         $fogNear = 1000.0;
         $fogFar = 2000.0;
         $waveEnabled = false;
+        /** @var list<DrawOutline> $outlines */
+        $outlines = [];
         $waveAmplitude = 0.3;
         $waveFrequency = 0.5;
         $wavePhase = 0.0;
@@ -1333,6 +1350,8 @@ class VioRenderer3D implements Renderer3DInterface
                 $pointLights[] = $cmd;
             } elseif ($cmd instanceof AddSpotLight) {
                 $spotLights[] = $cmd;
+            } elseif ($cmd instanceof DrawOutline) {
+                $outlines[] = $cmd;
             } elseif ($cmd instanceof SetFog) {
                 if ($this->settings->fog) {
                     $fogColor = $cmd->color;
@@ -1513,6 +1532,7 @@ class VioRenderer3D implements Renderer3DInterface
         $this->uploadSsaoUniforms();
         $this->uploadSdfAoUniforms();
         $this->frameUniformsShaderId = $this->activeShaderId();
+        $this->sceneUniformInputs = [$frameState, $hasShadowMap, $dirLights];
 
         // Collect opaque-eligible draws (resolving each material ONCE) and sort by
         // (materialId, meshId) so identical draws cluster — that makes the per-draw
@@ -1607,6 +1627,10 @@ class VioRenderer3D implements Renderer3DInterface
         // the present/bloom resolve, so reflected highlights bloom and tonemap
         // with the rest of the scene. No-op unless ssrEnabledThisFrame().
         $this->renderSsrPass($this->mrtThisFrame ? $this->mrtGbufferTexture() : null);
+
+        // --- Outlines (DrawOutline): stencil mask + ring over the finished
+        // scene, before post-processing so they tonemap and bloom with it. ---
+        $this->renderOutlinePass($outlines, $sceneViewportW, $sceneViewportH);
 
         // --- Post-processing: HDR → Bloom → Tonemap → Backbuffer ---
         $quad = $this->screenQuad;
@@ -1726,6 +1750,17 @@ class VioRenderer3D implements Renderer3DInterface
         $this->compileShaderFromFiles('sky_stars',    'atmosphere.vert.glsl', 'sky_stars.frag.glsl');
         $this->compileShaderFromFiles('sky_clouds',   'atmosphere.vert.glsl', 'sky_clouds.frag.glsl');
         $this->compileShaderFromFiles('sky_haze',     'atmosphere.vert.glsl', 'sky_haze.frag.glsl');
+
+        // Outline pass (DrawOutline): only where the backend has a stencil
+        // buffer. A compile failure just leaves outlines off.
+        if ($this->outlineSupported()) {
+            try {
+                $this->compileShaderFromFiles('outline', 'outline.vert.glsl', 'outline.frag.glsl');
+            } catch (\RuntimeException $e) {
+                $this->outlineSupported = false;
+                fwrite(STDERR, "[VioRenderer3D] outline shader unavailable, outlines are off: {$e->getMessage()}\n");
+            }
+        }
 
         // MRT scene path: the same sources with PHPOLYGON_MRT defined (four
         // colour outputs) + the composite. Only when the backend can do it; a
@@ -1887,9 +1922,9 @@ class VioRenderer3D implements Renderer3DInterface
      * MRT path only — 'transparent_water' (transparent that also writes the
      * G-buffer attachment, for surfaces the SSR pass should reflect off).
      */
-    private function bindPipeline(string $pass): void
+    private function bindPipeline(string $pass, bool $storageInstances = false): void
     {
-        $shaderId = $this->activeShaderId();
+        $shaderId = $storageInstances ? 'default_storage' : $this->activeShaderId();
         $hdr = $this->sceneTargetIsHdr();
         $mrt = $this->mrtThisFrame;
         // Cache LDR, HDR and MRT pipeline variants under distinct keys: on D3D12
@@ -1904,7 +1939,7 @@ class VioRenderer3D implements Renderer3DInterface
                 // blend on the transparent pass), attachment 3 is DATA: never
                 // blended, and written only by opaque geometry (+ water for SSR).
                 $cfg = [
-                    'shader' => $this->shaderCache['default_mrt'],
+                    'shader' => $this->shaderCache[$storageInstances ? 'default_storage_mrt' : 'default_mrt'],
                     'depth_test' => true,
                     'cull_mode' => VIO_CULL_NONE,
                     'blend' => $pass === 'opaque' ? VIO_BLEND_NONE : VIO_BLEND_ALPHA,
@@ -1941,6 +1976,9 @@ class VioRenderer3D implements Renderer3DInterface
         }
 
         vio_bind_pipeline($this->ctx, $this->pipelineCache[$key]);
+        if (!$storageInstances) {
+            $this->currentScenePass = $pass;
+        }
 
         // A pipeline bind may switch the bound shader object (its own cbuffer),
         // and the new pipeline starts a fresh draw run — invalidate the per-draw
@@ -2317,6 +2355,12 @@ class VioRenderer3D implements Renderer3DInterface
                 }
                 $casters[] = $cmd;
             } elseif ($cmd instanceof DrawMeshInstanced) {
+                // Storage-buffer draws (GPU-simulated instances) keep their
+                // matrices in GPU memory; the depth-only draw below uploads CPU
+                // instance data, so they cast no shadow.
+                if ($cmd->storageBuffer !== null) {
+                    continue;
+                }
                 $mat = MaterialRegistry::get($cmd->materialId);
                 if ($mat === null || $mat->alpha < 0.9 || !$this->castsShadow($cmd->materialId)) {
                     continue;
@@ -2990,6 +3034,13 @@ class VioRenderer3D implements Renderer3DInterface
     /** Draw one instanced mesh into the G-buffer (mirrors drawMeshInstancedCommand). */
     private function drawGbufferMeshInstanced(DrawMeshInstanced $cmd, Material $material): void
     {
+        // Storage-buffer instances (GPU-simulated) stay out of the forward
+        // G-buffer: gbuffer.vert reads instance matrices from vertex attributes
+        // only, and small self-lit instances such as particles gain nothing from
+        // SSAO / SSR. The MRT scene pass writes them through the storage program.
+        if ($cmd->storageBuffer !== null) {
+            return;
+        }
         $instanceCount = $cmd->instanceCount >= 0 ? $cmd->instanceCount : count($cmd->matrices);
         if ($instanceCount <= 0) {
             return;
@@ -3903,6 +3954,11 @@ class VioRenderer3D implements Renderer3DInterface
             return;
         }
 
+        if ($cmd->storageBuffer !== null) {
+            $this->drawStorageInstances($cmd, $material, $mesh, $instanceCount);
+            return;
+        }
+
         // Sticky-uniform dedup (shared trackers with drawMeshCommand — same
         // shader cbuffer). Texture binding always issued; u_use_instancing toggled
         // around the draw and reset to 0 so a following non-instanced draw is fine.
@@ -3918,32 +3974,8 @@ class VioRenderer3D implements Renderer3DInterface
         vio_set_uniform($this->ctx, 'u_use_instancing', 1);
         $this->applyGbufferWrite(1);
 
-        // Readback-free path (Path B): the instance matrices are a GPU-resident
-        // SSBO written by a compute pass. Bind it to the vertex stage and draw
-        // straight from it — no matrices cross the PHP<->GPU bus. Guarded by the
-        // producer (GpuParticleBaker only emits this when the backend reports
-        // VIO_FEATURE_VERTEX_STORAGE), and defensively re-checked here.
-        $storage = $cmd->storageBuffer;
-        if ($storage instanceof \VioBuffer
-            && function_exists('vio_draw_instanced_from_buffer')
-            && defined('VIO_FEATURE_VERTEX_STORAGE')
-            && vio_supports_feature($this->ctx, VIO_FEATURE_VERTEX_STORAGE)
-        ) {
-            vio_bind_storage_buffer($this->ctx, $storage, 0, VIO_COMPUTE_READ);
-            $args = $cmd->indirectArgs;
-            if ($args instanceof \VioBuffer && $this->indirectDrawAvailable()) {
-                // GPU-driven count: the compute pass that filled the storage
-                // buffer also wrote the draw arguments (instanceCount after
-                // culling / compaction), so nothing is read back to decide how
-                // much to draw. $instanceCount is only the fallback bound.
-                vio_draw_indirect($this->ctx, $mesh, $args, max(1, $cmd->indirectMaxDraws));
-            } else {
-                vio_draw_instanced_from_buffer($this->ctx, $mesh, $instanceCount);
-            }
-        } else {
-            [$packed, $count] = $this->resolveInstanceData($cmd->meshId, $material, $cmd);
-            vio_draw_instanced($this->ctx, $mesh, $packed, $count);
-        }
+        [$packed, $count] = $this->resolveInstanceData($cmd->meshId, $material, $cmd);
+        vio_draw_instanced($this->ctx, $mesh, $packed, $count);
 
         vio_set_uniform($this->ctx, 'u_use_instancing', 0);
     }
@@ -4184,14 +4216,242 @@ class VioRenderer3D implements Renderer3DInterface
             return null;
         }
 
-        // Load via vio directly for 3D use
-        $vioTex = vio_texture($this->ctx, ['file' => $texture->path]);
-        if ($vioTex === false) {
-            return null;
+        // Bind the manager's upload: it already carries the mip chain and the
+        // anisotropy level (or the KTX2 container). Decoding the file again
+        // here doubled the load work and dropped both; a .ktx2 path could not
+        // be decoded at all.
+        $vioTex = $this->textureManager->vioTexture($textureId);
+        if ($vioTex === null) {
+            $loaded = vio_texture($this->ctx, ['file' => $texture->path]);
+            if ($loaded === false) {
+                return null;
+            }
+            $vioTex = $loaded;
         }
 
         $this->textureCache[$textureId] = $vioTex;
         return $vioTex;
+    }
+
+    // ----------------------------------------------------------------
+    // Storage-buffer instances (GPU-simulated instance matrices)
+    // ----------------------------------------------------------------
+
+    /**
+     * Draw instances whose matrices live in a GPU storage buffer (e.g. the GPU
+     * particle simulation). The regular programs read instance matrices from
+     * vertex attributes, which a storage draw does not bind - the instances
+     * would all collapse onto the origin. The 'default_storage' program reads
+     * instanceModels[gl_InstanceIndex] from the buffer instead and shares
+     * mesh3d.frag, so the instances are lit like any other mesh. The draw
+     * switches to it for the current pass and back to the regular pipeline.
+     */
+    private function drawStorageInstances(DrawMeshInstanced $cmd, Material $material, VioMesh $mesh, int $instanceCount): void
+    {
+        $storage = $cmd->storageBuffer;
+        $inputs = $this->sceneUniformInputs;
+        if (!$storage instanceof \VioBuffer || $inputs === null || !$this->ensureStorageInstancing()) {
+            return;
+        }
+
+        $pass = $this->currentScenePass;
+        $this->bindPipeline($pass, storageInstances: true);
+        [$frameState, $hasShadowMap, $dirLights] = $inputs;
+        $this->uploadFrameUniforms($frameState);
+        $this->uploadShadowUniforms($hasShadowMap, $dirLights);
+        $this->uploadSsaoUniforms();
+        $this->uploadSdfAoUniforms();
+        $this->applyMaterialUniforms($material, $cmd->materialId);
+        $this->bindMaterialTextures($material);
+        $this->bindMeshAabb($cmd->meshId);
+        vio_set_uniform($this->ctx, 'u_use_instancing', 1);
+        $this->applyGbufferWrite(1);
+
+        vio_bind_storage_buffer($this->ctx, $storage, 0, VIO_COMPUTE_READ);
+        $args = $cmd->indirectArgs;
+        if ($args instanceof \VioBuffer && $this->indirectDrawAvailable()) {
+            // GPU-driven count: the compute pass that filled the buffer also
+            // wrote the draw arguments, so nothing is read back.
+            vio_draw_indirect($this->ctx, $mesh, $args, max(1, $cmd->indirectMaxDraws));
+        } else {
+            vio_draw_instanced_from_buffer($this->ctx, $mesh, $instanceCount);
+        }
+        vio_set_uniform($this->ctx, 'u_use_instancing', 0);
+
+        // Back to the pass's regular program. Its cbuffer still holds the frame
+        // uniforms; bindPipeline() resets the per-draw material / mesh dedup.
+        $this->bindPipeline($pass);
+    }
+
+    /**
+     * Pre-compile the storage-instance programs, e.g. behind a splash, so the
+     * first GPU-simulated draw does not stall on a shader compile. False when
+     * the backend has no vertex-stage storage buffers or the compile failed.
+     */
+    public function warmStorageInstancing(): bool
+    {
+        $this->warmShaders();
+        return $this->ensureStorageInstancing();
+    }
+
+    private function ensureStorageInstancing(): bool
+    {
+        if ($this->storageInstancingReady !== null) {
+            return $this->storageInstancingReady;
+        }
+        $this->storageInstancingReady = false;
+        if (!function_exists('vio_draw_instanced_from_buffer')
+            || !defined('VIO_FEATURE_VERTEX_STORAGE')
+            || !vio_supports_feature($this->ctx, VIO_FEATURE_VERTEX_STORAGE)
+        ) {
+            return false;
+        }
+        try {
+            $vert = self::storageInstancingVertexSource($this->loadShader('mesh3d.vert.glsl'));
+            $frag = ProcModeShaderRegistry::spliceGlsl($this->loadShader('mesh3d.frag.glsl'), ProcModeShaderRegistry::FAMILY_VIO);
+            $this->compileShader('default_storage', $vert, $frag);
+            if ($this->mrtSupported()) {
+                $this->compileShader('default_storage_mrt', $vert, self::withMrtDefine($frag));
+            }
+            $this->storageInstancingReady = true;
+        } catch (\RuntimeException $e) {
+            fwrite(STDERR, "[VioRenderer3D] storage-buffer instancing unavailable: {$e->getMessage()}\n");
+        }
+        return $this->storageInstancingReady === true;
+    }
+
+    /**
+     * mesh3d.vert with the instance matrix taken from a storage buffer (binding
+     * 0, indexed by gl_InstanceIndex) instead of the per-instance vertex
+     * attributes. Derived by text so the vertex stage stays one source; throws
+     * when the anchors no longer match.
+     */
+    public static function storageInstancingVertexSource(string $vertexSource): string
+    {
+        $src = str_replace("\r\n", "\n", $vertexSource);
+        $edits = [
+            "#version 410 core\n" => "#version 450\n",
+            "layout(location = 3) in vec4 a_instance_col0;\nlayout(location = 4) in vec4 a_instance_col1;\nlayout(location = 5) in vec4 a_instance_col2;\nlayout(location = 6) in vec4 a_instance_col3;\n"
+                => "// Instance matrices from the storage buffer bound at slot 0 (vio_bind_storage_buffer).\nlayout(std430, binding = 0) readonly buffer InstanceStorage { mat4 instanceModels[]; };\n",
+            "        model = mat4(a_instance_col0, a_instance_col1, a_instance_col2, a_instance_col3);\n"
+                => "        model = instanceModels[gl_InstanceIndex];\n",
+        ];
+        foreach ($edits as $old => $new) {
+            if (substr_count($src, $old) !== 1) {
+                throw new \RuntimeException('mesh3d.vert.glsl changed; storageInstancingVertexSource() anchors need updating');
+            }
+            $src = str_replace($old, $new, $src);
+        }
+        return $src;
+    }
+
+    // ----------------------------------------------------------------
+    // Outline pass (DrawOutline)
+    // ----------------------------------------------------------------
+
+    /** Stencil-capable backend (php-vio >= 2.12, VIO_FEATURE_STENCIL); probed once. */
+    private ?bool $outlineSupported = null;
+
+    /** True when {@see DrawOutline} commands are drawn on this backend (it has a stencil buffer). */
+    public function outlineSupported(): bool
+    {
+        return $this->outlineSupported ??= defined('VIO_FEATURE_STENCIL')
+            && defined('VIO_CMP_NOTEQUAL')
+            && vio_supports_feature($this->ctx, VIO_FEATURE_STENCIL);
+    }
+
+    /**
+     * Outline every DrawOutline of the frame into the bound scene target.
+     *
+     * Pass 1 writes each mesh into the stencil buffer; the colour stays as it
+     * is because the draw blends with alpha 0. Pass 2 redraws the meshes pushed
+     * outward by their pixel width where the stencil is still empty - the ring.
+     * All parts are masked before any ring is drawn, so touching parts of one
+     * object get a single outline without a seam between them. Depth test is
+     * off in both passes: the outline stays visible behind other geometry and
+     * looks the same on the forward and the MRT path (whose depth lives in the
+     * MRT target, not in the scene target bound here).
+     *
+     * @param list<DrawOutline> $outlines
+     */
+    private function renderOutlinePass(array $outlines, int $viewportW, int $viewportH): void
+    {
+        if ($outlines === [] || !$this->outlineSupported() || !isset($this->shaderCache['outline'])) {
+            return;
+        }
+        $view = $this->currentViewMatrix;
+        $projection = $this->currentProjectionMatrix;
+        if ($view === null || $projection === null) {
+            return;
+        }
+        $hdr = $this->sceneTargetIsHdr();
+        $mask = $this->outlinePipeline(true, $hdr);
+        $ring = $this->outlinePipeline(false, $hdr);
+        if ($mask === null || $ring === null) {
+            return;
+        }
+
+        $draws = [];
+        foreach ($outlines as $outline) {
+            $mesh = $this->uploadMesh($outline->meshId);
+            if ($mesh !== null) {
+                $draws[] = [$outline, $mesh, $this->meshAabb($outline->meshId)];
+            }
+        }
+        if ($draws === []) {
+            return;
+        }
+
+        PerfProfiler::begin('render3d.submit.outline');
+        try {
+            vio_viewport($this->ctx, 0, 0, $viewportW, $viewportH);
+            $viewArr = $view->toArray();
+            $projectionArr = $projection->toArray();
+            foreach ([true, false] as $isMask) {
+                vio_bind_pipeline($this->ctx, $isMask ? $mask : $ring);
+                vio_set_uniform($this->ctx, 'u_view', $viewArr);
+                vio_set_uniform($this->ctx, 'u_projection', $projectionArr);
+                vio_set_uniform($this->ctx, 'u_viewport_size', [(float) $viewportW, (float) $viewportH]);
+                vio_set_uniform($this->ctx, 'u_linear_output', $hdr ? 1 : 0);
+                foreach ($draws as [$outline, $mesh, $aabb]) {
+                    $c = $outline->color;
+                    vio_set_uniform($this->ctx, 'u_model', $outline->modelMatrix->toArray());
+                    vio_set_uniform($this->ctx, 'u_mesh_local_aabb_min', $aabb['min']);
+                    vio_set_uniform($this->ctx, 'u_mesh_local_aabb_max', $aabb['max']);
+                    vio_set_uniform($this->ctx, 'u_outline_width_px', $isMask ? 0.0 : max(0.0, $outline->widthPx));
+                    vio_set_uniform($this->ctx, 'u_outline_color', [$c->r, $c->g, $c->b, $isMask ? 0.0 : $c->a]);
+                    vio_draw($this->ctx, $mesh);
+                }
+            }
+        } finally {
+            PerfProfiler::end();
+            // A later scene-geometry bind must re-upload its material state.
+            $this->resetDrawStateCache();
+        }
+    }
+
+    /** Mask (stencil ALWAYS/REPLACE) or ring (stencil NOTEQUAL, no write) pipeline, cached per target format. */
+    private function outlinePipeline(bool $mask, bool $hdr): ?\VioPipeline
+    {
+        $key = 'outline:' . ($mask ? 'mask' : 'ring') . ($hdr ? ':hdr' : '');
+        if (!isset($this->pipelineCache[$key])) {
+            $pipeline = vio_pipeline($this->ctx, [
+                'shader' => $this->shaderCache['outline'],
+                'depth_test' => false,
+                'depth_write' => false,
+                'cull_mode' => VIO_CULL_NONE,
+                'blend' => VIO_BLEND_ALPHA,
+                'hdr' => $hdr,
+                'stencil' => $mask
+                    ? ['func' => VIO_CMP_ALWAYS, 'ref' => 1, 'pass' => VIO_STENCIL_REPLACE]
+                    : ['func' => VIO_CMP_NOTEQUAL, 'ref' => 1, 'write_mask' => 0],
+            ]);
+            if ($pipeline === false) {
+                return null;
+            }
+            $this->pipelineCache[$key] = $pipeline;
+        }
+        return $this->pipelineCache[$key];
     }
 
     // ----------------------------------------------------------------

@@ -42,6 +42,24 @@ const VIO_COLOR_B = 4;
 const VIO_COLOR_A = 8;
 const VIO_COLOR_RGB = 7;
 const VIO_COLOR_RGBA = 15;
+
+// Stencil state for vio_pipeline(['stencil' => [...]]) (php-vio >= 2.12)
+const VIO_CMP_NEVER = 0;
+const VIO_CMP_LESS = 1;
+const VIO_CMP_EQUAL = 2;
+const VIO_CMP_LEQUAL = 3;
+const VIO_CMP_GREATER = 4;
+const VIO_CMP_NOTEQUAL = 5;
+const VIO_CMP_GEQUAL = 6;
+const VIO_CMP_ALWAYS = 7;
+const VIO_STENCIL_KEEP = 0;
+const VIO_STENCIL_ZERO = 1;
+const VIO_STENCIL_REPLACE = 2;
+const VIO_STENCIL_INCR = 3;
+const VIO_STENCIL_DECR = 4;
+const VIO_STENCIL_INVERT = 5;
+const VIO_STENCIL_INCR_WRAP = 6;
+const VIO_STENCIL_DECR_WRAP = 7;
 const VIO_DEPTH_LEQUAL = 1;
 const VIO_DEPTH_LESS = 0;
 const VIO_FLOAT2 = 2;

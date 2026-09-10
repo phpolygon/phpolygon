@@ -160,6 +160,16 @@ class VioTextureManager extends TextureManager
         return $tex === false ? null : $tex;
     }
 
+    /**
+     * The GPU texture behind a loaded id: the one upload with the mip chain,
+     * anisotropy and (when present) the KTX2 container. The 3D renderer binds
+     * this object instead of decoding the file a second time.
+     */
+    public function vioTexture(string $id): ?VioTexture
+    {
+        return $this->vioTextureObjects[$id] ?? null;
+    }
+
     public function get(string $id): ?Texture
     {
         return $this->vioManagedTextures[$id] ?? null;
