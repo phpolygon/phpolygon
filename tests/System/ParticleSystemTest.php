@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace PHPolygon\Tests\System;
 
 use PHPolygon\Component\ParticleEmitter;
+use PHPolygon\Component\ParticleSimulation;
 use PHPolygon\Component\Transform3D;
 use PHPolygon\ECS\World;
 use PHPolygon\Math\Mat4;
@@ -166,5 +167,112 @@ class ParticleSystemTest extends TestCase
 
         $emitter->clear();
         $this->assertCount(0, $emitter->particles);
+    }
+
+    public function testClearStartsANewGeneration(): void
+    {
+        $emitter = new ParticleEmitter();
+        $this->assertSame(0, $emitter->generation);
+        $emitter->clear();
+        $emitter->clear();
+        $this->assertSame(2, $emitter->generation);
+        $this->assertNull($emitter->gpuLedger);
+        $this->assertSame(0, $emitter->count());
+    }
+
+    public function testWithoutContextEmittersStayOnTheFlatCpuPath(): void
+    {
+        [$world, $emitter] = $this->emitterWorld(new ParticleEmitter(rate: 20.0, lifetime: 5.0));
+        $cl = new RenderCommandList();
+        $sys = new ParticleSystem($cl, null, true);
+
+        $sys->update($world, 0.5);
+        $sys->render($world);
+
+        $draws = $cl->ofType(DrawMeshInstanced::class);
+        $this->assertCount(1, $draws);
+        $this->assertTrue($draws[0]->hasFlatMatrices());
+        $this->assertFalse($draws[0]->hasStorageBuffer());
+        $this->assertNull($emitter->gpuLedger);
+        $this->assertSame(10, $emitter->count());
+        $this->assertSame(10, $draws[0]->effectiveInstanceCount());
+    }
+
+    public function testCpuSimulationOptOutKeepsTheCpuRows(): void
+    {
+        $this->assertSame(ParticleSimulation::Auto, (new ParticleEmitter())->simulation);
+
+        [$world, $emitter] = $this->emitterWorld(new ParticleEmitter(rate: 20.0, lifetime: 5.0, simulation: ParticleSimulation::Cpu));
+        $cl = new RenderCommandList();
+        $sys = new ParticleSystem($cl);
+
+        $sys->update($world, 0.5);
+        $sys->render($world);
+
+        $this->assertCount(10, $emitter->particles);
+        $this->assertNull($emitter->gpuLedger);
+        $draws = $cl->ofType(DrawMeshInstanced::class);
+        $this->assertCount(1, $draws);
+        $this->assertTrue($draws[0]->hasFlatMatrices());
+    }
+
+    public function testSpawnConsumesTheRngInTheCanonicalOrder(): void
+    {
+        $make = static fn (): ParticleEmitter => new ParticleEmitter(
+            rate: 30.0,
+            lifetime: 5.0,
+            velocity: new Vec3(0.0, 1.5, 0.0),
+            velocityJitter: new Vec3(0.5, 0.2, 0.3),
+            gravity: new Vec3(0.0, 0.0, 0.0),
+            maxParticles: 64,
+        );
+        [$world, $emitter] = $this->emitterWorld($make());
+        $sys = new ParticleSystem(new RenderCommandList());
+
+        mt_srand(99);
+        $sys->update($world, 0.1); // 3 spawns, freshly spawned rows are not integrated
+
+        // Three draws per particle, x then y then z — the order a downstream
+        // determinism check relies on.
+        mt_srand(99);
+        $max = mt_getrandmax();
+        $expected = [];
+        for ($i = 0; $i < 3; $i++) {
+            $expected[] = [
+                0.0, 0.0, 0.0,
+                0.0 + (mt_rand() / $max - 0.5) * 2.0 * 0.5,
+                1.5 + (mt_rand() / $max - 0.5) * 2.0 * 0.2,
+                0.0 + (mt_rand() / $max - 0.5) * 2.0 * 0.3,
+                0.0, 5.0,
+            ];
+        }
+        $this->assertSame($expected, $emitter->particles);
+
+        // Same seed on two independent systems and emitters: the same rows over several frames.
+        [$worldA, $emitterA] = $this->emitterWorld($make());
+        [$worldB, $emitterB] = $this->emitterWorld($make());
+        $sysB = new ParticleSystem(new RenderCommandList());
+        mt_srand(7);
+        for ($i = 0; $i < 5; $i++) {
+            $sys->update($worldA, 0.1);
+        }
+        mt_srand(7);
+        for ($i = 0; $i < 5; $i++) {
+            $sysB->update($worldB, 0.1);
+        }
+        $this->assertCount(15, $emitterA->particles);
+        $this->assertSame($emitterA->particles, $emitterB->particles);
+    }
+
+    /**
+     * @return array{0: World, 1: ParticleEmitter}
+     */
+    private function emitterWorld(ParticleEmitter $emitter): array
+    {
+        $world = new World();
+        $entity = $world->createEntity();
+        $entity->attach($emitter);
+        $entity->attach(new Transform3D(position: new Vec3(0, 0, 0)));
+        return [$world, $emitter];
     }
 }

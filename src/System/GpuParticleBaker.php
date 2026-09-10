@@ -15,11 +15,11 @@ use PHPolygon\Math\Vec3;
  * hands the raw bytes straight to {@see \PHPolygon\Rendering\Command\DrawMeshInstanced::packed()}
  * — no per-particle PHP loop, no unpack/repack.
  *
- * The shape mirrors {@see \PHPolygon\Fieldtracing\GpuSdfBaker} exactly: inline
- * GLSL compute const, pipeline compiled once + cached (warm at splash), data in
- * raw f32 SSBOs via pack('f*',…), dispatch, {@see vio_storage_buffer_read},
- * everything best-effort with a null fallback. A GPU failure must NEVER fail a
- * frame — the caller falls back to the canonical CPU path in
+ * The shape follows {@see \PHPolygon\Fieldtracing\GpuSdfBaker}: inline GLSL
+ * compute consts, shaders warmed at splash, data in raw f32 SSBOs via
+ * pack('f*',…), dispatch, {@see vio_storage_buffer_read}, everything best-effort
+ * with a null/false fallback. A GPU failure must NEVER fail a frame — the
+ * caller falls back to the canonical CPU path in
  * {@see \PHPolygon\System\ParticleSystem}.
  *
  * Keep the integration and billboard math numerically identical to
@@ -28,48 +28,62 @@ use PHPolygon\Math\Vec3;
  * comparison stays clean. Particles are purely visual, so float divergence
  * between the CPU and GPU paths is acceptable.
  *
- * SCOPE — PHASE 1. This class currently covers the *measurable core*: seed a
- * GPU-resident state once ({@see createState}) and step it ({@see step}). That
- * is what the benchmark needs to answer the only question that matters before
- * investing further — does GPU compute beat the CPU at these particle counts,
- * and does the readback eat the win? Live spawning into dead slots (A.3's CPU
- * free-slot cursor) and the {@see ParticleSystem} wiring are Phase 2, gated on
- * the benchmark showing a readback-bound win. ext-vio exposes no partial
- * storage-buffer write, so Phase 2's spawn model must be either a GPU-side
- * spawn-inject SSBO or a per-frame full state re-upload — decided by the bench.
+ * SCOPE. Seed a GPU-resident state ({@see createState}), spawn into it while it
+ * lives ({@see inject}) and step it ({@see step} / {@see stepIndirect}).
+ * ext-vio exposes no partial storage-buffer write, so spawning uploads only the
+ * new rows and a small kernel ({@see SPAWN_SHADER}) copies them into the ring
+ * slots the state's {@see GpuParticleLedger} hands out. {@see ParticleSystem}
+ * drives this per emitter where the backend draws indirectly.
  *
- * Slot compaction is in: {@see stepIndirect()} lets every live thread claim
- * the next output slot with an atomic and counts them into an indirect draw
- * argument buffer, so the draw covers exactly the live particles instead of
- * always maxParticles — and still nothing is read back
+ * Slot compaction: {@see stepIndirect()} lets every live thread claim the next
+ * output slot with an atomic and counts them into an indirect draw argument
+ * buffer, so the draw covers exactly the live particles instead of always
+ * maxParticles — and still nothing is read back
  * ({@see \PHPolygon\Rendering\Command\DrawMeshInstanced::fromStorageBuffer()}
  * with $indirectArgs, php-vio >= 2.17 / VIO_FEATURE_INDIRECT_DRAW).
+ *
+ * BUFFERS AND BINDINGS — two ext-vio properties shape everything below:
+ *   - A storage buffer created from 'data' is a read-only upload buffer on
+ *     D3D12; binding it for writing removes the device. Everything a kernel
+ *     writes is therefore created with 'size' and filled by a kernel.
+ *   - vio_compute_bind_buffer() appends to a list on the pipeline object that
+ *     is never cleared (at most 8 entries on D3D12 and OpenGL; later binds are
+ *     silently dropped). A pipeline shared between buffers, or bound to a fresh
+ *     buffer every frame, ends up dispatching on stale — possibly freed —
+ *     buffers after a few calls. Every kernel is therefore created for one
+ *     fixed set of buffers and bound exactly once ({@see boundKernel()}): per
+ *     state, and per emitter for the billboard path. Uploads go into persistent
+ *     buffers rewritten with vio_update_buffer() where the backend implements
+ *     that ({@see uploadsRewritable()}); otherwise a spawn gets a fresh upload
+ *     buffer and a fresh kernel bound to it.
  */
 final class GpuParticleBaker
 {
     /** Threads per workgroup — must match the shader's local_size_x. */
     private const LOCAL_SIZE = 64;
 
-    /** Compiled compute pipeline, cached so the shader compile happens once —
-     *  warmed during the splash via {@see warm()}, reused by every step. */
-    private static ?\VioComputePipeline $pipeline = null;
+    /**
+     * The context the static state below belongs to. Objects of one context are
+     * never handed to another; see {@see useContext()}.
+     *
+     * @var \WeakReference<\VioContext>|null
+     */
+    private static ?\WeakReference $cacheContext = null;
 
-    /** Billboard-only pipeline for the readback-free path ({@see BILLBOARD_SHADER}). */
-    private static ?\VioComputePipeline $billboardPipeline = null;
+    /** Shaders compiled once on the current context ({@see warm()}). */
+    private static bool $warmed = false;
 
-    /** Compacting variant of {@see SHADER} ({@see compactShader()}) and the
-     *  one-thread argument reset that precedes it ({@see RESET_ARGS_SHADER}). */
-    private static ?\VioComputePipeline $compactPipeline = null;
-    private static ?\VioComputePipeline $resetPipeline = null;
+    /** Whether vio_update_buffer() rewrites a storage upload buffer on the current context; null = not probed yet. */
+    private static ?bool $uploadsRewritable = null;
 
     /**
-     * Reusable per-emitter output matrix SSBO for the readback-free path, kept
-     * GPU-resident so it can be bound as the graphics instance source and only
-     * freed when the emitter is GC'd.
+     * Readback-free billboard kit per emitter: [input upload buffer, output
+     * matrix buffer, kernel bound to both, capacity in particles]. Freed with
+     * the emitter.
      *
-     * @var \WeakMap<ParticleEmitter, \VioBuffer>|null
+     * @var \WeakMap<ParticleEmitter, array{0: \VioBuffer, 1: \VioBuffer, 2: \VioComputePipeline, 3: int}>|null
      */
-    private static ?\WeakMap $billboardOutputs = null;
+    private static ?\WeakMap $billboards = null;
 
     /**
      * GLSL compute shader: one thread per slot. Reads the RW state row
@@ -105,8 +119,13 @@ final class GpuParticleBaker
             uint b = gid * 8u;
             uint o = gid * 16u;
 
-            float age  = s[b + 6u];
+            // Age first, then test — the order of ParticleSystem::integrate(),
+            // which drops a particle on the step its age reaches its lifetime.
+            // The aged value is written back for dead slots too, so a later,
+            // shorter step can never bring a dead slot back to life.
             float life = s[b + 7u];
+            float age  = s[b + 6u] + dt;
+            s[b + 6u] = age;
 
             // Dead slot -> zero matrix, no integration.
             if (age >= life || life <= 0.0) {
@@ -121,11 +140,9 @@ final class GpuParticleBaker
             float px = s[b + 0u] + vx * dt;
             float py = s[b + 1u] + vy * dt;
             float pz = s[b + 2u] + vz * dt;
-            age += dt;
 
             s[b + 0u] = px; s[b + 1u] = py; s[b + 2u] = pz;
             s[b + 3u] = vx; s[b + 4u] = vy; s[b + 5u] = vz;
-            s[b + 6u] = age;
 
             float t    = age / max(life, 1e-4);
             float size = mix(startSize, endSize, t);
@@ -182,32 +199,108 @@ final class GpuParticleBaker
     }
 
     /**
-     * Pre-compile + cache the compute pipeline (the shader compile is the
-     * dominant one-off cost). Call once during the splash so the first frame is
-     * just bind+dispatch+readback. Safe to call repeatedly; returns false when
-     * compute is unavailable or the compile fails.
+     * Compile every particle kernel once (the first compile of a shader is the
+     * dominant one-off cost; later kernels from the same source hit the
+     * backend's shader caches) and probe {@see uploadsRewritable()}. Call once
+     * during the splash. Safe to call repeatedly; returns false when compute is
+     * unavailable or the main shader fails to compile.
      */
     public static function warm(\VioContext $ctx): bool
     {
         if (!self::isAvailable($ctx)) {
             return false;
         }
-        if (self::$pipeline === null) {
-            $p = vio_compute_pipeline($ctx, ['source' => self::SHADER]);
-            if ($p === false) {
-                return false;
-            }
-            self::$pipeline = $p;
+        self::useContext($ctx);
+        if (self::$warmed) {
+            return true;
         }
-        // Warm the readback-free billboard pipeline too, where supported, so the
-        // first particle frame is just upload+dispatch+bind.
-        if (self::$billboardPipeline === null && self::isReadbackFree($ctx)) {
-            $bp = vio_compute_pipeline($ctx, ['source' => self::BILLBOARD_SHADER]);
-            if ($bp !== false) {
-                self::$billboardPipeline = $bp;
-            }
+        if (vio_compute_pipeline($ctx, ['source' => self::SHADER]) === false) {
+            return false;
         }
+        $sources = [self::SPAWN_SHADER];
+        if (self::isReadbackFree($ctx)) {
+            $sources[] = self::BILLBOARD_SHADER;
+        }
+        if (self::isIndirectDraw($ctx)) {
+            $sources[] = self::RESET_ARGS_SHADER;
+            $sources[] = self::compactShader();
+        }
+        foreach ($sources as $source) {
+            vio_compute_pipeline($ctx, ['source' => $source]);
+        }
+        self::uploadsRewritable($ctx);
+        self::$warmed = true;
         return true;
+    }
+
+    /**
+     * Static state belongs to the context that created it. A different context
+     * (a test suite opening one per test, a backend switch) starts from scratch.
+     */
+    private static function useContext(\VioContext $ctx): void
+    {
+        if (self::$cacheContext !== null && self::$cacheContext->get() === $ctx) {
+            return;
+        }
+        self::$cacheContext = \WeakReference::create($ctx);
+        self::$warmed = false;
+        self::$uploadsRewritable = null;
+        self::$billboards = null;
+    }
+
+    /**
+     * A compute pipeline with its buffers bound exactly once. Never rebind the
+     * result to other buffers: ext-vio keeps every bound buffer for the
+     * pipeline's lifetime (see the class comment).
+     *
+     * @param list<array{0: \VioBuffer, 1: int, 2: int}> $bindings [buffer, binding slot, VIO_COMPUTE_READ|VIO_COMPUTE_WRITE]
+     */
+    private static function boundKernel(\VioContext $ctx, string $source, array $bindings): ?\VioComputePipeline
+    {
+        $kernel = vio_compute_pipeline($ctx, ['source' => $source]);
+        if ($kernel === false) {
+            return null;
+        }
+        foreach ($bindings as [$buffer, $slot, $access]) {
+            vio_compute_bind_buffer($ctx, $kernel, $buffer, $slot, $access);
+        }
+        return $kernel;
+    }
+
+    /**
+     * True when vio_update_buffer() rewrites a storage upload buffer that a
+     * kernel then reads. Checked once per context with a one-row round trip
+     * through {@see SPAWN_SHADER} — some backends implement the update as a
+     * no-op for storage buffers.
+     */
+    private static function uploadsRewritable(\VioContext $ctx): bool
+    {
+        self::useContext($ctx);
+        if (self::$uploadsRewritable !== null) {
+            return self::$uploadsRewritable;
+        }
+        $ok = false;
+        try {
+            $row = pack('f8', 1.5, 2.5, 3.5, 4.5, 5.5, 6.5, 7.5, 8.5);
+            $target = vio_storage_buffer($ctx, ['size' => strlen($row), 'stride' => 4]);
+            $upload = vio_storage_buffer($ctx, ['data' => str_repeat("\0", strlen($row)), 'stride' => 4]);
+            if ($target !== false && $upload !== false) {
+                $kernel = self::boundKernel($ctx, self::SPAWN_SHADER, [
+                    [$target, 0, VIO_COMPUTE_WRITE],
+                    [$upload, 1, VIO_COMPUTE_READ],
+                ]);
+                if ($kernel !== null) {
+                    vio_update_buffer($upload, $row);
+                    vio_compute_set_uniforms($ctx, $kernel, pack('l4', 0, 1, 1, 0));
+                    vio_compute_dispatch($ctx, $kernel, 1, 1, 1);
+                    $ok = vio_storage_buffer_read($ctx, $target) === $row;
+                }
+            }
+        } catch (\Throwable) {
+            $ok = false;
+        }
+        self::$uploadsRewritable = $ok;
+        return $ok;
     }
 
     /**
@@ -222,17 +315,23 @@ final class GpuParticleBaker
      * @param int $indexCount index count of the mesh the particles are drawn
      *        with; > 0 additionally allocates the indirect draw argument record
      *        for {@see stepIndirect()} when the backend supports it
+     * @param int $generation emitter generation the ring belongs to
+     *        ({@see GpuParticleLedger::isCurrent()})
      */
-    public static function createState(\VioContext $ctx, array $particles, int $capacity, int $indexCount = 0): ?GpuParticleState
+    public static function createState(\VioContext $ctx, array $particles, int $capacity, int $indexCount = 0, int $generation = 0): ?GpuParticleState
     {
         if (!self::isAvailable($ctx) || $capacity <= 0) {
             return null;
         }
+        if (count($particles) > $capacity) {
+            $particles = array_slice($particles, 0, $capacity);
+        }
+        self::useContext($ctx);
 
         try {
-            // Seed the full state buffer explicitly: pack the live rows, then
-            // zero-pad to capacity so untouched slots read life==0 (dead) rather
-            // than relying on the driver zero-initialising the allocation.
+            // Every slot is filled once through the spawn kernel: the live rows,
+            // zero-padded to capacity so untouched slots read life == 0 (dead)
+            // instead of whatever the allocation held.
             $flat = [];
             foreach ($particles as $p) {
                 $flat[] = $p[0]; $flat[] = $p[1]; $flat[] = $p[2];
@@ -240,27 +339,41 @@ final class GpuParticleBaker
                 $flat[] = $p[6]; $flat[] = $p[7];
             }
             $stateBytes = $flat === [] ? '' : pack('f*', ...$flat);
-            $wantBytes  = $capacity * 8 * 4;
+            $wantBytes  = $capacity * GpuParticleLedger::ROW_FLOATS * 4;
             if (strlen($stateBytes) < $wantBytes) {
                 $stateBytes .= str_repeat("\0", $wantBytes - strlen($stateBytes));
             }
 
-            $stateBuf = vio_storage_buffer($ctx, ['data' => $stateBytes, 'stride' => 4]);
+            $stateBuf = vio_storage_buffer($ctx, ['size' => $wantBytes, 'stride' => 4]);
             $outBuf   = vio_storage_buffer($ctx, ['size' => $capacity * 16 * 4, 'stride' => 4]);
             if ($stateBuf === false || $outBuf === false) {
                 return null;
             }
 
+            // One ring's worth of spawn rows, rewritten per spawn.
+            $rowsBuf = null;
+            if (self::uploadsRewritable($ctx)) {
+                $rows = vio_storage_buffer($ctx, ['data' => str_repeat("\0", $wantBytes), 'stride' => 4]);
+                $rowsBuf = $rows === false ? null : $rows;
+            }
+
             // Indirect draw record {indexCount, instanceCount, firstIndex,
-            // baseVertex, firstInstance}; instanceCount starts at 0 and is
-            // rewritten by every compacting step.
+            // baseVertex, firstInstance}, GPU-writable: the argument reset
+            // kernel writes the whole record before every compacting step,
+            // which then counts the live slots into it.
             $argsBuf = null;
             if ($indexCount > 0 && self::isIndirectDraw($ctx)) {
-                $args = vio_storage_buffer($ctx, ['data' => pack('V5', $indexCount, 0, 0, 0, 0), 'stride' => 4, 'indirect' => true]);
+                $args = vio_storage_buffer($ctx, ['size' => 5 * 4, 'stride' => 4, 'indirect' => true]);
                 $argsBuf = $args === false ? null : $args;
             }
 
-            return new GpuParticleState($capacity, $stateBuf, $outBuf, $argsBuf);
+            // The seeded rows occupy slots 0..n-1; the ledger releases them in
+            // slot order as they expire and hands out the slots after them.
+            $ledger = new GpuParticleLedger($capacity, $generation);
+            $ledger->seed($particles);
+
+            $state = new GpuParticleState($capacity, $stateBuf, $outBuf, $argsBuf, max(0, $indexCount), $ledger, $rowsBuf);
+            return self::copyRows($ctx, $state, $stateBytes, $capacity, 0) ? $state : null;
         } catch (\Throwable) {
             return null;
         }
@@ -275,10 +388,8 @@ final class GpuParticleBaker
      * is the whole point (no PHP-array roundtrip).
      *
      * With $readback = false the dispatch is submitted but the matrices are not
-     * read back — used by the benchmark to isolate the (async) submit cost from
-     * the (synchronising) readback. Note that without a readback there is no GPU
-     * fence, so a no-readback timing reflects submission only, not GPU execution;
-     * the readback path is the honest full-frame measurement.
+     * read back — used by the benchmark to isolate the submit cost from the
+     * readback.
      *
      * @param Vec3|null $camPos camera world position for billboarding; null =
      *                          axis-aligned quads (matches the CPU no-cam path)
@@ -296,21 +407,18 @@ final class GpuParticleBaker
         }
 
         try {
-            $pipeline = self::$pipeline ?? vio_compute_pipeline($ctx, ['source' => self::SHADER]);
-            if ($pipeline === false) {
+            // State is read-write -> WRITE (UAV / RW SSBO); OutM is write-only.
+            $kernel = $state->stepKernel ??= self::boundKernel($ctx, self::SHADER, [
+                [$state->stateBuf, 0, VIO_COMPUTE_WRITE],
+                [$state->outBuf,   1, VIO_COMPUTE_WRITE],
+            ]);
+            if ($kernel === null) {
                 return null;
             }
-            self::$pipeline = $pipeline;
 
-            vio_compute_set_uniforms($ctx, $pipeline, self::stepParams($state, $emitter, $dt, $camPos));
-
-            // State is read-write -> bind as WRITE (UAV / RW SSBO). OutM is
-            // write-only. Slots 0/1 match the shader's binding = 0/1.
-            vio_compute_bind_buffer($ctx, $pipeline, $state->stateBuf, 0, VIO_COMPUTE_WRITE);
-            vio_compute_bind_buffer($ctx, $pipeline, $state->outBuf,   1, VIO_COMPUTE_WRITE);
-
+            vio_compute_set_uniforms($ctx, $kernel, self::stepParams($state, $emitter, $dt, $camPos));
             $groups = intdiv($state->capacity + self::LOCAL_SIZE - 1, self::LOCAL_SIZE);
-            vio_compute_dispatch($ctx, $pipeline, $groups, 1, 1);
+            vio_compute_dispatch($ctx, $kernel, $groups, 1, 1);
 
             if (!$readback) {
                 return '';
@@ -356,8 +464,8 @@ final class GpuParticleBaker
      * {@see \PHPolygon\Rendering\Command\DrawMeshInstanced::fromStorageBuffer()}
      * ($indirectArgs = argsBuf) and the renderer issues vio_draw_indirect() with
      * exactly the live count, nothing read back. Two dispatches: a one-thread
-     * reset of instanceCount, then the compacting kernel. False when the state
-     * carries no argument record (created without an index count, or no
+     * reset of the argument record, then the compacting kernel. False when the
+     * state carries no argument record (created without an index count, or no
      * VIO_FEATURE_INDIRECT_DRAW) or on any GPU error — fall back to {@see step()}.
      */
     public static function stepIndirect(
@@ -368,27 +476,133 @@ final class GpuParticleBaker
         ?Vec3 $camPos,
     ): bool {
         $args = $state->argsBuf;
-        if ($args === null || !self::isIndirectDraw($ctx)) {
+        if ($args === null || $state->indexCount <= 0 || !self::isIndirectDraw($ctx)) {
             return false;
         }
         try {
-            $reset = self::$resetPipeline ?? vio_compute_pipeline($ctx, ['source' => self::RESET_ARGS_SHADER]);
-            $compact = self::$compactPipeline ?? vio_compute_pipeline($ctx, ['source' => self::compactShader()]);
-            if ($reset === false || $compact === false) {
+            $reset = $state->resetKernel ??= self::boundKernel($ctx, self::RESET_ARGS_SHADER, [
+                [$args, 0, VIO_COMPUTE_WRITE],
+            ]);
+            $compact = $state->compactKernel ??= self::boundKernel($ctx, self::compactShader(), [
+                [$state->stateBuf, 0, VIO_COMPUTE_WRITE],
+                [$state->outBuf,   1, VIO_COMPUTE_WRITE],
+                [$args,            3, VIO_COMPUTE_WRITE],
+            ]);
+            if ($reset === null || $compact === null) {
                 return false;
             }
-            self::$resetPipeline = $reset;
-            self::$compactPipeline = $compact;
 
-            vio_compute_bind_buffer($ctx, $reset, $args, 0, VIO_COMPUTE_WRITE);
+            vio_compute_set_uniforms($ctx, $reset, pack('V4', $state->indexCount, 0, 0, 0));
             vio_compute_dispatch($ctx, $reset, 1, 1, 1);
 
             vio_compute_set_uniforms($ctx, $compact, self::stepParams($state, $emitter, $dt, $camPos));
-            vio_compute_bind_buffer($ctx, $compact, $state->stateBuf, 0, VIO_COMPUTE_WRITE);
-            vio_compute_bind_buffer($ctx, $compact, $state->outBuf,   1, VIO_COMPUTE_WRITE);
-            vio_compute_bind_buffer($ctx, $compact, $args,            3, VIO_COMPUTE_WRITE);
             $groups = intdiv($state->capacity + self::LOCAL_SIZE - 1, self::LOCAL_SIZE);
             vio_compute_dispatch($ctx, $compact, $groups, 1, 1);
+            return true;
+        } catch (\Throwable) {
+            return false;
+        }
+    }
+
+    // ── Spawning into a live state ───────────────────────────────────────────
+
+    /**
+     * Copies freshly spawned rows into the resident state ring: thread i writes
+     * row i to slot (head + i) % capacity, so a batch wraps around the end of
+     * the ring. Which slots are free is the {@see GpuParticleLedger}'s call.
+     *
+     *   binding 0 = State  (RW SSBO, 8 floats/slot)
+     *   binding 1 = Rows   (readonly SSBO, 8 floats/row)
+     *   binding 2 = Params (UBO: head, n, capacity, pad) — 16 bytes, std140
+     */
+    public const SPAWN_SHADER = <<<'GLSL'
+        #version 450
+        layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+        layout(std430, binding = 0) buffer State { float s[]; };
+        layout(std430, binding = 1) readonly buffer Rows { float r[]; };
+        layout(std140, binding = 2) uniform Params {
+            int head;
+            int n;
+            int capacity;
+            int pad;
+        };
+
+        void main() {
+            uint gid = gl_GlobalInvocationID.x;
+            if (gid >= uint(n)) return;
+            uint b = ((uint(head) + gid) % uint(capacity)) * 8u;
+            uint i = gid * 8u;
+            for (uint k = 0u; k < 8u; k++) s[b + k] = r[i + k];
+        }
+        GLSL;
+
+    /**
+     * Write $n spawned rows (raw f32 bytes, 8 floats per row — see
+     * {@see GpuParticleLedger::takePending()}) into the state ring at the
+     * ledger's head and move the head past them. Only the new rows cross the
+     * bus. True on success (and for $n = 0); false when compute is unavailable,
+     * the batch is larger than the ring or shorter than $n rows, or on any GPU
+     * error.
+     */
+    public static function inject(\VioContext $ctx, GpuParticleState $state, string $rows, int $n): bool
+    {
+        if ($n <= 0) {
+            return true;
+        }
+        if ($n > $state->capacity || !self::isAvailable($ctx)) {
+            return false;
+        }
+        if (!self::copyRows($ctx, $state, $rows, $n, $state->ledger->head())) {
+            return false;
+        }
+        $state->ledger->advanceHead($n);
+        return true;
+    }
+
+    /**
+     * Dispatch {@see SPAWN_SHADER}: copy $n rows (raw f32, 8 floats each) into
+     * the ring slots starting at $head — through the state's persistent upload
+     * buffer and kernel where uploads are rewritable, otherwise through a fresh
+     * upload buffer and a kernel bound to it. False on short input or any GPU
+     * error.
+     */
+    private static function copyRows(\VioContext $ctx, GpuParticleState $state, string $rows, int $n, int $head): bool
+    {
+        $bytes = $n * GpuParticleLedger::ROW_FLOATS * 4;
+        if ($n <= 0 || $n > $state->capacity || strlen($rows) < $bytes) {
+            return false;
+        }
+        if (strlen($rows) !== $bytes) {
+            $rows = substr($rows, 0, $bytes);
+        }
+        try {
+            $rowsBuf = $state->rowsBuf;
+            if ($rowsBuf !== null && self::uploadsRewritable($ctx)) {
+                $kernel = $state->spawnKernel ??= self::boundKernel($ctx, self::SPAWN_SHADER, [
+                    [$state->stateBuf, 0, VIO_COMPUTE_WRITE],
+                    [$rowsBuf,         1, VIO_COMPUTE_READ],
+                ]);
+                if ($kernel === null) {
+                    return false;
+                }
+                vio_update_buffer($rowsBuf, $rows);
+            } else {
+                $upload = vio_storage_buffer($ctx, ['data' => $rows, 'stride' => 4]);
+                if ($upload === false) {
+                    return false;
+                }
+                $kernel = self::boundKernel($ctx, self::SPAWN_SHADER, [
+                    [$state->stateBuf, 0, VIO_COMPUTE_WRITE],
+                    [$upload,          1, VIO_COMPUTE_READ],
+                ]);
+                if ($kernel === null) {
+                    return false;
+                }
+            }
+
+            vio_compute_set_uniforms($ctx, $kernel, pack('l4', $head, $n, $state->capacity, 0));
+            vio_compute_dispatch($ctx, $kernel, intdiv($n + self::LOCAL_SIZE - 1, self::LOCAL_SIZE), 1, 1);
             return true;
         } catch (\Throwable) {
             return false;
@@ -424,15 +638,20 @@ final class GpuParticleBaker
     }
 
     /**
-     * Resets the instance count of the indirect argument record before a
-     * compacting step. indexCount (a[0]) was seeded at creation and never
-     * changes; the offsets (a[2..4]) stay 0.
+     * Writes the whole indirect argument record before a compacting step:
+     * indexCount from the params, instanceCount 0 (the compacting kernel counts
+     * into it), offsets 0. The record buffer is GPU-writable and never uploaded
+     * from the CPU, so the kernel owns every field.
+     *
+     *   binding 0 = Args   (RW SSBO, 5 uints)
+     *   binding 2 = Params (UBO: indexCount, pad*3) — 16 bytes, std140
      */
     public const RESET_ARGS_SHADER = <<<'GLSL'
         #version 450
         layout(local_size_x = 1, local_size_y = 1, local_size_z = 1) in;
         layout(std430, binding = 0) buffer Args { uint a[]; };
-        void main() { a[1] = 0u; }
+        layout(std140, binding = 2) uniform Params { uint indexCount; uint pad0; uint pad1; uint pad2; };
+        void main() { a[0] = indexCount; a[1] = 0u; a[2] = 0u; a[3] = 0u; a[4] = 0u; }
         GLSL;
 
     /**
@@ -445,24 +664,14 @@ final class GpuParticleBaker
     {
         $src = self::SHADER;
         $edits = [
-            "layout(std430, binding = 1) writeonly buffer OutM { float m[]; };
-"
-                => "layout(std430, binding = 1) writeonly buffer OutM { float m[]; };
-layout(std430, binding = 3) buffer Args { uint a[]; };
-",
-            "    uint o = gid * 16u;
-" => "    uint o;
-",
-            "    if (age >= life || life <= 0.0) {
-        for (uint k = 0u; k < 16u; k++) m[o + k] = 0.0;
-        return;
-    }
-"
-                => "    if (age >= life || life <= 0.0) return;
-    // Compaction: claim the next live instance slot (indirect draw record).
-    o = atomicAdd(a[1], 1u) * 16u;
-",
+            "layout(std430, binding = 1) writeonly buffer OutM { float m[]; };\n"
+                => "layout(std430, binding = 1) writeonly buffer OutM { float m[]; };\nlayout(std430, binding = 3) buffer Args { uint a[]; };\n",
+            "    uint o = gid * 16u;\n" => "    uint o;\n",
+            "    if (age >= life || life <= 0.0) {\n        for (uint k = 0u; k < 16u; k++) m[o + k] = 0.0;\n        return;\n    }\n"
+                => "    if (age >= life || life <= 0.0) return;\n    // Compaction: claim the next live instance slot (indirect draw record).\n    o = atomicAdd(a[1], 1u) * 16u;\n",
         ];
+        // The heredoc carries the file's line endings; match them either way.
+        $src = str_replace("\r\n", "\n", $src);
         foreach ($edits as $old => $new) {
             if (substr_count($src, $old) !== 1) {
                 throw new \LogicException('GpuParticleBaker::SHADER changed; compactShader() anchors need updating');
@@ -555,9 +764,11 @@ layout(std430, binding = 3) buffer Args { uint a[]; };
      * Build the finished instance matrices for an emitter on the GPU and return
      * the output SSBO (a {@see \VioBuffer}) to bind as the graphics instance
      * source — the readback-free path. The CPU-integrated particle positions are
-     * uploaded compactly (4 floats each), the GPU billboards them, and the
-     * matrices are NEVER read back. Returns null on unavailability/error so the
-     * caller falls back to the CPU flat path.
+     * uploaded compactly (4 floats each) into the emitter's persistent input
+     * buffer, the GPU billboards them, and the matrices are NEVER read back.
+     * Returns null on unavailability/error — and where uploads cannot be
+     * rewritten in place, since a fresh kernel every frame would cost more than
+     * it saves — so the caller falls back to the CPU flat path.
      *
      * The returned buffer is reused per emitter across frames (overwritten each
      * dispatch) and freed automatically when the emitter is GC'd.
@@ -571,17 +782,16 @@ layout(std430, binding = 3) buffer Args { uint a[]; };
             return null;
         }
         $count = count($emitter->particles);
-        if ($count === 0) {
+        if ($count === 0 || !self::uploadsRewritable($ctx)) {
             return null;
         }
 
         try {
-            $pipeline = self::$billboardPipeline
-                ?? vio_compute_pipeline($ctx, ['source' => self::BILLBOARD_SHADER]);
-            if ($pipeline === false) {
+            $kit = self::billboardKit($ctx, $emitter, $count);
+            if ($kit === null) {
                 return null;
             }
-            self::$billboardPipeline = $pipeline;
+            [$inBuf, $outBuf, $kernel] = $kit;
 
             // Compact per-particle input: px,py,pz, size (size from the same
             // start->end curve the CPU render path uses).
@@ -594,11 +804,7 @@ layout(std430, binding = 3) buffer Args { uint a[]; };
                 $in[] = $p[0]; $in[] = $p[1]; $in[] = $p[2];
                 $in[] = $ss + ($es - $ss) * $t;
             }
-            $inBuf = vio_storage_buffer($ctx, ['data' => pack('f*', ...$in), 'stride' => 4]);
-            $outBuf = self::billboardOutput($ctx, $emitter);
-            if ($inBuf === false || $outBuf === null) {
-                return null;
-            }
+            vio_update_buffer($inBuf, pack('f*', ...$in));
 
             $hasCam = $camPos !== null ? 1 : 0;
             $cx = 0.0; $cy = 0.0; $cz = 0.0;
@@ -609,13 +815,10 @@ layout(std430, binding = 3) buffer Args { uint a[]; };
             $params = pack('l', $count)
                     . pack('f3', $cx, $cy, $cz)
                     . pack('l4', $hasCam, 0, 0, 0);
-            vio_compute_set_uniforms($ctx, $pipeline, $params);
-
-            vio_compute_bind_buffer($ctx, $pipeline, $inBuf,  0, VIO_COMPUTE_READ);
-            vio_compute_bind_buffer($ctx, $pipeline, $outBuf, 1, VIO_COMPUTE_WRITE);
+            vio_compute_set_uniforms($ctx, $kernel, $params);
 
             $groups = intdiv($count + self::LOCAL_SIZE - 1, self::LOCAL_SIZE);
-            vio_compute_dispatch($ctx, $pipeline, $groups, 1, 1);
+            vio_compute_dispatch($ctx, $kernel, $groups, 1, 1);
 
             return $outBuf;
         } catch (\Throwable) {
@@ -624,27 +827,36 @@ layout(std430, binding = 3) buffer Args { uint a[]; };
     }
 
     /**
-     * Reusable output matrix SSBO for an emitter, sized to maxParticles and kept
-     * across frames (WeakMap-keyed so it frees with the emitter). Recreated when
-     * the cap changes. Null on allocation failure.
+     * The emitter's billboard input buffer, output matrix buffer and the kernel
+     * bound to both, sized to maxParticles (or the live count, if larger) and
+     * recreated when the particles outgrow it. Null on allocation failure.
+     *
+     * @return array{0: \VioBuffer, 1: \VioBuffer, 2: \VioComputePipeline, 3: int}|null
      */
-    private static function billboardOutput(\VioContext $ctx, ParticleEmitter $emitter): ?\VioBuffer
+    private static function billboardKit(\VioContext $ctx, ParticleEmitter $emitter, int $count): ?array
     {
-        self::$billboardOutputs ??= new \WeakMap();
-        $cap = max(1, $emitter->maxParticles);
-        $want = $cap * 16 * 4;
-
-        $existing = self::$billboardOutputs[$emitter] ?? null;
-        if ($existing instanceof \VioBuffer) {
-            // Emitter cap is immutable in practice; recreate only if it grew.
-            return $existing;
+        self::useContext($ctx);
+        self::$billboards ??= new \WeakMap();
+        $kit = self::$billboards[$emitter] ?? null;
+        if ($kit !== null && $kit[3] >= $count) {
+            return $kit;
         }
 
-        $buf = vio_storage_buffer($ctx, ['size' => $want, 'stride' => 4]);
-        if ($buf === false) {
+        $cap = max(1, $emitter->maxParticles, $count);
+        $inBuf = vio_storage_buffer($ctx, ['data' => str_repeat("\0", $cap * 4 * 4), 'stride' => 4]);
+        $outBuf = vio_storage_buffer($ctx, ['size' => $cap * 16 * 4, 'stride' => 4]);
+        if ($inBuf === false || $outBuf === false) {
             return null;
         }
-        self::$billboardOutputs[$emitter] = $buf;
-        return $buf;
+        $kernel = self::boundKernel($ctx, self::BILLBOARD_SHADER, [
+            [$inBuf,  0, VIO_COMPUTE_READ],
+            [$outBuf, 1, VIO_COMPUTE_WRITE],
+        ]);
+        if ($kernel === null) {
+            return null;
+        }
+        $kit = [$inBuf, $outBuf, $kernel, $cap];
+        self::$billboards[$emitter] = $kit;
+        return $kit;
     }
 }

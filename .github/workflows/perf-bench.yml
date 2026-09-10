@@ -156,6 +156,8 @@ jobs:
             "src/Math:Math"
             "src/Component/Particle:System"
             "src/System/Particle:System"
+            "src/System/GpuParticle:System"
+            "src/System/OutlineSystem:System"
             "src/System/Transform3DSystem:System"
             "src/System/Physics3DSystem:System"
             "src/Component/BoxCollider3D:System"

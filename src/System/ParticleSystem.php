@@ -5,23 +5,43 @@ declare(strict_types=1);
 namespace PHPolygon\System;
 
 use PHPolygon\Component\ParticleEmitter;
+use PHPolygon\Component\ParticleSimulation;
 use PHPolygon\Component\Transform3D;
 use PHPolygon\ECS\AbstractSystem;
 use PHPolygon\ECS\World;
+use PHPolygon\Geometry\MeshRegistry;
 use PHPolygon\Math\Vec3;
 use PHPolygon\Rendering\Command\DrawMeshInstanced;
 use PHPolygon\Rendering\Command\SetCamera;
 use PHPolygon\Rendering\RenderCommandList;
 
 /**
- * Drives every {@see ParticleEmitter} in the world.
+ * Drives every {@see ParticleEmitter} in the world, on the best of three tiers
+ * the context supports:
  *
- * Per frame:
- *   1. Spawns new particles up to the emitter rate (with the spawn
- *      accumulator carrying fractional ticks).
- *   2. Integrates position and age. Storage is nested arrays - PHP's
+ *   1. GPU simulation — a vio context with compute, vertex storage and
+ *      indirect draws, an indexed particle mesh, emitter simulation Auto.
+ *      update() only spawns: the rows and the elapsed time go into the
+ *      emitter's {@see GpuParticleLedger}. render() writes the new rows into
+ *      the GPU slot ring ({@see GpuParticleBaker::inject()}), integrates,
+ *      billboards and compacts every slot in one compute pass
+ *      ({@see GpuParticleBaker::stepIndirect()}) and emits one indirect draw
+ *      whose instance count the GPU wrote. Only freshly spawned rows cross the
+ *      bus. Any GPU failure hands the emitter to the CPU for good; its live GPU
+ *      particles are dropped.
+ *   2. CPU simulation, GPU billboards — vertex storage without indirect draws:
+ *      {@see GpuParticleBaker::tryBillboardStep()} builds the matrices.
+ *   3. CPU simulation, CPU billboards — the canonical path below.
+ *
+ * All tiers spawn through {@see spawnRows()}, so they consume `mt_rand()` in
+ * the same order and the same seed yields the same particles.
+ *
+ * CPU path per frame:
+ *   1. Integrates position and age. Storage is nested arrays - PHP's
  *      fastest path at this size class according to
  *      benchmarks/micro/System/ParticleStorageBench.php.
+ *   2. Spawns new particles up to the emitter rate (with the spawn
+ *      accumulator carrying fractional ticks).
  *   3. Builds a flat float[N*16] instance-matrix buffer and emits a
  *      single DrawMeshInstanced::flat() per emitter. The flat buffer
  *      is the source of the measured 4.5x render speed-up - the
@@ -38,19 +58,29 @@ use PHPolygon\Rendering\RenderCommandList;
  */
 class ParticleSystem extends AbstractSystem
 {
+    /** @var \WeakMap<ParticleEmitter, GpuParticleState> GPU simulations by emitter (tier 1) */
+    private \WeakMap $gpuStates;
+
+    /** @var \WeakMap<ParticleEmitter, true> emitters whose GPU simulation failed — CPU from then on */
+    private \WeakMap $gpuFailed;
+
+    private ?bool $indirectDraw = null;
+
     /**
-     * @param \VioContext|null $ctx When a live vio context is passed AND the
-     *        backend supports readback-free instancing (VIO_FEATURE_VERTEX_STORAGE),
-     *        the per-particle billboard-matrix build is offloaded to the GPU and
-     *        the matrices are read straight from GPU memory — no PHP<->GPU
-     *        roundtrip. Null (headless, non-vio, or an older vio) keeps the
-     *        canonical CPU path, so behaviour is unchanged there. The CPU
-     *        integration in {@see update()} stays authoritative in every case.
+     * @param \VioContext|null $ctx The renderer's live vio context. Enables the
+     *        GPU tiers where the backend supports them; null (headless, non-vio)
+     *        keeps the canonical CPU path.
+     * @param bool $gpuSimulation False keeps every emitter's simulation on the
+     *        CPU (tiers 2 and 3) even where tier 1 is available.
      */
     public function __construct(
         private readonly RenderCommandList $commandList,
         private readonly ?\VioContext $ctx = null,
-    ) {}
+        private readonly bool $gpuSimulation = true,
+    ) {
+        $this->gpuStates = new \WeakMap();
+        $this->gpuFailed = new \WeakMap();
+    }
 
     public function update(World $world, float $dt): void
     {
@@ -60,8 +90,21 @@ class ParticleSystem extends AbstractSystem
             $emitter = $entity->get(ParticleEmitter::class);
             $tx      = $entity->get(Transform3D::class);
 
+            $state = $this->gpuState($emitter);
+            if ($state !== null) {
+                $ledger = $state->ledger;
+                $ledger->advance($dt);
+                $rows = $this->spawnRows($emitter, $tx->getWorldPosition(), $dt, $ledger->count());
+                if ($rows !== []) {
+                    $ledger->queue($rows, $emitter->lifetime);
+                }
+                continue;
+            }
+
             $this->integrate($emitter, $dt);
-            $this->spawn($emitter, $tx->getWorldPosition(), $dt);
+            foreach ($this->spawnRows($emitter, $tx->getWorldPosition(), $dt, count($emitter->particles)) as $row) {
+                $emitter->particles[] = $row;
+            }
         }
     }
 
@@ -71,6 +114,20 @@ class ParticleSystem extends AbstractSystem
 
         foreach ($world->query(ParticleEmitter::class) as $entity) {
             $emitter = $entity->get(ParticleEmitter::class);
+
+            $state = $this->gpuStates[$emitter] ?? null;
+            if ($state !== null && $this->ctx !== null) {
+                if (!$state->ledger->isCurrent($emitter->maxParticles, $emitter->generation)) {
+                    // Cleared or re-capped since the last update: the ring is
+                    // stale and the next update replaces it. Nothing to draw.
+                    continue;
+                }
+                if ($this->renderGpu($this->ctx, $state, $emitter, $cameraPos)) {
+                    continue;
+                }
+                $this->abandonGpu($emitter);
+            }
+
             $count = count($emitter->particles);
             if ($count === 0) continue;
 
@@ -130,6 +187,120 @@ class ParticleSystem extends AbstractSystem
                 instanceCount: $count,
             ));
         }
+    }
+
+    /**
+     * Tier 1 render: write the rows spawned since the last render into the GPU
+     * ring, advance the simulation over the time elapsed since then and emit
+     * the indirect draw. False on any GPU failure — the caller then moves the
+     * emitter to the CPU.
+     */
+    protected function renderGpu(\VioContext $ctx, GpuParticleState $state, ParticleEmitter $emitter, ?Vec3 $cameraPos): bool
+    {
+        $args = $state->argsBuf;
+        if ($args === null) {
+            return false;
+        }
+        $ledger = $state->ledger;
+
+        $pending = $ledger->pendingCount();
+        if ($pending > 0) {
+            $g = $emitter->gravity;
+            if (!GpuParticleBaker::inject($ctx, $state, $ledger->takePending($g->x, $g->y, $g->z), $pending)) {
+                return false;
+            }
+        }
+
+        if ($ledger->count() === 0) {
+            // Every slot has been released: all particles are dead and stay
+            // dead without stepping. Nothing to draw.
+            $ledger->takeDt();
+            return true;
+        }
+
+        if (!GpuParticleBaker::stepIndirect($ctx, $state, $emitter, $ledger->takeDt(), $cameraPos)) {
+            return false;
+        }
+
+        $this->commandList->add(DrawMeshInstanced::fromStorageBuffer(
+            meshId: $emitter->meshId,
+            materialId: $emitter->materialId,
+            storageBuffer: $state->outBuf,
+            instanceCount: $ledger->count(),
+            indirectArgs: $args,
+        ));
+        return true;
+    }
+
+    /**
+     * The GPU simulation of an emitter that runs on tier 1 — created, or
+     * replaced after clear() / a new cap / a new mesh — or null when the
+     * emitter is simulated on the CPU.
+     */
+    private function gpuState(ParticleEmitter $emitter): ?GpuParticleState
+    {
+        $state = $this->gpuStates[$emitter] ?? null;
+        $ctx = $this->ctx;
+        $indexCount = $this->gpuIndexCount($emitter);
+        if ($ctx === null || $indexCount === 0) {
+            if ($state !== null) {
+                // Opted out (or the mesh lost its indices): the live GPU
+                // particles are not carried over to the CPU.
+                unset($this->gpuStates[$emitter]);
+                $emitter->gpuLedger = null;
+            }
+            return null;
+        }
+        if ($state !== null
+            && $state->indexCount === $indexCount
+            && $state->ledger->isCurrent($emitter->maxParticles, $emitter->generation)
+        ) {
+            return $state;
+        }
+
+        // Rows the CPU simulated so far seed the ring (always none when the
+        // emitter already ran on the GPU), so moving to the GPU keeps them.
+        $created = GpuParticleBaker::createState(
+            $ctx,
+            array_values($emitter->particles),
+            $emitter->maxParticles,
+            $indexCount,
+            $emitter->generation,
+        );
+        if ($created === null || $created->argsBuf === null) {
+            $this->abandonGpu($emitter);
+            return null;
+        }
+        $this->gpuStates[$emitter] = $created;
+        $emitter->particles = [];
+        $emitter->gpuLedger = $created->ledger;
+        return $created;
+    }
+
+    /** Index count of the emitter's mesh when the emitter qualifies for tier 1, else 0. */
+    private function gpuIndexCount(ParticleEmitter $emitter): int
+    {
+        if ($this->ctx === null
+            || !$this->gpuSimulation
+            || $emitter->simulation !== ParticleSimulation::Auto
+            || $emitter->maxParticles <= 0
+            || isset($this->gpuFailed[$emitter])
+        ) {
+            return 0;
+        }
+        $this->indirectDraw ??= GpuParticleBaker::isIndirectDraw($this->ctx);
+        if (!$this->indirectDraw) {
+            return 0;
+        }
+        $mesh = MeshRegistry::get($emitter->meshId);
+        return $mesh === null ? 0 : count($mesh->indices);
+    }
+
+    private function abandonGpu(ParticleEmitter $emitter): void
+    {
+        unset($this->gpuStates[$emitter]);
+        $this->gpuFailed[$emitter] = true;
+        $emitter->gpuLedger = null;
     }
 
     /**
@@ -242,16 +413,24 @@ class ParticleSystem extends AbstractSystem
         $emitter->particles = $alive;
     }
 
-    private function spawn(ParticleEmitter $emitter, Vec3 $position, float $dt): void
+    /**
+     * Advance the spawn accumulator and build this step's new particle rows
+     * (age 0), capped so the live count never exceeds maxParticles. Shared by
+     * every tier: the `mt_rand()` draws happen here and only here, three per
+     * row in x, y, z order, so a seed reproduces the same rows on any tier.
+     *
+     * @return list<array{0: float, 1: float, 2: float, 3: float, 4: float, 5: float, 6: float, 7: float}>
+     */
+    private function spawnRows(ParticleEmitter $emitter, Vec3 $position, float $dt, int $liveCount): array
     {
         $emitter->spawnAccumulator += $emitter->rate * $dt;
         $toSpawn = (int) floor($emitter->spawnAccumulator);
-        if ($toSpawn <= 0) return;
+        if ($toSpawn <= 0) return [];
         $emitter->spawnAccumulator -= $toSpawn;
 
-        $room = $emitter->maxParticles - count($emitter->particles);
+        $room = $emitter->maxParticles - $liveCount;
         $toSpawn = min($toSpawn, max(0, $room));
-        if ($toSpawn === 0) return;
+        if ($toSpawn === 0) return [];
 
         $jx = $emitter->velocityJitter->x;
         $jy = $emitter->velocityJitter->y;
@@ -262,8 +441,9 @@ class ParticleSystem extends AbstractSystem
         $life = $emitter->lifetime;
         $rngMax = mt_getrandmax();
 
+        $rows = [];
         for ($i = 0; $i < $toSpawn; $i++) {
-            $emitter->particles[] = [
+            $rows[] = [
                 $position->x, $position->y, $position->z,
                 $vbx + (mt_rand() / $rngMax - 0.5) * 2.0 * $jx,
                 $vby + (mt_rand() / $rngMax - 0.5) * 2.0 * $jy,
@@ -271,5 +451,6 @@ class ParticleSystem extends AbstractSystem
                 0.0, $life,
             ];
         }
+        return $rows;
     }
 }

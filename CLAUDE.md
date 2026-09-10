@@ -120,6 +120,7 @@ All commands are plain PHP value objects (no methods, only constructor propertie
 | `SetSkybox` | `cubemapId: string` |
 | `SetFog` | `color: Color`, `near: float`, `far: float` |
 | `SetShader` | `shaderId: ?string` — override active shader for subsequent draws; `null` resets to material-driven |
+| `DrawOutline` | `meshId: string`, `modelMatrix: Mat4`, `color: Color`, `widthPx: float` — screen-space outline, drawn after the scene (see "Outline pass") |
 
 Commands are appended to `RenderCommandList` during the scene tick. The
 `Renderer3DSystem` flushes the list once per frame.
@@ -236,6 +237,26 @@ Rules that follow from it:
 - Escape hatches: `PHPOLYGON_VIO_MRT=0` forces the forward path, `=1` skips the php-vio
   version gate. `mrtActive()` tells tests which path a frame took.
 
+**Outline pass** (`DrawOutline`, php-vio >= 2.12 with `VIO_FEATURE_STENCIL`): runs on both paths after SSR
+and before post-processing, into the bound scene target. Pass 1 draws every outlined mesh into the
+stencil buffer (alpha-0 blend, colour untouched), pass 2 redraws them pushed outward by a constant
+pixel width (`outline.vert` extrudes from the projected centre of the mesh AABB, not along split
+normals) where the stencil is still 0. All parts are masked before any ring, so touching parts of one
+object share a single outline. Depth test is off: the outline shows through geometry and looks the
+same forward and MRT. Backends without stencil (Metal) skip it; `outlineSupported()` reports it.
+`VioRendererOutlineTest` pins ring position, seam-free parts and the MRT path.
+
+**Storage-buffer instances** (`DrawMeshInstanced::fromStorageBuffer`, e.g. GPU particles): the matrices never
+leave GPU memory, but the regular programs read instance matrices from vertex attributes. The draw
+therefore switches to `default_storage` (`storageInstancingVertexSource()`: mesh3d.vert with
+`instanceModels[gl_InstanceIndex]` from the SSBO at binding 0, same mesh3d.frag, MRT twin) for the current
+pass and back. Compiled lazily or via `warmStorageInstancing()`. They cast no shadow and stay out of the
+forward G-buffer. A count-only test cannot catch a wrong instance source — `VioRendererIndirectDrawTest`
+checks the position.
+
+**3D textures:** `resolveTexture()` binds the `VioTextureManager` upload (`vioTexture()`: mip chain,
+anisotropy, KTX2 container) — never decode the file a second time for 3D.
+
 ### Shaders
 - Authoring language: **GLSL** (human- and AI-readable plaintext)
 - 2D: used directly by NanoVG / OpenGL at runtime
@@ -272,6 +293,7 @@ Components follow the same ECS discipline as 2D. 3D-specific components:
 | `DirectionalLight` | `direction: Vec3`, `color: Color`, `intensity: float` |
 | `PointLight` | `color: Color`, `intensity: float`, `radius: float` |
 | `CharacterController3D` | Capsule collision, gravity, slope detection, step height |
+| `Outline` | `enabled`, `color`, `widthPx`, `includeChildren` — outline this entity's mesh (and its children's) |
 
 `Transform3D` replaces `Transform2D` in 3D scenes. Never mix 2D and 3D transform
 components on the same entity.
@@ -283,6 +305,7 @@ components on the same entity.
 | `Renderer3DSystem` | Collects `MeshRenderer` + `Transform3D`, builds `RenderCommandList`, flushes |
 | `Camera3DSystem` | Updates view/projection matrices, pushes `SetCamera` command |
 | `Physics3DSystem` | Capsule vs AABB collision, gravity integration (Phase 7+) |
+| `OutlineSystem` | Emits `DrawOutline` for every enabled `Outline`; register BEFORE `Renderer3DSystem` |
 
 ### Procedural geometry — code-driven worlds
 
@@ -512,7 +535,7 @@ uploads, no extra passes. All are documented in
 | ACES tone mapping | Every mesh-shader exit path runs `toneMapACES()` before gamma. Vio's HDR tonemap pass uses the same curve. |
 | Camera-following shadow + texel-snap | `ShadowMapRenderer::updateLightMatrix($dir, $cameraTarget)` and the equivalent on Vio centre the shadow frustum on the camera and snap to the shadow-map grid. |
 | `AreaLightHelper` | Forward-pipeline rectangular area light = grid of point-light samples summing to total radiance. |
-| `ParticleEmitter` + `ParticleSystem` | Inline particle storage, single `DrawMeshInstanced` per emitter per frame. Camera-facing billboard rotation in render(). |
+| `ParticleEmitter` + `ParticleSystem` | Three tiers, best the context supports: (1) GPU simulation — spawn ring (`GpuParticleLedger`), `GpuParticleBaker::inject()` + `stepIndirect()` compaction, one `vio_draw_indirect` per emitter, only new rows cross the bus (needs compute + vertex storage + indirect draws, an indexed mesh, `ParticleSimulation::Auto`); (2) CPU simulation with GPU billboards; (3) CPU storage + flat `DrawMeshInstanced`. All tiers spawn through `spawnRows()`, so the `mt_rand` order is identical. `ParticleSystem(..., gpuSimulation: false)` or `simulation: Cpu` opts out. |
 | `ScreenSpaceReflections` | Quality enum (Off/Low/High). On OpenGL the `OpenGLSsrPass` runs a 24-step world-space ray-march from the resolved depth buffer (via `OpenGLOffscreenTarget::depthTextureId()`); on Vio + Metal it scales the wetness IBL lobe via the shared `u_ssr_intensity` uniform. |
 | `AntiAliasing::Taa` | Temporal AA. OpenGL ships a real `OpenGLTaaPass` with per-frame Halton jitter on the projection matrix, neighbourhood-clamped composite, and a private history color target. Vio/Metal still fall back to FXAA via `AntiAliasing::fallback()` until their post-process chains are migrated. |
 
@@ -616,7 +639,7 @@ classic per-target build.
 |---|---|
 | `BuildConfig` | Loads build.json + composer.json, provides all settings |
 | `PharBuilder` | Stages sources, builds PHAR with custom stub |
-| `StaticPhpResolver` | Finds/downloads/caches micro.sfx binary |
+| `StaticPhpResolver` | Finds/downloads/caches micro.sfx binary + Windows runtime libs (vulkan-1, d3dcompiler_47, DXC `dxcompiler.dll`/`dxil.dll` from the latest DirectXShaderCompiler release for Shader Model 6, Steam API) |
 | `PlatformPackager` | Creates .app bundle, Linux dir, Windows .exe |
 | `GameBuilder` | Orchestrates the 7-phase pipeline |
 

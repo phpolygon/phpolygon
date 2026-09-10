@@ -10,6 +10,7 @@ use PHPolygon\ECS\Attribute\Property;
 use PHPolygon\ECS\Attribute\Serializable;
 use PHPolygon\Math\Vec3;
 use PHPolygon\Rendering\Color;
+use PHPolygon\System\GpuParticleLedger;
 
 /**
  * Spawns and integrates a swarm of point-particles in world space.
@@ -84,6 +85,15 @@ class ParticleEmitter extends AbstractComponent
     public int $maxParticles;
 
     /**
+     * Where the particles are simulated. Auto runs on the GPU where the
+     * renderer supports it — the particles then live in GPU memory only and
+     * `$particles` stays empty. Cpu keeps the CPU simulation, e.g. when game
+     * code reads particle positions.
+     */
+    #[Property]
+    public ParticleSimulation $simulation = ParticleSimulation::Auto;
+
+    /**
      * Live particles. Each entry: [px, py, pz, vx, vy, vz, age, lifetime].
      * Nested rather than parallel because PHP arrays are fast at this
      * shape - the system reads with one hash-table lookup per particle
@@ -96,6 +106,15 @@ class ParticleEmitter extends AbstractComponent
 
     /** Spawn-rate accumulator carried frame-to-frame for fractional rates. */
     public float $spawnAccumulator = 0.0;
+
+    /** Bumped by {@see clear()}; a GPU simulation of an older generation is discarded. */
+    public int $generation = 0;
+
+    /**
+     * Slot ledger of the GPU simulation currently driving this emitter, null
+     * while it is simulated on the CPU. Maintained by the particle system.
+     */
+    public ?GpuParticleLedger $gpuLedger = null;
 
     public function __construct(
         string $meshId = 'particle_quad',
@@ -110,7 +129,9 @@ class ParticleEmitter extends AbstractComponent
         ?Color $startColor = null,
         ?Color $endColor = null,
         int $maxParticles = 256,
+        ParticleSimulation $simulation = ParticleSimulation::Auto,
     ) {
+        $this->simulation     = $simulation;
         $this->meshId         = $meshId;
         $this->materialId     = $materialId;
         $this->rate           = $rate;
@@ -132,11 +153,17 @@ class ParticleEmitter extends AbstractComponent
     public function clear(): void
     {
         $this->particles = [];
+        $this->generation++;
+        $this->gpuLedger = null;
     }
 
-    /** Live-particle count helper for callers that don't want to count() the array. */
+    /**
+     * Live-particle count. For a GPU-simulated emitter this is the ledger's
+     * conservative count (particles still counted until their slot is
+     * released), otherwise the size of `$particles`.
+     */
     public function count(): int
     {
-        return count($this->particles);
+        return $this->gpuLedger !== null ? $this->gpuLedger->count() : count($this->particles);
     }
 }

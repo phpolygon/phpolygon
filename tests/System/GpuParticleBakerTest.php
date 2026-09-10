@@ -74,9 +74,7 @@ class GpuParticleBakerTest extends TestCase
         $packed = GpuParticleBaker::step($ctx, $state, $emitter, $dt, $cam, true);
         self::assertNotNull($packed);
 
-        $unpacked = unpack('f*', $packed);
-        self::assertNotFalse($unpacked);
-        $gpu = array_values($unpacked);
+        $gpu = self::floats($packed);
         self::assertCount($capacity * 16, $gpu);
 
         $maxErr = 0.0;
@@ -159,6 +157,72 @@ class GpuParticleBakerTest extends TestCase
         self::assertSame($live, $rec[1], 'instance count does not accumulate across steps');
     }
 
+    public function testParticleDiesOnTheStepItsAgeReachesItsLifetime(): void
+    {
+        $ctx = $this->ctx;
+        self::assertNotNull($ctx);
+        GpuParticleBaker::warm($ctx);
+
+        $emitter = new ParticleEmitter(gravity: new Vec3(0.0, 0.0, 0.0));
+        $seed = [
+            [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.99, 1.0], // 0.99 + 0.016 >= 1.0: dies this step
+            [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.50, 1.0], // stays alive
+        ];
+        $state = GpuParticleBaker::createState($ctx, $seed, 4);
+        self::assertNotNull($state);
+
+        $m = array_values(unpack('f*', (string) GpuParticleBaker::step($ctx, $state, $emitter, 0.016, null)) ?: []);
+        self::assertSame(0.0, $m[15], 'the CPU path drops this particle on the same step');
+        self::assertSame(1.0, $m[16 + 15]);
+
+        // A shorter step must not revive it: the aged value was written back.
+        $m = array_values(unpack('f*', (string) GpuParticleBaker::step($ctx, $state, $emitter, 0.001, null)) ?: []);
+        self::assertSame(0.0, $m[15]);
+        self::assertSame(1.0, $m[16 + 15]);
+    }
+
+    public function testInjectWritesRowsAtTheHeadAndWrapsAroundTheRing(): void
+    {
+        $ctx = $this->ctx;
+        self::assertNotNull($ctx);
+        self::assertTrue(GpuParticleBaker::warm($ctx));
+
+        $state = GpuParticleBaker::createState($ctx, [], 8);
+        self::assertNotNull($state);
+        $state->ledger->advanceHead(6);
+
+        $flat = [];
+        for ($i = 0; $i < 4; $i++) {
+            array_push($flat, 10.0 + $i, 20.0 + $i, 30.0 + $i, 1.0, 2.0, 3.0, 0.25, 4.0);
+        }
+        self::assertTrue(GpuParticleBaker::inject($ctx, $state, pack('f*', ...$flat), 4));
+        self::assertSame(2, $state->ledger->head(), 'slots 6, 7, 0, 1 were written');
+        self::assertFalse(GpuParticleBaker::inject($ctx, $state, pack('f*', ...$flat), 9), 'a batch larger than the ring is refused');
+        self::assertFalse(GpuParticleBaker::inject($ctx, $state, pack('f*', ...$flat), 5), 'fewer bytes than rows is refused');
+
+        $bytes = vio_storage_buffer_read($ctx, $state->stateBuf);
+        self::assertIsString($bytes);
+        $s = array_values(unpack('f*', $bytes) ?: []);
+        foreach ([6 => 0, 7 => 1, 0 => 2, 1 => 3] as $slot => $row) {
+            self::assertSame([10.0 + $row, 20.0 + $row, 30.0 + $row, 1.0, 2.0, 3.0, 0.25, 4.0], array_slice($s, $slot * 8, 8), "slot {$slot}");
+        }
+        foreach ([2, 3, 4, 5] as $slot) {
+            self::assertSame(array_fill(0, 8, 0.0), array_slice($s, $slot * 8, 8), "slot {$slot} untouched");
+        }
+    }
+
+    /** @return list<float> */
+    private static function floats(string $bytes): array
+    {
+        $out = [];
+        foreach (unpack('f*', $bytes) ?: [] as $f) {
+            if (is_float($f)) {
+                $out[] = $f;
+            }
+        }
+        return $out;
+    }
+
     /**
      * CPU reference: integrate one step (semi-implicit Euler) then build the
      * camera-facing billboard matrix from the post-integrate state — identical
@@ -175,6 +239,9 @@ class GpuParticleBakerTest extends TestCase
             return $m;
         }
         [$px, $py, $pz, $vx, $vy, $vz, $age, $life] = $p;
+        // Age first, then test — ParticleSystem::integrate() drops a particle
+        // on the step its age reaches its lifetime.
+        $age += $dt;
         if ($age >= $life || $life <= 0.0) {
             return $m;
         }
@@ -184,7 +251,6 @@ class GpuParticleBakerTest extends TestCase
         $px += $vx * $dt;
         $py += $vy * $dt;
         $pz += $vz * $dt;
-        $age += $dt;
         $t = $age / max($life, 1e-4);
         $size = $em->startSize + ($em->endSize - $em->startSize) * $t;
 
