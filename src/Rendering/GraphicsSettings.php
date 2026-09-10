@@ -13,6 +13,7 @@ use PHPolygon\Rendering\Quality\ScreenSpaceAO;
 use PHPolygon\Rendering\Quality\ScreenSpaceReflections;
 use PHPolygon\Rendering\Quality\ShaderQuality;
 use PHPolygon\Rendering\Quality\ShadowQuality;
+use PHPolygon\Rendering\Quality\ShadingRate;
 use PHPolygon\Rendering\Quality\TextureQuality;
 
 /**
@@ -54,6 +55,14 @@ final class GraphicsSettings
          */
         public readonly bool $lowLatency = false,
         /**
+         * Variable rate shading for the 3D scene pass (php-vio >= 2.19,
+         * VIO_FEATURE_SHADING_RATE): Half shades 2x2 pixel blocks once, Quarter
+         * 4x4 - the cheapest performance tier since geometry, depth and the
+         * resolution stay untouched. UI and post-processing run at full rate;
+         * backends without the feature ignore it.
+         */
+        public readonly ShadingRate $shadingRate = ShadingRate::Full,
+        /**
          * HDR10 display output (php-vio 'hdr_output', D3D11 / D3D12): a 10-bit
          * ST 2084 backbuffer when the display is in HDR mode; the resolve
          * shaders then PQ-encode the tonemapped image with hdrPaperWhite nits
@@ -94,6 +103,7 @@ final class GraphicsSettings
         ?bool $bloom = null,
         ?bool $hdr = null,
         ?bool $lowLatency = null,
+        ?ShadingRate $shadingRate = null,
         ?bool $hdrOutput = null,
         ?float $hdrPaperWhite = null,
         ?bool $fog = null,
@@ -122,6 +132,7 @@ final class GraphicsSettings
             bloom: $bloom ?? $this->bloom,
             hdr: $hdr ?? $this->hdr,
             lowLatency: $lowLatency ?? $this->lowLatency,
+            shadingRate: $shadingRate ?? $this->shadingRate,
             hdrOutput: $hdrOutput ?? $this->hdrOutput,
             hdrPaperWhite: max(80.0, min(1000.0, $hdrPaperWhite ?? $this->hdrPaperWhite)),
             fog: $fog ?? $this->fog,
@@ -157,6 +168,7 @@ final class GraphicsSettings
             'bloom' => $this->bloom,
             'hdr' => $this->hdr,
             'lowLatency' => $this->lowLatency,
+            'shadingRate' => $this->shadingRate->value,
             'hdrOutput' => $this->hdrOutput,
             'hdrPaperWhite' => $this->hdrPaperWhite,
             'fog' => $this->fog,
@@ -193,6 +205,7 @@ final class GraphicsSettings
             bloom: self::asBool($data['bloom'] ?? null) ?? $defaults->bloom,
             hdr: self::asBool($data['hdr'] ?? null) ?? $defaults->hdr,
             lowLatency: self::asBool($data['lowLatency'] ?? null) ?? $defaults->lowLatency,
+            shadingRate: self::enumFrom(ShadingRate::class, $data['shadingRate'] ?? null) ?? $defaults->shadingRate,
             hdrOutput: self::asBool($data['hdrOutput'] ?? null) ?? $defaults->hdrOutput,
             hdrPaperWhite: max(80.0, min(1000.0, self::asFloat($data['hdrPaperWhite'] ?? null) ?? $defaults->hdrPaperWhite)),
             fog: self::asBool($data['fog'] ?? null) ?? $defaults->fog,

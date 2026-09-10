@@ -1116,10 +1116,13 @@ class VioRenderer3D implements Renderer3DInterface
         $this->applyDeferredSettings();
 
         $this->beginOffscreenIfRequired();
+        $this->applyShadingRate($this->settings->shadingRate);
     }
 
     public function endFrame(): void
     {
+        // UI and post-processing shade every pixel; only the scene pass ran coarse.
+        $this->applyShadingRate(Quality\ShadingRate::Full);
         $this->presentOffscreenIfActive();
         $this->renderShadowMapDebug();
         vio_draw_3d($this->ctx);
@@ -3801,6 +3804,37 @@ class VioRenderer3D implements Renderer3DInterface
     }
 
     private ?bool $indirectDrawAvailable = null;
+
+    /**
+     * vio_set_shading_rate() usable on this context (php-vio >= 2.19 with
+     * VIO_FEATURE_SHADING_RATE, D3D12 VRS Tier 1+); probed once. False means
+     * GraphicsSettings::$shadingRate is ignored - the setting is harmless there,
+     * and AdaptiveTierStack is told to skip its shading-rate steps.
+     */
+    public function shadingRateAvailable(): bool
+    {
+        return $this->shadingRateAvailable ??= function_exists('vio_set_shading_rate')
+            && defined('VIO_FEATURE_SHADING_RATE')
+            && vio_supports_feature($this->ctx, VIO_FEATURE_SHADING_RATE);
+    }
+
+    private ?bool $shadingRateAvailable = null;
+
+    /** Rate currently armed on the context, to skip redundant native calls. */
+    private Quality\ShadingRate $armedShadingRate = Quality\ShadingRate::Full;
+
+    private function applyShadingRate(Quality\ShadingRate $rate): void
+    {
+        if ($rate === $this->armedShadingRate || !$this->shadingRateAvailable()) {
+            return;
+        }
+        if (vio_set_shading_rate($this->ctx, $rate->vioConstant())) {
+            $this->armedShadingRate = $rate;
+        } elseif ($rate !== Quality\ShadingRate::Full && vio_set_shading_rate($this->ctx, Quality\ShadingRate::Half->vioConstant())) {
+            // 4x4 needs the device's additional rates; 2x2 is the honest fallback.
+            $this->armedShadingRate = Quality\ShadingRate::Half;
+        }
+    }
 
     private function drawMeshInstancedCommand(DrawMeshInstanced $cmd, Material $material): void
     {

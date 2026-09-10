@@ -42,6 +42,24 @@ final class AdaptiveTierStack
     /** @return list<int> */
     private const ANISOTROPY_LEVELS = [16, 8, 4, 2, 1];
 
+    /**
+     * Whether the active renderer can apply a shading rate (VIO_FEATURE_SHADING_RATE).
+     * Off until the engine confirms it from the renderer probe: the stack then skips
+     * the shading-rate steps, so a downgrade never lands on a setting that changes
+     * nothing, and behaves exactly as before the feature existed.
+     */
+    private static bool $shadingRateAvailable = false;
+
+    public static function setShadingRateAvailable(bool $available): void
+    {
+        self::$shadingRateAvailable = $available;
+    }
+
+    public static function shadingRateAvailable(): bool
+    {
+        return self::$shadingRateAvailable;
+    }
+
     public static function downgrade(GraphicsSettings $current): ?GraphicsSettings
     {
         // 1. VolumetricFog (8-step raymarch is the most expensive per-fragment cost in the stack)
@@ -59,13 +77,24 @@ final class AdaptiveTierStack
             return $current->with(ssr: $ssrNext);
         }
 
-        // 3. RenderScale
+        // 3. Shading rate 2x2: a quarter of the fragment work at full geometry and
+        // UI resolution, no upscaling blur - cheaper than the first render-scale step.
+        if (self::$shadingRateAvailable && $current->shadingRate === ShadingRate::Full) {
+            return $current->with(shadingRate: ShadingRate::Half);
+        }
+
+        // 4. RenderScale
         $idx = self::indexFloat(self::RENDER_SCALE_LEVELS, $current->renderScale);
         if ($idx !== null && $idx + 1 < count(self::RENDER_SCALE_LEVELS)) {
             return $current->with(renderScale: self::RENDER_SCALE_LEVELS[$idx + 1]);
         }
 
-        // 3. ScreenSpaceAO
+        // 5. Shading rate 4x4, once the render scale has bottomed out.
+        if (self::$shadingRateAvailable && $current->shadingRate === ShadingRate::Half) {
+            return $current->with(shadingRate: ShadingRate::Quarter);
+        }
+
+        // 6. ScreenSpaceAO
         $aoNext = match ($current->ambientOcclusion) {
             ScreenSpaceAO::High => ScreenSpaceAO::Medium,
             ScreenSpaceAO::Medium => ScreenSpaceAO::Low,
@@ -196,9 +225,17 @@ final class AdaptiveTierStack
             return $current->with(ambientOcclusion: $aoUp);
         }
 
+        if ($current->shadingRate === ShadingRate::Quarter) {
+            return $current->with(shadingRate: ShadingRate::Half);
+        }
+
         $idx = self::indexFloat(self::RENDER_SCALE_LEVELS, $current->renderScale);
         if ($idx !== null && $idx > 0) {
             return $current->with(renderScale: self::RENDER_SCALE_LEVELS[$idx - 1]);
+        }
+
+        if ($current->shadingRate === ShadingRate::Half) {
+            return $current->with(shadingRate: ShadingRate::Full);
         }
 
         $ssrUp = match ($current->ssr) {

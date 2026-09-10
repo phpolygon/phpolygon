@@ -11,6 +11,7 @@ use PHPolygon\Rendering\Quality\AntiAliasing;
 use PHPolygon\Rendering\Quality\ScreenSpaceAO;
 use PHPolygon\Rendering\Quality\ScreenSpaceReflections;
 use PHPolygon\Rendering\Quality\ShaderQuality;
+use PHPolygon\Rendering\Quality\ShadingRate;
 use PHPolygon\Rendering\Quality\ShadowQuality;
 
 final class AdaptiveTierStackTest extends TestCase
@@ -96,6 +97,46 @@ final class AdaptiveTierStackTest extends TestCase
         $next = AdaptiveTierStack::upgrade($s);
         $this->assertNotNull($next);
         $this->assertSame(8, $next->anisotropy);
+    }
+
+    public function testDowngradeLowersTheShadingRateBeforeTheRenderScale(): void
+    {
+        AdaptiveTierStack::setShadingRateAvailable(true);
+        try {
+            $s = new GraphicsSettings(renderScale: 1.0, volumetricFog: false, ssr: ScreenSpaceReflections::Off);
+            $next = AdaptiveTierStack::downgrade($s);
+            $this->assertNotNull($next);
+            $this->assertSame(ShadingRate::Half, $next->shadingRate, '2x2 shading comes before any render-scale step');
+            $this->assertSame(1.0, $next->renderScale);
+
+            // Once the render scale is at its floor, the next cut is 4x4.
+            $floor = $next->with(renderScale: 0.5);
+            $quarter = AdaptiveTierStack::downgrade($floor);
+            $this->assertNotNull($quarter);
+            $this->assertSame(ShadingRate::Quarter, $quarter->shadingRate);
+
+            // The way back: 4x4 -> 2x2 before the render scale climbs, 2x2 -> full after it.
+            $up = AdaptiveTierStack::upgrade($quarter->with(ambientOcclusion: ScreenSpaceAO::High, shadowQuality: ShadowQuality::High, viewDistance: 200.0, antiAliasing: AntiAliasing::Msaa4x, anisotropy: 16));
+            $this->assertNotNull($up);
+            $this->assertSame(ShadingRate::Half, $up->shadingRate);
+            $this->assertSame(0.5, $up->renderScale);
+        } finally {
+            AdaptiveTierStack::setShadingRateAvailable(false);
+        }
+    }
+
+    public function testDowngradeSkipsTheShadingRateWhereTheBackendCannotApplyIt(): void
+    {
+        AdaptiveTierStack::setShadingRateAvailable(false);
+        try {
+            $s = new GraphicsSettings(renderScale: 1.0, volumetricFog: false, ssr: ScreenSpaceReflections::Off);
+            $next = AdaptiveTierStack::downgrade($s);
+            $this->assertNotNull($next);
+            $this->assertSame(ShadingRate::Full, $next->shadingRate, 'no step that would change nothing');
+            $this->assertSame(0.9, $next->renderScale, 'the render scale is the first real cut instead');
+        } finally {
+            AdaptiveTierStack::setShadingRateAvailable(false);
+        }
     }
 
     public function testUpgradeReturnsNullAtMax(): void

@@ -70,6 +70,13 @@ const VIO_FEATURE_HDR_OUTPUT = 34;
 const VIO_FEATURE_INDIRECT_DRAW = 35;
 const VIO_FEATURE_TEXTURE_ARRAY = 36;
 const VIO_FEATURE_TEXTURE_COMPRESSION_BC = 37;
+const VIO_FEATURE_SHADING_RATE = 38;
+// vio_set_shading_rate() rates (php-vio >= 2.19)
+const VIO_SHADING_RATE_1X1 = 0;
+const VIO_SHADING_RATE_1X2 = 1;
+const VIO_SHADING_RATE_2X1 = 2;
+const VIO_SHADING_RATE_2X2 = 3;
+const VIO_SHADING_RATE_4X4 = 4;
 
 // Render-target colour attachment formats (vio_render_target 'attachments', vio_pipeline 'attachments')
 const VIO_FORMAT_RGBA8      = 0;
@@ -509,3 +516,9 @@ function vio_draw_indirect(VioContext $context, VioMesh $mesh, VioBuffer $args, 
  * @param array{mip_offset?: int, filter?: int, wrap?: int, anisotropy?: int, mipmaps?: bool}|null $options
  */
 function vio_texture_ktx2(VioContext $context, string $bytes, ?array $options = null): VioTexture|false {}
+
+/**
+ * php-vio >= 2.19 (VIO_FEATURE_SHADING_RATE): variable rate shading for every following
+ * draw, sticky until changed; false when the backend has no VRS or the rate is not offered.
+ */
+function vio_set_shading_rate(VioContext $context, int $rate): bool {}

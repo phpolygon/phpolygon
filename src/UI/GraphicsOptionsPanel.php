@@ -13,6 +13,7 @@ use PHPolygon\Rendering\Quality\QualityMode;
 use PHPolygon\Rendering\Quality\ScreenSpaceAO;
 use PHPolygon\Rendering\Quality\ScreenSpaceReflections;
 use PHPolygon\Rendering\Quality\ShaderQuality;
+use PHPolygon\Rendering\Quality\ShadingRate;
 use PHPolygon\Rendering\Quality\ShadowQuality;
 use PHPolygon\Rendering\Quality\TextureQuality;
 
@@ -181,6 +182,19 @@ final class GraphicsOptionsPanel
         $newIdx = $this->ui->dropdown('graphics.textureQuality', $textureLabels, $idx, 0.0, 0);
         if ($enabled && $newIdx !== $idx) {
             $manager->update(static fn(GraphicsSettings $g): GraphicsSettings => $g->with(textureQuality: $textures[$newIdx]));
+        }
+
+        // Shading rate (variable rate shading; no effect on backends without it)
+        $rates = [ShadingRate::Full, ShadingRate::Half, ShadingRate::Quarter];
+        $rateLabels = array_map(static fn(ShadingRate $r): string => $r->label(), $rates);
+        $idx = array_search($s->shadingRate, $rates, true);
+        if (!is_int($idx)) {
+            $idx = 0;
+        }
+        $this->ui->label('Shading Rate');
+        $newIdx = $this->ui->dropdown('graphics.shadingRate', $rateLabels, $idx, 0.0, 0);
+        if ($enabled && $newIdx !== $idx) {
+            $manager->update(static fn(GraphicsSettings $g): GraphicsSettings => $g->with(shadingRate: $rates[$newIdx]));
         }
 
         // Shader quality

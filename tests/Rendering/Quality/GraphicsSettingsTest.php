@@ -10,6 +10,7 @@ use PHPolygon\Rendering\Quality\AntiAliasing;
 use PHPolygon\Rendering\Quality\MeshLodTier;
 use PHPolygon\Rendering\Quality\QualityMode;
 use PHPolygon\Rendering\Quality\ShaderQuality;
+use PHPolygon\Rendering\Quality\ShadingRate;
 use PHPolygon\Rendering\Quality\ShadowQuality;
 use PHPolygon\Rendering\Quality\TextureQuality;
 
@@ -90,6 +91,7 @@ final class GraphicsSettingsTest extends TestCase
             cloudShadows: false,
             bloom: false,
             lowLatency: true,
+            shadingRate: ShadingRate::Half,
             fog: false,
             meshLod: MeshLodTier::Low,
         );
@@ -100,6 +102,8 @@ final class GraphicsSettingsTest extends TestCase
         $this->assertSame($s->toJson(), $rebuilt->toJson());
         $this->assertTrue($rebuilt->lowLatency, 'low-latency toggle survives the round trip');
         $this->assertFalse((new GraphicsSettings())->lowLatency, 'off by default (costs throughput on GPU-bound frames)');
+        $this->assertSame(ShadingRate::Half, $rebuilt->shadingRate, 'shading rate survives the round trip');
+        $this->assertSame(ShadingRate::Full, (new GraphicsSettings())->shadingRate, 'full rate by default');
         $this->assertSame(QualityMode::Adaptive, $rebuilt->mode);
         $this->assertSame(120.0, $rebuilt->targetFps);
         $this->assertSame(0.75, $rebuilt->renderScale);

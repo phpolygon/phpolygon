@@ -743,6 +743,8 @@ class Engine
                     $this->window->getFramebufferWidth(),
                     $this->window->getFramebufferHeight(),
                 );
+                // The adaptive stack only lowers the shading rate where the backend can apply it.
+                \PHPolygon\Rendering\Quality\AdaptiveTierStack::setShadingRateAvailable($this->renderer3D->shadingRateAvailable());
             } else {
                 // Native renderer path (Vulkan via php-vulkan, OpenGL via
                 // php-glfw). Metal has no standalone renderer any more: vio's
