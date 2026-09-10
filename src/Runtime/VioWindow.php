@@ -24,12 +24,17 @@ class VioWindow extends Window
         string $backend = 'auto',
         bool $debug = false,
         string $shaderCachePath = '',
+        int $frameLatency = 0,
     ) {
         parent::__construct($width, $height, $title, $vsync, $resizable);
         $this->backend = $backend;
         $this->debug = $debug;
         $this->shaderCachePath = $shaderCachePath;
+        $this->frameLatency = $frameLatency;
     }
+
+    /** vio_create 'frame_latency' (0 = driver default; 1 = GraphicsSettings::$lowLatency). */
+    private int $frameLatency = 0;
 
     /** Directory handed to vio_create as 'shader_cache' ('' = no cache). */
     private string $shaderCachePath = '';
@@ -56,6 +61,11 @@ class VioWindow extends Window
             if (is_dir($this->shaderCachePath) || @mkdir($this->shaderCachePath, 0755, true)) {
                 $config['shader_cache'] = $this->shaderCachePath;
             }
+        }
+        // Waitable swapchain (php-vio >= 2.15, D3D11 / D3D12): cap the CPU's
+        // run-ahead. Backends without the feature ignore the option.
+        if ($this->frameLatency > 0) {
+            $config['frame_latency'] = $this->frameLatency;
         }
 
         // Try the requested backend first; on failure, walk a platform-aware

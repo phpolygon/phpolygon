@@ -89,6 +89,7 @@ final class GraphicsSettingsTest extends TestCase
             shaderQuality: ShaderQuality::Unlit,
             cloudShadows: false,
             bloom: false,
+            lowLatency: true,
             fog: false,
             meshLod: MeshLodTier::Low,
         );
@@ -97,6 +98,8 @@ final class GraphicsSettingsTest extends TestCase
         $rebuilt = GraphicsSettings::fromJson($json);
 
         $this->assertSame($s->toJson(), $rebuilt->toJson());
+        $this->assertTrue($rebuilt->lowLatency, 'low-latency toggle survives the round trip');
+        $this->assertFalse((new GraphicsSettings())->lowLatency, 'off by default (costs throughput on GPU-bound frames)');
         $this->assertSame(QualityMode::Adaptive, $rebuilt->mode);
         $this->assertSame(120.0, $rebuilt->targetFps);
         $this->assertSame(0.75, $rebuilt->renderScale);

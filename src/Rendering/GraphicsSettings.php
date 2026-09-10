@@ -45,6 +45,14 @@ final class GraphicsSettings
         public readonly bool $cloudShadows = true,
         public readonly bool $bloom = true,
         public readonly bool $hdr = true,
+        /**
+         * Low input latency: cap the CPU at ONE frame ahead of presentation
+         * (php-vio 'frame_latency' => 1, a waitable swapchain on D3D11 / D3D12)
+         * instead of DXGI's default queue of three. Costs a little throughput
+         * when the GPU is the bottleneck; applied when the window is created,
+         * so a change takes effect on the next start.
+         */
+        public readonly bool $lowLatency = false,
         public readonly bool $fog = true,
         public readonly MeshLodTier $meshLod = MeshLodTier::High,
         public readonly ScreenSpaceAO $ambientOcclusion = ScreenSpaceAO::Medium,
@@ -76,6 +84,7 @@ final class GraphicsSettings
         ?bool $cloudShadows = null,
         ?bool $bloom = null,
         ?bool $hdr = null,
+        ?bool $lowLatency = null,
         ?bool $fog = null,
         ?MeshLodTier $meshLod = null,
         ?ScreenSpaceAO $ambientOcclusion = null,
@@ -101,6 +110,7 @@ final class GraphicsSettings
             cloudShadows: $cloudShadows ?? $this->cloudShadows,
             bloom: $bloom ?? $this->bloom,
             hdr: $hdr ?? $this->hdr,
+            lowLatency: $lowLatency ?? $this->lowLatency,
             fog: $fog ?? $this->fog,
             meshLod: $meshLod ?? $this->meshLod,
             ambientOcclusion: $ambientOcclusion ?? $this->ambientOcclusion,
@@ -133,6 +143,7 @@ final class GraphicsSettings
             'cloudShadows' => $this->cloudShadows,
             'bloom' => $this->bloom,
             'hdr' => $this->hdr,
+            'lowLatency' => $this->lowLatency,
             'fog' => $this->fog,
             'meshLod' => $this->meshLod->value,
             'ambientOcclusion' => $this->ambientOcclusion->value,
@@ -166,6 +177,7 @@ final class GraphicsSettings
             cloudShadows: self::asBool($data['cloudShadows'] ?? null) ?? $defaults->cloudShadows,
             bloom: self::asBool($data['bloom'] ?? null) ?? $defaults->bloom,
             hdr: self::asBool($data['hdr'] ?? null) ?? $defaults->hdr,
+            lowLatency: self::asBool($data['lowLatency'] ?? null) ?? $defaults->lowLatency,
             fog: self::asBool($data['fog'] ?? null) ?? $defaults->fog,
             meshLod: self::enumFrom(MeshLodTier::class, $data['meshLod'] ?? null) ?? $defaults->meshLod,
             ambientOcclusion: self::enumFrom(ScreenSpaceAO::class, $data['ambientOcclusion'] ?? null) ?? $defaults->ambientOcclusion,
