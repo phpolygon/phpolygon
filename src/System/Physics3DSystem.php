@@ -57,14 +57,34 @@ class Physics3DSystem extends AbstractSystem
     private function step(World $world, float $dt): void
     {
         // Collect all box colliders once per frame (static + dynamic)
-        $boxData = $this->collectBoxColliders($world);
-        $staticColliders = $boxData['aabbs'];
-        $meshColliders = $this->collectMeshColliders($world);
-        // Merge rotated-box BVHs into mesh colliders for triangle-based resolution
-        foreach ($boxData['meshColliders'] as $mc) {
-            $meshColliders[] = $mc;
+        PerfProfiler::begin('physics.collect');
+        try {
+            $boxData = $this->collectBoxColliders($world);
+            $staticColliders = $boxData['aabbs'];
+            $meshColliders = $this->collectMeshColliders($world);
+            // Merge rotated-box BVHs into mesh colliders for triangle-based resolution
+            foreach ($boxData['meshColliders'] as $mc) {
+                $meshColliders[] = $mc;
+            }
+        } finally {
+            PerfProfiler::end();
         }
 
+        PerfProfiler::begin('physics.resolve');
+        try {
+            $this->resolveCharacters($world, $dt, $staticColliders, $meshColliders, $boxData['boxTopY']);
+        } finally {
+            PerfProfiler::end();
+        }
+    }
+
+    /**
+     * @param list<array{entityId: int, min: Vec3, max: Vec3}> $staticColliders
+     * @param list<array{entityId: int, bvh: BVH}> $meshColliders
+     * @param array<int, float> $boxTopY
+     */
+    private function resolveCharacters(World $world, float $dt, array $staticColliders, array $meshColliders, array $boxTopY): void
+    {
         foreach ($world->query(CharacterController3D::class, Transform3D::class) as $entity) {
             $controller = $entity->get(CharacterController3D::class);
             $transform = $entity->get(Transform3D::class);
@@ -159,7 +179,7 @@ class Physics3DSystem extends AbstractSystem
                     $radius,
                     $meshColliders,
                     $entity->id,
-                    $boxData['boxTopY'],
+                    $boxTopY,
                 );
 
                 // Final AABB update after mesh collision resolution
@@ -302,6 +322,23 @@ class Physics3DSystem extends AbstractSystem
             }
             $worldMatrix = $transform->getWorldMatrix();
 
+            // Same (immutable) Mat4 object as when the cache was built: the box did
+            // not move. That is the steady state of a built world, so skip the
+            // rotation probe, the matrix copy and the 16-value compare.
+            $cachedAabb = $collider->cachedWorldAabb;
+            if ($worldMatrix === $collider->lastWorldMatrix && $cachedAabb !== null) {
+                $cachedBvh = $collider->bvh;
+                if (!$collider->cachedRotated) {
+                    $aabbs[] = ['entityId' => $entityId, 'min' => $cachedAabb['min'], 'max' => $cachedAabb['max']];
+                    continue;
+                }
+                if ($cachedBvh !== null) {
+                    $meshColliders[] = ['entityId' => $entityId, 'bvh' => $cachedBvh];
+                    $boxTopY[$entityId] = $cachedAabb['max']->y;
+                    continue;
+                }
+            }
+
             // Check if entity has meaningful rotation (non-identity)
             $rot = $transform->rotation;
             $isRotated = abs($rot->x) > 0.001 || abs($rot->y) > 0.001 || abs($rot->z) > 0.001;
@@ -341,6 +378,8 @@ class Physics3DSystem extends AbstractSystem
                     'max' => $collider->cachedWorldAabb['max'],
                 ];
             }
+            $collider->lastWorldMatrix = $worldMatrix;
+            $collider->cachedRotated = $isRotated;
         }
 
         return ['aabbs' => $aabbs, 'meshColliders' => $meshColliders, 'boxTopY' => $boxTopY];
@@ -422,6 +461,10 @@ class Physics3DSystem extends AbstractSystem
                 continue;
             }
             $worldMatrix = $transform->getWorldMatrix();
+            if ($worldMatrix === $meshCollider->lastWorldMatrix && $meshCollider->bvh !== null) {
+                $colliders[] = ['entityId' => $entityId, 'bvh' => $meshCollider->bvh];
+                continue; // unchanged transform: see collectBoxColliders()
+            }
             $worldMatrixArr = $worldMatrix->toArray();
 
             // Check if BVH needs to be (re)built: first use or transform changed
@@ -439,6 +482,7 @@ class Physics3DSystem extends AbstractSystem
                 $meshCollider->bvh = BVH::build($triangles);
                 $meshCollider->lastWorldMatrixArr = $worldMatrixArr;
             }
+            $meshCollider->lastWorldMatrix = $worldMatrix;
 
             $colliders[] = [
                 'entityId' => $entityId,

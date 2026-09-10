@@ -41,6 +41,14 @@ class MeshCollider3D extends AbstractComponent
     #[Hidden]
     public ?array $lastWorldMatrixArr = null;
 
+    /**
+     * The world matrix object the caches above were built from. Mat4 is
+     * immutable, so the same object means the transform did not change and the
+     * value compare against lastWorldMatrixArr can be skipped.
+     */
+    #[Hidden]
+    public ?\PHPolygon\Math\Mat4 $lastWorldMatrix = null;
+
     public function __construct(
         string $meshId = '',
         bool $isStatic = true,

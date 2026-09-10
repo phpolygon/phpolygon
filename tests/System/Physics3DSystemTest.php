@@ -116,6 +116,57 @@ class Physics3DSystemTest extends TestCase
         $this->assertLessThan(2.0, $t->position->x, 'Player should be pushed back before wall');
     }
 
+    /**
+     * @return array{World, Transform3D, CharacterController3D, Transform3D}
+     */
+    private function playerAgainstWall(): array
+    {
+        $world = new World();
+        $world->addSystem(new Physics3DSystem(new Vec3(0.0, 0.0, 0.0)));
+
+        // Wall spans x 2.0..3.0; the player's capsule (radius 0.5) at x 1.6 reaches 2.1.
+        $wall = $world->createEntity();
+        $wallT = new Transform3D(position: new Vec3(2.5, 1.0, 0.0));
+        $world->attachComponent($wall->id, $wallT);
+        $world->attachComponent($wall->id, new BoxCollider3D(size: new Vec3(1.0, 4.0, 4.0), isStatic: true));
+
+        $player = $world->createEntity();
+        $playerT = new Transform3D(position: new Vec3(1.6, 1.0, 0.0));
+        $world->attachComponent($player->id, $playerT);
+        $cc = new CharacterController3D(height: 2.0, radius: 0.5);
+        $world->attachComponent($player->id, $cc);
+
+        return [$world, $playerT, $cc, $wallT];
+    }
+
+    public function testMovedColliderIsResolvedAtItsNewPlace(): void
+    {
+        [$world, $playerT, $cc, $wallT] = $this->playerAgainstWall();
+        $world->update(0.016);
+        $this->assertLessThan(1.6, $playerT->position->x, 'the wall pushes the player back');
+
+        // The wall moves away: a new world matrix must invalidate the cached AABB.
+        $wallT->position = new Vec3(50.0, 1.0, 0.0);
+        $wallT->worldMatrix = $wallT->getLocalMatrix();
+        $playerT->position = new Vec3(1.6, 1.0, 0.0);
+        $cc->velocity = new Vec3(10.0, 0.0, 0.0);
+        $world->update(0.016);
+        $this->assertGreaterThan(1.6, $playerT->position->x, 'the player walks where the wall used to be');
+    }
+
+    public function testEqualWorldMatrixInANewObjectKeepsTheCollider(): void
+    {
+        [$world, $playerT, $cc, $wallT] = $this->playerAgainstWall();
+        $world->update(0.016);
+
+        // A system that rebuilds every matrix hands over an equal matrix in a new object.
+        $wallT->worldMatrix = new \PHPolygon\Math\Mat4($wallT->worldMatrix->toArray());
+        $playerT->position = new Vec3(1.6, 1.0, 0.0);
+        $cc->velocity = new Vec3(10.0, 0.0, 0.0);
+        $world->update(0.016);
+        $this->assertLessThan(1.6, $playerT->position->x, 'the wall still blocks');
+    }
+
     public function testCharacterWalksOnTopOfCollider(): void
     {
         $world = new World();
