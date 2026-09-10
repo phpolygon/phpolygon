@@ -208,6 +208,34 @@ The engine selects the backend automatically at startup:
 1. If `extension_loaded('vio')` → Vio backends for window, input, audio, 2D, 3D, textures
 2. Otherwise → GLFW window/input, NanoVG 2D, OpenGL/Vulkan/Metal 3D (per `renderBackend3D` config)
 
+### VioRenderer3D scene passes — forward vs. MRT
+
+`VioRenderer3D::render()` has two ways to produce the scene (`docs/rfcs/mrt-gbuffer.md`):
+
+- **Forward** (every backend): shadow cascades → G-buffer geometry pass (`gbuffer.vert/frag`,
+  only when SSAO / SDF-AO / SSR need it) → SSAO + SDF-AO → sky → opaque → transparent →
+  SSR → post. The mesh shader samples the AO maps inside its lighting.
+- **MRT** (php-vio ≥ 2.11 with `VIO_FEATURE_MRT`, taken whenever the frame needs the
+  G-buffer, the built-in shader is active and the scene target is single-sampled):
+  shadow → sky + opaque + transparent into a 4×RGBA16F target (`o_sun`, `o_local`,
+  `o_ambient`, `o_gbuffer` — `mesh3d.frag` compiled with `PHPOLYGON_MRT`) → SSAO + SDF-AO
+  read attachment 3 → `composite.frag` writes `sun·sdfShadow + local + ambient·ssao·sdfAo`
+  into the real scene target → SSR → post. One geometry submission less per frame; the
+  image is the forward image up to FP16 rounding (`VioRendererMrtTest`,
+  `MrtMeshShaderHeadlessTest` pin both).
+
+Rules that follow from it:
+- Anything added to the mesh shader's lighting must be routed into one of the three
+  accumulators (`sunAcc` = primary directional light, `ambientAcc` = AO-modulated terms,
+  `localAcc` = everything else) — never into a separate output.
+- Game snippets keep writing `frag_color` (it is `o_local` under MRT); the post-colour hook
+  (`applyPostColor`) must stay affine in the colour — it is evaluated at 0 and 1 and
+  distributed over the split outputs.
+- New pipelines that draw into the scene target need an MRT variant (see `bindPipeline`,
+  `bindSkyPipeline`: `attachments` + `attachment_blend` / `attachment_color_mask`).
+- Escape hatches: `PHPOLYGON_VIO_MRT=0` forces the forward path, `=1` skips the php-vio
+  version gate. `mrtActive()` tells tests which path a frame took.
+
 ### Shaders
 - Authoring language: **GLSL** (human- and AI-readable plaintext)
 - 2D: used directly by NanoVG / OpenGL at runtime

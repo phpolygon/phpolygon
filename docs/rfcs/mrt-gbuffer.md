@@ -1,6 +1,6 @@
 # RFC: G-Buffer als MRT-Attachment des Opaque-Passes
 
-**Status**: draft
+**Status**: implemented (`feat/mrt-gbuffer`, 2026-09-10) — see „Umsetzung" am Ende
 **Author**: engineering
 **Last update**: 2026-09-10
 **Related**: php-vio ≥ 2.10 (`vio_render_target(['attachments' => …])`, `vio_pipeline(['attachments' => …])`, Test 097), php-vio PR #24 (Bind-Tabellen-Fix, Voraussetzung auf D3D11/D3D12), `docs/rfcs/compute-pipeline.md`
@@ -166,3 +166,35 @@ Aufwand: 1–2 Tage plus Cross-Backend-Prüfung (D3D12 hier, Metal/GL über CI-B
    sich dann für Wasser: es würde erstmals selbst gespiegelt; könnte gewollt sein).
 3. Der native OpenGL-Renderer (`OpenGLRenderer3D`, GL-Familie) bleibt beim alten Pfad; ist er
    noch ein Auslieferungsziel oder kann er auf den vio-OpenGL-Pfad folgen?
+
+## Umsetzung (Stand 2026-09-10)
+
+Umgesetzt wie oben entworfen, mit diesen Abweichungen gegenüber dem Entwurf:
+
+- **Post-Color-Hook bleibt im Mesh-Shader** (Phase 4 entfällt). Der Hook ist als Funktion
+  `applyPostColor(vec3)` gekapselt; der MRT-Pfad wertet ihn an 0 und 1 aus (`A = hook(0)`,
+  `S = hook(1) − A`) und verteilt `S` auf alle drei Anteile, `A` auf den lokalen Anteil.
+  Jeder in der Farbe affine Hook (Tint, Fade, Absorption) ist damit exakt; der
+  Snippet-Vertrag im Spiel bleibt unverändert.
+- **Kein `EMIT_UNLIT`-Makro**: unter `PHPOLYGON_MRT` ist `frag_color` ein Alias für
+  `o_local`; alle Attachments werden am Anfang von `main()` initialisiert (Sonne/Ambient 0,
+  G-Buffer regulär). Snippets mit `frag_color = …; return;` laufen unverändert.
+- **Transparent-Pass**: php-vio 2.11 liefert `attachment_blend` / `attachment_color_mask`
+  (PR #25). Transparente blenden in Attachment 0–2 und lassen den G-Buffer unberührt;
+  Wasser (proc_mode 2/11) wechselt bei aktivem SSR auf die Variante `transparent_water`,
+  die Attachment 3 mitschreibt – das ersetzt `appendReflectiveTransparentToGbuffer()`.
+- **Himmel**: die Sky-Layer- und Skybox-Pipelines schreiben unter MRT nur Attachment 1
+  (Maske `[0, RGBA, 0, 0]`), der G-Buffer behält dort die Clear-0 = Himmel. Die Skybox
+  linearisiert jetzt wie die Sky-Layer (`u_linear_output`).
+- **Composite ist alpha-geblendet** über das Szenen-Target, damit unberührte Pixel die
+  Clear-Farbe des Aufrufers behalten (`renderToImage`); premultipliziertes Alpha
+  transparenter Flächen über Nichts wird vorher herausdividiert.
+- **Gate**: MRT nur, wenn der Frame den G-Buffer braucht (`gbufferNeededThisFrame()`),
+  der Built-in-Shader aktiv ist, die MRT-Shader kompiliert sind und das Szenen-Target
+  einfach gesampelt ist; `hdrTarget`-Altpfad ausgenommen. `PHPOLYGON_VIO_MRT=0|1`.
+- **Alter Pfad bleibt vollständig** (Fallback für Backends ohne MRT / MSAA / Shader-Override).
+
+Belege: `tests/Rendering/Shader/MrtMeshShaderHeadlessTest.php` (Attachment-Summe ==
+Forward-Linearfarbe mit/ohne Nebel; Attachment 3 == `gbuffer.frag`; `u_gbuffer_write`),
+`tests/Rendering/VioRendererMrtTest.php` (Forward- vs. MRT-Bild auf D3D, Clear-Farbe,
+Transparenz).

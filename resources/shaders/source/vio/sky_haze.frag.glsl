@@ -8,7 +8,18 @@ uniform float u_fog_density;
 // HDR scene path: alpha-blend over the (already linear) sky, so the haze colour
 // must be linearised too or it would tint toward an un-tonemapped value.
 uniform int u_linear_output;
+#ifdef PHPOLYGON_MRT
+// Drawn into the MRT scene target: sky is local (unlit) light in attachment 1; the
+// renderer's pipeline masks the sun / ambient / G-buffer attachments off, so the
+// G-buffer keeps its cleared 0 = "sky" for the AO and reflection passes.
+layout(location = 0) out vec4 o_sun;
+layout(location = 1) out vec4 o_local;
+layout(location = 2) out vec4 o_ambient;
+layout(location = 3) out vec4 o_gbuffer;
+#define frag_color o_local
+#else
 out vec4 frag_color;
+#endif
 
 float smoothstep01(float e0, float e1, float x) {
     float t = clamp((x - e0) / (e1 - e0), 0.0, 1.0);

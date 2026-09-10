@@ -200,6 +200,24 @@ class VioRenderer3D implements Renderer3DInterface
     /** GL texture unit wired to u_sdf_ao_map. Distinct from albedo(0), ssao(1), shadows(6-9). */
     private const SDF_AO_SAMPLER_SLOT = 2;
 
+    // MRT scene path (docs/rfcs/mrt-gbuffer.md). When the frame needs the
+    // G-buffer (SSAO / SDF-AO / SSR) and the backend has multiple render targets,
+    // the opaque + transparent passes draw into mrtTarget — four RGBA16F
+    // attachments: sun light, local light, AO-modulated ambient, G-buffer — and
+    // the separate G-buffer geometry pass (renderSsaoPass' first half) is skipped.
+    // The AO passes then read attachment 3, and compositeMrt() folds everything
+    // into the real scene target: sun·sdfShadow + local + ambient·ssao·sdfAo.
+    // mrtThisFrame is decided once per frame in render(); every pipeline that
+    // draws into the scene target (opaque, transparent, sky, skybox) keys on it.
+    private ?VioRenderTarget $mrtTarget = null;
+    private int $mrtWidth = 0;
+    private int $mrtHeight = 0;
+    private bool $mrtThisFrame = false;
+    /** Lazily probed: backend feature + php-vio version (or PHPOLYGON_VIO_MRT override). */
+    private ?bool $mrtSupported = null;
+    /** Sticky value of u_gbuffer_write in the bound cbuffer (null = unknown / re-upload). */
+    private ?int $lastGbufferWrite = null;
+
     // The baked SDF volume (vio_texture_3d), uploaded from SetFieldtracingVolume.
     private ?VioTexture $sdfVolumeTex = null;
     private int $sdfVolumeVersion = -1;
@@ -579,7 +597,7 @@ class VioRenderer3D implements Renderer3DInterface
      *
      * @param array{dirLights: list<SetDirectionalLight>, ftAoRadius: float, ...} $frameState
      */
-    private function renderSdfAoPass(array $frameState): void
+    private function renderSdfAoPass(array $frameState, ?VioTexture $gbufferTex = null): void
     {
         $this->sdfAoActiveThisFrame = false;
 
@@ -587,8 +605,12 @@ class VioRenderer3D implements Renderer3DInterface
             return;
         }
 
-        $gbuffer = $this->gbufferTarget;
-        if ($gbuffer === null || $this->screenQuad === null
+        // Legacy path: the G-buffer built by renderSsaoPass; MRT path: attachment 3
+        // of the scene MRT target, handed in by renderAoFromMrt().
+        if ($gbufferTex === null && $this->gbufferTarget !== null) {
+            $gbufferTex = vio_render_target_texture($this->gbufferTarget);
+        }
+        if ($gbufferTex === null || $this->screenQuad === null
             || $this->currentProjectionMatrix === null || $this->currentViewMatrix === null
             || $this->sdfVolumeTex === null || $this->sdfVolOrigin === null || $this->sdfVolSize === null) {
             return;
@@ -632,7 +654,7 @@ class VioRenderer3D implements Renderer3DInterface
         // pipeline; mixing it after a sampler2D mis-binds on the D3D sampler table.
         vio_bind_texture($this->ctx, $volTex, 0);
         vio_set_uniform($this->ctx, 'u_sdf_volume', 0);
-        vio_bind_texture($this->ctx, vio_render_target_texture($gbuffer), 1);
+        vio_bind_texture($this->ctx, $gbufferTex, 1);
         vio_set_uniform($this->ctx, 'u_gbuffer', 1);
 
         vio_set_uniform($this->ctx, 'u_proj00', $proj[0]);
@@ -660,7 +682,7 @@ class VioRenderer3D implements Renderer3DInterface
         vio_viewport($this->ctx, 0, 0, $w, $h);
         vio_clear($this->ctx, 1, 1, 0, 1);
         $this->bindPostProcessPipeline('sdf_ao_blur');
-        vio_bind_texture($this->ctx, vio_render_target_texture($gbuffer), 0);
+        vio_bind_texture($this->ctx, $gbufferTex, 0);
         vio_set_uniform($this->ctx, 'u_gbuffer', 0);
         vio_bind_texture($this->ctx, vio_render_target_texture($target), 1);
         vio_set_uniform($this->ctx, 'u_source', 1);
@@ -1334,18 +1356,6 @@ class VioRenderer3D implements Renderer3DInterface
             $this->flashDbgHadShadow = $hasShadowMap;
         }
 
-        // --- SSAO G-buffer + occlusion + blur pass ---
-        // Runs only when the AO tier wants real SSAO and the backend supports it
-        // (see ssaoEnabledThisFrame()). Binds/unbinds its OWN targets, exactly
-        // like the shadow pass above, so it must run BEFORE the scene target is
-        // bound below. Leaves $this->ssaoActiveThisFrame set for the opaque pass.
-        PerfProfiler::begin('render3d.submit.ssao');
-        $this->renderSsaoPass($commands, $frameState);
-        PerfProfiler::end();
-        PerfProfiler::begin('render3d.submit.sdfao');
-        $this->renderSdfAoPass($frameState);
-        PerfProfiler::end();
-
         // --- Environment cubemap (sky probe) — six face passes into a cube RT
         // + mip chain, only when the SetSky parameters changed. Runs before the
         // scene target is bound (binds/unbinds its own target like the passes
@@ -1360,26 +1370,51 @@ class VioRenderer3D implements Renderer3DInterface
         // HDR/Bloom disabled — D3D11 fullscreen quad draw produces no pixels (needs investigation)
         $hdrTarget = $this->enableHdr ? $this->hdrTarget : null;
 
-        if ($hdrTarget !== null) {
-            vio_bind_render_target($this->ctx, $hdrTarget);
-            vio_clear($this->ctx, 0, 0, 0, 1);
-            $sceneViewportW = $this->width;
-            $sceneViewportH = $this->height;
-        } elseif ($this->offscreenActive && $this->offscreenTarget !== null) {
-            // The shadow pass unbinds its own target; restore the Phase 1.5
-            // offscreen target for the main scene draws.
-            $this->offscreenTarget->bindForDraw();
+        // Scene viewport = the target the composite / forward draws end up in.
+        if ($hdrTarget === null && $this->offscreenActive && $this->offscreenTarget !== null) {
             $sceneViewportW = $this->offscreenTarget->width();
             $sceneViewportH = $this->offscreenTarget->height();
-        } elseif ($this->externalSceneTarget !== null) {
-            // renderToImage(): the shadow / SSAO / env-cube passes above left the
-            // swapchain bound — the scene belongs in the caller's target.
-            vio_bind_render_target($this->ctx, $this->externalSceneTarget);
-            $sceneViewportW = $this->width;
-            $sceneViewportH = $this->height;
         } else {
             $sceneViewportW = $this->width;
             $sceneViewportH = $this->height;
+        }
+
+        // --- MRT decision (once per frame; every scene pipeline keys on it) ---
+        // The MRT target matches the scene viewport exactly so compositeMrt() is a
+        // 1:1 fullscreen pass and the G-buffer attachment has the same resolution
+        // the forward G-buffer pass had.
+        $mrtTarget = null;
+        if ($hdrTarget === null && $this->mrtEnabledThisFrame()) {
+            $this->ensureMrtTarget($sceneViewportW, $sceneViewportH);
+            $mrtTarget = $this->mrtTarget; // null when the backend refused it: forward path
+        }
+        $this->mrtThisFrame = $mrtTarget !== null;
+
+        if ($mrtTarget !== null) {
+            // The AO passes run AFTER the geometry (renderAoFromMrt); until then
+            // the mesh pass must not believe an AO map is bound.
+            $this->ssaoActiveThisFrame = false;
+            $this->sdfAoActiveThisFrame = false;
+            // Clear to 0: attachment 3's a = 0 marks "sky / no geometry" for the
+            // AO passes, and the composite's alpha-blend leaves untouched pixels
+            // at the scene target's own clear colour.
+            vio_bind_render_target($this->ctx, $mrtTarget);
+            vio_clear($this->ctx, 0, 0, 0, 0);
+        } else {
+            // --- SSAO G-buffer + occlusion + blur pass (forward path) ---
+            // Runs only when the AO tier wants real SSAO and the backend supports
+            // it (see ssaoEnabledThisFrame()). Binds/unbinds its OWN targets,
+            // exactly like the shadow pass above, so it must run BEFORE the scene
+            // target is bound below. Leaves ssaoActiveThisFrame set for the
+            // opaque pass.
+            PerfProfiler::begin('render3d.submit.ssao');
+            $this->renderSsaoPass($commands, $frameState);
+            PerfProfiler::end();
+            PerfProfiler::begin('render3d.submit.sdfao');
+            $this->renderSdfAoPass($frameState);
+            PerfProfiler::end();
+
+            $this->bindSceneTarget($hdrTarget);
         }
 
         vio_viewport($this->ctx, 0, 0, $sceneViewportW, $sceneViewportH);
@@ -1439,7 +1474,7 @@ class VioRenderer3D implements Renderer3DInterface
         usort($opaque, static fn (array $a, array $b): int => ($a[0] <=> $b[0]) ?: ($a[1] <=> $b[1]));
         foreach ($opaque as [, , $cmd, $material]) {
             if ($cmd instanceof DrawMesh) {
-                $this->drawMeshCommand($cmd->meshId, $material, $cmd->modelMatrix, $cmd->materialId);
+                $this->drawMeshCommand($cmd->meshId, $material, $cmd->modelMatrix, $cmd->materialId, $cmd->excludeFromGbuffer);
             } else {
                 $this->drawMeshInstancedCommand($cmd, $material);
             }
@@ -1461,29 +1496,58 @@ class VioRenderer3D implements Renderer3DInterface
             $this->frameUniformsShaderId = $transparentShaderId;
         }
 
+        // MRT path: a reflective water surface (proc_mode 2 / 11) must also write
+        // the G-buffer attachment when SSR runs — what the forward path's
+        // appendReflectiveTransparentToGbuffer() did in a separate draw — so it
+        // switches to the 'transparent_water' variant (same blend, attachment 3
+        // unmasked). Every other transparent leaves the G-buffer untouched.
+        $waterToGbuffer = $this->mrtThisFrame && $this->ssrEnabledThisFrame();
+        $transparentPass = 'transparent';
         foreach ($commands as $cmd) {
+            if (!($cmd instanceof DrawMesh) && !($cmd instanceof DrawMeshInstanced)) {
+                continue;
+            }
+            $material = MaterialRegistry::get($cmd->materialId);
+            if ($material === null || $material->alpha >= 1.0) {
+                continue;
+            }
+            if ($waterToGbuffer) {
+                $pass = $this->isReflectiveTransparent($cmd->materialId) ? 'transparent_water' : 'transparent';
+                if ($pass !== $transparentPass) {
+                    $this->bindPipeline($pass);
+                    $transparentPass = $pass;
+                }
+            }
             if ($cmd instanceof DrawMesh) {
-                $material = MaterialRegistry::get($cmd->materialId);
-                if ($material === null || $material->alpha >= 1.0) {
-                    continue;
-                }
-                $this->drawMeshCommand($cmd->meshId, $material, $cmd->modelMatrix, $cmd->materialId);
-            } elseif ($cmd instanceof DrawMeshInstanced) {
-                $material = MaterialRegistry::get($cmd->materialId);
-                if ($material === null || $material->alpha >= 1.0) {
-                    continue;
-                }
+                $this->drawMeshCommand($cmd->meshId, $material, $cmd->modelMatrix, $cmd->materialId, $cmd->excludeFromGbuffer);
+            } else {
                 $this->drawMeshInstancedCommand($cmd, $material);
             }
         }
         PerfProfiler::end();
+
+        // --- MRT resolve: AO from the G-buffer attachment, then composite ------
+        // The geometry is drawn; attachment 3 now holds exactly what the forward
+        // G-buffer pass produced. Run SSAO + SDF-AO on it, then bind the real
+        // scene target and fold sun / local / ambient + AO into it.
+        if ($this->mrtThisFrame) {
+            vio_unbind_render_target($this->ctx);
+            PerfProfiler::begin('render3d.submit.ssao');
+            $this->renderAoFromMrt($frameState);
+            PerfProfiler::end();
+            $this->bindSceneTarget($hdrTarget);
+            vio_viewport($this->ctx, 0, 0, $sceneViewportW, $sceneViewportH);
+            PerfProfiler::begin('render3d.submit.composite');
+            $this->compositeMrt();
+            PerfProfiler::end();
+        }
 
         // --- Screen-space reflections (VIO/D3D12, HDR path) ---
         // Ray-march the G-buffer against the just-rendered HDR scene colour and
         // composite the reflection back into the offscreen scene target BEFORE
         // the present/bloom resolve, so reflected highlights bloom and tonemap
         // with the rest of the scene. No-op unless ssrEnabledThisFrame().
-        $this->renderSsrPass();
+        $this->renderSsrPass($this->mrtThisFrame ? $this->mrtGbufferTexture() : null);
 
         // --- Post-processing: HDR → Bloom → Tonemap → Backbuffer ---
         $quad = $this->screenQuad;
@@ -1603,6 +1667,23 @@ class VioRenderer3D implements Renderer3DInterface
         $this->compileShaderFromFiles('sky_stars',    'atmosphere.vert.glsl', 'sky_stars.frag.glsl');
         $this->compileShaderFromFiles('sky_clouds',   'atmosphere.vert.glsl', 'sky_clouds.frag.glsl');
         $this->compileShaderFromFiles('sky_haze',     'atmosphere.vert.glsl', 'sky_haze.frag.glsl');
+
+        // MRT scene path: the same sources with PHPOLYGON_MRT defined (four
+        // colour outputs) + the composite. Only when the backend can do it; a
+        // compile failure just keeps the forward path.
+        if ($this->mrtSupported()) {
+            try {
+                $this->compileShaderFromFiles('default_mrt', 'mesh3d.vert.glsl', 'mesh3d.frag.glsl', true);
+                $this->compileShaderFromFiles('composite',   'postprocess.vert.glsl', 'composite.frag.glsl');
+                $this->compileShaderFromFiles('skybox_mrt',  'skybox.vert.glsl', 'skybox.frag.glsl', true);
+                foreach (['sky_gradient', 'sky_sun', 'sky_moon', 'sky_stars', 'sky_clouds', 'sky_haze'] as $sky) {
+                    $this->compileShaderFromFiles($sky . '_mrt', 'atmosphere.vert.glsl', $sky . '.frag.glsl', true);
+                }
+            } catch (\RuntimeException $e) {
+                $this->mrtSupported = false;
+                fwrite(STDERR, "[VioRenderer3D] MRT shaders unavailable, using the forward path: {$e->getMessage()}\n");
+            }
+        }
     }
 
     private function initPostProcess(): void
@@ -1647,17 +1728,21 @@ class VioRenderer3D implements Renderer3DInterface
 
     }
 
-    private function compileShaderFromFiles(string $id, string $vertFile, string $fragFile): void
+    private function compileShaderFromFiles(string $id, string $vertFile, string $fragFile, bool $mrt = false): void
     {
         $vertSrc = $this->loadShader($vertFile);
         $fragSrc = $this->loadShader($fragFile);
 
-        // Only the übershader (mesh3d = 'default' program) carries the per-material
-        // u_proc_mode ladder. Splice any game-registered proc_mode snippets into its
-        // two sentinels before transpilation; with none registered this is a no-op
-        // (sentinels resolve to empty). The other programs have no sentinels.
-        if ($id === 'default') {
+        // Only the übershader (mesh3d = 'default' program, and its MRT twin)
+        // carries the per-material u_proc_mode ladder. Splice any game-registered
+        // proc_mode snippets into its two sentinels before transpilation; with none
+        // registered this is a no-op (sentinels resolve to empty). The other
+        // programs have no sentinels.
+        if ($id === 'default' || $id === 'default_mrt') {
             $fragSrc = ProcModeShaderRegistry::spliceGlsl($fragSrc, ProcModeShaderRegistry::FAMILY_VIO);
+        }
+        if ($mrt) {
+            $fragSrc = self::withMrtDefine($fragSrc);
         }
 
         $this->compileShader($id, $vertSrc, $fragSrc);
@@ -1738,27 +1823,56 @@ class VioRenderer3D implements Renderer3DInterface
     // Pipeline management
     // ----------------------------------------------------------------
 
+    /**
+     * Bind the scene-geometry pipeline for $pass: 'opaque', 'transparent', or —
+     * MRT path only — 'transparent_water' (transparent that also writes the
+     * G-buffer attachment, for surfaces the SSR pass should reflect off).
+     */
     private function bindPipeline(string $pass): void
     {
         $shaderId = $this->activeShaderId();
         $hdr = $this->sceneTargetIsHdr();
-        // Cache LDR and HDR pipeline variants under distinct keys: on D3D12 the
-        // PSO RTV format (R8 vs FP16) is baked in and must match the bound target.
-        $key = $pass . ':' . $shaderId . ($hdr ? ':hdr' : '');
+        $mrt = $this->mrtThisFrame;
+        // Cache LDR, HDR and MRT pipeline variants under distinct keys: on D3D12
+        // the PSO RTV formats (R8 vs FP16, 1 vs 4 attachments) are baked in and
+        // must match the bound target.
+        $key = $pass . ':' . $shaderId . ($mrt ? ':mrt' : ($hdr ? ':hdr' : ''));
 
         if (!isset($this->pipelineCache[$key])) {
-            $shader = $this->shaderCache[$shaderId] ?? $this->shaderCache['default'];
+            if ($mrt) {
+                // mrtEnabledThisFrame() guarantees the 'default' shader is active
+                // and its MRT twin compiled. Attachments 0-2 are colour (alpha
+                // blend on the transparent pass), attachment 3 is DATA: never
+                // blended, and written only by opaque geometry (+ water for SSR).
+                $cfg = [
+                    'shader' => $this->shaderCache['default_mrt'],
+                    'depth_test' => true,
+                    'cull_mode' => VIO_CULL_NONE,
+                    'blend' => $pass === 'opaque' ? VIO_BLEND_NONE : VIO_BLEND_ALPHA,
+                    'attachments' => self::mrtFormats(),
+                ];
+                if ($pass !== 'opaque') {
+                    $cfg['attachment_blend'] = [VIO_BLEND_ALPHA, VIO_BLEND_ALPHA, VIO_BLEND_ALPHA, VIO_BLEND_NONE];
+                    $cfg['attachment_color_mask'] = [
+                        VIO_COLOR_RGBA, VIO_COLOR_RGBA, VIO_COLOR_RGBA,
+                        $pass === 'transparent_water' ? VIO_COLOR_RGBA : 0,
+                    ];
+                }
+                $pipeline = vio_pipeline($this->ctx, $cfg);
+            } else {
+                $shader = $this->shaderCache[$shaderId] ?? $this->shaderCache['default'];
 
-            $pipeline = vio_pipeline($this->ctx, [
-                'shader' => $shader,
-                'depth_test' => true,
-                'cull_mode' => VIO_CULL_NONE,
-                'blend' => $pass === 'transparent' ? VIO_BLEND_ALPHA : VIO_BLEND_NONE,
-                // FP16 scene target → PSO RTVFormats[0] = R16G16B16A16_FLOAT so
-                // the draw isn't dropped with "render target format does not
-                // match". No-op on backends that derive format from the target.
-                'hdr' => $hdr,
-            ]);
+                $pipeline = vio_pipeline($this->ctx, [
+                    'shader' => $shader,
+                    'depth_test' => true,
+                    'cull_mode' => VIO_CULL_NONE,
+                    'blend' => $pass === 'opaque' ? VIO_BLEND_NONE : VIO_BLEND_ALPHA,
+                    // FP16 scene target → PSO RTVFormats[0] = R16G16B16A16_FLOAT so
+                    // the draw isn't dropped with "render target format does not
+                    // match". No-op on backends that derive format from the target.
+                    'hdr' => $hdr,
+                ]);
+            }
 
             if ($pipeline === false) {
                 return;
@@ -1785,6 +1899,230 @@ class VioRenderer3D implements Renderer3DInterface
     {
         $this->lastMaterialId = null;
         $this->lastMeshId = null;
+        $this->lastGbufferWrite = null;
+    }
+
+    // ----------------------------------------------------------------
+    // MRT scene path (docs/rfcs/mrt-gbuffer.md)
+    // ----------------------------------------------------------------
+
+    /**
+     * The four colour attachments of the MRT scene target: sun light, local
+     * light, AO-modulated ambient, G-buffer (mesh3d.frag with PHPOLYGON_MRT).
+     * All FP16: the lighting is linear HDR and the G-buffer needs the depth
+     * precision (same format the forward G-buffer target used).
+     *
+     * @return list<int>
+     */
+    private static function mrtFormats(): array
+    {
+        return [VIO_FORMAT_RGBA16F, VIO_FORMAT_RGBA16F, VIO_FORMAT_RGBA16F, VIO_FORMAT_RGBA16F];
+    }
+
+    /**
+     * Whether this backend / php-vio build can run the MRT scene path at all
+     * (probed once): VIO_FEATURE_MRT plus the per-attachment blend / write mask
+     * the transparent pass relies on (php-vio ≥ 2.11). PHPOLYGON_VIO_MRT=0
+     * forces the forward path; =1 skips the version gate (a build that has the
+     * feature under an older version string).
+     */
+    private function mrtSupported(): bool
+    {
+        if ($this->mrtSupported !== null) {
+            return $this->mrtSupported;
+        }
+        $env = getenv('PHPOLYGON_VIO_MRT');
+        if ($env === '0') {
+            return $this->mrtSupported = false;
+        }
+        if (!defined('VIO_FEATURE_MRT') || !vio_supports_feature($this->ctx, VIO_FEATURE_MRT)) {
+            return $this->mrtSupported = false;
+        }
+        if ($env !== '1' && version_compare((string) phpversion('vio'), '2.11.0', '<')) {
+            return $this->mrtSupported = false;
+        }
+        return $this->mrtSupported = true;
+    }
+
+    /**
+     * MRT this frame: the backend supports it, the frame actually needs the
+     * G-buffer (otherwise one attachment is strictly cheaper than four), the
+     * built-in shader is active (a game shader override has no MRT outputs), the
+     * MRT shaders compiled, and the scene target is single-sampled (the MRT
+     * target is not multisampled, so MSAA geometry edges would be lost).
+     */
+    private function mrtEnabledThisFrame(): bool
+    {
+        if (!$this->mrtSupported() || !$this->gbufferNeededThisFrame()) {
+            return false;
+        }
+        if ($this->activeShaderId() !== 'default'
+            || !isset($this->shaderCache['default_mrt'], $this->shaderCache['composite'])
+            || $this->screenQuad === null) {
+            return false;
+        }
+        if ($this->offscreenActive && $this->offscreenTarget !== null && $this->offscreenTarget->samples() > 1) {
+            return false;
+        }
+        return true;
+    }
+
+    /** True when the MRT path was taken this frame (test / diagnostic hook). */
+    public function mrtActive(): bool
+    {
+        return $this->mrtThisFrame;
+    }
+
+    /** (Re)allocate the MRT scene target at the scene viewport size. */
+    private function ensureMrtTarget(int $w, int $h): void
+    {
+        $w = max(1, $w);
+        $h = max(1, $h);
+        if ($this->mrtTarget !== null && $this->mrtWidth === $w && $this->mrtHeight === $h) {
+            return;
+        }
+        $this->mrtTarget = vio_render_target($this->ctx, [
+            'width' => $w,
+            'height' => $h,
+            'attachments' => self::mrtFormats(),
+        ]) ?: null;
+        $this->mrtWidth = $w;
+        $this->mrtHeight = $h;
+    }
+
+    /** Attachment 3 of the MRT target — the G-buffer the AO / SSR passes read. */
+    private function mrtGbufferTexture(): ?VioTexture
+    {
+        if ($this->mrtTarget === null) {
+            return null;
+        }
+        return vio_render_target_texture($this->mrtTarget, 3);
+    }
+
+    /**
+     * Bind the target the finished scene belongs in: the legacy HDR target, the
+     * render-scale / AA offscreen target, renderToImage()'s external target, or
+     * (nothing to bind) the swapchain. The forward path binds it before the sky;
+     * the MRT path binds it for the composite.
+     */
+    private function bindSceneTarget(?VioRenderTarget $hdrTarget): void
+    {
+        if ($hdrTarget !== null) {
+            vio_bind_render_target($this->ctx, $hdrTarget);
+            vio_clear($this->ctx, 0, 0, 0, 1);
+        } elseif ($this->offscreenActive && $this->offscreenTarget !== null) {
+            // The shadow pass unbinds its own target; restore the Phase 1.5
+            // offscreen target for the main scene draws.
+            $this->offscreenTarget->bindForDraw();
+        } elseif ($this->externalSceneTarget !== null) {
+            // renderToImage(): the shadow / SSAO / env-cube passes above left the
+            // swapchain bound — the scene belongs in the caller's target.
+            vio_bind_render_target($this->ctx, $this->externalSceneTarget);
+        }
+    }
+
+    /**
+     * SSAO (occlusion + blur) and SDF-AO from the G-buffer attachment of the MRT
+     * target, after the geometry passes. Same passes as the forward path minus
+     * the G-buffer geometry pass. Sets ssaoActiveThisFrame / sdfAoActiveThisFrame
+     * for compositeMrt().
+     *
+     * @param array{dirLights: list<SetDirectionalLight>, ftAoRadius: float, ...} $frameState
+     */
+    private function renderAoFromMrt(array $frameState): void
+    {
+        $this->ssaoActiveThisFrame = false;
+        $this->sdfAoActiveThisFrame = false;
+        $gbufferTex = $this->mrtGbufferTexture();
+        if ($gbufferTex === null) {
+            return;
+        }
+        if ($this->ssaoEnabledThisFrame()) {
+            $this->ensureSsaoTargets(false);
+            $ssao = $this->ssaoTarget;
+            $blur = $this->ssaoBlurTarget;
+            if ($ssao !== null && $blur !== null) {
+                $halfW = max(1, (int) (max(1, $this->gbufferWidth) / 2));
+                $halfH = max(1, (int) (max(1, $this->gbufferHeight) / 2));
+                $this->renderSsaoOcclusion($gbufferTex, $ssao, $blur, $halfW, $halfH);
+            }
+        }
+        $this->renderSdfAoPass($frameState, $gbufferTex);
+    }
+
+    /**
+     * Fold the MRT attachments into the bound scene target:
+     *   colour = sun · sdfShadow + local + ambient · ssao · sdfAo
+     * (composite.frag), tonemapping when the scene target is LDR. Alpha-blended
+     * so untouched pixels keep the target's clear colour, like the forward path.
+     */
+    private function compositeMrt(): void
+    {
+        $quad = $this->screenQuad;
+        $mrt = $this->mrtTarget;
+        if ($quad === null || $mrt === null) {
+            return;
+        }
+        $hdr = $this->sceneTargetIsHdr();
+        $this->bindCompositePipeline($hdr);
+
+        foreach (['u_sun', 'u_local', 'u_ambient'] as $i => $name) {
+            vio_bind_texture($this->ctx, vio_render_target_texture($mrt, $i), $i);
+            vio_set_uniform($this->ctx, $name, $i);
+        }
+
+        $this->ensureWhiteTexture();
+        $ssaoOn = $this->ssaoActiveThisFrame && $this->ssaoBlurTarget !== null;
+        $ssaoTex = $ssaoOn ? vio_render_target_texture($this->ssaoBlurTarget) : $this->whiteTexture;
+        if ($ssaoTex !== null) {
+            vio_bind_texture($this->ctx, $ssaoTex, 3);
+            vio_set_uniform($this->ctx, 'u_ssao_map', 3);
+        }
+        vio_set_uniform($this->ctx, 'u_ssao_enabled', $ssaoOn ? 1 : 0);
+
+        $sdfOn = $this->sdfAoActiveThisFrame && $this->sdfAoBlurTarget !== null;
+        $sdfTex = $sdfOn ? vio_render_target_texture($this->sdfAoBlurTarget) : $this->whiteTexture;
+        if ($sdfTex !== null) {
+            vio_bind_texture($this->ctx, $sdfTex, 4);
+            vio_set_uniform($this->ctx, 'u_sdf_ao_map', 4);
+        }
+        vio_set_uniform($this->ctx, 'u_sdf_ao_enabled', $sdfOn ? 1.0 : 0.0);
+        vio_set_uniform($this->ctx, 'u_linear_output', $hdr ? 1 : 0);
+
+        vio_draw($this->ctx, $quad);
+    }
+
+    /** Composite pipeline: fullscreen, depth off, ALPHA blend, LDR or FP16 PSO. */
+    private function bindCompositePipeline(bool $hdr): void
+    {
+        $key = 'postprocess:composite:alpha' . ($hdr ? ':hdr' : '');
+        if (!isset($this->pipelineCache[$key])) {
+            $pipeline = vio_pipeline($this->ctx, [
+                'shader' => $this->shaderCache['composite'],
+                'depth_test' => false,
+                'cull_mode' => VIO_CULL_NONE,
+                'blend' => VIO_BLEND_ALPHA,
+                'hdr' => $hdr,
+            ]);
+            if ($pipeline === false) {
+                return;
+            }
+            $this->pipelineCache[$key] = $pipeline;
+        }
+        vio_bind_pipeline($this->ctx, $this->pipelineCache[$key]);
+    }
+
+    /**
+     * Inject `#define PHPOLYGON_MRT 1` right after the #version line so the same
+     * GLSL source compiles as its four-output MRT variant.
+     */
+    private static function withMrtDefine(string $src): string
+    {
+        $define = "#define PHPOLYGON_MRT 1\n";
+        if (preg_match('/^\s*#version[^\n]*\n/', $src, $m) === 1) {
+            return $m[0] . $define . substr($src, strlen($m[0]));
+        }
+        return $define . $src;
     }
 
     /**
@@ -2101,7 +2439,7 @@ class VioRenderer3D implements Renderer3DInterface
         $viewMatrix = $this->currentViewMatrix;
         $projMatrix = $this->currentProjectionMatrix;
 
-        $this->ensureSsaoTargets();
+        $this->ensureSsaoTargets(true);
         $gbuffer = $this->gbufferTarget;
         $ssao    = $this->ssaoTarget;
         $blur    = $this->ssaoBlurTarget;
@@ -2166,7 +2504,7 @@ class VioRenderer3D implements Renderer3DInterface
         // skips them (the G-buffer is enough for the SSR pass). The water-append
         // below runs regardless, so do it after this block via a goto-free split.
         if ($this->ssaoEnabledThisFrame()) {
-            $this->renderSsaoOcclusion($gbuffer, $ssao, $blur, $halfW, $halfH);
+            $this->renderSsaoOcclusion(vio_render_target_texture($gbuffer), $ssao, $blur, $halfW, $halfH);
         }
 
         // Reflective TRANSPARENT surfaces (water) into the G-buffer — AFTER SSAO
@@ -2184,7 +2522,7 @@ class VioRenderer3D implements Renderer3DInterface
      * ssaoActiveThisFrame on success.
      */
     private function renderSsaoOcclusion(
-        VioRenderTarget $gbuffer,
+        VioTexture $gbufferTex,
         VioRenderTarget $ssao,
         VioRenderTarget $blur,
         int $halfW,
@@ -2213,7 +2551,7 @@ class VioRenderer3D implements Renderer3DInterface
         vio_viewport($this->ctx, 0, 0, $halfW, $halfH);
         vio_clear($this->ctx, 1, 1, 1, 1);
         $this->bindPostProcessPipeline('ssao');
-        vio_bind_texture($this->ctx, vio_render_target_texture($gbuffer), 0);
+        vio_bind_texture($this->ctx, $gbufferTex, 0);
         vio_set_uniform($this->ctx, 'u_gbuffer', 0);
         vio_set_uniform($this->ctx, 'u_noise_scale', [$halfW / 4.0, $halfH / 4.0]);
         vio_set_uniform($this->ctx, 'u_proj00', $proj00);
@@ -2340,7 +2678,7 @@ class VioRenderer3D implements Renderer3DInterface
      * and re-bind it as the composite RT (alpha-blending the separate ssr target
      * over it — no read+write of the same resource).
      */
-    private function renderSsrPass(): void
+    private function renderSsrPass(?VioTexture $gbufferTex = null): void
     {
         if (!$this->ssrEnabledThisFrame()
             || $this->currentProjectionMatrix === null
@@ -2356,8 +2694,10 @@ class VioRenderer3D implements Renderer3DInterface
         $screenQuad  = $this->screenQuad;
         $projMatrix  = $this->currentProjectionMatrix;
 
-        $gbuffer = $this->gbufferTarget;
-        if ($gbuffer === null) {
+        if ($gbufferTex === null && $this->gbufferTarget !== null) {
+            $gbufferTex = vio_render_target_texture($this->gbufferTarget);
+        }
+        if ($gbufferTex === null) {
             return; // G-buffer wasn't built (backend refused an RT)
         }
         $this->ensureSsrTarget();
@@ -2392,7 +2732,7 @@ class VioRenderer3D implements Renderer3DInterface
         // Clear to 0 (rgb=0, a=0): a miss leaves weight 0 → composite no-ops.
         vio_clear($this->ctx, 0, 0, 0, 0);
         $this->bindPostProcessPipeline('ssr', true); // FP16 target → hdr PSO
-        vio_bind_texture($this->ctx, vio_render_target_texture($gbuffer), 0);
+        vio_bind_texture($this->ctx, $gbufferTex, 0);
         vio_set_uniform($this->ctx, 'u_gbuffer', 0);
         vio_bind_texture($this->ctx, $sceneTex, 1);
         vio_set_uniform($this->ctx, 'u_scene', 1);
@@ -2474,6 +2814,21 @@ class VioRenderer3D implements Renderer3DInterface
      */
     private function uploadSsaoUniforms(): void
     {
+        // MRT path: the AO map does not exist yet (SSAO runs after the geometry
+        // and compositeMrt() applies it). u_ssao_enabled then means "real SSAO
+        // will be applied" so mesh3d.frag skips its curvature-AO fallback; the
+        // sampler gets the white placeholder (the shader never reads it).
+        if ($this->mrtThisFrame) {
+            $this->ensureWhiteTexture();
+            if ($this->whiteTexture !== null) {
+                vio_bind_texture($this->ctx, $this->whiteTexture, self::SSAO_SAMPLER_SLOT);
+                vio_set_uniform($this->ctx, 'u_ssao_map', self::SSAO_SAMPLER_SLOT);
+            }
+            vio_set_uniform($this->ctx, 'u_ssao_enabled', $this->ssaoEnabledThisFrame() ? 1 : 0);
+            vio_set_uniform($this->ctx, 'u_ssao_uv_flip_y', 1.0);
+            return;
+        }
+
         $enabled = $this->ssaoActiveThisFrame && $this->ssaoBlurTarget !== null;
 
         if ($enabled) {
@@ -2607,11 +2962,12 @@ class VioRenderer3D implements Renderer3DInterface
      * half-res is invisible and ~4x cheaper). Rebuilt whenever the backbuffer
      * size changes — same trigger as ensureBloomTargets().
      */
-    private function ensureSsaoTargets(): void
+    private function ensureSsaoTargets(bool $withGbuffer = true): void
     {
         $fw = max(1, $this->backbufferWidth);
         $fh = max(1, $this->backbufferHeight);
-        if ($this->gbufferTarget !== null
+        if ($this->ssaoTarget !== null && $this->ssaoBlurTarget !== null
+            && (!$withGbuffer || $this->gbufferTarget !== null)
             && $this->gbufferWidth === $fw && $this->gbufferHeight === $fh) {
             return;
         }
@@ -2623,7 +2979,11 @@ class VioRenderer3D implements Renderer3DInterface
         // target AND an hdr-output G-buffer pipeline (bindGbufferPipeline) so the
         // D3D12 PSO RTV format matches the bound target. SSAO + blur stay default
         // RGBA8 (LDR) — the AO is a single 0..1 value in R, no FP16 needed.
-        $this->gbufferTarget   = vio_render_target($this->ctx, ['width' => $fw, 'height' => $fh, 'hdr' => true]) ?: null;
+        // MRT path: the G-buffer lives in the scene MRT target (attachment 3);
+        // only the forward path needs the separate full-res target.
+        $this->gbufferTarget   = $withGbuffer
+            ? (vio_render_target($this->ctx, ['width' => $fw, 'height' => $fh, 'hdr' => true]) ?: null)
+            : null;
         $this->ssaoTarget      = vio_render_target($this->ctx, ['width' => $hw, 'height' => $hh]) ?: null;
         $this->ssaoBlurTarget  = vio_render_target($this->ctx, ['width' => $hw, 'height' => $hh]) ?: null;
         $this->gbufferWidth  = $fw;
@@ -2993,7 +3353,7 @@ class VioRenderer3D implements Renderer3DInterface
         // the clip→world mapping we need is inverse(projection * rotView).
         $invVP = $projMatrix->multiply($rotView)->inverse()->toArray();
 
-        $this->drawSkyLayers($sky, $invVP, $this->sceneTargetIsHdr());
+        $this->drawSkyLayers($sky, $invVP, $this->sceneTargetIsHdr(), $this->mrtThisFrame);
     }
 
     /**
@@ -3044,7 +3404,7 @@ class VioRenderer3D implements Renderer3DInterface
      *
      * @param float[] $invVP column-major float[16]
      */
-    private function drawSkyLayers(SetSky $sky, array $invVP, bool $hdr): void
+    private function drawSkyLayers(SetSky $sky, array $invVP, bool $hdr, bool $mrt = false): void
     {
         $quad = $this->screenQuad;
         if ($quad === null) {
@@ -3060,7 +3420,7 @@ class VioRenderer3D implements Renderer3DInterface
         // its own shader (sky_*.frag.glsl), editable/toggleable on its own.
 
         // 1. Base gradient (opaque) — always.
-        $this->bindSkyPipeline('sky_gradient', VIO_BLEND_NONE, $hdr);
+        $this->bindSkyPipeline('sky_gradient', VIO_BLEND_NONE, $hdr, $mrt);
         vio_set_uniform($this->ctx, 'u_sky_inv_vp', $invVP);
         vio_set_uniform($this->ctx, 'u_zenith_color', [$sky->zenithColor->r, $sky->zenithColor->g, $sky->zenithColor->b]);
         vio_set_uniform($this->ctx, 'u_horizon_color', [$sky->horizonColor->r, $sky->horizonColor->g, $sky->horizonColor->b]);
@@ -3069,7 +3429,7 @@ class VioRenderer3D implements Renderer3DInterface
 
         // 2. Sun (additive).
         if ($sky->sunIntensity > 0.0) {
-            $this->bindSkyPipeline('sky_sun', VIO_BLEND_ADDITIVE, $hdr);
+            $this->bindSkyPipeline('sky_sun', VIO_BLEND_ADDITIVE, $hdr, $mrt);
             vio_set_uniform($this->ctx, 'u_sky_inv_vp', $invVP);
             vio_set_uniform($this->ctx, 'u_sun_direction', [$sunDir->x, $sunDir->y, $sunDir->z]);
             vio_set_uniform($this->ctx, 'u_sun_color', [$sky->sunColor->r, $sky->sunColor->g, $sky->sunColor->b]);
@@ -3083,7 +3443,7 @@ class VioRenderer3D implements Renderer3DInterface
         // 3. Moon (additive).
         if ($sky->moonIntensity > 0.0) {
             $moonDir = $sky->moonDirection ?? new Vec3(0.0, -1.0, 0.0);
-            $this->bindSkyPipeline('sky_moon', VIO_BLEND_ADDITIVE, $hdr);
+            $this->bindSkyPipeline('sky_moon', VIO_BLEND_ADDITIVE, $hdr, $mrt);
             vio_set_uniform($this->ctx, 'u_sky_inv_vp', $invVP);
             vio_set_uniform($this->ctx, 'u_moon_direction', [$moonDir->x, $moonDir->y, $moonDir->z]);
             vio_set_uniform($this->ctx, 'u_moon_color', [$sky->moonColor->r, $sky->moonColor->g, $sky->moonColor->b]);
@@ -3095,7 +3455,7 @@ class VioRenderer3D implements Renderer3DInterface
 
         // 4. Stars (additive).
         if ($sky->starBrightness > 0.0) {
-            $this->bindSkyPipeline('sky_stars', VIO_BLEND_ADDITIVE, $hdr);
+            $this->bindSkyPipeline('sky_stars', VIO_BLEND_ADDITIVE, $hdr, $mrt);
             vio_set_uniform($this->ctx, 'u_sky_inv_vp', $invVP);
             vio_set_uniform($this->ctx, 'u_star_brightness', $sky->starBrightness);
             vio_draw($this->ctx, $quad);
@@ -3109,7 +3469,7 @@ class VioRenderer3D implements Renderer3DInterface
             $wx = $wl > 1e-6 ? $wd->x / $wl : 1.0;
             $wz = $wl > 1e-6 ? $wd->z / $wl : 0.0;
 
-            $this->bindSkyPipeline('sky_clouds', VIO_BLEND_ALPHA, $hdr);
+            $this->bindSkyPipeline('sky_clouds', VIO_BLEND_ALPHA, $hdr, $mrt);
             vio_set_uniform($this->ctx, 'u_sky_inv_vp', $invVP);
             vio_set_uniform($this->ctx, 'u_camera_pos', [$camPos->x, $camPos->y, $camPos->z]);
             vio_set_uniform($this->ctx, 'u_sun_direction', [$sunDir->x, $sunDir->y, $sunDir->z]);
@@ -3127,7 +3487,7 @@ class VioRenderer3D implements Renderer3DInterface
 
         // 6. Horizon haze (alpha).
         if ($sky->fogDensity > 0.0) {
-            $this->bindSkyPipeline('sky_haze', VIO_BLEND_ALPHA, $hdr);
+            $this->bindSkyPipeline('sky_haze', VIO_BLEND_ALPHA, $hdr, $mrt);
             vio_set_uniform($this->ctx, 'u_sky_inv_vp', $invVP);
             vio_set_uniform($this->ctx, 'u_horizon_color', [$sky->horizonColor->r, $sky->horizonColor->g, $sky->horizonColor->b]);
             vio_set_uniform($this->ctx, 'u_fog_density', $sky->fogDensity);
@@ -3141,16 +3501,16 @@ class VioRenderer3D implements Renderer3DInterface
      * NONE for the opaque gradient, ADDITIVE for emissive elements (sun/moon/
      * stars), ALPHA for clouds/haze.
      */
-    private function bindSkyPipeline(string $shaderId, int $blend, ?bool $hdrOverride = null): void
+    private function bindSkyPipeline(string $shaderId, int $blend, ?bool $hdrOverride = null, bool $mrt = false): void
     {
         $hdr = $hdrOverride ?? $this->sceneTargetIsHdr();
-        $key = 'sky:' . $shaderId . ($hdr ? ':hdr' : '');
+        $key = 'sky:' . $shaderId . ($mrt ? ':mrt' : ($hdr ? ':hdr' : ''));
         if (!isset($this->pipelineCache[$key])) {
-            $shader = $this->shaderCache[$shaderId] ?? null;
+            $shader = $this->shaderCache[$mrt ? $shaderId . '_mrt' : $shaderId] ?? null;
             if ($shader === null) {
                 return;
             }
-            $pipeline = vio_pipeline($this->ctx, [
+            $cfg = [
                 'shader' => $shader,
                 'depth_test' => false,
                 'cull_mode' => VIO_CULL_NONE,
@@ -3158,7 +3518,16 @@ class VioRenderer3D implements Renderer3DInterface
                 // Sky draws into the FP16 scene target on the HDR path — match
                 // the PSO RTV format. No-op off D3D12.
                 'hdr' => $hdr,
-            ]);
+            ];
+            if ($mrt) {
+                // Into the MRT scene target the sky is unlit local light: write
+                // attachment 1 only (with this layer's blend), leave sun / ambient
+                // at 0 and the G-buffer at its cleared "sky" value.
+                $cfg['attachments'] = self::mrtFormats();
+                $cfg['attachment_blend'] = [VIO_BLEND_NONE, $blend, VIO_BLEND_NONE, VIO_BLEND_NONE];
+                $cfg['attachment_color_mask'] = [0, VIO_COLOR_RGBA, 0, 0];
+            }
+            $pipeline = vio_pipeline($this->ctx, $cfg);
             if ($pipeline === false) {
                 return;
             }
@@ -3170,7 +3539,7 @@ class VioRenderer3D implements Renderer3DInterface
         // sun/moon/stars passes inverse-tonemap their additive contribution too,
         // so an isolated disc/glow round-trips to its LDR appearance (no
         // over-bright/over-spread under HDR).
-        vio_set_uniform($this->ctx, 'u_linear_output', $hdr ? 1 : 0);
+        vio_set_uniform($this->ctx, 'u_linear_output', ($hdr || $mrt) ? 1 : 0);
     }
 
     private function renderSkybox(string $cubemapId): void
@@ -3190,6 +3559,8 @@ class VioRenderer3D implements Renderer3DInterface
 
         // Skybox pipeline: depth test LEQUAL, no cull (inside of cube)
         $this->bindSkyboxPipeline();
+        // Display-referred cubemap into a linear target (FP16 scene or MRT composite).
+        vio_set_uniform($this->ctx, 'u_linear_output', ($this->sceneTargetIsHdr() || $this->mrtThisFrame) ? 1 : 0);
 
         // View matrix without translation (skybox follows camera)
         $vm = $viewMatrix->toArray();
@@ -3212,10 +3583,11 @@ class VioRenderer3D implements Renderer3DInterface
     private function bindSkyboxPipeline(): void
     {
         $hdr = $this->sceneTargetIsHdr();
-        $key = 'skybox:skybox' . ($hdr ? ':hdr' : '');
+        $mrt = $this->mrtThisFrame;
+        $key = 'skybox:skybox' . ($mrt ? ':mrt' : ($hdr ? ':hdr' : ''));
 
         if (!isset($this->pipelineCache[$key])) {
-            $shader = $this->shaderCache['skybox'];
+            $shader = $this->shaderCache[$mrt ? 'skybox_mrt' : 'skybox'] ?? $this->shaderCache['skybox'];
 
             // Skybox is rendered FIRST (before opaque geometry) with depth
             // test disabled. The cube fills every pixel with cubemap color;
@@ -3223,14 +3595,20 @@ class VioRenderer3D implements Renderer3DInterface
             // This avoids the classic .xyww far-plane trick which doesn't
             // survive SPIRV-Cross's HLSL depth-convention fixup, and it
             // also avoids far-plane clipping at the cube's diagonal corners.
-            $pipeline = vio_pipeline($this->ctx, [
+            $cfg = [
                 'shader' => $shader,
                 'depth_test' => false,
                 'cull_mode' => VIO_CULL_NONE,
                 'blend' => VIO_BLEND_NONE,
                 // Skybox draws into the FP16 scene target on the HDR path.
                 'hdr' => $hdr,
-            ]);
+            ];
+            if ($mrt) {
+                // Local (unlit) light only — see bindSkyPipeline().
+                $cfg['attachments'] = self::mrtFormats();
+                $cfg['attachment_color_mask'] = [0, VIO_COLOR_RGBA, 0, 0];
+            }
+            $pipeline = vio_pipeline($this->ctx, $cfg);
 
             if ($pipeline === false) {
                 return;
@@ -3308,7 +3686,7 @@ class VioRenderer3D implements Renderer3DInterface
     // Drawing
     // ----------------------------------------------------------------
 
-    private function drawMeshCommand(string $meshId, Material $material, Mat4 $modelMatrix, string $materialId = ''): void
+    private function drawMeshCommand(string $meshId, Material $material, Mat4 $modelMatrix, string $materialId = '', bool $excludeFromGbuffer = false): void
     {
         $mesh = $this->uploadMesh($meshId);
         if ($mesh === null) {
@@ -3321,6 +3699,7 @@ class VioRenderer3D implements Renderer3DInterface
             'u_use_instancing' => 0,
             'u_normal_matrix'  => $this->computeNormalMatrix($modelMatrix),
         ]);
+        $this->applyGbufferWrite($excludeFromGbuffer ? 0 : 1);
 
         // Sticky-uniform dedup: skip the ~28 material uniforms / mesh AABB when
         // unchanged from the previous draw (the opaque pass sorts by material+mesh
@@ -3336,6 +3715,21 @@ class VioRenderer3D implements Renderer3DInterface
         }
 
         vio_draw($this->ctx, $mesh);
+    }
+
+    /**
+     * MRT path: u_gbuffer_write tells mesh3d.frag whether this draw writes the
+     * G-buffer attachment (0 = excludeFromGbuffer, the dynamic-object opt-out the
+     * forward G-buffer pass honoured by skipping the draw). Sticky: uploaded only
+     * when it changes; reset at pipeline binds.
+     */
+    private function applyGbufferWrite(int $write): void
+    {
+        if (!$this->mrtThisFrame || $write === $this->lastGbufferWrite) {
+            return;
+        }
+        vio_set_uniform($this->ctx, 'u_gbuffer_write', $write);
+        $this->lastGbufferWrite = $write;
     }
 
     private function drawMeshInstancedCommand(DrawMeshInstanced $cmd, Material $material): void
@@ -3366,6 +3760,7 @@ class VioRenderer3D implements Renderer3DInterface
             $this->lastMeshId = $cmd->meshId;
         }
         vio_set_uniform($this->ctx, 'u_use_instancing', 1);
+        $this->applyGbufferWrite(1);
 
         // Readback-free path (Path B): the instance matrices are a GPU-resident
         // SSBO written by a compute pass. Bind it to the vertex stage and draw
@@ -3654,7 +4049,17 @@ class VioRenderer3D implements Renderer3DInterface
         // Linear output: when the scene target is FP16 (HDR offscreen path) the
         // mesh shader skips its inline ACES+gamma and writes unclamped linear
         // colour; the resolve pass tonemaps. Otherwise it tonemaps inline (LDR).
-        vio_set_uniform($this->ctx, 'u_linear_output', $this->sceneTargetIsHdr() ? 1 : 0);
+        // The MRT attachments are always linear: compositeMrt() tonemaps for an
+        // LDR scene target.
+        vio_set_uniform($this->ctx, 'u_linear_output', ($this->sceneTargetIsHdr() || $this->mrtThisFrame) ? 1 : 0);
+        if ($this->mrtThisFrame) {
+            // Fragment-stage copy of the view matrix for the G-buffer attachment
+            // (view normal + linear view depth), and the default "writes the
+            // G-buffer" — a fresh cbuffer would read 0 = opted out.
+            vio_set_uniform($this->ctx, 'u_gbuffer_view', $this->currentViewMatrix->toArray());
+            vio_set_uniform($this->ctx, 'u_gbuffer_write', 1);
+            $this->lastGbufferWrite = 1;
+        }
 
         if ($this->cameraPosition !== null) {
             vio_set_uniform($this->ctx, 'u_camera_pos', [

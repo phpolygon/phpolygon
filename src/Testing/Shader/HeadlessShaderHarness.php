@@ -60,6 +60,10 @@ final class HeadlessShaderHarness
     /** Lazy 1x1 samplerCube, bound to the reflection-environment sampler. */
     private ?VioCubemap $dummyCubemap = null;
 
+    /** Offscreen render targets for {@see renderToTargetAndRead}, keyed by attachment formats. */
+    /** @var array<string, VioRenderTarget> */
+    private array $targetCache = [];
+
     private function __construct(
         VioContext $ctx,
         public readonly int $width,
@@ -121,6 +125,7 @@ final class HeadlessShaderHarness
         $this->shaderCache   = [];
         $this->pipelineCache = [];
         $this->meshCache     = [];
+        $this->targetCache   = [];
         $this->dummyTexture2D = null;
         $this->dummyTexture3D = null;
         $this->dummyCubemap   = null;
@@ -132,9 +137,14 @@ final class HeadlessShaderHarness
      * shader source directory (`resources/shaders/source/`). Cached by
      * (vertex, fragment) path pair so subsequent tests reuse the program.
      */
-    public function compileShaderFromFiles(string $vertexFile, string $fragmentFile): VioShader
+    /**
+     * @param list<string> $fragmentDefines preprocessor symbols defined (= 1) right
+     *        after the fragment source's #version line — e.g. PHPOLYGON_MRT selects
+     *        the mesh shader's four-output variant, exactly as VioRenderer3D does.
+     */
+    public function compileShaderFromFiles(string $vertexFile, string $fragmentFile, array $fragmentDefines = []): VioShader
     {
-        $key = $vertexFile . '|' . $fragmentFile;
+        $key = $vertexFile . '|' . $fragmentFile . '|' . implode(',', $fragmentDefines);
         if (isset($this->shaderCache[$key])) {
             return $this->shaderCache[$key];
         }
@@ -146,6 +156,9 @@ final class HeadlessShaderHarness
             throw new \RuntimeException(
                 "Shader source not found: vertex={$vertexFile}, fragment={$fragmentFile}",
             );
+        }
+        foreach (array_reverse($fragmentDefines) as $define) {
+            $fragSrc = self::withDefine($fragSrc, $define);
         }
 
         $shader = vio_shader($this->ctx, [
@@ -159,6 +172,124 @@ final class HeadlessShaderHarness
 
         $this->shaderCache[$key] = $shader;
         return $shader;
+    }
+
+    /** Insert `#define NAME 1` after the #version line (or at the top). */
+    private static function withDefine(string $src, string $name): string
+    {
+        $define = "#define {$name} 1\n";
+        if (preg_match('/^\s*#version[^\n]*\n/', $src, $m) === 1) {
+            return $m[0] . $define . substr($src, strlen($m[0]));
+        }
+        return $define . $src;
+    }
+
+    /** Whether the harness backend reports a VIO_FEATURE_* capability. */
+    public function supportsFeature(int $feature): bool
+    {
+        return vio_supports_feature($this->ctx, $feature);
+    }
+
+    /**
+     * Pipeline that draws into an offscreen target with the given colour
+     * attachment formats (one entry = a plain FP16/RGBA8 target, several = MRT).
+     * $attachmentBlend / $attachmentColorMask are the per-attachment overrides
+     * VioRenderer3D uses for its transparent and sky MRT pipelines.
+     *
+     * @param list<int>      $formats            VIO_FORMAT_* per attachment
+     * @param list<int>|null $attachmentBlend     VIO_BLEND_* per attachment
+     * @param list<int>|null $attachmentColorMask VIO_COLOR_* per attachment (0 = write nothing)
+     */
+    public function createTargetPipeline(
+        VioShader $shader,
+        array $formats,
+        bool $depthTest = false,
+        int $blend = VIO_BLEND_NONE,
+        ?array $attachmentBlend = null,
+        ?array $attachmentColorMask = null,
+    ): VioPipeline {
+        $key = spl_object_id($shader) . ':' . implode(',', $formats) . ":{$depthTest}:{$blend}:"
+            . json_encode($attachmentBlend) . ':' . json_encode($attachmentColorMask);
+        if (isset($this->pipelineCache[$key])) {
+            return $this->pipelineCache[$key];
+        }
+        $cfg = [
+            'shader'      => $shader,
+            'depth_test'  => $depthTest,
+            'cull_mode'   => VIO_CULL_NONE,
+            'blend'       => $blend,
+            'attachments' => $formats,
+            'hdr'         => $formats[0] === VIO_FORMAT_RGBA16F,
+        ];
+        if ($attachmentBlend !== null) {
+            $cfg['attachment_blend'] = $attachmentBlend;
+        }
+        if ($attachmentColorMask !== null) {
+            $cfg['attachment_color_mask'] = $attachmentColorMask;
+        }
+        $pipeline = vio_pipeline($this->ctx, $cfg);
+        if ($pipeline === false) {
+            throw new \RuntimeException('vio_pipeline failed (attachments ' . implode(',', $formats) . ')');
+        }
+        $this->pipelineCache[$key] = $pipeline;
+        return $pipeline;
+    }
+
+    /**
+     * Draw into an offscreen target with the given attachment formats and read
+     * every attachment back. Unlike {@see renderAndRead} (headless framebuffer,
+     * RGBA8) this reads real render targets, so FP16 and multi-attachment output
+     * can be asserted; the read-back is RGBA8 (values clamped to 0..1, top-down)
+     * on every backend.
+     *
+     * @param callable(self): void $setUniforms
+     * @param list<int>            $formats VIO_FORMAT_* per attachment
+     * @return list<string> one Width*Height*4 RGBA buffer per attachment
+     */
+    public function renderToTargetAndRead(
+        VioPipeline $pipeline,
+        VioMesh $mesh,
+        callable $setUniforms,
+        array $formats,
+        float $clearR = 0.0,
+        float $clearG = 0.0,
+        float $clearB = 0.0,
+        float $clearA = 0.0,
+    ): array {
+        // Targets are created OUTSIDE vio_begin/end (see open()).
+        $key = implode(',', $formats);
+        if (!isset($this->targetCache[$key])) {
+            $rt = vio_render_target($this->ctx, [
+                'width'       => $this->width,
+                'height'      => $this->height,
+                'attachments' => $formats,
+            ]);
+            if ($rt === false) {
+                throw new \RuntimeException("vio_render_target failed (attachments {$key})");
+            }
+            $this->targetCache[$key] = $rt;
+        }
+        $rt = $this->targetCache[$key];
+
+        vio_begin($this->ctx);
+        vio_bind_render_target($this->ctx, $rt);
+        vio_viewport($this->ctx, 0, 0, $this->width, $this->height);
+        vio_clear($this->ctx, $clearR, $clearG, $clearB, $clearA);
+        vio_bind_pipeline($this->ctx, $pipeline);
+        $setUniforms($this);
+        vio_draw($this->ctx, $mesh);
+        vio_unbind_render_target($this->ctx);
+        vio_end($this->ctx);
+
+        $out = [];
+        foreach (array_keys($formats) as $i) {
+            $pixels = vio_read_render_target($rt, -1, $i);
+            if ($pixels === false) {
+                throw new \RuntimeException("vio_read_render_target failed for attachment {$i}");
+            }
+            $out[] = $pixels;
+        }
+        return $out;
     }
 
     /**

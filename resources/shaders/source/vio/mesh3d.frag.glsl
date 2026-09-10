@@ -170,7 +170,30 @@ uniform float u_ssao_uv_flip_y;
 uniform float     u_sdf_ao_enabled;   // float: int-in-UBO is unreliable across SPIRV-Cross targets
 uniform sampler2D u_sdf_ao_map;
 
+#ifdef PHPOLYGON_MRT
+// Deferred-composite path (engine RFC docs/rfcs/mrt-gbuffer.md). The lit result is
+// SPLIT so a later fullscreen composite can apply the screen-space AO terms exactly
+// where this shader applies them on the single-target path, and the G-buffer rides
+// along as a fourth attachment instead of costing a second geometry pass:
+//   o_sun      primary directional light only (the SDF soft sun shadow multiplies it)
+//   o_local    everything else that is NOT AO-modulated: other lights, IBL, clearcoat,
+//              emission, fog colour, volumetrics, unlit/sky output
+//   o_ambient  the AO-modulated terms: flat ambient + probe GI
+//   o_gbuffer  gbuffer.frag's layout (oct view normal, reflectivity, linear depth)
+// All four are written linear; composite.frag tonemaps for LDR scene targets.
+layout(location = 0) out vec4 o_sun;
+layout(location = 1) out vec4 o_local;
+layout(location = 2) out vec4 o_ambient;
+layout(location = 3) out vec4 o_gbuffer;
+// Snippets that end a fragment early (`frag_color = outputColor(...); return;`) keep
+// working unchanged: their unlit colour is local light, and every attachment was
+// initialised at the top of main().
+#define frag_color o_local
+uniform mat4 u_gbuffer_view;   // camera view matrix (fragment-stage copy)
+uniform int  u_gbuffer_write;  // 0 => this draw opts out of the G-buffer (excludeFromGbuffer)
+#else
 out vec4 frag_color;
+#endif
 
 // ================================================================
 //  Noise — lightweight
@@ -458,6 +481,49 @@ vec4 outputColor(vec3 color, float alpha) {
     return vec4(color, alpha);
 }
 
+// Game post-colour hook (PHPOLYGON:POSTCOLOR). Wrapped in a function so the MRT
+// path can evaluate it as an affine map: hook(c) = S * c + A with A = hook(0),
+// S = hook(1) - A, and distribute S/A exactly over the split outputs. Any hook that
+// is affine in the colour (tints, fades, absorption) round-trips exactly; the
+// single-target path still applies it to the summed colour as before.
+vec3 applyPostColor(vec3 color) {
+    // PHPOLYGON:POSTCOLOR
+    return color;
+}
+
+#ifdef PHPOLYGON_MRT
+// Octahedral normal encoding — identical to gbuffer.frag so ssao/sdf_ao/ssr decode
+// it unchanged (full-sphere, never flips a normal).
+vec2 octWrap(vec2 v) {
+    return (1.0 - abs(v.yx)) * vec2(v.x >= 0.0 ? 1.0 : -1.0, v.y >= 0.0 ? 1.0 : -1.0);
+}
+vec2 octEncode(vec3 n) {
+    n /= (abs(n.x) + abs(n.y) + abs(n.z));
+    n.xy = n.z >= 0.0 ? n.xy : octWrap(n.xy);
+    return n.xy;
+}
+// gbuffer.frag's fragment, evaluated from the forward pass's inputs: view-space
+// geometric normal (before procedural perturbation, like the G-buffer pass), the
+// material reflectivity (metallic / smoothness / wetness with the ocean shoreline
+// fade) and linear view depth. a == 0 marks sky for the AO passes, so an opted-out
+// draw writes zeros.
+vec4 gbufferValue(vec3 worldN) {
+    if (u_gbuffer_write == 0) return vec4(0.0);
+    vec3 n = normalize(mat3(u_gbuffer_view) * worldN);
+    float linearDepth = -(u_gbuffer_view * vec4(v_worldPos, 1.0)).z;
+    float smoothness = 1.0 - clamp(u_roughness, 0.0, 1.0);
+    float wet = max(u_wetness, u_rain_wetness);
+    float metalRefl = u_metallic * smoothness;
+    float wetRefl   = wet * smoothness * smoothness;
+    float reflectivity = clamp(max(metalRefl, wetRefl), 0.0, 1.0);
+    if (u_proc_mode == 2) {
+        float r = length(v_worldPos.xz);
+        reflectivity *= smoothstep(92.0, 100.0, r);
+    }
+    return vec4(octEncode(n), reflectivity, linearDepth);
+}
+#endif
+
 // PHPOLYGON:PROCMODE_HELPERS
 
 // ================================================================
@@ -675,6 +741,15 @@ vec3 perturbNormalProcedural(vec3 N, vec3 worldPos, vec2 uv,
 
 void main() {
     vec3 N = normalize(v_normal);
+#ifdef PHPOLYGON_MRT
+    // Every attachment holds a defined value even when a procedural branch
+    // returns early: no sun/ambient, unlit colour in o_local, geometry in the
+    // G-buffer (a = linear depth, so the AO passes see this surface).
+    o_sun     = vec4(0.0, 0.0, 0.0, u_alpha);
+    o_local   = vec4(0.0, 0.0, 0.0, u_alpha);
+    o_ambient = vec4(0.0, 0.0, 0.0, u_alpha);
+    o_gbuffer = gbufferValue(N);
+#endif
     // View-facing normal for specular/fresnel (flipped for back faces)
     vec3 Nv = gl_FrontFacing ? N : -N;
 
@@ -776,26 +851,41 @@ void main() {
     // did NOT flip — this change is a no-op there and only removes the wrong D3D
     // branch. u_ssao_uv_flip_y is now unused by this shader.
     float ao;
+#ifdef PHPOLYGON_MRT
+    // Real SSAO is folded in by composite.frag (u_ssao_enabled says it WILL run);
+    // only the curvature fallback is a per-fragment term here.
+    ao = (u_ssao_enabled == 1) ? 1.0 : curvatureAO(N, u_ao_strength);
+#else
     if (u_ssao_enabled == 1) {
         vec2 sUV = gl_FragCoord.xy / u_viewport_size;
         ao = clamp(texture(u_ssao_map, sUV).r, 0.0, 1.0);
     } else {
         ao = curvatureAO(N, u_ao_strength);
     }
+#endif
 
     // Fieldtracing SDF trace-pass result (SdfOcclusion / SdfBounce): fold the
     // screen-space SDF AO into `ao` (contact darkening on the ambient terms) and
     // capture the soft sun shadow for the directional term below. Neutral (1.0)
     // when the pass didn't run (ProbesOnly, no volume, or non-D3D backend).
     float ftSunShadow = 1.0;
+#ifndef PHPOLYGON_MRT
     if (u_sdf_ao_enabled > 0.5) {
         vec2 ftUV = gl_FragCoord.xy / u_viewport_size;
         vec2 ftAoSh = texture(u_sdf_ao_map, ftUV).rg;
         ao = min(ao, clamp(ftAoSh.r, 0.0, 1.0));
         ftSunShadow = clamp(ftAoSh.g, 0.0, 1.0);
     }
+#endif
 
-    vec3 color = u_ambient_color * u_ambient_intensity * albedo * kD_ambient * ambientShadow * ao;
+    // Three accumulators instead of one colour: the AO-modulated ambient terms, the
+    // primary (sun) light and everything else. On the single-target path they are
+    // summed at the end (same result as the former single `color`); on the MRT path
+    // they leave as separate attachments so the composite can apply SSAO / SDF-AO to
+    // the ambient part and the SDF sun shadow to the sun part only.
+    vec3 ambientAcc = u_ambient_color * u_ambient_intensity * albedo * kD_ambient * ambientShadow * ao;
+    vec3 sunAcc = vec3(0.0);
+    vec3 localAcc = vec3(0.0);
 
     // Fieldtracing contribution (added before outputColor, per the engine's
     // "contribution before finalize" rule). ProbesOnly tier: a hemisphere
@@ -826,7 +916,7 @@ void main() {
             vec3  ftGround = u_ambient_color * 0.6;
             ftProbe = mix(ftGround, ftSky, ftHemi) * u_ambient_intensity;
         }
-        color += albedo * kD_ambient * ftProbe * ao * (0.35 * u_ft_intensity);
+        ambientAcc += albedo * kD_ambient * ftProbe * ao * (0.35 * u_ft_intensity);
     }
 
     // Clamp the loop bound to the array size: u_*_light_count is a GPU
@@ -848,6 +938,7 @@ void main() {
         // while ambient keeps the scene readable — tuned in-game: the strong
         // sweep is what makes passing clouds readable as weather.
         if (dl == 0) radiance *= mix(0.1, 1.0, cloudSh);
+        vec3 lit = vec3(0.0);
 
         if (u_subsurface_strength > 0.0) {
             // Skin path: wrap-diffuse extends light past the terminator,
@@ -864,21 +955,23 @@ void main() {
 
             vec3 F = fresnelSchlick(max(dot(normalize(V + dL), V), 0.0), F0);
             vec3 kD = (1.0 - F) * (1.0 - metallic);
-            color += (kD * effAlbedo / 3.14159265) * radiance * wrapNdotL * dShadow;
+            lit += (kD * effAlbedo / 3.14159265) * radiance * wrapNdotL * dShadow;
             if (rawNdotL > 0.0) {
                 vec3 spec = cookTorranceSpecular(N, V, dL, roughness, F0);
-                color += spec * radiance * rawNdotL * dShadow;
+                lit += spec * radiance * rawNdotL * dShadow;
             }
-            color += u_subsurface_color * albedo * backlight * u_subsurface_strength * radiance;
+            lit += u_subsurface_color * albedo * backlight * u_subsurface_strength * radiance;
         } else {
             float dNdotL = max(rawNdotL, 0.0);
             if (dNdotL > 0.0) {
                 vec3 spec = cookTorranceSpecular(N, V, dL, roughness, F0);
                 vec3 F = fresnelSchlick(max(dot(normalize(V + dL), V), 0.0), F0);
                 vec3 kD = (1.0 - F) * (1.0 - metallic);
-                color += (kD * albedo / 3.14159265 + spec) * radiance * dNdotL * dShadow;
+                lit += (kD * albedo / 3.14159265 + spec) * radiance * dNdotL * dShadow;
             }
         }
+        // The primary light is the one the SDF soft sun shadow (composite) scales.
+        if (dl == 0) sunAcc += lit; else localAcc += lit;
     }
 
     int pointCount = min(u_point_light_count, 8);
@@ -896,7 +989,7 @@ void main() {
             vec3 kD = (1.0 - F) * (1.0 - metallic);
 
             vec3 radiance = u_point_lights[i].color * u_point_lights[i].intensity * atten;
-            color += (kD * albedo / 3.14159265 + spec) * radiance * NdotPL;
+            localAcc += (kD * albedo / 3.14159265 + spec) * radiance * NdotPL;
         }
     }
 
@@ -923,7 +1016,7 @@ void main() {
             vec3 kD = (1.0 - F) * (1.0 - metallic);
 
             vec3 radiance = u_spot_lights[i].color * u_spot_lights[i].intensity * atten;
-            color += (kD * albedo / 3.14159265 + spec) * radiance * NdotSL;
+            localAcc += (kD * albedo / 3.14159265 + spec) * radiance * NdotSL;
         }
     }
 
@@ -935,7 +1028,7 @@ void main() {
         vec3 F_ibl = fresnelSchlick(NdotV, F0);
         vec3 envColor = sampleEnvironment(R, roughness);
         float iblWeight = mix(0.15, 1.0, metallic) * (1.0 - roughness * 0.6);
-        color += envColor * F_ibl * iblWeight * shadow;
+        localAcc += envColor * F_ibl * iblWeight * shadow;
     }
 
     // ---- Clearcoat lobe (carpaint, dielectric F0 ≈ 0.04) ----
@@ -946,7 +1039,7 @@ void main() {
         float ccNdotL = max(dot(N, ccL), 0.0);
         if (ccNdotL > 0.0) {
             vec3 ccSpec = cookTorranceSpecular(N, V, ccL, ccRough, ccF0);
-            color += ccSpec * u_dir_lights[0].color * u_dir_lights[0].intensity
+            localAcc += ccSpec * u_dir_lights[0].color * u_dir_lights[0].intensity
                    * ccNdotL * shadow * u_clearcoat;
         }
         // Clearcoat IBL: sharp, weakly roughness-modulated reflection of the
@@ -954,18 +1047,33 @@ void main() {
         vec3 ccR = reflect(-V, N);
         vec3 ccEnv = sampleEnvironment(ccR, ccRough);
         vec3 ccFres = fresnelSchlick(NdotV, ccF0);
-        color += ccEnv * ccFres * u_clearcoat * (1.0 - ccRough * 0.5) * 0.4;
+        localAcc += ccEnv * ccFres * u_clearcoat * (1.0 - ccRough * 0.5) * 0.4;
     }
 
-    color += u_emission;
+    localAcc += u_emission;
 
     float fogDist = length(v_worldPos - u_camera_pos);
     float fogFactor = clamp((fogDist - u_fog_near) / (u_fog_far - u_fog_near), 0.0, 1.0);
-    color = mix(color, u_fog_color, 1.0 - exp(-fogFactor * fogFactor * 3.0));
+    float fogT = 1.0 - exp(-fogFactor * fogFactor * 3.0);
 
+#ifdef PHPOLYGON_MRT
+    // mix(sum, fog, t) is affine: every part scales by (1 - t), the fog colour is
+    // local light. Volumetrics are additive local light. The post-colour hook is
+    // distributed as S * part (+ A on the local part), see applyPostColor().
+    sunAcc     *= (1.0 - fogT);
+    ambientAcc *= (1.0 - fogT);
+    localAcc    = localAcc * (1.0 - fogT) + u_fog_color * fogT;
+    localAcc   += volumetricScatter(v_worldPos);
+    vec3 pcA = applyPostColor(vec3(0.0));
+    vec3 pcS = applyPostColor(vec3(1.0)) - pcA;
+    o_sun     = vec4(max(sunAcc * pcS, vec3(0.0)), alpha);
+    o_local   = vec4(max(localAcc * pcS + pcA, vec3(0.0)), alpha);
+    o_ambient = vec4(max(ambientAcc * pcS, vec3(0.0)), alpha);
+#else
+    vec3 color = sunAcc + localAcc + ambientAcc;
+    color = mix(color, u_fog_color, fogT);
     color += volumetricScatter(v_worldPos);
-
-    // PHPOLYGON:POSTCOLOR
-
+    color = applyPostColor(color);
     frag_color = outputColor(color, alpha);
+#endif
 }

@@ -21,7 +21,18 @@ uniform float u_time;
 // HDR scene path: clouds alpha-blend over the linear sky, so linearise the
 // cloud colour so it composites against the tonemapped resolve correctly.
 uniform int u_linear_output;
+#ifdef PHPOLYGON_MRT
+// Drawn into the MRT scene target: sky is local (unlit) light in attachment 1; the
+// renderer's pipeline masks the sun / ambient / G-buffer attachments off, so the
+// G-buffer keeps its cleared 0 = "sky" for the AO and reflection passes.
+layout(location = 0) out vec4 o_sun;
+layout(location = 1) out vec4 o_local;
+layout(location = 2) out vec4 o_ambient;
+layout(location = 3) out vec4 o_gbuffer;
+#define frag_color o_local
+#else
 out vec4 frag_color;
+#endif
 
 vec3 invToneMapInvGamma(vec3 displayColor) {
     vec3 y = pow(clamp(displayColor, 0.0, 0.9965), vec3(2.2));
