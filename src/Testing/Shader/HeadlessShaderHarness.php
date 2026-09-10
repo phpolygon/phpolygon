@@ -64,19 +64,36 @@ final class HeadlessShaderHarness
     /** @var array<string, VioRenderTarget> */
     private array $targetCache = [];
 
+    /** Environment variable that selects the vio backend of {@see open()} (default `opengl`). */
+    public const BACKEND_ENV = 'PHPOLYGON_SHADER_HARNESS_BACKEND';
+
     private function __construct(
         VioContext $ctx,
         public readonly int $width,
         public readonly int $height,
+        public readonly string $backend = 'opengl',
     ) {
         $this->ctx = $ctx;
     }
 
     /**
+     * Shader source format for this backend: raw GLSL on OpenGL, the SPIR-V
+     * round trip (the same GLSL sources) everywhere else.
+     */
+    private function shaderFormat(): int
+    {
+        return $this->backend === 'opengl' ? VIO_SHADER_GLSL_RAW : VIO_SHADER_GLSL;
+    }
+
+    /**
      * Open a hidden vio context with an offscreen framebuffer of the
-     * requested size. Returns null when vio cannot create an OpenGL context
+     * requested size. Returns null when vio cannot create the context
      * (no GPU + no software renderer in CI). Callers should
      * `$this->markTestSkipped(...)` on null.
+     *
+     * The backend is `$backend`, else the {@see BACKEND_ENV} environment variable,
+     * else OpenGL - so the same tests run on Vulkan (e.g. lavapipe in CI) with
+     * `PHPOLYGON_SHADER_HARNESS_BACKEND=vulkan`.
      *
      * The harness renders into vio's built-in headless framebuffer rather
      * than a separate render target, because `vio_read_pixels()` is wired
@@ -84,13 +101,17 @@ final class HeadlessShaderHarness
      * render target results in vio_read_pixels returning the clear colour
      * of the headless FBO instead of the rendered content.
      */
-    public static function open(int $width = 64, int $height = 64): ?self
+    public static function open(int $width = 64, int $height = 64, ?string $backend = null): ?self
     {
         if (!extension_loaded('vio')) {
             return null;
         }
 
-        $ctx = vio_create('opengl', [
+        if ($backend === null) {
+            $env = getenv(self::BACKEND_ENV);
+            $backend = is_string($env) && $env !== '' ? $env : 'opengl';
+        }
+        $ctx = @vio_create($backend, [
             'width'    => $width,
             'height'   => $height,
             'title'    => 'phpolygon-shader-test',
@@ -101,7 +122,7 @@ final class HeadlessShaderHarness
             return null;
         }
 
-        $harness = new self($ctx, $width, $height);
+        $harness = new self($ctx, $width, $height, $backend);
 
         // Pre-allocate the dummy depth render target outside any vio_begin/end
         // pair. vio_render_target binds the created FBO and then resets to
@@ -164,7 +185,7 @@ final class HeadlessShaderHarness
         $shader = vio_shader($this->ctx, [
             'vertex'   => $vertSrc,
             'fragment' => $fragSrc,
-            'format'   => VIO_SHADER_GLSL_RAW,
+            'format'   => $this->shaderFormat(),
         ]);
         if ($shader === false) {
             throw new \RuntimeException("vio_shader failed for {$key}");
@@ -304,7 +325,7 @@ final class HeadlessShaderHarness
         $shader = vio_shader($this->ctx, [
             'vertex'   => $vertSrc,
             'fragment' => $fragSrc,
-            'format'   => VIO_SHADER_GLSL_RAW,
+            'format'   => $this->shaderFormat(),
         ]);
         if ($shader === false) {
             throw new \RuntimeException("vio_shader failed for inline shader '{$key}'");
