@@ -519,6 +519,9 @@ function vio_set_uniforms(VioContext $context, array $uniforms): void {}
 /** php-vio >= 2.13: index width of a mesh (2 = uint16, 4 = uint32, 0 = unindexed). */
 function vio_mesh_index_bytes(VioMesh $mesh): int {}
 
+/** Write $data into an existing buffer at $offset (no-op on OpenGL as of php-vio 2.24). */
+function vio_update_buffer(VioBuffer $buffer, string $data, int $offset = 0): void {}
+
 /**
  * php-vio >= 2.13 (VIO_FEATURE_GPU_TIMESTAMP): GPU time in ms of the most
  * recently completed frame, -1.0 when none is available yet / unsupported.
