@@ -69,6 +69,11 @@ final class BackendConventions
         return $this->backend === 'metal';
     }
 
+    public function isVulkan(): bool
+    {
+        return $this->backend === 'vulkan';
+    }
+
     /**
      * True when clip-space depth lands in [0, 1] (D3D/Metal/Vulkan), false for
      * OpenGL's [-1, 1]. Use when the engine computes depth values in PHP that
@@ -84,14 +89,15 @@ final class BackendConventions
      * so a render target authored with the GL (bottom-left) convention must have
      * its sample/clip Y flipped. False for OpenGL.
      *
-     * NOTE: vio handles Vulkan's clip-Y itself. Metal behaves like D3D here —
-     * php-vio test 089 documents that a render target sampled with GL-style
-     * UVs comes out V-flipped on Metal (row 0 = NDC top), so shadow-map
-     * lookups and cubemap face captures must flip clip-Y exactly as on D3D.
+     * Metal behaves like D3D here — php-vio test 089 documents that a render
+     * target sampled with GL-style UVs comes out V-flipped on Metal (row 0 = NDC
+     * top), so shadow-map lookups and cubemap face captures must flip clip-Y
+     * exactly as on D3D. Vulkan too: php-vio's Vulkan 3D path (>= 2.21) appends
+     * y = -y to every vertex stage, so row 0 is NDC top as well (php-vio test 123).
      */
     public function flipRenderTargetClipY(): bool
     {
-        return $this->isDirect3D() || $this->isMetal();
+        return $this->isDirect3D() || $this->isMetal() || $this->isVulkan();
     }
 
     /**
