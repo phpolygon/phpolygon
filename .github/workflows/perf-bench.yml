@@ -156,6 +156,10 @@ jobs:
             "src/Math:Math"
             "src/Component/Particle:System"
             "src/System/Particle:System"
+            "src/System/Transform3DSystem:System"
+            "src/System/Physics3DSystem:System"
+            "src/Component/BoxCollider3D:System"
+            "src/Component/MeshCollider3D:System"
             "src/Rendering:Rendering"
           )
           changed=$(git diff --name-only origin/main...HEAD || true)
