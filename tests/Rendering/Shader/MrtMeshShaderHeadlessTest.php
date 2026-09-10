@@ -25,11 +25,23 @@ use PHPUnit\Framework\TestCase;
 #[RequiresPhpExtension('vio')]
 class MrtMeshShaderHeadlessTest extends TestCase
 {
-    private const MRT = [VIO_FORMAT_RGBA16F, VIO_FORMAT_RGBA16F, VIO_FORMAT_RGBA16F, VIO_FORMAT_RGBA16F];
-    private const SINGLE = [VIO_FORMAT_RGBA16F];
-
     /** 8-bit read-back of FP16 data: allow a few LSB per channel (+ rounding of a 3-term sum). */
     private const TOLERANCE = 3.5 / 255.0;
+
+    // The VIO_FORMAT_* constants only exist with the extension loaded; a class
+    // constant would fail to evaluate when PHPUnit reflects the class on a runner
+    // without vio (the RequiresPhpExtension skip runs later).
+    /** @return list<int> the four MRT attachment formats (all FP16) */
+    private static function mrt(): array
+    {
+        return [VIO_FORMAT_RGBA16F, VIO_FORMAT_RGBA16F, VIO_FORMAT_RGBA16F, VIO_FORMAT_RGBA16F];
+    }
+
+    /** @return list<int> one FP16 attachment */
+    private static function single(): array
+    {
+        return [VIO_FORMAT_RGBA16F];
+    }
 
     private ?HeadlessShaderHarness $h = null;
 
@@ -111,11 +123,11 @@ class MrtMeshShaderHeadlessTest extends TestCase
         });
 
         $gShader = $h->compileShaderFromFiles('vio/gbuffer.vert.glsl', 'vio/gbuffer.frag.glsl');
-        $gPipe = $h->createTargetPipeline($gShader, self::SINGLE);
+        $gPipe = $h->createTargetPipeline($gShader, self::single());
         [$reference] = $h->renderToTargetAndRead($gPipe, $h->fullscreenQuad(), function (HeadlessShaderHarness $h) use ($geometry): void {
             self::setNeutralMeshUniforms($h);
             $geometry($h);
-        }, self::SINGLE);
+        }, self::single());
 
         foreach ([[16, 16], [4, 4], [27, 9]] as [$x, $y]) {
             $got = $h->samplePixel($gbuffer, $x, $y);
@@ -162,11 +174,11 @@ class MrtMeshShaderHeadlessTest extends TestCase
         };
 
         $forwardShader = $h->compileShaderFromFiles('vio/mesh3d.vert.glsl', 'vio/mesh3d.frag.glsl');
-        $forwardPipe = $h->createTargetPipeline($forwardShader, self::SINGLE);
+        $forwardPipe = $h->createTargetPipeline($forwardShader, self::single());
         [$forward] = $h->renderToTargetAndRead($forwardPipe, $h->fullscreenQuad(), function (HeadlessShaderHarness $h) use ($fog): void {
             self::setNeutralMeshUniforms($h);
             $fog($h);
-        }, self::SINGLE);
+        }, self::single());
 
         [$sun, $local, $ambient] = $this->renderMrt($h, $fog);
 
@@ -200,7 +212,7 @@ class MrtMeshShaderHeadlessTest extends TestCase
     private function renderMrt(HeadlessShaderHarness $h, callable $override): array
     {
         $shader = $h->compileShaderFromFiles('vio/mesh3d.vert.glsl', 'vio/mesh3d.frag.glsl', ['PHPOLYGON_MRT']);
-        $pipe = $h->createTargetPipeline($shader, self::MRT);
+        $pipe = $h->createTargetPipeline($shader, self::mrt());
         $identity = [1, 0, 0, 0,  0, 1, 0, 0,  0, 0, 1, 0,  0, 0, 0, 1];
         /** @var array{0: string, 1: string, 2: string, 3: string} $out */
         $out = $h->renderToTargetAndRead($pipe, $h->fullscreenQuad(), function (HeadlessShaderHarness $h) use ($override, $identity): void {
@@ -208,7 +220,7 @@ class MrtMeshShaderHeadlessTest extends TestCase
             $h->setUniform('u_gbuffer_view', $identity);
             $h->setUniform('u_gbuffer_write', 1);
             $override($h);
-        }, self::MRT);
+        }, self::mrt());
         return $out;
     }
 
