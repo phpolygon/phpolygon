@@ -116,6 +116,15 @@ final class PerfOverlay
         $r->drawText(\sprintf('Render: %6.2f ms', $stats['renderMs']), $cx, $cy, self::FONT_SIZE, $textDim);
         $cy += self::LINE_HEIGHT;
 
+        // GPU time of the last completed frame (php-vio timestamp queries). Read
+        // next to 'Render' (CPU submit) it answers CPU-bound vs GPU-bound at a glance.
+        $gpuMs = $this->gpuFrameMs();
+        if ($gpuMs !== null) {
+            $gpuColor = $gpuMs > $stats['frameMs'] * 0.9 ? $textWarn : $textDim;
+            $r->drawText(\sprintf('GPU:    %6.2f ms', $gpuMs), $cx, $cy, self::FONT_SIZE, $gpuColor);
+            $cy += self::LINE_HEIGHT;
+        }
+
         $r->drawText(\sprintf('r-p95:  %6.2f ms', $stats['p95Ms']), $cx, $cy, self::FONT_SIZE, $textDim);
         $cy += self::LINE_HEIGHT;
 
@@ -152,6 +161,17 @@ final class PerfOverlay
                 $textDim,
             );
         }
+    }
+
+    /** GPU frame time when the 3D renderer can report one (null = unavailable). */
+    private function gpuFrameMs(): ?float
+    {
+        $renderer = $this->engine->renderer3D;
+        if (!\is_object($renderer) || !\method_exists($renderer, 'gpuFrameTimeMs')) {
+            return null;
+        }
+        $ms = $renderer->gpuFrameTimeMs();
+        return \is_float($ms) && $ms >= 0.0 ? $ms : null;
     }
 
     /**

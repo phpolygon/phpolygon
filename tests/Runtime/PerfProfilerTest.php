@@ -57,6 +57,23 @@ final class PerfProfilerTest extends TestCase
         );
     }
 
+    /**
+     * record() files an externally measured duration (the renderer's GPU
+     * frame time) under a section so it lists next to the CPU sections.
+     */
+    public function testRecordAccumulatesExternalDurations(): void
+    {
+        PerfProfiler::record('render3d.gpu', 2_000_000);
+        PerfProfiler::record('render3d.gpu', 4_000_000);
+        PerfProfiler::record('render3d.gpu', -5); // negative = "no data", ignored
+
+        $snapshot = PerfProfiler::snapshot();
+        self::assertArrayHasKey('render3d.gpu', $snapshot);
+        self::assertSame(2, $snapshot['render3d.gpu']['calls']);
+        self::assertSame(6_000_000, $snapshot['render3d.gpu']['totalNs']);
+        self::assertEqualsWithDelta(3_000_000.0, $snapshot['render3d.gpu']['avgNs'], 0.01);
+    }
+
     public function testSectionWrapperRunsCallableAndReturnsResult(): void
     {
         $result = PerfProfiler::section('wrapped', static fn(): int => 42);

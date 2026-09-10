@@ -80,6 +80,14 @@ final class VioOffscreenTarget
         $height  = max(1, $height);
         $samples = max(1, $samples);
 
+        // Backends that report VIO_FEATURE_RENDER_TARGET_MSAA = 0 (Vulkan today;
+        // D3D12 until php-vio 2.12) are not probed at all — vio would allocate
+        // a single-sample target under the requested count and the caller would
+        // believe it is anti-aliased.
+        if ($samples > 1 && $this->msaaSupported === null && defined('VIO_FEATURE_RENDER_TARGET_MSAA')
+            && !vio_supports_feature($this->ctx, VIO_FEATURE_RENDER_TARGET_MSAA)) {
+            $this->msaaSupported = false;
+        }
         // Suppress MSAA on backends that previously refused it.
         if ($samples > 1 && $this->msaaSupported === false) {
             $samples = 1;
@@ -98,9 +106,9 @@ final class VioOffscreenTarget
         $this->samples = $samples;
         $this->hdr     = $hdr;
 
-        // Try MSAA first when requested. vio gives no feature query, so we
-        // probe by attempting allocation - on failure we fall back to a
-        // single-sample target and remember the rejection.
+        // Try MSAA first when requested (the feature flag above says the backend
+        // can); a refused allocation still falls back to a single-sample target
+        // and remembers the rejection.
         if ($samples > 1) {
             $msaaCfg = ['width' => $width, 'height' => $height, 'samples' => $samples];
             if ($hdr) {
@@ -191,6 +199,16 @@ final class VioOffscreenTarget
     public function samples(): int
     {
         return $this->samples;
+    }
+
+    /**
+     * The underlying vio render target (null until allocated) - for readback in
+     * tests and tooling (vio_read_render_target); rendering goes through
+     * bindForDraw() / texture().
+     */
+    public function renderTarget(): ?VioRenderTarget
+    {
+        return $this->allocated ? $this->target : null;
     }
 
     public function isAllocated(): bool

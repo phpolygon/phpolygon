@@ -23,11 +23,16 @@ class VioWindow extends Window
         bool $resizable = true,
         string $backend = 'auto',
         bool $debug = false,
+        string $shaderCachePath = '',
     ) {
         parent::__construct($width, $height, $title, $vsync, $resizable);
         $this->backend = $backend;
         $this->debug = $debug;
+        $this->shaderCachePath = $shaderCachePath;
     }
+
+    /** Directory handed to vio_create as 'shader_cache' ('' = no cache). */
+    private string $shaderCachePath = '';
 
     public function initialize(InputInterface $input): void
     {
@@ -45,6 +50,13 @@ class VioWindow extends Window
             // the log with benign hints; Engine threads $effectiveDevMode here.
             'debug'   => $this->debug ? 1 : 0,
         ];
+        // On-disk shader / pipeline cache (EngineConfig::$shaderCachePath). A
+        // directory that cannot be created just leaves the cache off.
+        if ($this->shaderCachePath !== '') {
+            if (is_dir($this->shaderCachePath) || @mkdir($this->shaderCachePath, 0755, true)) {
+                $config['shader_cache'] = $this->shaderCachePath;
+            }
+        }
 
         // Try the requested backend first; on failure, walk a platform-aware
         // fallback list. On Linux a missing Vulkan loader / driver makes the

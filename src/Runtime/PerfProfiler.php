@@ -84,6 +84,24 @@ final class PerfProfiler
     }
 
     /**
+     * Record an externally measured duration under a section name — for costs
+     * the CPU cannot bracket with begin()/end(), such as the GPU time of the
+     * last completed frame (VioRenderer3D reports vio_gpu_frame_time() here as
+     * `render3d.gpu`). Shows up in snapshot() / the PerfOverlay like any section.
+     */
+    public static function record(string $section, int $elapsedNs): void
+    {
+        if (self::backend() === self::BACKEND_NONE || $elapsedNs < 0) {
+            return;
+        }
+        if (!isset(self::$sections[$section])) {
+            self::$sections[$section] = [0, 0];
+        }
+        self::$sections[$section][0]++;
+        self::$sections[$section][1] += $elapsedNs;
+    }
+
+    /**
      * Run $fn inside a begin/end pair. Returns whatever $fn returns.
      *
      * @template T

@@ -39,6 +39,14 @@ class EngineConfig
         public readonly ?ThreadingMode $threadingMode = null,
         public readonly ?InputInterface $input = null,
         public readonly string $meshCachePath = '',
+        /**
+         * Directory for php-vio's on-disk shader / pipeline cache (php-vio >= 2.13:
+         * DXBC per HLSL stage on D3D11/D3D12, OpenGL program binaries, the Vulkan
+         * pipeline cache). The first start compiles and stores, every later start
+         * loads — the multi-second shader warm-up behind the splash shrinks to the
+         * file reads. '' disables the cache. Created on demand.
+         */
+        public readonly string $shaderCachePath = 'saves/shader-cache',
         public readonly bool $skipSplash = false,
         public readonly float $splashDuration = 2.5,
         public readonly string $vioBackend = 'auto',

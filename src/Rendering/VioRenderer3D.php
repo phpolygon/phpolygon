@@ -1096,6 +1096,35 @@ class VioRenderer3D implements Renderer3DInterface
         $this->presentOffscreenIfActive();
         $this->renderShadowMapDebug();
         vio_draw_3d($this->ctx);
+        $this->sampleGpuFrameTime();
+    }
+
+    /**
+     * GPU time of the most recently completed frame in milliseconds, from
+     * php-vio's timestamp queries (VIO_FEATURE_GPU_TIMESTAMP, php-vio >= 2.12).
+     * Trails the CPU by one to two frames; -1 when the backend has no
+     * timestamps or no frame has finished yet. Recorded per frame as the
+     * profiler section `render3d.gpu`, so the overlay shows CPU and GPU cost
+     * side by side — the quickest way to tell a CPU-bound frame from a
+     * GPU-bound one.
+     */
+    public function gpuFrameTimeMs(): float
+    {
+        return $this->lastGpuFrameMs;
+    }
+
+    private float $lastGpuFrameMs = -1.0;
+
+    private function sampleGpuFrameTime(): void
+    {
+        if (!function_exists('vio_gpu_frame_time')) {
+            return;
+        }
+        $ms = vio_gpu_frame_time($this->ctx);
+        $this->lastGpuFrameMs = $ms;
+        if ($ms >= 0.0) {
+            PerfProfiler::record('render3d.gpu', (int) round($ms * 1_000_000.0));
+        }
     }
 
     /**
