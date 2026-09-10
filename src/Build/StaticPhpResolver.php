@@ -124,6 +124,16 @@ class StaticPhpResolver
                 // it the shipped exe dies at startup with 0xC0000135.
                 $this->log("No d3dcompiler_47.dll found for {$cacheKey} — the d3d11/d3d12 backends will fail to start (0xC0000135) on a clean Windows install.");
             }
+
+            // dxcompiler.dll + dxil.dll: Shader Model 6 on D3D12 (php-vio >= 2.16,
+            // EngineConfig::$vioShaderModel = 6). Optional - php-vio falls back to
+            // FXC without them - but DXC compiles a large shader set about ten
+            // times faster on a cold start, so ship them whenever they resolve.
+            $dxc = $this->resolveDxcDlls($cacheKey, $arch);
+            if ($dxc === []) {
+                $this->log("No DXC (dxcompiler.dll / dxil.dll) for {$cacheKey} — Shader Model 6 requests fall back to FXC in the shipped binary.");
+            }
+            array_push($libs, ...$dxc);
         }
 
         // Steam API library — all four desktop platforms. The cached file is
@@ -374,6 +384,96 @@ class StaticPhpResolver
         $this->log(sprintf("Downloaded and cached: %s (%.1f KB)", $cachedPath, $size / 1024));
 
         return $cachedPath;
+    }
+
+    /** Release feed of the DirectX Shader Compiler (MIT/LLVM licensed, dxil.dll redistributable). */
+    private const string DXC_RELEASE_URL = 'https://api.github.com/repos/microsoft/DirectXShaderCompiler/releases/latest';
+
+    /**
+     * dxcompiler.dll + dxil.dll for the target arch, from the build cache or the
+     * latest DXC release. Both or nothing: DXC without dxil.dll cannot sign the
+     * DXIL it produces, and php-vio then refuses Shader Model 6 anyway.
+     *
+     * @return list<string>
+     */
+    private function resolveDxcDlls(string $cacheKey, string $arch): array
+    {
+        $dir = $this->cacheDir . "/{$cacheKey}/dxc";
+        $paths = [$dir . '/dxcompiler.dll', $dir . '/dxil.dll'];
+        $present = static fn (): bool => is_file($paths[0]) && is_file($paths[1]);
+        if (!$present()) {
+            $this->downloadDxc($dir, $arch);
+        }
+        return $present() ? $paths : [];
+    }
+
+    private function downloadDxc(string $dir, string $arch): void
+    {
+        $json = $this->httpGet(self::DXC_RELEASE_URL);
+        $release = $json !== null ? json_decode($json, true) : null;
+        $asset = is_array($release) ? self::dxcWindowsAsset($release) : null;
+        if ($asset === null || !class_exists(\ZipArchive::class)) {
+            return;
+        }
+
+        $this->log("Downloading {$asset['name']}...");
+        $content = $this->httpGet($asset['url']);
+        $tempFile = tempnam(sys_get_temp_dir(), 'phpolygon-dxc-');
+        if ($content === null || $tempFile === false) {
+            return;
+        }
+        file_put_contents($tempFile, $content);
+
+        $zip = new \ZipArchive();
+        if ($zip->open($tempFile) === true) {
+            if (!is_dir($dir)) {
+                mkdir($dir, 0755, true);
+            }
+            foreach (self::dxcZipEntries($arch) as $entry => $name) {
+                $data = $zip->getFromName($entry);
+                if (is_string($data) && $data !== '') {
+                    file_put_contents($dir . '/' . $name, $data);
+                }
+            }
+            $zip->close();
+        }
+        @unlink($tempFile);
+    }
+
+    /**
+     * The Windows binary archive of a DXC release (`dxc_YYYY_MM_DD.zip`); the
+     * Linux tarball and the PDB archive are skipped.
+     *
+     * @param array<mixed> $release GitHub release JSON
+     * @return array{name: string, url: string}|null
+     */
+    public static function dxcWindowsAsset(array $release): ?array
+    {
+        foreach (is_array($release['assets'] ?? null) ? $release['assets'] : [] as $asset) {
+            if (!is_array($asset)) {
+                continue;
+            }
+            $name = is_string($asset['name'] ?? null) ? $asset['name'] : '';
+            $url = is_string($asset['browser_download_url'] ?? null) ? $asset['browser_download_url'] : '';
+            if ($url !== '' && preg_match('/^dxc_\d{4}_\d{2}_\d{2}\.zip$/', $name) === 1) {
+                return ['name' => $name, 'url' => $url];
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Zip entry -> file name of the two DLLs for a build arch.
+     *
+     * @return array<string, string>
+     */
+    public static function dxcZipEntries(string $arch): array
+    {
+        $dir = in_array(strtolower($arch), ['arm64', 'aarch64'], true) ? 'arm64' : 'x64';
+        return [
+            "bin/{$dir}/dxcompiler.dll" => 'dxcompiler.dll',
+            "bin/{$dir}/dxil.dll" => 'dxil.dll',
+        ];
     }
 
     private function downloadD3DCompilerDllIfNewer(string $platform, string $arch, string $variant, string $phpVersion, string $cachedPath): ?string

@@ -98,4 +98,27 @@ class StaticPhpResolverTest extends TestCase
         }
         @rmdir($dir);
     }
+    public function testDxcAssetIsTheWindowsZipOfTheRelease(): void
+    {
+        $release = ['assets' => [
+            ['name' => 'linux_dxc_2026_07_29.x86_x64.tar.gz', 'browser_download_url' => 'https://example.test/linux.tar.gz'],
+            ['name' => 'pdb_2026_07_29.zip', 'browser_download_url' => 'https://example.test/pdb.zip'],
+            ['name' => 'dxc_2026_07_29.zip', 'browser_download_url' => 'https://example.test/dxc.zip'],
+        ]];
+
+        $this->assertSame(
+            ['name' => 'dxc_2026_07_29.zip', 'url' => 'https://example.test/dxc.zip'],
+            StaticPhpResolver::dxcWindowsAsset($release),
+        );
+        $this->assertNull(StaticPhpResolver::dxcWindowsAsset(['assets' => []]));
+    }
+
+    public function testDxcZipEntriesFollowTheArch(): void
+    {
+        $this->assertSame(
+            ['bin/x64/dxcompiler.dll' => 'dxcompiler.dll', 'bin/x64/dxil.dll' => 'dxil.dll'],
+            StaticPhpResolver::dxcZipEntries('x86_64'),
+        );
+        $this->assertArrayHasKey('bin/arm64/dxil.dll', StaticPhpResolver::dxcZipEntries('aarch64'));
+    }
 }
