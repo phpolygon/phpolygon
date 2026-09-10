@@ -88,6 +88,25 @@ class DrawMeshInstancedPackedTest extends TestCase
         $this->assertSame([], $cmd->flatMatricesResolved());
     }
 
+    public function testStorageBufferModeCanCarryIndirectDrawArguments(): void
+    {
+        // GPU-driven count: the argument record buffer rides along with the
+        // storage buffer; the instance count stays as the fallback bound.
+        $matrices = new \stdClass();
+        $args = new \stdClass();
+        $cmd = DrawMeshInstanced::fromStorageBuffer('quad', 'mat', $matrices, 512, indirectArgs: $args, indirectMaxDraws: 0);
+
+        $this->assertTrue($cmd->hasStorageBuffer());
+        $this->assertTrue($cmd->hasIndirectArgs());
+        $this->assertSame($args, $cmd->indirectArgs);
+        $this->assertSame(1, $cmd->indirectMaxDraws, 'at least one record is issued');
+        $this->assertSame(512, $cmd->effectiveInstanceCount());
+
+        $plain = DrawMeshInstanced::fromStorageBuffer('quad', 'mat', $matrices, 128);
+        $this->assertFalse($plain->hasIndirectArgs());
+        $this->assertNull($plain->indirectArgs);
+    }
+
     public function testOtherModesHaveNoStorageBuffer(): void
     {
         $this->assertFalse((new DrawMeshInstanced('q', 'm', []))->hasStorageBuffer());

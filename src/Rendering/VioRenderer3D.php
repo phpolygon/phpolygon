@@ -980,7 +980,7 @@ class VioRenderer3D implements Renderer3DInterface
             $this->hdr10Output = false;
             if (function_exists('vio_swapchain_info')) {
                 $info = vio_swapchain_info($this->ctx);
-                $this->hdr10Output = (bool) ($info['hdr_output'] ?? false);
+                $this->hdr10Output = (bool) $info['hdr_output'];
             }
         }
         return $this->hdr10Output;
@@ -3788,6 +3788,20 @@ class VioRenderer3D implements Renderer3DInterface
         $this->lastGbufferWrite = $write;
     }
 
+    /**
+     * vio_draw_indirect() usable on this context (php-vio >= 2.17 with
+     * VIO_FEATURE_INDIRECT_DRAW); probed once. False makes indirect commands
+     * fall back to the plain storage-buffer draw with their instance count.
+     */
+    public function indirectDrawAvailable(): bool
+    {
+        return $this->indirectDrawAvailable ??= function_exists('vio_draw_indirect')
+            && defined('VIO_FEATURE_INDIRECT_DRAW')
+            && vio_supports_feature($this->ctx, VIO_FEATURE_INDIRECT_DRAW);
+    }
+
+    private ?bool $indirectDrawAvailable = null;
+
     private function drawMeshInstancedCommand(DrawMeshInstanced $cmd, Material $material): void
     {
         // Hot-path: read public properties directly instead of via the
@@ -3830,7 +3844,16 @@ class VioRenderer3D implements Renderer3DInterface
             && vio_supports_feature($this->ctx, VIO_FEATURE_VERTEX_STORAGE)
         ) {
             vio_bind_storage_buffer($this->ctx, $storage, 0, VIO_COMPUTE_READ);
-            vio_draw_instanced_from_buffer($this->ctx, $mesh, $instanceCount);
+            $args = $cmd->indirectArgs;
+            if ($args instanceof \VioBuffer && $this->indirectDrawAvailable()) {
+                // GPU-driven count: the compute pass that filled the storage
+                // buffer also wrote the draw arguments (instanceCount after
+                // culling / compaction), so nothing is read back to decide how
+                // much to draw. $instanceCount is only the fallback bound.
+                vio_draw_indirect($this->ctx, $mesh, $args, max(1, $cmd->indirectMaxDraws));
+            } else {
+                vio_draw_instanced_from_buffer($this->ctx, $mesh, $instanceCount);
+            }
         } else {
             [$packed, $count] = $this->resolveInstanceData($cmd->meshId, $material, $cmd);
             vio_draw_instanced($this->ctx, $mesh, $packed, $count);

@@ -31,5 +31,15 @@ final class GpuParticleState
         public readonly \VioBuffer $stateBuf,
         /** Write-only output matrix SSBO, capacity*16 floats. */
         public readonly \VioBuffer $outBuf,
+        /**
+         * Indirect draw arguments (php-vio >= 2.17, VIO_FEATURE_INDIRECT_DRAW):
+         * one {indexCount, instanceCount, firstIndex, baseVertex, firstInstance}
+         * record. {@see GpuParticleBaker::stepIndirect()} compacts the live slots
+         * to the front of $outBuf and counts them into instanceCount, so the
+         * draw issues exactly the live particles without a readback. Null when
+         * the state was created without a mesh index count or the backend
+         * cannot draw indirectly.
+         */
+        public readonly ?\VioBuffer $argsBuf = null,
     ) {}
 }

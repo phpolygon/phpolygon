@@ -62,6 +62,12 @@ const VIO_FEATURE_MRT = 25;
 const VIO_FEATURE_STORAGE_IMAGE = 26;
 const VIO_FEATURE_COMPUTE = 1;
 const VIO_FEATURE_VERTEX_STORAGE = 30;
+// php-vio >= 2.12 (GAP-PHASE5)
+const VIO_FEATURE_STENCIL = 31;
+const VIO_FEATURE_GPU_TIMESTAMP = 32;
+const VIO_FEATURE_FRAME_LATENCY = 33;
+const VIO_FEATURE_HDR_OUTPUT = 34;
+const VIO_FEATURE_INDIRECT_DRAW = 35;
 
 // Render-target colour attachment formats (vio_render_target 'attachments', vio_pipeline 'attachments')
 const VIO_FORMAT_RGBA8      = 0;
@@ -72,6 +78,7 @@ const VIO_FORMAT_RG16F      = 4;
 const VIO_FORMAT_R16F       = 5;
 const VIO_FORMAT_R32F       = 6;
 const VIO_FORMAT_R8         = 7;
+const VIO_FORMAT_RGB10A2    = 8; // HDR10 backbuffer / render target (php-vio >= 2.15)
 
 // ----------------------------------------------------------------
 // Backend info
@@ -453,3 +460,36 @@ function vio_draw_instanced_from_buffer(VioContext $context, VioMesh $mesh, int 
  * @param array<string, int|float|array<float>> $uniforms
  */
 function vio_set_uniforms(VioContext $context, array $uniforms): void {}
+
+/** php-vio >= 2.13: index width of a mesh (2 = uint16, 4 = uint32, 0 = unindexed). */
+function vio_mesh_index_bytes(VioMesh $mesh): int {}
+
+/**
+ * php-vio >= 2.13 (VIO_FEATURE_GPU_TIMESTAMP): GPU time in ms of the most
+ * recently completed frame, -1.0 when none is available yet / unsupported.
+ */
+function vio_gpu_frame_time(VioContext $context): float {}
+
+/**
+ * php-vio >= 2.14: on-disk shader cache statistics for vio_create(['shader_cache' => dir]).
+ *
+ * @return array{dir: string, hits: int, misses: int, stores: int}
+ */
+function vio_shader_cache_stats(VioContext $context): array {}
+
+/**
+ * php-vio >= 2.14: swapchain facts (buffer count, frame latency, waitable object,
+ * HDR output, backbuffer format, shader model).
+ *
+ * @return array{buffer_count: int, frame_latency: int, waitable: bool, hdr_output: bool, format: int, shader_model: int}
+ */
+function vio_swapchain_info(VioContext $context): array {}
+
+/**
+ * php-vio >= 2.17 (VIO_FEATURE_INDIRECT_DRAW): draw $mesh with arguments read
+ * from a storage buffer created with vio_storage_buffer(['indirect' => true]) —
+ * 5 uint32 {indexCount, instanceCount, firstIndex, baseVertex, firstInstance}
+ * per indexed draw (4 for unindexed meshes); $maxDraws consecutive records from
+ * byte $offset. Per-instance data comes from vio_bind_storage_buffer().
+ */
+function vio_draw_indirect(VioContext $context, VioMesh $mesh, VioBuffer $args, int $maxDraws = 1, int $offset = 0): void {}

@@ -166,11 +166,18 @@ final class PerfProfiler
         return $out;
     }
 
+    /**
+     * Drops all recorded sections and forgets the probed backend, so the next
+     * call re-reads PHPOLYGON_PROFILE / SPX_ENABLED / PHPOLYGON_EXCIMER. Tests
+     * that enable profiling via putenv() rely on that re-probe: an earlier test
+     * may already have cached BACKEND_NONE.
+     */
     public static function reset(): void
     {
         self::$sections = [];
         self::$stack = [];
         self::$gcBaseline = null;
+        self::$backend = -1;
     }
 
     /**

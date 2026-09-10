@@ -62,6 +62,19 @@ readonly class DrawMeshInstanced
      *                                (with VIO_FEATURE_VERTEX_STORAGE) honours
      *                                it; it is only ever emitted there. Null in
      *                                every other mode.
+     * @param object|null $indirectArgs Storage-buffer mode only: a GPU-resident
+     *                                draw-argument buffer (a vio VioBuffer created
+     *                                with ['indirect' => true]) holding
+     *                                {indexCount, instanceCount, firstIndex,
+     *                                baseVertex, firstInstance} records that the
+     *                                compute pass wrote alongside the matrices.
+     *                                The renderer then issues vio_draw_indirect()
+     *                                and the culled / compacted instance count
+     *                                never crosses the bus; $instanceCount is only
+     *                                the fallback when the backend lacks
+     *                                VIO_FEATURE_INDIRECT_DRAW.
+     * @param int     $indirectMaxDraws Number of consecutive argument records to
+     *                                issue (>= 1); one per LOD / sub-mesh.
      */
     public function __construct(
         public string $meshId,
@@ -72,6 +85,8 @@ readonly class DrawMeshInstanced
         public array $flatMatrices = [],
         public string $packedMatrices = '',
         public ?object $storageBuffer = null,
+        public ?object $indirectArgs = null,
+        public int $indirectMaxDraws = 1,
     ) {}
 
     /**
@@ -132,8 +147,17 @@ readonly class DrawMeshInstanced
      * PHP<->GPU bus. Emitted only on the vio backend when
      * VIO_FEATURE_VERTEX_STORAGE is available (see {@see \PHPolygon\System\GpuParticleBaker}).
      *
+     * With $indirectArgs the draw becomes GPU-driven (php-vio >= 2.17,
+     * VIO_FEATURE_INDIRECT_DRAW): the same compute pass writes the instance count
+     * into the argument buffer and the renderer calls vio_draw_indirect(), so a
+     * culling / compaction kernel decides how much is drawn without a readback.
+     * $instanceCount stays the honest upper bound the fallback draw uses.
+     *
      * @param object $storageBuffer a vio VioBuffer (typed object here to keep
      *                              the command backend-agnostic)
+     * @param object|null $indirectArgs a vio VioBuffer of draw-argument records
+     *                              (see the constructor), or null for a plain
+     *                              storage-buffer draw
      */
     public static function fromStorageBuffer(
         string $meshId,
@@ -141,6 +165,8 @@ readonly class DrawMeshInstanced
         object $storageBuffer,
         int $instanceCount,
         bool $isStatic = false,
+        ?object $indirectArgs = null,
+        int $indirectMaxDraws = 1,
     ): self {
         return new self(
             meshId: $meshId,
@@ -151,6 +177,8 @@ readonly class DrawMeshInstanced
             flatMatrices: [],
             packedMatrices: '',
             storageBuffer: $storageBuffer,
+            indirectArgs: $indirectArgs,
+            indirectMaxDraws: max(1, $indirectMaxDraws),
         );
     }
 
@@ -167,6 +195,12 @@ readonly class DrawMeshInstanced
     public function hasStorageBuffer(): bool
     {
         return $this->storageBuffer !== null;
+    }
+
+    /** True when the instance count comes from a GPU-written argument buffer. */
+    public function hasIndirectArgs(): bool
+    {
+        return $this->storageBuffer !== null && $this->indirectArgs !== null;
     }
 
     /**

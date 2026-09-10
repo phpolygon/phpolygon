@@ -38,8 +38,12 @@ use PHPolygon\Math\Vec3;
  * storage-buffer write, so Phase 2's spawn model must be either a GPU-side
  * spawn-inject SSBO or a per-frame full state re-upload — decided by the bench.
  *
- * TODO(phase2): GPU slot compaction via atomics (draw only live instances
- * instead of always maxParticles) is a later optimisation, not this cut.
+ * Slot compaction is in: {@see stepIndirect()} lets every live thread claim
+ * the next output slot with an atomic and counts them into an indirect draw
+ * argument buffer, so the draw covers exactly the live particles instead of
+ * always maxParticles — and still nothing is read back
+ * ({@see \PHPolygon\Rendering\Command\DrawMeshInstanced::fromStorageBuffer()}
+ * with $indirectArgs, php-vio >= 2.17 / VIO_FEATURE_INDIRECT_DRAW).
  */
 final class GpuParticleBaker
 {
@@ -52,6 +56,11 @@ final class GpuParticleBaker
 
     /** Billboard-only pipeline for the readback-free path ({@see BILLBOARD_SHADER}). */
     private static ?\VioComputePipeline $billboardPipeline = null;
+
+    /** Compacting variant of {@see SHADER} ({@see compactShader()}) and the
+     *  one-thread argument reset that precedes it ({@see RESET_ARGS_SHADER}). */
+    private static ?\VioComputePipeline $compactPipeline = null;
+    private static ?\VioComputePipeline $resetPipeline = null;
 
     /**
      * Reusable per-emitter output matrix SSBO for the readback-free path, kept
@@ -210,8 +219,11 @@ final class GpuParticleBaker
      * @param list<array{0:float,1:float,2:float,3:float,4:float,5:float,6:float,7:float}> $particles
      *        rows of [px,py,pz, vx,vy,vz, age, lifetime]; length must be <= $capacity
      * @param int $capacity slot count (== emitter maxParticles)
+     * @param int $indexCount index count of the mesh the particles are drawn
+     *        with; > 0 additionally allocates the indirect draw argument record
+     *        for {@see stepIndirect()} when the backend supports it
      */
-    public static function createState(\VioContext $ctx, array $particles, int $capacity): ?GpuParticleState
+    public static function createState(\VioContext $ctx, array $particles, int $capacity, int $indexCount = 0): ?GpuParticleState
     {
         if (!self::isAvailable($ctx) || $capacity <= 0) {
             return null;
@@ -239,7 +251,16 @@ final class GpuParticleBaker
                 return null;
             }
 
-            return new GpuParticleState($capacity, $stateBuf, $outBuf);
+            // Indirect draw record {indexCount, instanceCount, firstIndex,
+            // baseVertex, firstInstance}; instanceCount starts at 0 and is
+            // rewritten by every compacting step.
+            $argsBuf = null;
+            if ($indexCount > 0 && self::isIndirectDraw($ctx)) {
+                $args = vio_storage_buffer($ctx, ['data' => pack('V5', $indexCount, 0, 0, 0, 0), 'stride' => 4, 'indirect' => true]);
+                $argsBuf = $args === false ? null : $args;
+            }
+
+            return new GpuParticleState($capacity, $stateBuf, $outBuf, $argsBuf);
         } catch (\Throwable) {
             return null;
         }
@@ -281,22 +302,7 @@ final class GpuParticleBaker
             }
             self::$pipeline = $pipeline;
 
-            $hasCam = $camPos !== null ? 1 : 0;
-            $cx = 0.0; $cy = 0.0; $cz = 0.0;
-            if ($camPos !== null) {
-                $cx = $camPos->x; $cy = $camPos->y; $cz = $camPos->z;
-            }
-
-            // 12 scalars, 48 bytes, tight std140 packing (all 4-byte scalars,
-            // none straddles a 16-byte boundary; block padded to 48 = 16*3).
-            $params = pack(
-                'f9',
-                $dt,
-                $emitter->gravity->x, $emitter->gravity->y, $emitter->gravity->z,
-                $emitter->startSize, $emitter->endSize,
-                $cx, $cy, $cz,
-            ) . pack('l3', $hasCam, $state->capacity, 0);
-            vio_compute_set_uniforms($ctx, $pipeline, $params);
+            vio_compute_set_uniforms($ctx, $pipeline, self::stepParams($state, $emitter, $dt, $camPos));
 
             // State is read-write -> bind as WRITE (UAV / RW SSBO). OutM is
             // write-only. Slots 0/1 match the shader's binding = 0/1.
@@ -322,6 +328,73 @@ final class GpuParticleBaker
         }
     }
 
+    /**
+     * Params UBO of {@see SHADER} / {@see compactShader()}: 12 scalars, 48 bytes,
+     * tight std140 packing (all 4-byte scalars, none straddles a 16-byte
+     * boundary; block padded to 48 = 16*3).
+     */
+    private static function stepParams(GpuParticleState $state, ParticleEmitter $emitter, float $dt, ?Vec3 $camPos): string
+    {
+        $hasCam = $camPos !== null ? 1 : 0;
+        $cx = 0.0; $cy = 0.0; $cz = 0.0;
+        if ($camPos !== null) {
+            $cx = $camPos->x; $cy = $camPos->y; $cz = $camPos->z;
+        }
+        return pack(
+            'f9',
+            $dt,
+            $emitter->gravity->x, $emitter->gravity->y, $emitter->gravity->z,
+            $emitter->startSize, $emitter->endSize,
+            $cx, $cy, $cz,
+        ) . pack('l3', $hasCam, $state->capacity, 0);
+    }
+
+    /**
+     * Advance the resident state one step and compact the live slots to the
+     * front of $state->outBuf while counting them into $state->argsBuf — the
+     * GPU-driven draw: hand both to
+     * {@see \PHPolygon\Rendering\Command\DrawMeshInstanced::fromStorageBuffer()}
+     * ($indirectArgs = argsBuf) and the renderer issues vio_draw_indirect() with
+     * exactly the live count, nothing read back. Two dispatches: a one-thread
+     * reset of instanceCount, then the compacting kernel. False when the state
+     * carries no argument record (created without an index count, or no
+     * VIO_FEATURE_INDIRECT_DRAW) or on any GPU error — fall back to {@see step()}.
+     */
+    public static function stepIndirect(
+        \VioContext $ctx,
+        GpuParticleState $state,
+        ParticleEmitter $emitter,
+        float $dt,
+        ?Vec3 $camPos,
+    ): bool {
+        $args = $state->argsBuf;
+        if ($args === null || !self::isIndirectDraw($ctx)) {
+            return false;
+        }
+        try {
+            $reset = self::$resetPipeline ?? vio_compute_pipeline($ctx, ['source' => self::RESET_ARGS_SHADER]);
+            $compact = self::$compactPipeline ?? vio_compute_pipeline($ctx, ['source' => self::compactShader()]);
+            if ($reset === false || $compact === false) {
+                return false;
+            }
+            self::$resetPipeline = $reset;
+            self::$compactPipeline = $compact;
+
+            vio_compute_bind_buffer($ctx, $reset, $args, 0, VIO_COMPUTE_WRITE);
+            vio_compute_dispatch($ctx, $reset, 1, 1, 1);
+
+            vio_compute_set_uniforms($ctx, $compact, self::stepParams($state, $emitter, $dt, $camPos));
+            vio_compute_bind_buffer($ctx, $compact, $state->stateBuf, 0, VIO_COMPUTE_WRITE);
+            vio_compute_bind_buffer($ctx, $compact, $state->outBuf,   1, VIO_COMPUTE_WRITE);
+            vio_compute_bind_buffer($ctx, $compact, $args,            3, VIO_COMPUTE_WRITE);
+            $groups = intdiv($state->capacity + self::LOCAL_SIZE - 1, self::LOCAL_SIZE);
+            vio_compute_dispatch($ctx, $compact, $groups, 1, 1);
+            return true;
+        } catch (\Throwable) {
+            return false;
+        }
+    }
+
     // ── Readback-free path (Path B: VIO_FEATURE_VERTEX_STORAGE) ──────────────
 
     /**
@@ -335,6 +408,68 @@ final class GpuParticleBaker
             && function_exists('vio_bind_storage_buffer')
             && defined('VIO_FEATURE_VERTEX_STORAGE')
             && vio_supports_feature($ctx, VIO_FEATURE_VERTEX_STORAGE);
+    }
+
+    /**
+     * True when the finished matrices can also be drawn with a GPU-written
+     * instance count (php-vio >= 2.17, VIO_FEATURE_INDIRECT_DRAW on top of the
+     * readback-free path) — the prerequisite for {@see stepIndirect()}.
+     */
+    public static function isIndirectDraw(\VioContext $ctx): bool
+    {
+        return self::isReadbackFree($ctx)
+            && function_exists('vio_draw_indirect')
+            && defined('VIO_FEATURE_INDIRECT_DRAW')
+            && vio_supports_feature($ctx, VIO_FEATURE_INDIRECT_DRAW);
+    }
+
+    /**
+     * Resets the instance count of the indirect argument record before a
+     * compacting step. indexCount (a[0]) was seeded at creation and never
+     * changes; the offsets (a[2..4]) stay 0.
+     */
+    public const RESET_ARGS_SHADER = <<<'GLSL'
+        #version 450
+        layout(local_size_x = 1, local_size_y = 1, local_size_z = 1) in;
+        layout(std430, binding = 0) buffer Args { uint a[]; };
+        void main() { a[1] = 0u; }
+        GLSL;
+
+    /**
+     * {@see SHADER} with slot compaction: a live thread claims the next output
+     * slot via atomicAdd on the indirect record's instanceCount (binding 3) and
+     * writes its matrix there; dead slots write nothing. Derived from SHADER by
+     * text so the integration and billboard math stay one source.
+     */
+    public static function compactShader(): string
+    {
+        $src = self::SHADER;
+        $edits = [
+            "layout(std430, binding = 1) writeonly buffer OutM { float m[]; };
+"
+                => "layout(std430, binding = 1) writeonly buffer OutM { float m[]; };
+layout(std430, binding = 3) buffer Args { uint a[]; };
+",
+            "    uint o = gid * 16u;
+" => "    uint o;
+",
+            "    if (age >= life || life <= 0.0) {
+        for (uint k = 0u; k < 16u; k++) m[o + k] = 0.0;
+        return;
+    }
+"
+                => "    if (age >= life || life <= 0.0) return;
+    // Compaction: claim the next live instance slot (indirect draw record).
+    o = atomicAdd(a[1], 1u) * 16u;
+",
+        ];
+        foreach ($edits as $old => $new) {
+            if (substr_count($src, $old) !== 1) {
+                throw new \LogicException('GpuParticleBaker::SHADER changed; compactShader() anchors need updating');
+            }
+            $src = str_replace($old, $new, $src);
+        }
+        return $src;
     }
 
     /**

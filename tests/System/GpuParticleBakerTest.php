@@ -116,6 +116,49 @@ class GpuParticleBakerTest extends TestCase
         }
     }
 
+    public function testStepIndirectCompactsLiveSlotsIntoTheArgumentRecord(): void
+    {
+        $ctx = $this->ctx;
+        self::assertNotNull($ctx);
+        if (!GpuParticleBaker::isIndirectDraw($ctx)) {
+            $this->markTestSkipped('backend cannot draw indirectly (php-vio < 2.17 or no VIO_FEATURE_INDIRECT_DRAW)');
+        }
+        GpuParticleBaker::warm($ctx);
+
+        $emitter = new ParticleEmitter(gravity: new Vec3(0.0, -1.0, 0.0), startSize: 0.5, endSize: 0.1);
+        $live = 300;
+        $capacity = 512;
+        $seed = $this->seed($live);
+        $seed[] = [1.0, 2.0, 3.0, 0.0, 0.0, 0.0, 5.0, 2.0]; // dead: age 5 > life 2
+
+        $state = GpuParticleBaker::createState($ctx, $seed, $capacity, indexCount: 6);
+        self::assertNotNull($state);
+        self::assertNotNull($state->argsBuf, 'index count + indirect support => argument record allocated');
+
+        self::assertTrue(GpuParticleBaker::stepIndirect($ctx, $state, $emitter, 0.016, new Vec3(0.0, 5.0, 20.0)));
+
+        // {indexCount, instanceCount, firstIndex, baseVertex, firstInstance}
+        $args = vio_storage_buffer_read($ctx, $state->argsBuf);
+        self::assertNotFalse($args);
+        $rec = array_values(unpack('V5', $args) ?: []);
+        self::assertSame([6, $live, 0, 0, 0], $rec, 'exactly the live particles are counted');
+
+        // The live matrices are compacted to the front: every slot below the
+        // count is a real billboard (w = 1), the first slot past it untouched.
+        $out = vio_storage_buffer_read($ctx, $state->outBuf);
+        self::assertNotFalse($out);
+        $m = array_values(unpack('f*', $out) ?: []);
+        for ($i = 0; $i < $live; $i++) {
+            self::assertSame(1.0, $m[$i * 16 + 15], "compacted slot {$i} is not a matrix");
+        }
+        self::assertSame(0.0, $m[$live * 16 + 15], 'slot past the live count stays empty');
+
+        // A second step keeps the count exact (the reset kernel zeroes it first).
+        self::assertTrue(GpuParticleBaker::stepIndirect($ctx, $state, $emitter, 0.016, null));
+        $rec = array_values(unpack('V5', (string) vio_storage_buffer_read($ctx, $state->argsBuf)) ?: []);
+        self::assertSame($live, $rec[1], 'instance count does not accumulate across steps');
+    }
+
     /**
      * CPU reference: integrate one step (semi-implicit Euler) then build the
      * camera-facing billboard matrix from the post-integrate state — identical
