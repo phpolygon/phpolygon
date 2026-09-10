@@ -68,6 +68,8 @@ const VIO_FEATURE_GPU_TIMESTAMP = 32;
 const VIO_FEATURE_FRAME_LATENCY = 33;
 const VIO_FEATURE_HDR_OUTPUT = 34;
 const VIO_FEATURE_INDIRECT_DRAW = 35;
+const VIO_FEATURE_TEXTURE_ARRAY = 36;
+const VIO_FEATURE_TEXTURE_COMPRESSION_BC = 37;
 
 // Render-target colour attachment formats (vio_render_target 'attachments', vio_pipeline 'attachments')
 const VIO_FORMAT_RGBA8      = 0;
@@ -79,6 +81,12 @@ const VIO_FORMAT_R16F       = 5;
 const VIO_FORMAT_R32F       = 6;
 const VIO_FORMAT_R8         = 7;
 const VIO_FORMAT_RGB10A2    = 8; // HDR10 backbuffer / render target (php-vio >= 2.15)
+// Block-compressed texture data for vio_texture(['format' => …]) / KTX2 (php-vio >= 2.18); not render-target formats
+const VIO_FORMAT_BC1        = 9;
+const VIO_FORMAT_BC3        = 10;
+const VIO_FORMAT_BC4        = 11;
+const VIO_FORMAT_BC5        = 12;
+const VIO_FORMAT_BC7        = 13;
 
 // ----------------------------------------------------------------
 // Backend info
@@ -493,3 +501,11 @@ function vio_swapchain_info(VioContext $context): array {}
  * byte $offset. Per-instance data comes from vio_bind_storage_buffer().
  */
 function vio_draw_indirect(VioContext $context, VioMesh $mesh, VioBuffer $args, int $maxDraws = 1, int $offset = 0): void {}
+
+/**
+ * php-vio >= 2.18: texture from a KTX2 container in memory (2D / 2D array; R8, RGBA8,
+ * BC1 / BC3 / BC4 / BC5 / BC7; no supercompression), stored mip chain uploaded as-is.
+ *
+ * @param array{mip_offset?: int, filter?: int, wrap?: int, anisotropy?: int, mipmaps?: bool}|null $options
+ */
+function vio_texture_ktx2(VioContext $context, string $bytes, ?array $options = null): VioTexture|false {}
