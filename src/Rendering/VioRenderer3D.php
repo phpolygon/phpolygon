@@ -2304,6 +2304,7 @@ class VioRenderer3D implements Renderer3DInterface
         // the draw count tiny, and drawing every caster into every cascade is free
         // on this CPU-bound path (off-box casters clip to the cascade ortho box;
         // the shadow result is identical to the old per-cascade-culled version).
+        PerfProfiler::begin('render3d.shadow.collect');
         /** @var list<DrawMesh> $casters */
         $casters = [];
         /** @var list<array{0: DrawMeshInstanced, 1: Material}> $instancedCasters */
@@ -2353,21 +2354,59 @@ class VioRenderer3D implements Renderer3DInterface
         // instanced) casters by mesh and draw each group as ONE instanced draw per
         // cascade — e.g. 78 'box' casters collapse from 78 draws to 1. Matrices are
         // packed once here and reused for every cascade.
-        $shadowGroups = [];
-        foreach ($casters as $cmd) {
-            $shadowGroups[$cmd->meshId][] = $cmd->modelMatrix;
-        }
-        $shadowPacked = [];
-        foreach ($shadowGroups as $meshId => $mats) {
-            $floats = [];
-            foreach ($mats as $mm) {
-                foreach ($mm->toArray() as $f) {
-                    $floats[] = $f;
+        // The same casters with the same (immutable) matrix objects as last frame
+        // pack to the same bytes: reuse them. A built world's casters are static.
+        $reusePacked = count($casters) === count($this->shadowCasterMatrices);
+        if ($reusePacked) {
+            foreach ($casters as $i => $cmd) {
+                if ($cmd->modelMatrix !== $this->shadowCasterMatrices[$i] || $cmd->meshId !== $this->shadowCasterMeshIds[$i]) {
+                    $reusePacked = false;
+                    break;
                 }
             }
-            $shadowPacked[$meshId] = [pack('f*', ...$floats), count($mats)];
+        }
+        if (!$reusePacked) {
+            $shadowGroups = [];
+            $this->shadowCasterMatrices = [];
+            $this->shadowCasterMeshIds = [];
+            foreach ($casters as $cmd) {
+                $shadowGroups[$cmd->meshId][] = $cmd->modelMatrix;
+                $this->shadowCasterMatrices[] = $cmd->modelMatrix;
+                $this->shadowCasterMeshIds[] = $cmd->meshId;
+            }
+            $this->shadowPackedCache = [];
+            foreach ($shadowGroups as $meshId => $mats) {
+                $floats = [];
+                foreach ($mats as $mm) {
+                    foreach ($mm->toArray() as $f) {
+                        $floats[] = $f;
+                    }
+                }
+                $this->shadowPackedCache[$meshId] = [pack('f*', ...$floats), count($mats)];
+            }
         }
 
+        // Resolve every shadow draw once per frame, not once per cascade.
+        /** @var list<array{0: \VioMesh, 1: string, 2: int}> $shadowDraws */
+        $shadowDraws = [];
+        foreach ($this->shadowPackedCache as $meshId => [$buf, $cnt]) {
+            $mesh = $this->uploadMesh((string) $meshId);
+            if ($mesh !== null) {
+                $shadowDraws[] = [$mesh, $buf, $cnt];
+            }
+        }
+        foreach ($instancedCasters as [$cmd, $mat]) {
+            $mesh = $this->uploadMesh($cmd->meshId);
+            if ($mesh === null) {
+                continue;
+            }
+            [$flatMatrices, $instanceCount] = $this->resolveInstanceData($cmd->meshId, $mat, $cmd);
+            $shadowDraws[] = [$mesh, $flatMatrices, $instanceCount];
+        }
+
+        PerfProfiler::end();
+
+        PerfProfiler::begin('render3d.shadow.draw');
         $this->cascadeLightSpaceMatrices = [];
         foreach (self::CASCADE_ORTHO_SIZES as $cIdx => $orthoSize) {
             $target = $this->cascadeShadowTargets[$cIdx] ?? null;
@@ -2388,26 +2427,14 @@ class VioRenderer3D implements Renderer3DInterface
             vio_set_uniform($this->ctx, 'u_view', $lightView->toArray());
             vio_set_uniform($this->ctx, 'u_projection', $lightProj->toArray());
 
-            // Individual casters, grouped by mesh → one instanced draw each.
-            foreach ($shadowPacked as $meshId => [$buf, $cnt]) {
-                $mesh = $this->uploadMesh($meshId);
-                if ($mesh === null) {
-                    continue;
-                }
+            // Individual casters grouped by mesh, then the instanced casters.
+            foreach ($shadowDraws as [$mesh, $buf, $cnt]) {
                 vio_set_uniform($this->ctx, 'u_use_instancing', 1);
                 vio_draw_instanced($this->ctx, $mesh, $buf, $cnt);
             }
-
-            foreach ($instancedCasters as [$cmd, $mat]) {
-                $mesh = $this->uploadMesh($cmd->meshId);
-                if ($mesh === null) {
-                    continue;
-                }
-                [$flatMatrices, $instanceCount] = $this->resolveInstanceData($cmd->meshId, $mat, $cmd);
-                vio_set_uniform($this->ctx, 'u_use_instancing', 1);
-                vio_draw_instanced($this->ctx, $mesh, $flatMatrices, $instanceCount);
-            }
         }
+
+        PerfProfiler::end();
 
         vio_unbind_render_target($this->ctx);
 
@@ -3753,10 +3780,16 @@ class VioRenderer3D implements Renderer3DInterface
         }
 
         // Per-draw uniforms (vary per transform — always set), batched.
+        $memo = $this->drawMatrixMemo ??= new \WeakMap();
+        $matrices = $memo[$modelMatrix] ?? null;
+        if ($matrices === null) {
+            $matrices = [$modelMatrix->toArray(), $this->computeNormalMatrix($modelMatrix)];
+            $memo[$modelMatrix] = $matrices;
+        }
         $this->setUniforms([
-            'u_model'          => $modelMatrix->toArray(),
+            'u_model'          => $matrices[0],
             'u_use_instancing' => 0,
-            'u_normal_matrix'  => $this->computeNormalMatrix($modelMatrix),
+            'u_normal_matrix'  => $matrices[1],
         ]);
         $this->applyGbufferWrite($excludeFromGbuffer ? 0 : 1);
 
@@ -3804,6 +3837,25 @@ class VioRenderer3D implements Renderer3DInterface
     }
 
     private ?bool $indirectDrawAvailable = null;
+
+    /**
+     * u_model / u_normal_matrix per model matrix object. Mat4 is immutable and a
+     * static entity hands the renderer the same world matrix object every frame,
+     * so its 4x4 inverse is computed once instead of once per draw per frame.
+     * Weak: entries vanish with their matrix.
+     *
+     * @var \WeakMap<Mat4, array{0: float[], 1: float[]}>|null
+     */
+    private ?\WeakMap $drawMatrixMemo = null;
+
+    /** @var list<Mat4> individual shadow casters of the last frame, in draw order */
+    private array $shadowCasterMatrices = [];
+
+    /** @var list<string> */
+    private array $shadowCasterMeshIds = [];
+
+    /** @var array<string, array{0: string, 1: int}> packed matrices per mesh for those casters */
+    private array $shadowPackedCache = [];
 
     /**
      * vio_set_shading_rate() usable on this context (php-vio >= 2.19 with
