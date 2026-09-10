@@ -108,7 +108,15 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release download --repo phpolygon/php-vio --pattern '*_php8.5-x86_64-linux-glibc.zip' --dir /tmp/vio
+          # A fresh php-vio release uploads its binaries a few minutes after the tag:
+          # take the newest release that already has the Linux build.
+          for tag in $(gh release list --repo phpolygon/php-vio -L 5 --json tagName -q '.[].tagName'); do
+            if gh release download "$tag" --repo phpolygon/php-vio --pattern '*_php8.5-x86_64-linux-glibc.zip' --dir /tmp/vio; then
+              echo "php-vio release: $tag"
+              break
+            fi
+          done
+          ls /tmp/vio/*.zip
           unzip -o /tmp/vio/*.zip -d /tmp/vio
           sudo cp /tmp/vio/vio.so "$(php -r 'echo ini_get("extension_dir");')/"
           echo 'extension=vio.so' | sudo tee -a "$(php -r 'echo php_ini_loaded_file();')"
