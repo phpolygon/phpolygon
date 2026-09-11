@@ -5,9 +5,6 @@ declare(strict_types=1);
 namespace PHPolygon\Build;
 
 use Phar;
-use FilesystemIterator;
-use RecursiveDirectoryIterator;
-use RecursiveIteratorIterator;
 
 class PharBuilder
 {
@@ -24,7 +21,7 @@ class PharBuilder
     public function stage(string $stagingDir): void
     {
         if (is_dir($stagingDir)) {
-            $this->removeDirectory($stagingDir);
+            FileTree::remove($stagingDir);
         }
         mkdir($stagingDir, 0755, true);
 
@@ -40,7 +37,7 @@ class PharBuilder
         // Stage src/
         $srcDir = $projectRoot . '/src';
         if (is_dir($srcDir)) {
-            $this->copyDirectory($srcDir, $stagingDir . '/src');
+            FileTree::copy($srcDir, $stagingDir . '/src');
         }
 
         // Stage root PHP files and config
@@ -81,7 +78,7 @@ class PharBuilder
                     if ($item === '.' || $item === '..') continue;
                     $itemPath = $resourcesDir . '/' . $item;
                     if (is_dir($itemPath) && !in_array($item, $external) && !in_array('resources/' . $item, $this->config->externalResources)) {
-                        $this->copyDirectory($itemPath, $stagingDir . '/resources/' . $item);
+                        FileTree::copy($itemPath, $stagingDir . '/resources/' . $item);
                     } elseif (is_file($itemPath)) {
                         @mkdir($stagingDir . '/resources', 0755, true);
                         copy($itemPath, $stagingDir . '/resources/' . $item);
@@ -93,13 +90,13 @@ class PharBuilder
         // Stage mesh cache if present
         $meshCacheDir = $projectRoot . '/.phpolygon/mesh-cache';
         if (is_dir($meshCacheDir)) {
-            $this->copyDirectory($meshCacheDir, $stagingDir . '/resources/meshes');
+            FileTree::copy($meshCacheDir, $stagingDir . '/resources/meshes');
         }
 
         // Stage assets/ directory
         $assetsDir = $projectRoot . '/assets';
         if (is_dir($assetsDir)) {
-            $this->copyDirectory($assetsDir, $stagingDir . '/assets');
+            FileTree::copy($assetsDir, $stagingDir . '/assets');
         }
     }
 
@@ -297,20 +294,9 @@ STUB_END;
         @mkdir($dst, 0755, true);
         $excludes = array_map(fn(string $p) => str_replace('**/', '', $p), $excludePatterns);
 
-        $iterator = new RecursiveIteratorIterator(
-            new RecursiveDirectoryIterator($src, FilesystemIterator::SKIP_DOTS | FilesystemIterator::FOLLOW_SYMLINKS),
-            RecursiveIteratorIterator::SELF_FIRST
-        );
-
-        $srcLen = strlen($src);
-        /** @var \SplFileInfo $item */
-        foreach ($iterator as $item) {
-            // Normalise to '/' — on Windows getPathname() returns backslashes,
-            // so explode('/') below would not split path segments and the
-            // exclude match (e.g. '**/tests') would silently miss, bloating the
-            // PHAR with test/vendor junk on Windows builds.
-            $relPath = str_replace('\\', '/', substr($item->getPathname(), $srcLen + 1));
-
+        // The keys are '/'-separated on Windows too, so explode('/') below splits
+        // the segments the exclude patterns (e.g. '**/tests') match against.
+        foreach (FileTree::walk($src) as $relPath => $item) {
             // Check if any path segment matches an exclude pattern
             $skip = false;
             $segments = explode('/', $relPath);
@@ -328,56 +314,24 @@ STUB_END;
 
             $target = $dst . '/' . $relPath;
             $source = $item->getRealPath() ?: $item->getPathname();
-            if ($item->isDir()) {
-                @mkdir($target, 0755, true);
-            } elseif (is_dir($source)) {
-                // A symlink/junction to a directory the iterator won't descend
-                // into — a Composer path-repo dependency (e.g. the engine, which
-                // appears as a junction on Windows). Without this its sources
-                // never reach the PHAR (the classic "Class PHPolygon\Engine not
-                // found" at runtime). Copy its real tree, skipping the dev
-                // checkout's VCS/build junk and its own (already-flattened) vendor.
+            if (FileTree::isLinkedDirectory($item->getPathname())) {
+                // A symlink/junction to a directory, which the walk does not enter:
+                // a Composer path-repo dependency (e.g. the engine, which appears
+                // as a junction on Windows). Without this its sources never reach
+                // the PHAR (the classic "Class PHPolygon\Engine not found" at
+                // runtime). Copy its real tree, skipping the dev checkout's
+                // VCS/build junk and its own (already-flattened) vendor.
                 $depExcludes = array_merge($excludePatterns, [
                     '**/.git', '**/.github', '**/.idea',
                     '**/node_modules', '**/vendor', '**/build', '**/dist',
                 ]);
                 $this->copyDirectoryFiltered($source, $target, $depExcludes);
+            } elseif ($item->isDir()) {
+                @mkdir($target, 0755, true);
             } else {
                 @mkdir(dirname($target), 0755, true);
                 copy($source, $target);
             }
         }
-    }
-
-    private function copyDirectory(string $src, string $dst): void
-    {
-        @mkdir($dst, 0755, true);
-        $iterator = new RecursiveIteratorIterator(
-            new RecursiveDirectoryIterator($src, FilesystemIterator::SKIP_DOTS),
-            RecursiveIteratorIterator::SELF_FIRST
-        );
-        /** @var \SplFileInfo $item */
-        foreach ($iterator as $item) {
-            $target = $dst . '/' . substr($item->getPathname(), strlen($src) + 1);
-            if ($item->isDir()) {
-                @mkdir($target, 0755, true);
-            } else {
-                @mkdir(dirname($target), 0755, true);
-                copy($item->getPathname(), $target);
-            }
-        }
-    }
-
-    private function removeDirectory(string $dir): void
-    {
-        $iterator = new RecursiveIteratorIterator(
-            new RecursiveDirectoryIterator($dir, FilesystemIterator::SKIP_DOTS),
-            RecursiveIteratorIterator::CHILD_FIRST
-        );
-        /** @var \SplFileInfo $item */
-        foreach ($iterator as $item) {
-            $item->isDir() ? rmdir($item->getPathname()) : unlink($item->getPathname());
-        }
-        rmdir($dir);
     }
 }

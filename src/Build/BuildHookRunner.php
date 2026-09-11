@@ -134,6 +134,9 @@ final class BuildHookRunner
             if ($command[0] === '@php') {
                 $command[0] = $this->interpreter($hook, $context);
                 $hookEnvironment['PHPOLYGON_HOOK_PHP'] = $command[0];
+                if (str_starts_with($command[0], $this->runnerDir . '/')) {
+                    $hookEnvironment = self::withLibraryDirectory($hookEnvironment, dirname($command[0]));
+                }
             }
             ($this->logger)('info', 'Build hook: ' . implode(' ', $hook['run']));
             $exit = $this->execute($command, $hookEnvironment);
@@ -190,12 +193,13 @@ final class BuildHookRunner
             if (!is_dir(dirname($path)) && !mkdir(dirname($path), 0755, true) && !is_dir(dirname($path))) {
                 throw new \RuntimeException('Cannot create ' . dirname($path));
             }
-            $runtime = file_get_contents($microSfx);
-            if ($runtime === false) {
-                throw new \RuntimeException("Game runtime not readable: {$microSfx}");
-            }
+            // Copied as a stream: a runtime is some 70 MB, and a build PHP without a
+            // php.ini has 128 MB of memory - reading it and appending held it twice.
             $tmp = $path . '.tmp' . getmypid();
-            file_put_contents($tmp, $runtime . self::RUNNER_BOOTSTRAP);
+            if (!copy($microSfx, $tmp) || file_put_contents($tmp, self::RUNNER_BOOTSTRAP, FILE_APPEND) === false) {
+                @unlink($tmp);
+                throw new \RuntimeException("Cannot build the hook runner from {$microSfx}");
+            }
             chmod($tmp, 0755);
             rename($tmp, $path);
         }
@@ -209,6 +213,30 @@ final class BuildHookRunner
         }
 
         return $path;
+    }
+
+    /**
+     * $environment with $dir searched first for shared libraries. Windows loads a
+     * program's DLLs from the program's directory; Linux and macOS look there only
+     * when told to, so the runtime's libraries next to a runner (libsteam_api.so)
+     * were not found.
+     *
+     * @param array<string, string> $environment
+     * @return array<string, string>
+     */
+    public static function withLibraryDirectory(array $environment, string $dir): array
+    {
+        $variable = match (PHP_OS_FAMILY) {
+            'Windows' => null,
+            'Darwin' => 'DYLD_LIBRARY_PATH',
+            default => 'LD_LIBRARY_PATH',
+        };
+        if ($variable !== null) {
+            $current = $environment[$variable] ?? '';
+            $environment[$variable] = $current === '' ? $dir : $dir . PATH_SEPARATOR . $current;
+        }
+
+        return $environment;
     }
 
     /** Platform name of this host as the runtime releases use it. */

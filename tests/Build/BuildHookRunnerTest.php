@@ -167,6 +167,68 @@ final class BuildHookRunnerTest extends TestCase
         self::assertFileExists(dirname($interpreter) . '/runtime-lib.dll');
     }
 
+    public function testRunnerLibrariesAreFoundOutsideWindowsToo(): void
+    {
+        $variable = match (PHP_OS_FAMILY) {
+            'Windows' => null,
+            'Darwin' => 'DYLD_LIBRARY_PATH',
+            default => 'LD_LIBRARY_PATH',
+        };
+        $environment = ['PATH' => '/usr/bin'];
+
+        if ($variable === null) {
+            self::assertSame($environment, BuildHookRunner::withLibraryDirectory($environment, 'C:/runners/abc'));
+            return;
+        }
+        self::assertSame(['PATH' => '/usr/bin', $variable => '/tmp/runners/abc'], BuildHookRunner::withLibraryDirectory($environment, '/tmp/runners/abc'));
+        self::assertSame(
+            '/tmp/runners/abc' . PATH_SEPARATOR . '/opt/lib',
+            BuildHookRunner::withLibraryDirectory([$variable => '/opt/lib'], '/tmp/runners/abc')[$variable],
+            'a library path set already stays behind the runner directory',
+        );
+    }
+
+    /**
+     * A runtime is some 70 MB and a build container's PHP has 128 MB of memory: the
+     * runner is copied as a stream, never held in memory. Checked in a PHP with less
+     * memory than the runtime file.
+     */
+    public function testRunnerIsBuiltWithoutLoadingTheRuntimeIntoMemory(): void
+    {
+        $this->config([]);
+        $size = 40 * 1024 * 1024;
+        $sfx = $this->dir . '/micro.sfx';
+        $handle = fopen($sfx, 'wb');
+        self::assertIsResource($handle);
+        ftruncate($handle, $size);
+        fclose($handle);
+
+        $script = $this->dir . '/build-runner.php';
+        file_put_contents($script, sprintf(
+            '<?php require %s; echo (new PHPolygon\Build\BuildHookRunner(PHPolygon\Build\BuildConfig::load(%s), static fn (): string => "", %s))->runner(%s);',
+            var_export(dirname(__DIR__, 2) . '/vendor/autoload.php', true),
+            var_export($this->dir, true),
+            var_export($this->dir . '/runners', true),
+            var_export($sfx, true),
+        ));
+
+        $process = proc_open([PHP_BINARY, '-d', 'memory_limit=24M', $script], [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
+        self::assertIsResource($process);
+        $interpreter = (string) stream_get_contents($pipes[1]);
+        $err = (string) stream_get_contents($pipes[2]);
+        fclose($pipes[1]);
+        fclose($pipes[2]);
+        self::assertSame(0, proc_close($process), $interpreter . $err);
+
+        $bootstrap = BuildHookRunner::RUNNER_BOOTSTRAP;
+        self::assertSame($size + strlen($bootstrap), filesize($interpreter));
+        $runner = fopen($interpreter, 'rb');
+        self::assertIsResource($runner);
+        fseek($runner, -strlen($bootstrap), SEEK_END);
+        self::assertSame($bootstrap, stream_get_contents($runner));
+        fclose($runner);
+    }
+
     /**
      * The bootstrap appended to a micro.sfx is plain PHP: run it with this PHP
      * to check how it passes `-d` options, the script and its arguments on.

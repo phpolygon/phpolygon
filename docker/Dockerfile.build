@@ -30,11 +30,14 @@ ARG RCODESIGN_VERSION=0.29.0
 #   mbstring -> composer + phar staging
 #   git/unzip/jq/curl -> tooling
 #   build-essential/cmake -> build.json hooks that compile tools (e.g. a texture encoder)
+#   libx11-6 ... libxrender1 -> the X11 libraries the Linux game runtime links: build.json
+#                hooks whose requirements this PHP lacks run on that runtime
 RUN set -eux; \
     apt-get update; \
     apt-get install -y --no-install-recommends \
         git unzip jq curl ca-certificates libzip-dev libonig-dev \
-        build-essential cmake; \
+        build-essential cmake \
+        libx11-6 libxrandr2 libxinerama1 libxcursor1 libxext6 libxfixes3 libxrender1; \
     docker-php-ext-install -j"$(nproc)" zip mbstring; \
     rm -rf /var/lib/apt/lists/*
 

@@ -73,7 +73,7 @@ class GameBuilder
         // Clean previous build output
         if (is_dir($platformOutputDir)) {
             $this->log('info', 'Cleaning previous build...');
-            $this->removeDirectory($platformOutputDir);
+            FileTree::remove($platformOutputDir);
         }
         mkdir($platformOutputDir, 0755, true);
 
@@ -212,8 +212,11 @@ class GameBuilder
                 'bundleSize' => $bundleSize,
             ];
         } finally {
-            if (is_dir($tempDir)) {
-                $this->removeDirectory($tempDir);
+            // A leftover temp dir must not replace the build's own result or exception.
+            try {
+                FileTree::remove($tempDir);
+            } catch (\RuntimeException $e) {
+                $this->log('warning', $e->getMessage());
             }
             // Only restore dev dependencies if this call actually prepared vendor.
             if ($vendorPrepared) {
@@ -309,12 +312,8 @@ class GameBuilder
     private function countFiles(string $dir): int
     {
         $count = 0;
-        $iterator = new \RecursiveIteratorIterator(
-            new \RecursiveDirectoryIterator($dir, \FilesystemIterator::SKIP_DOTS),
-            \RecursiveIteratorIterator::LEAVES_ONLY
-        );
-        foreach ($iterator as $_) {
-            $count++;
+        foreach (FileTree::walk($dir) as $item) {
+            $count += (int) !$item->isDir();
         }
         return $count;
     }
@@ -325,28 +324,12 @@ class GameBuilder
             return (int) filesize($path);
         }
         $size = 0;
-        $iterator = new \RecursiveIteratorIterator(
-            new \RecursiveDirectoryIterator($path, \FilesystemIterator::SKIP_DOTS),
-            \RecursiveIteratorIterator::LEAVES_ONLY
-        );
-        /** @var \SplFileInfo $file */
-        foreach ($iterator as $file) {
-            $size += $file->getSize();
+        foreach (FileTree::walk($path) as $item) {
+            if (!$item->isDir()) {
+                $size += (int) $item->getSize();
+            }
         }
         return $size;
-    }
-
-    private function removeDirectory(string $dir): void
-    {
-        $iterator = new \RecursiveIteratorIterator(
-            new \RecursiveDirectoryIterator($dir, \FilesystemIterator::SKIP_DOTS),
-            \RecursiveIteratorIterator::CHILD_FIRST
-        );
-        /** @var \SplFileInfo $item */
-        foreach ($iterator as $item) {
-            $item->isDir() ? rmdir($item->getPathname()) : unlink($item->getPathname());
-        }
-        rmdir($dir);
     }
 
     /**

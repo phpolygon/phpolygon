@@ -143,7 +143,7 @@ class IosAppBuilder
     private function prepareProject(string $stagingDir, string $libphpDir, string $slice): string
     {
         $work = sys_get_temp_dir() . '/phpolygon-ios-' . getmypid();
-        $this->removeDir($work);
+        FileTree::remove($work);
         mkdir($work . '/Source', 0755, true);
 
         // 1. Template ObjC sources.
@@ -153,7 +153,7 @@ class IosAppBuilder
 
         // 2. Staged game tree -> App/, plus the generated entry shim.
         $appDir = $work . '/App';
-        $this->copyDir($stagingDir, $appDir);
+        FileTree::copy($stagingDir, $appDir);
         // PharBuilder excludes externalResources from the staged tree (on
         // desktop they sit next to the binary). The iOS bundle has no such
         // sidecar - App/resources IS the resource root - so fold them back in,
@@ -189,8 +189,8 @@ class IosAppBuilder
             throw new \RuntimeException('xcodebuild succeeded but no .app was found under DerivedData');
         }
         $dest = $outputDir . '/' . basename($built);
-        $this->removeDir($dest);
-        $this->copyDir($built, $dest);
+        FileTree::remove($dest);
+        FileTree::copy($built, $dest);
         $this->log("app: {$dest}");
 
         return $dest;
@@ -219,8 +219,8 @@ class IosAppBuilder
         }
 
         $archiveDest = $outputDir . '/' . $projectName . '.xcarchive';
-        $this->removeDir($archiveDest);
-        $this->copyDir($archivePath, $archiveDest);
+        FileTree::remove($archiveDest);
+        FileTree::copy($archivePath, $archiveDest);
         $this->log("archive: {$archiveDest}");
 
         if (!$exportIpa) {
@@ -298,14 +298,14 @@ PLIST;
             $dst = $appDir . '/' . $resourcePath;
             if (!is_dir($dst)) {
                 $this->log("staging external resource: {$resourcePath}");
-                $this->copyDir($src, $dst);
+                FileTree::copy($src, $dst);
             }
         }
 
         // Engine branding (splash logo) lives in the engine, not the game.
         $branding = dirname(__DIR__, 2) . '/resources/branding';
         if (is_dir($branding) && !is_dir($appDir . '/resources/branding')) {
-            $this->copyDir($branding, $appDir . '/resources/branding');
+            FileTree::copy($branding, $appDir . '/resources/branding');
         }
     }
 
@@ -478,46 +478,5 @@ YAML;
             $tail = implode("\n", array_slice($out, -25));
             throw new \RuntimeException("Command failed (exit {$code}):\n{$cmd}\n\n{$tail}");
         }
-    }
-
-    private function copyDir(string $src, string $dst): void
-    {
-        if (!is_dir($dst)) {
-            mkdir($dst, 0755, true);
-        }
-        $it = new \RecursiveIteratorIterator(
-            new \RecursiveDirectoryIterator($src, \FilesystemIterator::SKIP_DOTS),
-            \RecursiveIteratorIterator::SELF_FIRST
-        );
-        foreach ($it as $item) {
-            /** @var \SplFileInfo $item */
-            $target = $dst . '/' . $it->getSubPathName();
-            if ($item->isDir()) {
-                if (!is_dir($target)) {
-                    mkdir($target, 0755, true);
-                }
-            } else {
-                copy($item->getPathname(), $target);
-            }
-        }
-    }
-
-    private function removeDir(string $dir): void
-    {
-        if (!is_dir($dir)) {
-            if (is_file($dir)) {
-                unlink($dir);
-            }
-            return;
-        }
-        $it = new \RecursiveIteratorIterator(
-            new \RecursiveDirectoryIterator($dir, \FilesystemIterator::SKIP_DOTS),
-            \RecursiveIteratorIterator::CHILD_FIRST
-        );
-        foreach ($it as $item) {
-            /** @var \SplFileInfo $item */
-            $item->isDir() ? rmdir($item->getPathname()) : unlink($item->getPathname());
-        }
-        rmdir($dir);
     }
 }

@@ -752,17 +752,13 @@ class StaticPhpResolver
         return is_string($release['url']) ? $release['url'] : null;
     }
 
+    /** Best effort: a leftover extraction directory in the temp dir does not fail a download. */
     private function removeDir(string $dir): void
     {
-        $it = new \RecursiveIteratorIterator(
-            new \RecursiveDirectoryIterator($dir, \FilesystemIterator::SKIP_DOTS),
-            \RecursiveIteratorIterator::CHILD_FIRST
-        );
-        /** @var \SplFileInfo $item */
-        foreach ($it as $item) {
-            $item->isDir() ? @rmdir($item->getPathname()) : @unlink($item->getPathname());
+        try {
+            FileTree::remove($dir);
+        } catch (\RuntimeException) {
         }
-        @rmdir($dir);
     }
 
     private function httpGet(string $url): ?string

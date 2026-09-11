@@ -195,7 +195,7 @@ XML;
             if (!is_dir($src)) continue;
 
             $dst = $targetDir . '/' . $resourcePath;
-            $this->copyDirectory($src, $dst);
+            FileTree::copy($src, $dst);
         }
 
         // Copy engine branding assets (splash screen logo) so the engine
@@ -203,26 +203,7 @@ XML;
         $engineBranding = __DIR__ . '/../../resources/branding';
         if (is_dir($engineBranding)) {
             $dst = $targetDir . '/resources/branding';
-            $this->copyDirectory($engineBranding, $dst);
-        }
-    }
-
-    private function copyDirectory(string $src, string $dst): void
-    {
-        @mkdir($dst, 0755, true);
-        $iterator = new \RecursiveIteratorIterator(
-            new \RecursiveDirectoryIterator($src, \FilesystemIterator::SKIP_DOTS),
-            \RecursiveIteratorIterator::SELF_FIRST
-        );
-        /** @var \SplFileInfo $item */
-        foreach ($iterator as $item) {
-            $target = $dst . '/' . substr($item->getPathname(), strlen($src) + 1);
-            if ($item->isDir()) {
-                @mkdir($target, 0755, true);
-            } else {
-                @mkdir(dirname($target), 0755, true);
-                copy($item->getPathname(), $target);
-            }
+            FileTree::copy($engineBranding, $dst);
         }
     }
 }
