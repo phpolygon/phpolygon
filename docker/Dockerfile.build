@@ -29,10 +29,12 @@ ARG RCODESIGN_VERSION=0.29.0
 #   zip      -> StaticPhpResolver extracts micro.sfx zips (ext-zip / ZipArchive)
 #   mbstring -> composer + phar staging
 #   git/unzip/jq/curl -> tooling
+#   build-essential/cmake -> build.json hooks that compile tools (e.g. a texture encoder)
 RUN set -eux; \
     apt-get update; \
     apt-get install -y --no-install-recommends \
-        git unzip jq curl ca-certificates libzip-dev libonig-dev; \
+        git unzip jq curl ca-certificates libzip-dev libonig-dev \
+        build-essential cmake; \
     docker-php-ext-install -j"$(nproc)" zip mbstring; \
     rm -rf /var/lib/apt/lists/*
 

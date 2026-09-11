@@ -144,6 +144,10 @@ package run per reuse target. In practice the first target takes ~50-90s
 (composer + staging + PHAR) and each remaining target ~1-4s, run in parallel.
 All four desktop targets land in roughly the time of one.
 
+### Build hooks
+
+`build.json` `hooks.beforeBuild` run inside the container before the first PHAR is built. `@php` falls back to the game's static runtime when the image PHP lacks a function the hook `requires` (e.g. GD with FreeType or php-vio), and the image carries `build-essential`/`cmake` for hooks that compile tools. Set `-e PHPOLYGON_SKIP_HOOKS=1` to skip them.
+
 ## 3. Options (env vars)
 
 | Var | Default | Values |

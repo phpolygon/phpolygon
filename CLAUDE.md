@@ -642,6 +642,19 @@ classic per-target build.
 | `StaticPhpResolver` | Finds/downloads/caches micro.sfx binary + Windows runtime libs (vulkan-1, d3dcompiler_47, DXC `dxcompiler.dll`/`dxil.dll` from the latest DirectXShaderCompiler release for Shader Model 6, Steam API) |
 | `PlatformPackager` | Creates .app bundle, Linux dir, Windows .exe |
 | `GameBuilder` | Orchestrates the 7-phase pipeline |
+| `BuildHookRunner` | Runs build.json `hooks.beforeBuild` before staging (see below) |
+
+### Build hooks
+
+`build.json` `hooks.beforeBuild` lists commands a build runs in the project root before it stages the game (asset pre-bakes, generated data). They run once per build that creates a PHAR; `--phar` reuse targets skip them. A failing hook fails the build; `PHPOLYGON_SKIP_HOOKS=1` skips them.
+
+```json
+"hooks": { "beforeBuild": [
+  { "run": ["@php", "-d", "memory_limit=-1", "tools/prebake.php"], "requires": ["imagettftext"], "runtimeVariant": "steam" }
+] }
+```
+
+`@php` resolves to `PHPOLYGON_HOOK_PHP`, else the PHP running the build when it has every `requires` function, else the game's static runtime (micro.sfx for the host, variant `runtimeVariant`) wrapped as a runner taking `[-d key=value]... script [args]` - so a hook can use the shipped game's extensions inside a build container whose PHP lacks them. Hooks see `PHPOLYGON_BUILD_PLATFORM/ARCH/VARIANT/TYPE`.
 
 ### PHAR stub constants
 

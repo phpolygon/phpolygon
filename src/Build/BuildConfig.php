@@ -52,6 +52,14 @@ class BuildConfig
      */
     public ?array $uiTranspile = null;
 
+    /**
+     * build.json `hooks.beforeBuild`: commands run before a build stages the
+     * game, see {@see BuildHookRunner}.
+     *
+     * @var list<array{run: list<string>, requires: list<string>, runtimeVariant: ?string}>
+     */
+    public array $hooksBeforeBuild = [];
+
     public string $projectRoot;
 
     private function __construct(string $projectRoot)
@@ -162,6 +170,56 @@ class BuildConfig
             $buildTypes = $data['buildTypes'];
             $this->buildTypes = $buildTypes;
         }
+
+        $hooks = isset($data['hooks']) && is_array($data['hooks']) ? $data['hooks'] : [];
+        if (isset($hooks['beforeBuild']) && is_array($hooks['beforeBuild'])) {
+            foreach ($hooks['beforeBuild'] as $hook) {
+                $parsed = self::parseHook($hook);
+                if ($parsed !== null) {
+                    $this->hooksBeforeBuild[] = $parsed;
+                }
+            }
+        }
+    }
+
+    /**
+     * One hook entry: `{"run": [...], "requires": [...], "runtimeVariant": "..."}`
+     * or just the command array. Null for anything else.
+     *
+     * @return array{run: list<string>, requires: list<string>, runtimeVariant: ?string}|null
+     */
+    private static function parseHook(mixed $hook): ?array
+    {
+        if (!is_array($hook)) {
+            return null;
+        }
+        if (array_is_list($hook)) {
+            $hook = ['run' => $hook];
+        }
+        $run = $hook['run'] ?? null;
+        if (!is_array($run) || $run === []) {
+            return null;
+        }
+        $command = [];
+        foreach ($run as $part) {
+            if (!is_string($part) || $part === '') {
+                return null;
+            }
+            $command[] = $part;
+        }
+        $requires = [];
+        foreach (is_array($hook['requires'] ?? null) ? $hook['requires'] : [] as $function) {
+            if (is_string($function) && $function !== '') {
+                $requires[] = $function;
+            }
+        }
+        $variant = $hook['runtimeVariant'] ?? null;
+
+        return [
+            'run' => $command,
+            'requires' => $requires,
+            'runtimeVariant' => is_string($variant) && $variant !== '' ? $variant : null,
+        ];
     }
 
     /**
@@ -205,6 +263,7 @@ class BuildConfig
             'resources.external' => $this->externalResources,
             'platforms' => $this->platforms,
             'buildTypes' => $this->buildTypes,
+            'hooks.beforeBuild' => $this->hooksBeforeBuild,
         ];
     }
 }

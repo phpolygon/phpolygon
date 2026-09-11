@@ -11,6 +11,7 @@ class GameBuilder
     private StaticPhpResolver $staticPhpResolver;
     private PlatformPackager $platformPackager;
     private IosAppBuilder $iosAppBuilder;
+    private BuildHookRunner $hookRunner;
 
     /** @var callable|null */
     private $logger = null;
@@ -22,6 +23,11 @@ class GameBuilder
         $this->staticPhpResolver = new StaticPhpResolver();
         $this->platformPackager = new PlatformPackager($config);
         $this->iosAppBuilder = new IosAppBuilder($config);
+        $this->hookRunner = new BuildHookRunner(
+            $config,
+            fn (string $platform, string $arch, string $variant, string $phpVersion): string
+                => $this->staticPhpResolver->resolve(null, $platform, $arch, $variant, $phpVersion),
+        );
     }
 
     /**
@@ -32,6 +38,7 @@ class GameBuilder
         $this->logger = $logger;
         $this->staticPhpResolver->setLogger(fn(string $msg) => $logger('info', $msg));
         $this->iosAppBuilder->setLogger(fn(string $msg) => $logger('info', $msg));
+        $this->hookRunner->setLogger(fn(string $level, string $msg) => $logger($level, $msg));
     }
 
     /**
@@ -93,6 +100,16 @@ class GameBuilder
                     mkdir($tempDir, 0755, true);
                 }
             } else {
+                // Phase 0: build.json beforeBuild hooks (asset pre-bakes and the like),
+                // while vendor still holds the full development install.
+                $this->hookRunner->runBeforeBuild([
+                    'platform' => $platform,
+                    'arch' => $arch,
+                    'variant' => $variant,
+                    'type' => $buildType,
+                    'phpVersion' => $phpVersion,
+                ]);
+
                 // Phase 1: Prepare vendor (install --no-dev)
                 $this->log('info', 'Installing production dependencies...');
                 $this->prepareVendor();
