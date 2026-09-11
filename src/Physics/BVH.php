@@ -43,6 +43,14 @@ class BVH
     /** @var array<int, int> triangle indices, reordered while building */
     private array $order = [];
 
+    /** Root bounds as plain properties: the miss test every query starts with. An empty tree keeps inverted infinite bounds, so every query misses. */
+    private float $rootMinX = INF;
+    private float $rootMinY = INF;
+    private float $rootMinZ = INF;
+    private float $rootMaxX = -INF;
+    private float $rootMaxY = -INF;
+    private float $rootMaxZ = -INF;
+
     private function __construct() {}
 
     /**
@@ -149,19 +157,31 @@ class BVH
      */
     public function query(Vec3 $queryMin, Vec3 $queryMax): array
     {
-        if ($this->left === []) {
+        // Root first, before anything is copied or allocated: in a world with many
+        // colliders almost every one misses a character-sized box, usually on the
+        // first comparison.
+        if ($queryMax->x < $this->rootMinX || $queryMin->x > $this->rootMaxX
+            || $queryMax->z < $this->rootMinZ || $queryMin->z > $this->rootMaxZ
+            || $queryMax->y < $this->rootMinY || $queryMin->y > $this->rootMaxY) {
             return [];
         }
 
         $bounds = $this->bounds;
+
+        $minX = $queryMin->x;
+        $minY = $queryMin->y;
+        $minZ = $queryMin->z;
+        $maxX = $queryMax->x;
+        $maxY = $queryMax->y;
+        $maxZ = $queryMax->z;
         $result = [];
         $stack = [0];
         while ($stack !== []) {
             $node = array_pop($stack);
             $o = $node * 6;
-            if ($queryMax->x < $bounds[$o] || $queryMin->x > $bounds[$o + 3]
-                || $queryMax->y < $bounds[$o + 1] || $queryMin->y > $bounds[$o + 4]
-                || $queryMax->z < $bounds[$o + 2] || $queryMin->z > $bounds[$o + 5]) {
+            if ($maxX < $bounds[$o] || $minX > $bounds[$o + 3]
+                || $maxY < $bounds[$o + 1] || $minY > $bounds[$o + 4]
+                || $maxZ < $bounds[$o + 2] || $minZ > $bounds[$o + 5]) {
                 continue;
             }
 
@@ -196,6 +216,12 @@ class BVH
     {
         $this->order = range(0, $count - 1);
         $this->buildNode(0, $count, $centroids, $boxes);
+        $this->rootMinX = $this->bounds[0];
+        $this->rootMinY = $this->bounds[1];
+        $this->rootMinZ = $this->bounds[2];
+        $this->rootMaxX = $this->bounds[3];
+        $this->rootMaxY = $this->bounds[4];
+        $this->rootMaxZ = $this->bounds[5];
     }
 
     /**
