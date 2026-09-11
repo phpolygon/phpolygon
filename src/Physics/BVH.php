@@ -7,26 +7,43 @@ namespace PHPolygon\Physics;
 use PHPolygon\Math\Vec3;
 
 /**
- * Binary Bounding Volume Hierarchy for fast triangle queries.
- * Built top-down with median split. Leaf threshold = 8 triangles.
+ * Binary bounding volume hierarchy for fast triangle queries.
+ *
+ * Built top-down with a median split along the longest extent of the triangle
+ * centroids; leaves hold at most {@see LEAF_THRESHOLD} triangles. The tree is
+ * stored flat – node bounds, child indices and leaf ranges in plain arrays, the
+ * triangles in leaf order – so building allocates no per-node objects and a
+ * query walks ints and floats.
+ *
+ * Each node's range is ordered once with array_multisort() over float keys (C,
+ * no PHP callback), and a node's bounds are the union of its children's. The
+ * previous object tree sorted with usort() and a callback that allocated two
+ * Vec3 per comparison, which made the collider BVHs of large imported meshes
+ * the dominant cost of loading a world.
  */
 class BVH
 {
-    private const LEAF_THRESHOLD = 8;
+    private const int LEAF_THRESHOLD = 8;
 
-    private Vec3 $min;
-    private Vec3 $max;
-    private ?BVH $left = null;
-    private ?BVH $right = null;
+    /** @var array<int, float> min x, y, z and max x, y, z per node */
+    private array $bounds = [];
 
-    /** @var Triangle[]|null Only set for leaf nodes */
-    private ?array $triangles = null;
+    /** @var array<int, int> left child per node; -1 marks a leaf */
+    private array $left = [];
 
-    private function __construct(Vec3 $min, Vec3 $max)
-    {
-        $this->min = $min;
-        $this->max = $max;
-    }
+    /** @var array<int, int> right child per node, or a leaf's first slot in $triangles */
+    private array $right = [];
+
+    /** @var array<int, int> triangles per leaf; 0 for internal nodes */
+    private array $counts = [];
+
+    /** @var list<Triangle> in leaf order */
+    private array $triangles = [];
+
+    /** @var array<int, int> triangle indices, reordered while building */
+    private array $order = [];
+
+    private function __construct() {}
 
     /**
      * Build a BVH from an array of triangles.
@@ -35,87 +52,129 @@ class BVH
      */
     public static function build(array $triangles): self
     {
-        if (empty($triangles)) {
-            return new self(Vec3::zero(), Vec3::zero());
+        $triangles = array_values($triangles);
+        $bvh = new self();
+        if ($triangles === []) {
+            return $bvh;
         }
 
-        // Compute AABB of all triangles
-        $bounds = self::computeBounds($triangles);
-        $node = new self($bounds['min'], $bounds['max']);
-
-        if (count($triangles) <= self::LEAF_THRESHOLD) {
-            $node->triangles = $triangles;
-            return $node;
+        $cx = $cy = $cz = $minX = $minY = $minZ = $maxX = $maxY = $maxZ = [];
+        foreach ($triangles as $tri) {
+            $a = $tri->v0;
+            $b = $tri->v1;
+            $c = $tri->v2;
+            $cx[] = $a->x + $b->x + $c->x;
+            $cy[] = $a->y + $b->y + $c->y;
+            $cz[] = $a->z + $b->z + $c->z;
+            $minX[] = min($a->x, $b->x, $c->x);
+            $minY[] = min($a->y, $b->y, $c->y);
+            $minZ[] = min($a->z, $b->z, $c->z);
+            $maxX[] = max($a->x, $b->x, $c->x);
+            $maxY[] = max($a->y, $b->y, $c->y);
+            $maxZ[] = max($a->z, $b->z, $c->z);
         }
 
-        // Find the longest axis
-        $extent = $bounds['max']->sub($bounds['min']);
-        if ($extent->x >= $extent->y && $extent->x >= $extent->z) {
-            $axis = 0; // X
-        } elseif ($extent->y >= $extent->z) {
-            $axis = 1; // Y
-        } else {
-            $axis = 2; // Z
+        $bvh->buildTree(count($triangles), [$cx, $cy, $cz], [$minX, $minY, $minZ, $maxX, $maxY, $maxZ]);
+        foreach ($bvh->order as $index) {
+            $bvh->triangles[] = $triangles[$index];
+        }
+        $bvh->order = [];
+
+        return $bvh;
+    }
+
+    /**
+     * Build a BVH straight from triangle-list mesh data – x, y, z per vertex and
+     * three vertex indices per triangle, as in {@see \PHPolygon\Geometry\MeshData} –
+     * without building a Triangle list first. The Triangle objects are created
+     * once, already in leaf order.
+     *
+     * @param array<int, float> $vertices
+     * @param array<int, int>   $indices
+     */
+    public static function fromMesh(array $vertices, array $indices): self
+    {
+        $bvh = new self();
+        $count = intdiv(count($indices), 3);
+        if ($count === 0) {
+            return $bvh;
         }
 
-        // Sort by centroid along the chosen axis
-        usort($triangles, function (Triangle $a, Triangle $b) use ($axis): int {
-            $centA = self::triangleCentroid($a);
-            $centB = self::triangleCentroid($b);
-            $valA = match ($axis) { 0 => $centA->x, 1 => $centA->y, 2 => $centA->z };
-            $valB = match ($axis) { 0 => $centB->x, 1 => $centB->y, 2 => $centB->z };
-            return $valA <=> $valB;
-        });
-
-        // Median split
-        $mid = (int)(count($triangles) / 2);
-        $leftTris = array_slice($triangles, 0, $mid);
-        $rightTris = array_slice($triangles, $mid);
-
-        // Fallback: if one side is empty, make this a leaf
-        if (empty($leftTris) || empty($rightTris)) {
-            $node->triangles = $triangles;
-            return $node;
+        $cx = $cy = $cz = $minX = $minY = $minZ = $maxX = $maxY = $maxZ = [];
+        for ($i = 0, $end = $count * 3; $i < $end; $i += 3) {
+            $a = $indices[$i] * 3;
+            $b = $indices[$i + 1] * 3;
+            $c = $indices[$i + 2] * 3;
+            $ax = (float) $vertices[$a];
+            $ay = (float) $vertices[$a + 1];
+            $az = (float) $vertices[$a + 2];
+            $bx = (float) $vertices[$b];
+            $by = (float) $vertices[$b + 1];
+            $bz = (float) $vertices[$b + 2];
+            $qx = (float) $vertices[$c];
+            $qy = (float) $vertices[$c + 1];
+            $qz = (float) $vertices[$c + 2];
+            $cx[] = $ax + $bx + $qx;
+            $cy[] = $ay + $by + $qy;
+            $cz[] = $az + $bz + $qz;
+            $minX[] = min($ax, $bx, $qx);
+            $minY[] = min($ay, $by, $qy);
+            $minZ[] = min($az, $bz, $qz);
+            $maxX[] = max($ax, $bx, $qx);
+            $maxY[] = max($ay, $by, $qy);
+            $maxZ[] = max($az, $bz, $qz);
         }
 
-        $node->left = self::build($leftTris);
-        $node->right = self::build($rightTris);
+        $bvh->buildTree($count, [$cx, $cy, $cz], [$minX, $minY, $minZ, $maxX, $maxY, $maxZ]);
+        foreach ($bvh->order as $index) {
+            $i = $index * 3;
+            $a = $indices[$i] * 3;
+            $b = $indices[$i + 1] * 3;
+            $c = $indices[$i + 2] * 3;
+            $bvh->triangles[] = new Triangle(
+                new Vec3((float) $vertices[$a], (float) $vertices[$a + 1], (float) $vertices[$a + 2]),
+                new Vec3((float) $vertices[$b], (float) $vertices[$b + 1], (float) $vertices[$b + 2]),
+                new Vec3((float) $vertices[$c], (float) $vertices[$c + 1], (float) $vertices[$c + 2]),
+            );
+        }
+        $bvh->order = [];
 
-        return $node;
+        return $bvh;
     }
 
     /**
      * Query all triangles whose leaf AABB overlaps the given query AABB.
      *
-     * @return Triangle[]
+     * @return list<Triangle>
      */
     public function query(Vec3 $queryMin, Vec3 $queryMax): array
     {
-        // AABB overlap test
-        if ($queryMax->x < $this->min->x || $queryMin->x > $this->max->x
-            || $queryMax->y < $this->min->y || $queryMin->y > $this->max->y
-            || $queryMax->z < $this->min->z || $queryMin->z > $this->max->z) {
+        if ($this->left === []) {
             return [];
         }
 
-        // Leaf node — return all triangles
-        if ($this->triangles !== null) {
-            return $this->triangles;
-        }
-
-        // Internal node — recurse
+        $bounds = $this->bounds;
         $result = [];
-        if ($this->left !== null) {
-            $leftResult = $this->left->query($queryMin, $queryMax);
-            if (!empty($leftResult)) {
-                array_push($result, ...$leftResult);
+        $stack = [0];
+        while ($stack !== []) {
+            $node = array_pop($stack);
+            $o = $node * 6;
+            if ($queryMax->x < $bounds[$o] || $queryMin->x > $bounds[$o + 3]
+                || $queryMax->y < $bounds[$o + 1] || $queryMin->y > $bounds[$o + 4]
+                || $queryMax->z < $bounds[$o + 2] || $queryMin->z > $bounds[$o + 5]) {
+                continue;
             }
-        }
-        if ($this->right !== null) {
-            $rightResult = $this->right->query($queryMin, $queryMax);
-            if (!empty($rightResult)) {
-                array_push($result, ...$rightResult);
+
+            if ($this->left[$node] < 0) {
+                for ($k = $this->right[$node], $end = $k + $this->counts[$node]; $k < $end; $k++) {
+                    $result[] = $this->triangles[$k];
+                }
+                continue;
             }
+
+            // Right first onto the stack: the left subtree is visited first.
+            $stack[] = $this->right[$node];
+            $stack[] = $this->left[$node];
         }
 
         return $result;
@@ -126,53 +185,95 @@ class BVH
      */
     public function triangleCount(): int
     {
-        if ($this->triangles !== null) {
-            return count($this->triangles);
-        }
-
-        $count = 0;
-        if ($this->left !== null) {
-            $count += $this->left->triangleCount();
-        }
-        if ($this->right !== null) {
-            $count += $this->right->triangleCount();
-        }
-
-        return $count;
-    }
-
-    private static function triangleCentroid(Triangle $tri): Vec3
-    {
-        return new Vec3(
-            (float)(($tri->v0->x + $tri->v1->x + $tri->v2->x) / 3.0),
-            (float)(($tri->v0->y + $tri->v1->y + $tri->v2->y) / 3.0),
-            (float)(($tri->v0->z + $tri->v1->z + $tri->v2->z) / 3.0),
-        );
+        return count($this->triangles);
     }
 
     /**
-     * @param Triangle[] $triangles
-     * @return array{min: Vec3, max: Vec3}
+     * @param array{list<float>, list<float>, list<float>} $centroids three times the centroid per triangle, per axis
+     * @param array{list<float>, list<float>, list<float>, list<float>, list<float>, list<float>} $boxes triangle bounds: min x, y, z, max x, y, z
      */
-    private static function computeBounds(array $triangles): array
+    private function buildTree(int $count, array $centroids, array $boxes): void
     {
-        $minX = $minY = $minZ = PHP_FLOAT_MAX;
-        $maxX = $maxY = $maxZ = -PHP_FLOAT_MAX;
+        $this->order = range(0, $count - 1);
+        $this->buildNode(0, $count, $centroids, $boxes);
+    }
 
-        foreach ($triangles as $tri) {
-            foreach ([$tri->v0, $tri->v1, $tri->v2] as $v) {
-                $minX = min($minX, $v->x);
-                $minY = min($minY, $v->y);
-                $minZ = min($minZ, $v->z);
-                $maxX = max($maxX, $v->x);
-                $maxY = max($maxY, $v->y);
-                $maxZ = max($maxZ, $v->z);
+    /**
+     * Build the node for $this->order[$start, $end) and return its index.
+     *
+     * @param array{list<float>, list<float>, list<float>} $centroids
+     * @param array{list<float>, list<float>, list<float>, list<float>, list<float>, list<float>} $boxes
+     */
+    private function buildNode(int $start, int $end, array $centroids, array $boxes): int
+    {
+        $node = count($this->left);
+        $this->left[] = -1;
+        $this->right[] = 0;
+        $this->counts[] = 0;
+        array_push($this->bounds, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+        $o = $node * 6;
+        $count = $end - $start;
+
+        if ($count <= self::LEAF_THRESHOLD) {
+            [$minX, $minY, $minZ, $maxX, $maxY, $maxZ] = $boxes;
+            $lx = $ly = $lz = PHP_FLOAT_MAX;
+            $hx = $hy = $hz = -PHP_FLOAT_MAX;
+            for ($k = $start; $k < $end; $k++) {
+                $t = $this->order[$k];
+                $lx = min($lx, $minX[$t]);
+                $ly = min($ly, $minY[$t]);
+                $lz = min($lz, $minZ[$t]);
+                $hx = max($hx, $maxX[$t]);
+                $hy = max($hy, $maxY[$t]);
+                $hz = max($hz, $maxZ[$t]);
             }
+            $this->bounds[$o] = $lx;
+            $this->bounds[$o + 1] = $ly;
+            $this->bounds[$o + 2] = $lz;
+            $this->bounds[$o + 3] = $hx;
+            $this->bounds[$o + 4] = $hy;
+            $this->bounds[$o + 5] = $hz;
+            $this->right[$node] = $start;
+            $this->counts[$node] = $count;
+            return $node;
         }
 
-        return [
-            'min' => new Vec3((float)$minX, (float)$minY, (float)$minZ),
-            'max' => new Vec3((float)$maxX, (float)$maxY, (float)$maxZ),
-        ];
+        // Order the range along the longest centroid extent and split at the median.
+        $range = array_slice($this->order, $start, $count);
+        [$cx, $cy, $cz] = $centroids;
+        $kx = $ky = $kz = [];
+        foreach ($range as $t) {
+            $kx[] = $cx[$t];
+            $ky[] = $cy[$t];
+            $kz[] = $cz[$t];
+        }
+        if ($kx === []) {
+            return $node;   // unreachable: an inner node holds more than LEAF_THRESHOLD triangles
+        }
+        $ex = max($kx) - min($kx);
+        $ey = max($ky) - min($ky);
+        $ez = max($kz) - min($kz);
+        $keys = ($ex >= $ey && $ex >= $ez) ? $kx : ($ey >= $ez ? $ky : $kz);
+        unset($kx, $ky, $kz);
+        array_multisort($keys, SORT_ASC, SORT_NUMERIC, $range);
+        array_splice($this->order, $start, $count, $range);
+        unset($keys, $range);
+
+        $mid = $start + intdiv($count, 2);
+        $leftChild = $this->buildNode($start, $mid, $centroids, $boxes);
+        $rightChild = $this->buildNode($mid, $end, $centroids, $boxes);
+        $this->left[$node] = $leftChild;
+        $this->right[$node] = $rightChild;
+
+        $l = $leftChild * 6;
+        $r = $rightChild * 6;
+        $this->bounds[$o] = min($this->bounds[$l], $this->bounds[$r]);
+        $this->bounds[$o + 1] = min($this->bounds[$l + 1], $this->bounds[$r + 1]);
+        $this->bounds[$o + 2] = min($this->bounds[$l + 2], $this->bounds[$r + 2]);
+        $this->bounds[$o + 3] = max($this->bounds[$l + 3], $this->bounds[$r + 3]);
+        $this->bounds[$o + 4] = max($this->bounds[$l + 4], $this->bounds[$r + 4]);
+        $this->bounds[$o + 5] = max($this->bounds[$l + 5], $this->bounds[$r + 5]);
+
+        return $node;
     }
 }
