@@ -70,6 +70,9 @@ jobs:
         working-directory: ${{ inputs.game_repo && 'game' || 'engine' }}
         env:
           PHPOLYGON_BUILD_PLATFORM: ${{ matrix.platform }}
+          # Runtime lookups go to the GitHub API; anonymous calls from shared runner
+          # IPs run into the rate limit ("No release found for tag runtime-php8.5").
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           php -d phar.readonly=0 ../engine/bin/phpolygon build ${{ matrix.platform }} \
             --output-dir=dist/ \

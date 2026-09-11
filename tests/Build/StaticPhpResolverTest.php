@@ -148,4 +148,34 @@ class StaticPhpResolverTest extends TestCase
             @unlink($file);
         }
     }
+
+    public function testTheTokenGoesToTheGitHubApiOnly(): void
+    {
+        $this->assertContains(
+            'Authorization: Bearer secret',
+            StaticPhpResolver::requestHeaders('https://api.github.com/repos/o/r/releases/tags/runtime-php8.5', 'secret'),
+        );
+        $this->assertNotContains(
+            'Authorization: Bearer secret',
+            StaticPhpResolver::requestHeaders('https://github.com/o/r/releases/download/runtime-php8.5/micro.zip', 'secret'),
+            'a download redirects to another host',
+        );
+        foreach ([null, ''] as $noToken) {
+            $this->assertSame([], preg_grep('/^Authorization:/', StaticPhpResolver::requestHeaders('https://api.github.com/repos/o/r', $noToken)));
+        }
+    }
+
+    public function testFailureReasonNamesTheStatusAndTheMissingToken(): void
+    {
+        $redirectThenLimit = ['HTTP/1.1 302 Found', 'Location: https://api.github.com/x', 'HTTP/1.1 403 rate limit exceeded', 'X-RateLimit-Remaining: 0'];
+
+        $this->assertSame(
+            'HTTP/1.1 403 rate limit exceeded; anonymous GitHub API calls are rate-limited, set GITHUB_TOKEN',
+            StaticPhpResolver::failureReason($redirectThenLimit, 'stream error', false),
+        );
+        $this->assertSame('HTTP/1.1 403 rate limit exceeded', StaticPhpResolver::failureReason($redirectThenLimit, '', true));
+        $this->assertSame('HTTP/1.1 404 Not Found', StaticPhpResolver::failureReason(['HTTP/1.1 404 Not Found'], '', false));
+        $this->assertSame('getaddrinfo failed', StaticPhpResolver::failureReason([], 'getaddrinfo failed', false));
+        $this->assertSame('no response', StaticPhpResolver::failureReason([], '', false));
+    }
 }

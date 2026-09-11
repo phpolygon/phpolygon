@@ -763,20 +763,66 @@ class StaticPhpResolver
 
     private function httpGet(string $url): ?string
     {
+        $token = getenv('GITHUB_TOKEN') ?: getenv('GH_TOKEN') ?: null;
         $context = stream_context_create([
             'http' => [
                 'method' => 'GET',
-                'header' => [
-                    'User-Agent: PHPolygon-Build/1.0',
-                    'Accept: application/vnd.github+json',
-                ],
+                'header' => self::requestHeaders($url, $token),
                 'timeout' => 30,
                 'follow_location' => true,
             ],
         ]);
 
+        error_clear_last();
         $result = @file_get_contents($url, false, $context);
-        return $result !== false ? $result : null;
+        if ($result === false) {
+            $reason = self::failureReason(http_get_last_response_headers() ?? [], error_get_last()['message'] ?? '', $token !== null);
+            $this->log("Request failed ({$reason}): {$url}");
+            return null;
+        }
+        return $result;
+    }
+
+    /**
+     * Headers of a GET request to $url. $token goes to the GitHub API only, where
+     * anonymous calls are limited to 60 an hour per IP - and CI runners share IPs.
+     * Downloads go without it: they redirect to another host, which must not get it.
+     *
+     * @return list<string>
+     */
+    public static function requestHeaders(string $url, ?string $token): array
+    {
+        $headers = [
+            'User-Agent: PHPolygon-Build/1.0',
+            'Accept: application/vnd.github+json',
+        ];
+        if ($token !== null && $token !== '' && parse_url($url, PHP_URL_HOST) === 'api.github.com') {
+            $headers[] = 'Authorization: Bearer ' . $token;
+        }
+        return $headers;
+    }
+
+    /**
+     * Why a request failed: the last response status line, or the stream error when
+     * no response came. A rejected anonymous call gets a hint to set a token.
+     *
+     * @param array<int, string> $responseHeaders
+     */
+    public static function failureReason(array $responseHeaders, string $error, bool $authenticated): string
+    {
+        $statusLine = null;
+        foreach ($responseHeaders as $header) {
+            if (preg_match('#^HTTP/\S+\s+\d{3}#', $header) === 1) {
+                $statusLine = trim($header);
+            }
+        }
+        if ($statusLine === null) {
+            return $error !== '' ? $error : 'no response';
+        }
+        if (!$authenticated && preg_match('#^HTTP/\S+\s+(403|429)\b#', $statusLine) === 1) {
+            return $statusLine . '; anonymous GitHub API calls are rate-limited, set GITHUB_TOKEN';
+        }
+        return $statusLine;
     }
 
     /**
