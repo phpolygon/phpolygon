@@ -19,8 +19,10 @@ use PHPolygon\Rendering\RenderCommandList;
  * Drives every {@see ParticleEmitter} in the world, on the best of three tiers
  * the context supports:
  *
- *   1. GPU simulation — a vio context with compute, vertex storage and
- *      indirect draws, an indexed particle mesh, emitter simulation Auto.
+ *   1. GPU simulation — a vio context (php-vio >=
+ *      {@see GpuParticleBaker::MIN_VIO_VERSION}) with compute, vertex storage
+ *      and indirect draws, an indexed particle mesh, emitter simulation Auto.
+ *      Every emitter dispatches the same kernels, recorded into the frame.
  *      update() only spawns: the rows and the elapsed time go into the
  *      emitter's {@see GpuParticleLedger}. render() writes the new rows into
  *      the GPU slot ring ({@see GpuParticleBaker::inject()}), integrates,

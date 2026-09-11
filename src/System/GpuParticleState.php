@@ -17,31 +17,30 @@ namespace PHPolygon\System;
  *     column-major instance matrices — read back for
  *     {@see \PHPolygon\Rendering\Command\DrawMeshInstanced::packed()}, or bound
  *     directly as the instance source of an indirect draw.
+ *   - {@see $rowsBufs}: the spawn upload buffers, used in rotation.
  *
  * {@see $ledger} is the CPU-side bookkeeping of the slot ring: where the next
  * spawn batch goes, which slots may still be alive, and the rows and time not
  * yet handed to the GPU.
  *
- * The compute kernels are bound to exactly this state's buffers and never
- * shared: ext-vio keeps every buffer ever bound to a pipeline for the
- * pipeline's lifetime (see {@see GpuParticleBaker}).
+ * The compute kernels are shared by every state of a context; each dispatch
+ * binds this state's buffers (see {@see GpuParticleBaker}).
  */
 final class GpuParticleState
 {
+    /**
+     * Upload buffers a CPU write rotates through. A dispatch recorded into a
+     * frame reads its upload buffer when that frame runs on the GPU, so the
+     * buffer must not be rewritten until then: at most two further frames are
+     * in flight, and a frame uploads to one state at most twice (seed + spawn).
+     */
+    public const UPLOAD_ROTATION = 3;
+
     /** Ring bookkeeping: head, spawn batches, conservative live count, pending rows. */
     public readonly GpuParticleLedger $ledger;
 
-    /** Integration + billboard kernel ({@see GpuParticleBaker::SHADER}); created on first use. */
-    public ?\VioComputePipeline $stepKernel = null;
-
-    /** Spawn copy kernel reading {@see $rowsBuf}; created on first use. */
-    public ?\VioComputePipeline $spawnKernel = null;
-
-    /** Argument record reset kernel; created on first use. */
-    public ?\VioComputePipeline $resetKernel = null;
-
-    /** Compacting integration kernel; created on first use. */
-    public ?\VioComputePipeline $compactKernel = null;
+    /** Index into {@see $rowsBufs} of the next spawn upload. */
+    private int $nextRows = 0;
 
     public function __construct(
         /** Slot capacity — equals the emitter's maxParticles. */
@@ -64,12 +63,24 @@ final class GpuParticleState
         public readonly int $indexCount = 0,
         ?GpuParticleLedger $ledger = null,
         /**
-         * Persistent upload buffer for spawn rows (capacity*8 floats), rewritten
-         * per spawn. Null where the backend cannot rewrite an upload buffer —
-         * every spawn then uploads into a fresh buffer.
+         * Spawn upload buffers (capacity*8 floats each), rewritten in rotation
+         * ({@see UPLOAD_ROTATION}). A state without any cannot spawn.
+         *
+         * @var list<\VioBuffer>
          */
-        public readonly ?\VioBuffer $rowsBuf = null,
+        public readonly array $rowsBufs = [],
     ) {
         $this->ledger = $ledger ?? new GpuParticleLedger($capacity);
+    }
+
+    /** The upload buffer for the next spawn batch, or null when the state has none. */
+    public function nextRowsBuffer(): ?\VioBuffer
+    {
+        if ($this->rowsBufs === []) {
+            return null;
+        }
+        $buffer = $this->rowsBufs[$this->nextRows % count($this->rowsBufs)];
+        $this->nextRows = ($this->nextRows + 1) % count($this->rowsBufs);
+        return $buffer;
     }
 }

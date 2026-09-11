@@ -37,7 +37,7 @@ class GpuParticleBakerTest extends TestCase
         }
         if (!GpuParticleBaker::isAvailable($ctx)) {
             vio_destroy($ctx);
-            $this->markTestSkipped('vio context has no compute support.');
+            $this->markTestSkipped('vio context has no compute support, or php-vio < ' . GpuParticleBaker::MIN_VIO_VERSION . '.');
         }
         $this->ctx = $ctx;
     }

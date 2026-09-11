@@ -191,6 +191,78 @@ final class ParticleSystemGpuTest extends TestCase
         self::assertSame(3, $emitter->count(), 'only this frame\'s spawns are live');
     }
 
+    public function testEmittersShareKernelsInsideFrames(): void
+    {
+        $ctx = $this->ctx;
+        self::assertNotNull($ctx);
+        $origins = [new Vec3(0.0, 0.0, 0.0), new Vec3(100.0, 0.0, 0.0), new Vec3(0.0, 0.0, -100.0)];
+        $capacities = [16, 256, 64];
+        $frames = 40;
+
+        mt_srand(4321);
+        [$cpuEmitters] = $this->simulateMany(null, $capacities, $origins, $frames);
+        mt_srand(4321);
+        [$gpuEmitters, $draws] = $this->simulateMany($ctx, $capacities, $origins, $frames);
+
+        self::assertCount(count($origins), $draws);
+        foreach ($draws as $i => $cmd) {
+            self::assertInstanceOf(\VioBuffer::class, $cmd->indirectArgs);
+            self::assertInstanceOf(\VioBuffer::class, $cmd->storageBuffer);
+            $rec = unpack('V5', (string) vio_storage_buffer_read($ctx, $cmd->indirectArgs));
+            self::assertIsArray($rec);
+            $live = array_values($rec)[1];
+            self::assertSame(count($cpuEmitters[$i]->particles), $live, "emitter {$i}: GPU count == CPU simulation count");
+            self::assertSame($gpuEmitters[$i]->count(), $live, "emitter {$i}: GPU count == ledger count");
+
+            // The compacted matrices are this emitter's particles and not those
+            // of an emitter that dispatched the same kernel: every translation
+            // stays next to its own origin.
+            $m = unpack('f*', (string) vio_storage_buffer_read($ctx, $cmd->storageBuffer));
+            self::assertIsArray($m);
+            $m = array_values($m);
+            for ($k = 0; $k < $live; $k++) {
+                self::assertEqualsWithDelta($origins[$i]->x, $m[$k * 16 + 12], 1.0, "emitter {$i} particle {$k} x");
+                self::assertEqualsWithDelta($origins[$i]->z, $m[$k * 16 + 14], 1.0, "emitter {$i} particle {$k} z");
+            }
+        }
+    }
+
+    /**
+     * One world with an emitter per capacity at the matching origin, stepped
+     * $frames times. With a context every frame runs inside vio_begin/vio_end,
+     * so the dispatches are recorded into the frame and share its kernels.
+     *
+     * @param list<int> $capacities
+     * @param list<Vec3> $origins
+     * @return array{0: list<ParticleEmitter>, 1: list<DrawMeshInstanced>}
+     */
+    private function simulateMany(?\VioContext $ctx, array $capacities, array $origins, int $frames): array
+    {
+        $list = new RenderCommandList();
+        $system = new ParticleSystem($list, $ctx);
+        $world = new World();
+        $emitters = [];
+        foreach ($capacities as $i => $capacity) {
+            $emitter = $this->emitter($capacity, ParticleSimulation::Auto);
+            $entity = $world->createEntity();
+            $entity->attach($emitter);
+            $entity->attach(new Transform3D(position: $origins[$i]));
+            $emitters[] = $emitter;
+        }
+        for ($f = 0; $f < $frames; $f++) {
+            if ($ctx !== null) {
+                vio_begin($ctx);
+            }
+            $system->update($world, self::DT);
+            $list->clear();
+            $system->render($world);
+            if ($ctx !== null) {
+                vio_end($ctx);
+            }
+        }
+        return [$emitters, $list->ofType(DrawMeshInstanced::class)];
+    }
+
     /**
      * @return array{0: ParticleEmitter, 1: list<DrawMeshInstanced>}
      */
@@ -216,7 +288,16 @@ final class ParticleSystemGpuTest extends TestCase
     private function world(int $capacity, ParticleSimulation $simulation): array
     {
         $world = new World();
-        $emitter = new ParticleEmitter(
+        $emitter = $this->emitter($capacity, $simulation);
+        $entity = $world->createEntity();
+        $entity->attach($emitter);
+        $entity->attach(new Transform3D(position: new Vec3(0.0, 0.0, 0.0)));
+        return [$world, $emitter];
+    }
+
+    private function emitter(int $capacity, ParticleSimulation $simulation): ParticleEmitter
+    {
+        return new ParticleEmitter(
             meshId: self::MESH,
             materialId: 'gpu_particle_test_mat',
             rate: 200.0,
@@ -227,9 +308,5 @@ final class ParticleSystemGpuTest extends TestCase
             maxParticles: $capacity,
             simulation: $simulation,
         );
-        $entity = $world->createEntity();
-        $entity->attach($emitter);
-        $entity->attach(new Transform3D(position: new Vec3(0.0, 0.0, 0.0)));
-        return [$world, $emitter];
     }
 }
