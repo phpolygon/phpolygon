@@ -73,7 +73,11 @@ class PlatformPackagerTest extends TestCase
 
         $this->assertDirectoryExists($result);
         $this->assertFileExists($result . '/TestGame');
-        $this->assertTrue(is_executable($result . '/TestGame'));
+        // Windows has no execute bit: is_executable() only accepts known
+        // extensions there, and chmod() cannot mark an extensionless binary.
+        if (PHP_OS_FAMILY !== 'Windows') {
+            $this->assertTrue(is_executable($result . '/TestGame'));
+        }
     }
 
     public function testPackageWindowsCreatesExe(): void
