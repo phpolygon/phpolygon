@@ -379,6 +379,13 @@ class VioRenderer3D implements Renderer3DInterface
     /** Lazy FXAA post-process pass. Allocated when AntiAliasing == Fxaa. */
     private ?VioFxaaPass $fxaaPass = null;
 
+    /** FSR 1 present targets: the resolved scene at render size, and its EASU upscale. */
+    private ?\VioRenderTarget $fsrLowTarget = null;
+    private ?\VioRenderTarget $fsrUpscaledTarget = null;
+    private string $fsrTargetKey = '';
+
+    private ?Quality\GraphicsCapabilities $capabilities = null;
+
     /** Lazy shadow-map raw-depth debug blit. Allocated when PHPOLYGON_DEBUG_SHADOWMAP=1. */
     private ?VioShadowDebugPass $shadowDebugPass = null;
 
@@ -455,6 +462,12 @@ class VioRenderer3D implements Renderer3DInterface
         // Shadow-map tier change → rebuild the shadow targets next beginFrame().
         if ($previous->shadowQuality !== $settings->shadowQuality) {
             $this->shadowDirty = true;
+        }
+
+        // The relief tier gates two material uniforms: upload them again on the
+        // next draw, also when that draw repeats the previous material id.
+        if ($previous->surfaceRelief !== $settings->surfaceRelief) {
+            $this->lastMaterialId = null;
         }
 
         // Render-scale / AA / bloom / HDR all change the offscreen scene target's
@@ -924,6 +937,11 @@ class VioRenderer3D implements Renderer3DInterface
         $bloomTex = $this->settings->bloom ? $this->renderBloom($sceneTex, $quad) : null;
         $post = $this->postFinishParams();
 
+        if ($this->fsrApplies($target) && $this->presentWithFsr($sceneTex, $target, $quad, $bloomTex, $post)) {
+            $this->offscreenActive = false;
+            return;
+        }
+
         vio_viewport($this->ctx, 0, 0, $this->backbufferWidth, $this->backbufferHeight);
 
         if ($this->settings->antiAliasing === AntiAliasing::Fxaa && $this->fxaaPass !== null) {
@@ -947,6 +965,139 @@ class VioRenderer3D implements Renderer3DInterface
         }
 
         $this->offscreenActive = false;
+    }
+
+    /**
+     * AMD FidelityFX Super Resolution 1 applies when the player picked it and the
+     * scene renders below the display resolution; at full resolution it would only
+     * add two passes.
+     */
+    private function fsrApplies(VioOffscreenTarget $target): bool
+    {
+        return $this->settings->upscaler === Quality\Upscaler::Fsr1
+            && ($target->width() < $this->backbufferWidth || $target->height() < $this->backbufferHeight)
+            && $this->fsrShadersReady();
+    }
+
+    private function fsrShadersReady(): bool
+    {
+        return ($this->shaderCache['fsr_easu'] ?? null) instanceof \VioShader
+            && ($this->shaderCache['fsr_rcas'] ?? null) instanceof \VioShader;
+    }
+
+    /**
+     * FSR 1 present. The scene is resolved at render resolution into an RGBA8
+     * target (bloom, tonemap, grade, vignette and FXAA as in the direct present,
+     * without the HDR10 encoding), upscaled with EASU to the display size and
+     * sharpened with RCAS into the swapchain, which also applies the HDR10
+     * encoding. Returns false when the intermediate targets are unavailable; the
+     * caller then presents directly.
+     *
+     * @param array{lift: list<float>, gamma: list<float>, gain: list<float>, saturation: float, vignette: float, viewport: list<float>, hdr: int, exposure: float, pq: int, paperWhite: float} $post
+     */
+    private function presentWithFsr(
+        VioTexture $sceneTex,
+        VioOffscreenTarget $target,
+        VioMesh $quad,
+        ?VioTexture $bloomTex,
+        array $post,
+    ): bool {
+        $lowW = $target->width();
+        $lowH = $target->height();
+        $this->ensureFsrTargets($lowW, $lowH);
+        $low = $this->fsrLowTarget;
+        $upscaled = $this->fsrUpscaledTarget;
+        if ($low === null || $upscaled === null) {
+            return false;
+        }
+
+        // 1. Resolve at render resolution; the vignette follows that viewport.
+        $lowPost = $post;
+        $lowPost['pq'] = 0;
+        $lowPost['viewport'] = [(float) $lowW, (float) $lowH];
+        vio_bind_render_target($this->ctx, $low);
+        vio_viewport($this->ctx, 0, 0, $lowW, $lowH);
+        vio_clear($this->ctx, 0, 0, 0, 1);
+        if ($this->settings->antiAliasing === AntiAliasing::Fxaa && $this->fxaaPass !== null) {
+            $this->fxaaPass->apply($sceneTex, $lowW, $lowH, $quad, $bloomTex, $this->bloomIntensity, $lowPost);
+        } else {
+            $this->bindPostProcessPipeline('passthrough_blit');
+            vio_bind_texture($this->ctx, $sceneTex, 0);
+            vio_set_uniform($this->ctx, 'u_source', 0);
+            if ($bloomTex !== null) {
+                vio_bind_texture($this->ctx, $bloomTex, 1);
+                vio_set_uniform($this->ctx, 'u_bloom', 1);
+                vio_set_uniform($this->ctx, 'u_bloom_intensity', $this->bloomIntensity);
+            } else {
+                vio_set_uniform($this->ctx, 'u_bloom_intensity', 0.0);
+            }
+            $this->setPostFinishUniforms($lowPost);
+            vio_draw($this->ctx, $quad);
+        }
+        vio_unbind_render_target($this->ctx);
+
+        // 2. EASU: render resolution -> display resolution.
+        vio_bind_render_target($this->ctx, $upscaled);
+        vio_viewport($this->ctx, 0, 0, $this->backbufferWidth, $this->backbufferHeight);
+        vio_clear($this->ctx, 0, 0, 0, 1);
+        $this->bindPostProcessPipeline('fsr_easu');
+        vio_bind_texture($this->ctx, vio_render_target_texture($low), 0);
+        vio_set_uniform($this->ctx, 'u_source', 0);
+        vio_set_uniform($this->ctx, 'u_input_size', [(float) $lowW, (float) $lowH]);
+        vio_draw($this->ctx, $quad);
+        vio_unbind_render_target($this->ctx);
+
+        // 3. RCAS into the swapchain.
+        vio_viewport($this->ctx, 0, 0, $this->backbufferWidth, $this->backbufferHeight);
+        $this->bindPostProcessPipeline('fsr_rcas');
+        vio_bind_texture($this->ctx, vio_render_target_texture($upscaled), 0);
+        vio_set_uniform($this->ctx, 'u_source', 0);
+        vio_set_uniform($this->ctx, 'u_size', [(float) $this->backbufferWidth, (float) $this->backbufferHeight]);
+        // ffx_fsr1.h takes the sharpness in stops, 0 = strongest.
+        vio_set_uniform($this->ctx, 'u_sharpness', 2.0 * (1.0 - $this->settings->upscaleSharpness));
+        vio_set_uniform($this->ctx, 'u_output_pq', $post['pq']);
+        vio_set_uniform($this->ctx, 'u_paper_white', $post['paperWhite']);
+        vio_draw($this->ctx, $quad);
+
+        return true;
+    }
+
+    /** The two RGBA8 FSR targets, rebuilt when the render or display size changes. */
+    private function ensureFsrTargets(int $lowW, int $lowH): void
+    {
+        $key = "{$lowW}x{$lowH}:{$this->backbufferWidth}x{$this->backbufferHeight}";
+        if ($this->fsrTargetKey === $key && $this->fsrLowTarget !== null && $this->fsrUpscaledTarget !== null) {
+            return;
+        }
+        $this->fsrLowTarget = vio_render_target($this->ctx, ['width' => $lowW, 'height' => $lowH]) ?: null;
+        $this->fsrUpscaledTarget = vio_render_target($this->ctx, [
+            'width' => max(1, $this->backbufferWidth),
+            'height' => max(1, $this->backbufferHeight),
+        ]) ?: null;
+        $this->fsrTargetKey = $key;
+    }
+
+    /**
+     * What this backend can apply, for settings screens
+     * ({@see GraphicsSettingsManager::capabilities()}). Probed once.
+     */
+    public function graphicsCapabilities(): Quality\GraphicsCapabilities
+    {
+        return $this->capabilities ??= new Quality\GraphicsCapabilities(
+            shadingRate: $this->shadingRateAvailable(),
+            hdrOutput: defined('VIO_FEATURE_HDR_OUTPUT') && vio_supports_feature($this->ctx, VIO_FEATURE_HDR_OUTPUT),
+            lowLatency: $this->conventions()->isDirect3D(),
+            msaa: !defined('VIO_FEATURE_RENDER_TARGET_MSAA')
+                || vio_supports_feature($this->ctx, VIO_FEATURE_RENDER_TARGET_MSAA),
+            // AntiAliasing::Taa falls back to FXAA on this renderer.
+            temporalAntiAliasing: false,
+            screenSpaceReflections: true,
+            fieldtracingSdf: $this->supportsTexture3D(),
+            surfaceRelief: true,
+            upscalers: $this->fsrShadersReady()
+                ? [Quality\Upscaler::Off, Quality\Upscaler::Fsr1]
+                : [Quality\Upscaler::Off],
+        );
     }
 
     /**
@@ -1819,6 +1970,15 @@ class VioRenderer3D implements Renderer3DInterface
         $this->compileShaderFromFiles('bloom_blur',       'postprocess.vert.glsl', 'bloom_blur.frag.glsl');
         $this->compileShaderFromFiles('tonemap',          'postprocess.vert.glsl', 'tonemap.frag.glsl');
         $this->compileShaderFromFiles('passthrough_blit', 'postprocess.vert.glsl', 'passthrough_blit.frag.glsl');
+        // AMD FSR 1 (GraphicsSettings::$upscaler). A backend that cannot compile
+        // them keeps the bilinear present: fsrApplies() checks the cache.
+        foreach (['fsr_easu', 'fsr_rcas'] as $fsrPass) {
+            try {
+                $this->compileShaderFromFiles($fsrPass, 'postprocess.vert.glsl', $fsrPass . '.frag.glsl');
+            } catch (\Throwable $e) {
+                fwrite(STDERR, "[VioRenderer3D] {$fsrPass} unavailable: {$e->getMessage()}\n");
+            }
+        }
 
     }
 
@@ -4126,6 +4286,8 @@ class VioRenderer3D implements Renderer3DInterface
             'u_surface_pattern'     => SurfacePattern::codeFor($material->surfacePattern),
             'u_surface_scale'       => $material->surfaceScale,
             'u_surface_intensity'   => $material->surfaceIntensity,
+            'u_cavity'              => $this->settings->surfaceRelief->cavityEnabled() ? $material->cavity : 0.0,
+            'u_parallax_depth'      => $this->settings->surfaceRelief->parallaxEnabled() ? $material->parallaxDepth : 0.0,
             'u_wetness'             => $material->wetness,
             // Subsurface scattering (skin path). Gated by strength > 0 in the
             // shader so non-skin materials remain visually identical.

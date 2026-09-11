@@ -13,7 +13,13 @@ use PHPolygon\Rendering\Quality\ScreenSpaceReflections;
 use PHPolygon\Rendering\Quality\ShaderQuality;
 use PHPolygon\Rendering\Quality\ShadingRate;
 use PHPolygon\Rendering\Quality\ShadowQuality;
+use PHPolygon\Rendering\Quality\SurfaceRelief;
 
+/**
+ * Baselines that probe a later step set surfaceRelief: Off, otherwise the default
+ * Parallax is dropped first (right after SSR) - SurfaceReliefUpscalerSettingsTest
+ * covers the relief steps themselves.
+ */
 final class AdaptiveTierStackTest extends TestCase
 {
     public function testDowngradeStartsWithVolumetricFog(): void
@@ -28,7 +34,7 @@ final class AdaptiveTierStackTest extends TestCase
 
     public function testDowngradeMovesToRenderScaleAfterVolumetricFog(): void
     {
-        $atFloor = (new GraphicsSettings())->with(renderScale: 1.0, volumetricFog: false);
+        $atFloor = (new GraphicsSettings())->with(renderScale: 1.0, volumetricFog: false, surfaceRelief: SurfaceRelief::Off);
         $next = AdaptiveTierStack::downgrade($atFloor);
         $this->assertNotNull($next);
         $this->assertSame(0.9, $next->renderScale);
@@ -41,6 +47,7 @@ final class AdaptiveTierStackTest extends TestCase
             shadowQuality: ShadowQuality::High,
             volumetricFog: false,
             ambientOcclusion: ScreenSpaceAO::Off,
+            surfaceRelief: SurfaceRelief::Off,
         );
         $next = AdaptiveTierStack::downgrade($atFloor);
         $this->assertNotNull($next);
@@ -56,6 +63,7 @@ final class AdaptiveTierStackTest extends TestCase
             antiAliasing: AntiAliasing::Msaa4x,
             ambientOcclusion: ScreenSpaceAO::Off,
             volumetricFog: false,
+            surfaceRelief: SurfaceRelief::Off,
         );
         $next = AdaptiveTierStack::downgrade($s);
         $this->assertNotNull($next);
@@ -76,6 +84,7 @@ final class AdaptiveTierStackTest extends TestCase
             ambientOcclusion: ScreenSpaceAO::Off,
             vignetteIntensity: 0.0,
             volumetricFog: false,
+            surfaceRelief: SurfaceRelief::Off,
         );
         $this->assertNull(AdaptiveTierStack::downgrade($floor));
     }
@@ -103,7 +112,7 @@ final class AdaptiveTierStackTest extends TestCase
     {
         AdaptiveTierStack::setShadingRateAvailable(true);
         try {
-            $s = new GraphicsSettings(renderScale: 1.0, volumetricFog: false, ssr: ScreenSpaceReflections::Off);
+            $s = new GraphicsSettings(renderScale: 1.0, volumetricFog: false, ssr: ScreenSpaceReflections::Off, surfaceRelief: SurfaceRelief::Off);
             $next = AdaptiveTierStack::downgrade($s);
             $this->assertNotNull($next);
             $this->assertSame(ShadingRate::Half, $next->shadingRate, '2x2 shading comes before any render-scale step');
@@ -116,7 +125,7 @@ final class AdaptiveTierStackTest extends TestCase
             $this->assertSame(ShadingRate::Quarter, $quarter->shadingRate);
 
             // The way back: 4x4 -> 2x2 before the render scale climbs, 2x2 -> full after it.
-            $up = AdaptiveTierStack::upgrade($quarter->with(ambientOcclusion: ScreenSpaceAO::High, shadowQuality: ShadowQuality::High, viewDistance: 200.0, antiAliasing: AntiAliasing::Msaa4x, anisotropy: 16));
+            $up = AdaptiveTierStack::upgrade($quarter->with(ambientOcclusion: ScreenSpaceAO::High, shadowQuality: ShadowQuality::High, viewDistance: 200.0, antiAliasing: AntiAliasing::Msaa4x, anisotropy: 16, surfaceRelief: SurfaceRelief::Parallax));
             $this->assertNotNull($up);
             $this->assertSame(ShadingRate::Half, $up->shadingRate);
             $this->assertSame(0.5, $up->renderScale);
@@ -129,7 +138,7 @@ final class AdaptiveTierStackTest extends TestCase
     {
         AdaptiveTierStack::setShadingRateAvailable(false);
         try {
-            $s = new GraphicsSettings(renderScale: 1.0, volumetricFog: false, ssr: ScreenSpaceReflections::Off);
+            $s = new GraphicsSettings(renderScale: 1.0, volumetricFog: false, ssr: ScreenSpaceReflections::Off, surfaceRelief: SurfaceRelief::Off);
             $next = AdaptiveTierStack::downgrade($s);
             $this->assertNotNull($next);
             $this->assertSame(ShadingRate::Full, $next->shadingRate, 'no step that would change nothing');

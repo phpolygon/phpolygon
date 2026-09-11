@@ -192,6 +192,23 @@ class GraphicsSettingsManager
         }
     }
 
+    /**
+     * What the active 3D renderer can apply, for settings screens that disable
+     * options that would change nothing here. Everything counts as available while
+     * no renderer reports capabilities (headless, 2D-only, before the window).
+     */
+    public function capabilities(): Quality\GraphicsCapabilities
+    {
+        $r3d = $this->engine?->renderer3D;
+        if ($r3d !== null && method_exists($r3d, 'graphicsCapabilities')) {
+            $capabilities = $r3d->graphicsCapabilities();
+            if ($capabilities instanceof Quality\GraphicsCapabilities) {
+                return $capabilities;
+            }
+        }
+        return Quality\GraphicsCapabilities::unknown();
+    }
+
     public function isRecalibrationRecommended(): bool
     {
         return $this->recommendRecalibration;

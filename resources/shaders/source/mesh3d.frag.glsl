@@ -60,6 +60,11 @@ uniform int   u_use_environment_map;
 // need to ship a tangent buffer.
 uniform int   u_normal_pattern;
 uniform float u_normal_scale;
+// Relief of the procedural normal pattern (mirrors the Vio copy): u_cavity
+// darkens its recesses, u_parallax_depth marches the view ray through that many
+// world units of relief. 0 = off for both.
+uniform float u_cavity;
+uniform float u_parallax_depth;
 
 // Procedural surface-wear pattern (see PHPolygon\Rendering\SurfacePattern).
 // 0 = none, 1..4 = pattern code. Modulates albedo / roughness / metallic
@@ -736,10 +741,141 @@ vec3 dispatchSurfacePattern(int code, vec2 uv) {
     return vec3(0.5, 0.0, 0.0);
 }
 
+// ── Procedural height fields (mirrors the Vio copy) ──────────────────────────
+// One per normal pattern, over the same pattern UV: 1 = the surface, 0 = the
+// deepest recess. They drive cavity darkening and parallax occlusion.
+
+float nh_bricks(vec2 uv) {
+    vec2 cell = vec2(0.5, 1.0);
+    float rowIndex = floor(uv.y / cell.y);
+    float xOffset = mod(rowIndex, 2.0) * 0.5 * cell.x;
+    vec2 local = vec2(fract((uv.x + xOffset) / cell.x),
+                      fract(uv.y / cell.y));
+    float mortarX = 1.0 - (smoothstep(0.0, 0.06, local.x) *
+                           smoothstep(1.0, 0.94, local.x));
+    float mortarY = 1.0 - (smoothstep(0.0, 0.06, local.y) *
+                           smoothstep(1.0, 0.94, local.y));
+    return 1.0 - max(mortarX, mortarY);
+}
+
+float nh_bumps(vec2 uv) {
+    return noise(uv * 8.0);
+}
+
+float nh_orange_peel(vec2 uv) {
+    return 0.75 + 0.25 * hash21(floor(uv * 60.0));
+}
+
+float nh_hammered(vec2 uv) {
+    vec2 grid = uv * 6.0;
+    vec2 cell = floor(grid);
+    vec2 local = fract(grid) - 0.5;
+    vec2 jitter = vec2(hash21(cell), hash21(cell + 17.0)) - 0.5;
+    float r = length(local - jitter * 0.4);
+    return 1.0 - 0.6 * smoothstep(0.45, 0.0, r);
+}
+
+float nh_hexagons(vec2 uv) {
+    vec2 p = uv * 5.0;
+    vec2 af = fract(vec2(p.x + p.y * 0.5, p.y * 0.866)) - 0.5;
+    return 1.0 - smoothstep(0.42, 0.50, max(abs(af.x), abs(af.y)));
+}
+
+float nh_wood_grain(vec2 uv) {
+    return 0.85 + 0.15 * sin(uv.y * 80.0 + noise(uv * vec2(20.0, 4.0)) * 6.0);
+}
+
+float nh_scratches(vec2 uv) {
+    float rotated = uv.x * 0.97 + uv.y * 0.24;
+    float across  = -uv.x * 0.24 + uv.y * 0.97;
+    float lane = floor(across * 80.0);
+    float scratch = sin((rotated + hash21(vec2(lane, 0.0)) * 6.28) * 30.0);
+    float mask = step(0.6, hash21(vec2(lane, 13.0)));
+    return 1.0 - 0.5 * mask * smoothstep(0.6, 1.0, -scratch);
+}
+
+float nh_cracked(vec2 uv) {
+    vec2 p = uv * 8.0;
+    vec2 ip = floor(p);
+    vec2 fp = fract(p);
+    float d1 = 8.0;
+    float d2 = 8.0;
+    for (int x = -1; x <= 1; x++) {
+        for (int y = -1; y <= 1; y++) {
+            vec2 g = vec2(float(x), float(y));
+            vec2 jitter = vec2(hash21(ip + g), hash21(ip + g + 51.0));
+            float d = length(g + jitter - fp);
+            if (d < d1) { d2 = d1; d1 = d; }
+            else if (d < d2) { d2 = d; }
+        }
+    }
+    return smoothstep(0.0, 0.08, d2 - d1);
+}
+
+float nh_noise(vec2 uv) {
+    return fbm(uv * 6.0, 3);
+}
+
+float nh_skin(vec2 uv) {
+    return noise(uv * 14.0) * 0.55 + fbm(uv * 4.0, 3) * 0.45;
+}
+
+float dispatchProceduralHeight(int code, vec2 uv) {
+    if (code == 1)  return nh_bricks(uv);
+    if (code == 2)  return nh_bumps(uv);
+    if (code == 3)  return nh_orange_peel(uv);
+    if (code == 4)  return nh_hammered(uv);
+    if (code == 5)  return nh_hexagons(uv);
+    if (code == 6)  return nh_wood_grain(uv);
+    if (code == 7)  return nh_scratches(uv);
+    if (code == 8)  return nh_cracked(uv);
+    if (code == 9)  return nh_noise(uv);
+    if (code == 10) return nh_skin(uv);
+    return 1.0;
+}
+
+// Parallax occlusion over the pattern's height field (mirrors the Vio copy):
+// the view ray descends `depth` world units below the surface; the returned
+// mesh UV is where it meets the relief.
+vec2 parallaxProceduralUv(vec3 N, vec3 V, vec2 uv, vec3 dpx, vec3 dpy,
+                          vec2 duvx, vec2 duvy,
+                          int patternCode, float patternScale, float depth) {
+    float det = duvx.x * duvy.y - duvy.x * duvx.y;
+    if (abs(det) < 1e-12) return uv;
+    vec3 T = (dpx * duvy.y - dpy * duvx.y) / det;
+    vec3 B = (dpy * duvx.x - dpx * duvy.x) / det;
+    float tt = dot(T, T);
+    float bb = dot(B, B);
+    if (tt < 1e-12 || bb < 1e-12) return uv;
+
+    float NdotV = max(dot(N, V), 0.2);
+    vec2 shift = vec2(dot(-V, T) / tt, dot(-V, B) / bb) * (depth / NdotV);
+    float steps = floor(mix(12.0, 5.0, NdotV));
+    float layer = 1.0 / steps;
+
+    vec2 cur = uv;
+    float curDepth = 0.0;
+    float surf = 1.0 - dispatchProceduralHeight(patternCode, cur * patternScale);
+    vec2 prevUv = uv;
+    float prevGap = surf;
+    for (int i = 0; i < 12; i++) {
+        if (curDepth >= surf) break;
+        prevUv = cur;
+        prevGap = surf - curDepth;
+        cur += shift * layer;
+        curDepth += layer;
+        surf = 1.0 - dispatchProceduralHeight(patternCode, cur * patternScale);
+    }
+    float gap = surf - curDepth;
+    float w = prevGap / max(prevGap - gap, 1e-5);
+    return mix(prevUv, cur, clamp(w, 0.0, 1.0));
+}
+
 // Derive a tangent basis per-fragment from world-position + UV
 // derivatives (Mikkelsen "Surface Gradient", 2010). This avoids having
 // to ship pre-computed tangents on every procedurally-generated mesh.
-vec3 perturbNormalProcedural(vec3 N, vec3 worldPos, vec2 uv,
+// `uv` builds the basis, `sampleUv` is where the pattern is read.
+vec3 perturbNormalProcedural(vec3 N, vec3 worldPos, vec2 uv, vec2 sampleUv,
                              int patternCode, float patternScale,
                              float intensity) {
     if (patternCode == 0 || intensity <= 0.0) return N;
@@ -755,7 +891,7 @@ vec3 perturbNormalProcedural(vec3 N, vec3 worldPos, vec2 uv,
     vec3 B = normalize(cross(N, T));
     mat3 TBN = mat3(T, B, N);
 
-    vec3 nMap = dispatchProceduralNormal(patternCode, uv * patternScale);
+    vec3 nMap = dispatchProceduralNormal(patternCode, sampleUv * patternScale);
     // Lerp between geometric normal and pattern normal by intensity, then
     // re-normalise after TBN transform.
     nMap = mix(vec3(0.0, 0.0, 1.0), nMap, clamp(intensity, 0.0, 4.0));
@@ -773,6 +909,18 @@ void main() {
     vec3 V = normalize(u_camera_pos - v_worldPos);
     vec3 L = normalize(-u_dir_light_direction);
     vec3 H = normalize(V + L);
+
+    // Parallax occlusion over the normal pattern's height field (mirrors the
+    // Vio copy); derivatives taken outside any branch.
+    vec3 posDx = dFdx(v_worldPos);
+    vec3 posDy = dFdy(v_worldPos);
+    vec2 uvDx = dFdx(v_uv);
+    vec2 uvDy = dFdy(v_uv);
+    vec2 patternUv = v_uv;
+    if (u_normal_pattern != 0 && u_parallax_depth > 0.0) {
+        patternUv = parallaxProceduralUv(N, V, v_uv, posDx, posDy, uvDx, uvDy,
+                                         u_normal_pattern, u_normal_scale, u_parallax_depth);
+    }
 
     float roughness = clamp(u_roughness, 0.04, 1.0);
     // Local metallic: surface patterns may modulate this per-fragment.
@@ -793,20 +941,29 @@ void main() {
     // flake jitter as well because both perturbations stay tangent-bound.
     // Self-shading procedural materials (water, cloud, moon) early-return
     // above so this line never runs for them.
-    N = perturbNormalProcedural(N, v_worldPos, v_uv,
+    N = perturbNormalProcedural(N, v_worldPos, v_uv, patternUv,
                                 u_normal_pattern, u_normal_scale,
                                 u_normal_intensity);
 
     // Procedural surface-wear pattern. Returns vec3(albedoTint, rough,
     // metal) deltas applied with intensity to the base PBR values.
     if (u_surface_pattern > 0 && u_surface_intensity > 0.0) {
-        vec3 wear = dispatchSurfacePattern(u_surface_pattern, v_uv * u_surface_scale);
+        vec3 wear = dispatchSurfacePattern(u_surface_pattern, patternUv * u_surface_scale);
         float t = clamp(u_surface_intensity, 0.0, 4.0);
         // Albedo tint: 0.5 = neutral, mapped to *2.0 around centre.
         vec3 tint = mix(vec3(1.0), vec3(wear.x * 2.0), t);
         albedo *= tint;
         roughness = clamp(roughness + wear.y * t, 0.04, 1.0);
         metallic  = clamp(metallic  + wear.z * t, 0.0,  1.0);
+    }
+
+    // Cavity (mirrors the Vio copy): recesses of the height field catch less
+    // light - ambient by the full factor, direct light by half.
+    float patternCavity = 1.0;
+    if (u_normal_pattern != 0 && u_cavity > 0.0) {
+        float cavityHeight = dispatchProceduralHeight(u_normal_pattern, patternUv * u_normal_scale);
+        patternCavity = 1.0 - clamp(u_cavity, 0.0, 1.0) * (1.0 - cavityHeight);
+        albedo *= mix(1.0, patternCavity, 0.5);
     }
 
     // Wetness ("SSR surrogate"): smoother + darker + stronger IBL on
@@ -833,7 +990,7 @@ void main() {
     float primaryIntensity = u_dir_light_count > 0 ? u_dir_lights[0].intensity : 0.0;
     float shadowStrength = clamp(primaryIntensity / 1.0, 0.0, 1.0); // 0 at night, 1 at noon
     float ambientShadow = mix(1.0, mix(0.5, 1.0, shadow), shadowStrength);
-    float ao = curvatureAO(N, u_ao_strength);
+    float ao = curvatureAO(N, u_ao_strength) * patternCavity;
 
     // Fieldtracing SDF trace-pass result (D3D only; neutral on GL). Mirror of vio.
     float ftSunShadow = 1.0;

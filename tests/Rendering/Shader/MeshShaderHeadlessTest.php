@@ -298,6 +298,77 @@ class MeshShaderHeadlessTest extends TestCase
     }
 
     /**
+     * Cavity darkens the recesses of the pattern's height field. Bricks at scale 1
+     * put a vertical mortar joint at uv.x = 0.5 (pixel 32 of 64); pixel 16 sits on
+     * a brick face. The normal perturbation is off, so only the cavity term can
+     * tell the two apart.
+     */
+    public function testCavityDarkensThePatternRecesses(): void
+    {
+        $plain = $this->renderRow(['u_normal_pattern' => 1, 'u_normal_intensity' => 0.0, 'u_cavity' => 0.0]);
+        $cavity = $this->renderRow(['u_normal_pattern' => 1, 'u_normal_intensity' => 0.0, 'u_cavity' => 1.0]);
+
+        $this->assertEqualsWithDelta($plain[16], $plain[32], 0.02, 'without cavity joint and face match');
+        $this->assertEqualsWithDelta($plain[16], $cavity[16], 0.02, 'the brick face keeps its brightness');
+        $this->assertLessThan($cavity[16] * 0.8, $cavity[32], 'the joint is clearly darker');
+    }
+
+    /**
+     * Parallax occlusion moves where the relief is read when the surface is
+     * seen at an angle: the darkest column of the cavity joint shifts.
+     */
+    public function testParallaxShiftsThePatternUnderAnObliqueView(): void
+    {
+        $base = ['u_normal_pattern' => 1, 'u_normal_intensity' => 0.0, 'u_cavity' => 1.0, 'u_camera_pos' => [4.0, 0.0, 1.5]];
+        $flat = $this->renderRow($base + ['u_parallax_depth' => 0.0]);
+        $relief = $this->renderRow($base + ['u_parallax_depth' => 0.3]);
+
+        $joint = static function (array $row): int {
+            $slice = array_slice($row, 20, 30, true); // around the joint at 32, clear of the quad edges
+            return (int) array_search(min($slice), $slice, true);
+        };
+        $this->assertNotSame($joint($flat), $joint($relief), 'the joint moves with parallax');
+        $this->assertEqualsWithDelta(32, $joint($flat), 2, 'without parallax the joint sits at uv.x = 0.5');
+    }
+
+    /**
+     * Luminance of pixel row 16 after rendering mesh3d with $uniforms on top of the
+     * neutral set. One render per harness (see renderAlbedoSum).
+     *
+     * @param array<string, int|float|list<float>> $uniforms
+     * @return array<int, float>
+     */
+    private function renderRow(array $uniforms): array
+    {
+        $h = HeadlessShaderHarness::open(64, 64);
+        $this->assertNotNull($h);
+        try {
+            $shader   = $h->compileShaderFromFiles('vio/mesh3d.vert.glsl', 'vio/mesh3d.frag.glsl');
+            $pipeline = $h->createPipeline($shader);
+            $rgba     = $h->renderAndRead(
+                $pipeline,
+                $h->fullscreenQuad(),
+                function (HeadlessShaderHarness $h) use ($uniforms): void {
+                    self::setNeutralMeshUniforms($h, 64, 64);
+                    $h->setUniform('u_cavity', 0.0);
+                    $h->setUniform('u_parallax_depth', 0.0);
+                    foreach ($uniforms as $name => $value) {
+                        $h->setUniform($name, $value);
+                    }
+                },
+            );
+            $row = [];
+            for ($x = 0; $x < 64; $x++) {
+                [$r, $g, $b] = $h->samplePixel($rgba, $x, 16);
+                $row[$x] = ($r + $g + $b) / 3.0;
+            }
+            return $row;
+        } finally {
+            $h->close();
+        }
+    }
+
+    /**
      * Render mesh3d at a given albedo on a fresh harness and return the sum
      * of the centre pixel's RGB channels. Each call gets its own context so
      * the test does not depend on inter-frame state leakage on the OpenGL

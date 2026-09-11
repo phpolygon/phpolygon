@@ -48,6 +48,10 @@ final class HeadlessShaderHarness
     /** @var array<string, VioMesh> */
     private array $meshCache = [];
 
+    /** Textures uploaded by {@see bindPixelTexture}, keyed by content; alive until close(). */
+    /** @var array<string, VioTexture> */
+    private array $pixelTextures = [];
+
     /** Lazy 1x1 depth render target, created on first bindDummyShadowSamplers() call. */
     private ?VioRenderTarget $dummyShadowTarget = null;
 
@@ -147,6 +151,7 @@ final class HeadlessShaderHarness
         $this->pipelineCache = [];
         $this->meshCache     = [];
         $this->targetCache   = [];
+        $this->pixelTextures = [];
         $this->dummyTexture2D = null;
         $this->dummyTexture3D = null;
         $this->dummyCubemap   = null;
@@ -550,6 +555,53 @@ final class HeadlessShaderHarness
             vio_bind_cubemap($this->ctx, $this->dummyCubemap, 7);
             $this->setUniform('u_environment_map', 7);
         }
+    }
+
+    /**
+     * A fullscreen quad in the post-process layout (a_position vec3 + a_uv vec2)
+     * with the UVs of VioRenderer3D's screen quad, for passes that use
+     * postprocess.vert.glsl.
+     */
+    public function postProcessQuad(): VioMesh
+    {
+        if (isset($this->meshCache['postprocess_quad'])) {
+            return $this->meshCache['postprocess_quad'];
+        }
+        $mesh = vio_mesh($this->ctx, [
+            'vertices' => [
+                -1.0, -1.0, 0.0,  0.0, 1.0,
+                 1.0, -1.0, 0.0,  1.0, 1.0,
+                 1.0,  1.0, 0.0,  1.0, 0.0,
+                -1.0,  1.0, 0.0,  0.0, 0.0,
+            ],
+            'indices' => [0, 1, 2, 0, 2, 3],
+            'layout'  => [VIO_FLOAT3, VIO_FLOAT2],
+        ]);
+        if ($mesh === false) {
+            throw new \RuntimeException('vio_mesh failed for the post-process quad');
+        }
+        $this->meshCache['postprocess_quad'] = $mesh;
+        return $mesh;
+    }
+
+    /**
+     * Upload RGBA8 pixels (width * height * 4 bytes) as a 2D texture and bind it
+     * to $unit under the sampler uniform $uniform. Identical pixels reuse the
+     * upload; textures stay alive until close(), past the draw that samples them.
+     */
+    public function bindPixelTexture(string $rgba, int $width, int $height, int $unit, string $uniform): void
+    {
+        $key = "{$width}x{$height}:" . md5($rgba);
+        if (!isset($this->pixelTextures[$key])) {
+            $upload = vio_texture($this->ctx, ['data' => $rgba, 'width' => $width, 'height' => $height]);
+            if ($upload === false) {
+                throw new \RuntimeException("vio_texture failed ({$width}x{$height})");
+            }
+            $this->pixelTextures[$key] = $upload;
+        }
+        $texture = $this->pixelTextures[$key];
+        vio_bind_texture($this->ctx, $texture, $unit);
+        $this->setUniform($uniform, $unit);
     }
 
     /**

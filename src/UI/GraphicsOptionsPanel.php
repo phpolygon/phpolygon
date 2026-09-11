@@ -8,6 +8,7 @@ use PHPolygon\Engine;
 use PHPolygon\Rendering\GraphicsSettings;
 use PHPolygon\Rendering\Quality\AntiAliasing;
 use PHPolygon\Rendering\Quality\ColorGradingPreset;
+use PHPolygon\Rendering\Quality\GraphicsCapabilities;
 use PHPolygon\Rendering\Quality\MeshLodTier;
 use PHPolygon\Rendering\Quality\QualityMode;
 use PHPolygon\Rendering\Quality\ScreenSpaceAO;
@@ -15,7 +16,9 @@ use PHPolygon\Rendering\Quality\ScreenSpaceReflections;
 use PHPolygon\Rendering\Quality\ShaderQuality;
 use PHPolygon\Rendering\Quality\ShadingRate;
 use PHPolygon\Rendering\Quality\ShadowQuality;
+use PHPolygon\Rendering\Quality\SurfaceRelief;
 use PHPolygon\Rendering\Quality\TextureQuality;
+use PHPolygon\Rendering\Quality\Upscaler;
 
 /**
  * Drop-in widget that draws a "Graphics" options panel through a UIContext.
@@ -26,6 +29,8 @@ use PHPolygon\Rendering\Quality\TextureQuality;
  *
  * The Manual sliders are visually disabled (greyed) when QualityMode::Adaptive
  * is selected - the AdaptiveQualityController owns those values in that mode.
+ * Options the active renderer cannot apply ({@see GraphicsCapabilities}) are
+ * drawn non-interactive and marked "(not supported)"; their stored value stays.
  */
 final class GraphicsOptionsPanel
 {
@@ -117,6 +122,7 @@ final class GraphicsOptionsPanel
     private function drawManualSection(GraphicsSettings $s, bool $enabled): void
     {
         $manager = $this->engine->graphics;
+        $caps = $manager->capabilities();
 
         $this->ui->label($enabled ? 'Manual Settings' : 'Manual Settings (locked - Adaptive mode active)');
 
@@ -124,6 +130,27 @@ final class GraphicsOptionsPanel
         $rs = $this->ui->slider('graphics.renderScale', 'Render Scale', $s->renderScale, 0.5, 2.0);
         if ($enabled && abs($rs - $s->renderScale) > 0.01) {
             $manager->update(static fn(GraphicsSettings $g): GraphicsSettings => $g->with(renderScale: $rs));
+        }
+
+        // Upscaler for render scales below 1 - only the ones this renderer implements.
+        $upscalers = $caps->upscalers;
+        $upscalerLabels = array_map(static fn(Upscaler $u): string => $u->label(), $upscalers);
+        $idx = array_search($s->upscaler, $upscalers, true);
+        if (!is_int($idx)) {
+            $idx = 0;
+        }
+        $canUpscale = count($upscalers) > 1;
+        $this->ui->label(self::supportLabel('Upscaler', $canUpscale));
+        $newIdx = $this->gated($canUpscale, fn(): int => $this->ui->dropdown('graphics.upscaler', $upscalerLabels, $idx, 0.0, 0));
+        if ($enabled && $newIdx !== $idx && isset($upscalers[$newIdx])) {
+            $picked = $upscalers[$newIdx];
+            $manager->update(static fn(GraphicsSettings $g): GraphicsSettings => $g->with(upscaler: $picked));
+        }
+        if ($s->upscaler === Upscaler::Fsr1 && $caps->supportsUpscaler(Upscaler::Fsr1)) {
+            $sharp = $this->ui->slider('graphics.upscaleSharpness', 'Sharpness', $s->upscaleSharpness, 0.0, 1.0);
+            if ($enabled && abs($sharp - $s->upscaleSharpness) > 0.01) {
+                $manager->update(static fn(GraphicsSettings $g): GraphicsSettings => $g->with(upscaleSharpness: $sharp));
+            }
         }
 
         // Shadow quality
@@ -147,14 +174,17 @@ final class GraphicsOptionsPanel
 
         // Anti-aliasing
         $aas = [AntiAliasing::Off, AntiAliasing::Fxaa, AntiAliasing::Msaa2x, AntiAliasing::Msaa4x, AntiAliasing::Taa];
-        $aaLabels = array_map(static fn(AntiAliasing $a): string => $a->label(), $aas);
+        $aaLabels = array_map(
+            static fn(AntiAliasing $a): string => self::supportLabel($a->label(), $caps->supportsAntiAliasing($a)),
+            $aas,
+        );
         $idx = array_search($s->antiAliasing, $aas, true);
         if (!is_int($idx)) {
             $idx = 1;
         }
         $this->ui->label('Anti-Aliasing');
         $newIdx = $this->ui->dropdown('graphics.aa', $aaLabels, $idx, 0.0, 0);
-        if ($enabled && $newIdx !== $idx) {
+        if ($enabled && $newIdx !== $idx && $caps->supportsAntiAliasing($aas[$newIdx])) {
             $manager->update(static fn(GraphicsSettings $g): GraphicsSettings => $g->with(antiAliasing: $aas[$newIdx]));
         }
 
@@ -191,10 +221,23 @@ final class GraphicsOptionsPanel
         if (!is_int($idx)) {
             $idx = 0;
         }
-        $this->ui->label('Shading Rate');
-        $newIdx = $this->ui->dropdown('graphics.shadingRate', $rateLabels, $idx, 0.0, 0);
-        if ($enabled && $newIdx !== $idx) {
+        $this->ui->label(self::supportLabel('Shading Rate', $caps->shadingRate));
+        $newIdx = $this->gated($caps->shadingRate, fn(): int => $this->ui->dropdown('graphics.shadingRate', $rateLabels, $idx, 0.0, 0));
+        if ($enabled && $caps->shadingRate && $newIdx !== $idx) {
             $manager->update(static fn(GraphicsSettings $g): GraphicsSettings => $g->with(shadingRate: $rates[$newIdx]));
+        }
+
+        // Surface relief (cavities + parallax on materials that define them)
+        $reliefs = [SurfaceRelief::Off, SurfaceRelief::Cavity, SurfaceRelief::Parallax];
+        $reliefLabels = array_map(static fn(SurfaceRelief $r): string => $r->label(), $reliefs);
+        $idx = array_search($s->surfaceRelief, $reliefs, true);
+        if (!is_int($idx)) {
+            $idx = 2;
+        }
+        $this->ui->label(self::supportLabel('Surface Relief', $caps->surfaceRelief));
+        $newIdx = $this->gated($caps->surfaceRelief, fn(): int => $this->ui->dropdown('graphics.surfaceRelief', $reliefLabels, $idx, 0.0, 0));
+        if ($enabled && $caps->surfaceRelief && $newIdx !== $idx) {
+            $manager->update(static fn(GraphicsSettings $g): GraphicsSettings => $g->with(surfaceRelief: $reliefs[$newIdx]));
         }
 
         // Shader quality
@@ -312,5 +355,57 @@ final class GraphicsOptionsPanel
         if ($newIdx !== $idx) {
             $manager->update(static fn(GraphicsSettings $g): GraphicsSettings => $g->with(fpsCap: $fpsCaps[$newIdx]));
         }
+
+        // Presentation: read when the window is created, so they apply on the next start.
+        $lowLatency = $this->gated(
+            $caps->lowLatency,
+            fn(): bool => $this->ui->checkbox('graphics.lowLatency', self::supportLabel('Low Latency', $caps->lowLatency), $s->lowLatency),
+        );
+        if ($caps->lowLatency && $lowLatency !== $s->lowLatency) {
+            $manager->update(static fn(GraphicsSettings $g): GraphicsSettings => $g->with(lowLatency: $lowLatency));
+        }
+        $hdrOutput = $this->gated(
+            $caps->hdrOutput,
+            fn(): bool => $this->ui->checkbox('graphics.hdrOutput', self::supportLabel('HDR10 Output', $caps->hdrOutput), $s->hdrOutput),
+        );
+        if ($caps->hdrOutput && $hdrOutput !== $s->hdrOutput) {
+            $manager->update(static fn(GraphicsSettings $g): GraphicsSettings => $g->with(hdrOutput: $hdrOutput));
+        }
+        if ($caps->hdrOutput && $s->hdrOutput) {
+            $paperWhite = $this->ui->slider('graphics.hdrPaperWhite', 'HDR Paper White (nits)', $s->hdrPaperWhite, 80.0, 400.0);
+            if (abs($paperWhite - $s->hdrPaperWhite) > 1.0) {
+                $manager->update(static fn(GraphicsSettings $g): GraphicsSettings => $g->with(hdrPaperWhite: $paperWhite));
+            }
+        }
+        if ($caps->lowLatency || $caps->hdrOutput) {
+            $this->ui->label('Low Latency and HDR10 apply after a restart');
+        }
+    }
+
+    /**
+     * Draw a widget non-interactive when the renderer cannot apply its option; the
+     * previous interaction state is restored afterwards (the panel may itself sit
+     * under a modal that turned interaction off).
+     *
+     * @template T
+     * @param callable(): T $draw
+     * @return T
+     */
+    private function gated(bool $supported, callable $draw): mixed
+    {
+        $wasInteractive = $this->ui->isInteractive();
+        if (!$supported) {
+            $this->ui->setInteractive(false);
+        }
+        try {
+            return $draw();
+        } finally {
+            $this->ui->setInteractive($wasInteractive);
+        }
+    }
+
+    private static function supportLabel(string $label, bool $supported): string
+    {
+        return $supported ? $label : $label . ' (not supported)';
     }
 }

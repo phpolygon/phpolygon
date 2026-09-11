@@ -348,6 +348,8 @@ class OpenGLRenderer3D implements Renderer3DInterface
         $this->setUniformInt('u_surface_pattern', 0);
         $this->setUniformFloat('u_surface_scale', 1.0);
         $this->setUniformFloat('u_surface_intensity', 1.0);
+        $this->setUniformFloat('u_cavity', 0.0);
+        $this->setUniformFloat('u_parallax_depth', 0.0);
         $this->setUniformFloat('u_wetness', 0.0);
 
         // CSM defaults (1 cascade, identity matrices) so the shader never
@@ -1011,6 +1013,8 @@ class OpenGLRenderer3D implements Renderer3DInterface
             $this->setUniformInt('u_surface_pattern', SurfacePattern::codeFor($material->surfacePattern));
             $this->setUniformFloat('u_surface_scale', $material->surfaceScale);
             $this->setUniformFloat('u_surface_intensity', $material->surfaceIntensity);
+            $this->setUniformFloat('u_cavity', $this->settings->surfaceRelief->cavityEnabled() ? $material->cavity : 0.0);
+            $this->setUniformFloat('u_parallax_depth', $this->settings->surfaceRelief->parallaxEnabled() ? $material->parallaxDepth : 0.0);
             $this->setUniformFloat('u_wetness', $material->wetness);
             $this->setUniformInt('u_cloth', $material->cloth ? 1 : 0);
             $this->setUniformFloat('u_cloth_strength', $material->clothStrength);
@@ -1033,6 +1037,8 @@ class OpenGLRenderer3D implements Renderer3DInterface
             $this->setUniformInt('u_surface_pattern', 0);
             $this->setUniformFloat('u_surface_scale', 1.0);
             $this->setUniformFloat('u_surface_intensity', 1.0);
+            $this->setUniformFloat('u_cavity', 0.0);
+            $this->setUniformFloat('u_parallax_depth', 0.0);
             $this->setUniformFloat('u_wetness', 0.0);
             $this->setUniformInt('u_cloth', 0);
             $this->setUniformFloat('u_cloth_strength', 0.05);
@@ -1992,5 +1998,26 @@ class OpenGLRenderer3D implements Renderer3DInterface
         // SSR samples the resolved scene + depth, which only exist when
         // the offscreen pipeline is on.
         return $this->settings->ssr !== ScreenSpaceReflections::Off;
+    }
+
+    /**
+     * What this renderer can apply, for settings screens
+     * ({@see GraphicsSettingsManager::capabilities()}): MSAA, TAA and SSR passes
+     * exist; variable rate shading, HDR10 output, the waitable swapchain, SDF
+     * fieldtracing and upscalers are vio-only.
+     */
+    public function graphicsCapabilities(): Quality\GraphicsCapabilities
+    {
+        return new Quality\GraphicsCapabilities(
+            shadingRate: false,
+            hdrOutput: false,
+            lowLatency: false,
+            msaa: true,
+            temporalAntiAliasing: true,
+            screenSpaceReflections: true,
+            fieldtracingSdf: false,
+            surfaceRelief: true,
+            upscalers: [Quality\Upscaler::Off],
+        );
     }
 }

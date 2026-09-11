@@ -17,6 +17,7 @@ use PHPolygon\Rendering\Quality\ScreenSpaceReflections;
  * frame-time recovery for the smallest perceptual change):
  *   1. VolumetricFog   on -> off (8-sample raymarch per fragment)
  *   2. SSR             High -> Low -> Off (24-step world-space raymarch)
+ *      SurfaceRelief   Parallax -> Cavity (up to 12 height lookups per fragment)
  *   3. RenderScale     1.0 -> 0.5 in 0.1 increments
  *   4. ScreenSpaceAO   High -> Medium -> Low -> Off (curvature ALU)
  *   5. ShadowQuality   High -> Medium -> Low -> Off
@@ -25,6 +26,7 @@ use PHPolygon\Rendering\Quality\ScreenSpaceReflections;
  *   8. CloudShadows    on -> off
  *   9. Bloom           on -> off
  *  10. Vignette        > 0 -> 0 (cheap effect, last among in-shader items)
+ *      SurfaceRelief   Cavity -> Off (one height lookup, but visible)
  *  11. ShaderQuality   Full -> Unlit (last because it is highly visible)
  *  12. Anisotropy      16 -> 8 -> 4 -> 2 -> 1
  *
@@ -75,6 +77,11 @@ final class AdaptiveTierStack
         };
         if ($ssrNext !== null) {
             return $current->with(ssr: $ssrNext);
+        }
+
+        // 2b. Parallax relief (a height-field march per fragment on relief materials)
+        if ($current->surfaceRelief === SurfaceRelief::Parallax) {
+            return $current->with(surfaceRelief: SurfaceRelief::Cavity);
         }
 
         // 3. Shading rate 2x2: a quarter of the fragment work at full geometry and
@@ -149,6 +156,11 @@ final class AdaptiveTierStack
             return $current->with(vignetteIntensity: 0.0);
         }
 
+        // 9b. Cavity relief (one height lookup, but visible)
+        if ($current->surfaceRelief === SurfaceRelief::Cavity) {
+            return $current->with(surfaceRelief: SurfaceRelief::Off);
+        }
+
         // 10. ShaderQuality
         if ($current->shaderQuality === ShaderQuality::Full) {
             return $current->with(shaderQuality: ShaderQuality::Unlit);
@@ -174,6 +186,10 @@ final class AdaptiveTierStack
 
         if ($current->shaderQuality === ShaderQuality::Unlit) {
             return $current->with(shaderQuality: ShaderQuality::Full);
+        }
+
+        if ($current->surfaceRelief === SurfaceRelief::Off) {
+            return $current->with(surfaceRelief: SurfaceRelief::Cavity);
         }
 
         // Vignette is intentionally not auto-restored: the player may have
@@ -236,6 +252,10 @@ final class AdaptiveTierStack
 
         if ($current->shadingRate === ShadingRate::Half) {
             return $current->with(shadingRate: ShadingRate::Full);
+        }
+
+        if ($current->surfaceRelief === SurfaceRelief::Cavity) {
+            return $current->with(surfaceRelief: SurfaceRelief::Parallax);
         }
 
         $ssrUp = match ($current->ssr) {

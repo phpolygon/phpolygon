@@ -526,6 +526,9 @@ uploads, no extra passes. All are documented in
 |---|---|
 | `NormalPattern` | `Material::$normalPattern`, 9 procedural patterns (bricks, bumps, orange peel, hammered, hexagons, wood grain, scratches, cracked, fbm noise). Tangent space derived per-fragment via dFdx/dFdy. |
 | `SurfacePattern` | `Material::$surfacePattern`, 4 wear patterns that modulate albedo/roughness/metallic (worn paint, rust, brushed metal, polished rings). |
+| Surface relief | `Material::$cavity` (darkens pattern recesses) + `$parallaxDepth` (parallax occlusion, world units) over a height field per `NormalPattern` (`nh_*` in both mesh3d.frag copies - add a height function with every new pattern). Gated per player by `GraphicsSettings::$surfaceRelief` (Off/Cavity/Parallax). |
+| `Upscaler` | `GraphicsSettings::$upscaler`: `Fsr1` = AMD FSR 1 (EASU + RCAS, `fsr_easu/fsr_rcas.frag.glsl`, MIT notice kept) in the vio present when renderScale < 1; `$upscaleSharpness`. Temporal upscalers need motion vectors the renderer does not produce yet. |
+| `GraphicsCapabilities` | `$engine->graphics->capabilities()` from the renderer's `graphicsCapabilities()`: VRS, HDR10, low latency, MSAA, TAA, SSR, SDF fieldtracing, relief, upscalers. Settings UIs disable what is unsupported (GraphicsOptionsPanel does). |
 | `Material::$wetness` | Forward-renderer SSR surrogate. Up-facing fragments get smoother + darker + brighter-IBL pass. |
 | `Material::$clearcoat` + `$flakes` | Carpaint extras consumed by `proc_mode == 10`. `Material::carpaint()` factory wires them in. |
 | `ScreenSpaceAO` | Curvature-based AO via `dFdx(N)`. Tiers `Off/Low/Medium/High`. Shader uniform `u_ao_strength`. |

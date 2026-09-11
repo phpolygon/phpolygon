@@ -310,6 +310,48 @@ MaterialRegistry::register('weathered_door', new Material(
 ));
 ```
 
+### Surface relief (`Material::$cavity`, `Material::$parallaxDepth`)
+
+Every normal pattern also has a height field over the same pattern UV (1 = the surface, 0 = the deepest recess: mortar joints, cracks, dents). Two material values use it:
+
+- `cavity` (0..1) darkens the recesses. Ambient light is scaled by the full factor, direct light by half. 1 leaves the recesses without ambient light.
+- `parallaxDepth` (world units) runs parallax occlusion. The view ray descends that far below the surface; the pattern, the surface wear and the albedo texture are read where it meets the height field. It needs mesh UVs, and silhouettes stay flat.
+
+```php
+MaterialRegistry::register('cobbles', new Material(
+    albedo: new Color(0.52, 0.50, 0.47),
+    roughness: 0.9,
+    normalPattern: NormalPattern::CRACKED,
+    normalScale: 0.7,
+    normalIntensity: 1.2,
+    cavity: 0.6,
+    parallaxDepth: 0.03,
+));
+```
+
+`GraphicsSettings::$surfaceRelief` scales it per player: `Parallax` (default) applies both values, `Cavity` only the darkening, `Off` neither. Materials without these values render the same in every tier. The adaptive stack drops Parallax right after SSR, and Cavity after the vignette.
+
+### Upscaling (`GraphicsSettings::$upscaler`)
+
+At a render scale below 1 the scene has to reach the display resolution:
+
+| Upscaler | What happens |
+|---|---|
+| `Off` | The present pass stretches the image bilinearly. |
+| `Fsr1` | AMD FidelityFX Super Resolution 1 (vio). The scene is resolved at render resolution (bloom, tonemap, grade, vignette, FXAA), upscaled with EASU and sharpened with RCAS. `$upscaleSharpness` sets the sharpening, 0 = soft, 1 = strongest. |
+
+FSR 1 is spatial, so it needs no motion vectors and runs on every vio backend. Temporal upscalers (FSR 2/3, DLSS, XeSS) need per-pixel motion vectors and a jittered projection, which the renderer does not produce yet.
+
+### Hardware capabilities (`GraphicsCapabilities`)
+
+`$engine->graphics->capabilities()` reports what the active renderer can apply:
+- variable rate shading, HDR10 output and the waitable swapchain
+- MSAA and a real TAA pass
+- SSR and the SDF fieldtracing tiers
+- surface relief and the implemented upscalers
+
+`GraphicsOptionsPanel` draws unsupported options non-interactive and marks them "(not supported)". Game menus should do the same. The stored settings stay untouched, so a graphics.json carried to a more capable machine keeps its choices. Without a renderer (headless, before the window) `GraphicsCapabilities::unknown()` disables nothing.
+
 ### Wetness (SSR surrogate)
 
 Forward-renderer stand-in for screen-space reflections.

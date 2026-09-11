@@ -135,6 +135,22 @@ class Material
      *                                     warm tint bleeds into the shadow
      *                                     boundary. Use Material::skin(...)
      *                                     for sensible skin defaults.
+     * @param float   $cavity               0 = off (default). Darkens the
+     *                                     recesses of the procedural normal
+     *                                     pattern's height field (mortar,
+     *                                     cracks, dents): ambient light by
+     *                                     the full factor, direct light by
+     *                                     half. 1 = recesses get no ambient
+     *                                     light. Needs $normalPattern.
+     * @param float   $parallaxDepth        0 = off (default). Depth of the
+     *                                     pattern's relief in world units:
+     *                                     parallax occlusion marches the view
+     *                                     ray that far below the surface, so
+     *                                     the pattern shifts with the view
+     *                                     and recesses hide behind their
+     *                                     edges. The geometry is unchanged
+     *                                     (silhouettes stay flat). Needs
+     *                                     $normalPattern and mesh UVs.
      */
     public function __construct(
         public readonly Color $albedo = new Color(0.8, 0.8, 0.8),
@@ -162,6 +178,8 @@ class Material
         public readonly bool $clothAnchorTop = true,
         public readonly Color $subsurfaceColor = new Color(1.0, 0.35, 0.25),
         public readonly float $subsurfaceStrength = 0.0,
+        public readonly float $cavity = 0.0,
+        public readonly float $parallaxDepth = 0.0,
     ) {}
 
     public static function default(): self

@@ -14,7 +14,9 @@ use PHPolygon\Rendering\Quality\ScreenSpaceReflections;
 use PHPolygon\Rendering\Quality\ShaderQuality;
 use PHPolygon\Rendering\Quality\ShadowQuality;
 use PHPolygon\Rendering\Quality\ShadingRate;
+use PHPolygon\Rendering\Quality\SurfaceRelief;
 use PHPolygon\Rendering\Quality\TextureQuality;
+use PHPolygon\Rendering\Quality\Upscaler;
 
 /**
  * Immutable graphics-settings value object.
@@ -79,6 +81,22 @@ final class GraphicsSettings
         public readonly bool $volumetricFog = false,
         public readonly ScreenSpaceReflections $ssr = ScreenSpaceReflections::Off,
         public readonly FieldtracingMode $fieldtracing = FieldtracingMode::Off,
+        /**
+         * Relief of materials with a procedural normal pattern (Material::$cavity
+         * and $parallaxDepth): Parallax applies both, Cavity only darkens the
+         * recesses, Off renders the flat pattern. Materials without relief values
+         * render the same in every tier.
+         */
+        public readonly SurfaceRelief $surfaceRelief = SurfaceRelief::Parallax,
+        /**
+         * Upscaler for render scales below 1: Off stretches bilinearly, Fsr1 runs
+         * AMD FidelityFX Super Resolution 1 (edge-adaptive upscale + contrast-
+         * adaptive sharpening). No effect at render scale 1 and on renderers that
+         * do not implement it (see GraphicsCapabilities).
+         */
+        public readonly Upscaler $upscaler = Upscaler::Off,
+        /** Sharpening of the FSR upscaler: 0 = soft, 1 = strongest. */
+        public readonly float $upscaleSharpness = 0.9,
     ) {
     }
 
@@ -114,6 +132,9 @@ final class GraphicsSettings
         ?bool $volumetricFog = null,
         ?ScreenSpaceReflections $ssr = null,
         ?FieldtracingMode $fieldtracing = null,
+        ?SurfaceRelief $surfaceRelief = null,
+        ?Upscaler $upscaler = null,
+        ?float $upscaleSharpness = null,
     ): self {
         return new self(
             mode: $mode ?? $this->mode,
@@ -143,6 +164,9 @@ final class GraphicsSettings
             volumetricFog: $volumetricFog ?? $this->volumetricFog,
             ssr: $ssr ?? $this->ssr,
             fieldtracing: $fieldtracing ?? $this->fieldtracing,
+            surfaceRelief: $surfaceRelief ?? $this->surfaceRelief,
+            upscaler: $upscaler ?? $this->upscaler,
+            upscaleSharpness: $upscaleSharpness !== null ? max(0.0, min(1.0, $upscaleSharpness)) : $this->upscaleSharpness,
         );
     }
 
@@ -179,6 +203,9 @@ final class GraphicsSettings
             'volumetricFog' => $this->volumetricFog,
             'ssr' => $this->ssr->value,
             'fieldtracing' => $this->fieldtracing->value,
+            'surfaceRelief' => $this->surfaceRelief->value,
+            'upscaler' => $this->upscaler->value,
+            'upscaleSharpness' => $this->upscaleSharpness,
         ];
     }
 
@@ -216,6 +243,9 @@ final class GraphicsSettings
             volumetricFog: self::asBool($data['volumetricFog'] ?? null) ?? $defaults->volumetricFog,
             ssr: self::enumFrom(ScreenSpaceReflections::class, $data['ssr'] ?? null) ?? $defaults->ssr,
             fieldtracing: self::enumFrom(FieldtracingMode::class, $data['fieldtracing'] ?? null) ?? $defaults->fieldtracing,
+            surfaceRelief: self::enumFrom(SurfaceRelief::class, $data['surfaceRelief'] ?? null) ?? $defaults->surfaceRelief,
+            upscaler: self::enumFrom(Upscaler::class, $data['upscaler'] ?? null) ?? $defaults->upscaler,
+            upscaleSharpness: ($v = self::asFloat($data['upscaleSharpness'] ?? null)) !== null ? max(0.0, min(1.0, $v)) : $defaults->upscaleSharpness,
         );
     }
 
