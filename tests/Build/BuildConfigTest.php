@@ -77,6 +77,34 @@ class BuildConfigTest extends TestCase
         $this->assertSame(['glfw', 'mbstring', 'vulkan'], $config->phpExtensions);
     }
 
+    public function testBuildJsonPhpIni(): void
+    {
+        file_put_contents($this->tempDir . '/build.json', json_encode([
+            'php' => ['ini' => [
+                'opcache.enable_cli' => true,
+                'opcache.jit' => 'tracing',
+                'opcache.jit_buffer_size' => '128M',
+                'memory_limit' => -1,
+                'ignored' => ['nested'],
+            ]],
+        ]));
+
+        $config = BuildConfig::load($this->tempDir);
+
+        $this->assertSame([
+            'opcache.enable_cli' => '1',
+            'opcache.jit' => 'tracing',
+            'opcache.jit_buffer_size' => '128M',
+            'memory_limit' => '-1',
+        ], $config->phpIni);
+        $this->assertSame($config->phpIni, $config->toArray()['php.ini']);
+    }
+
+    public function testPhpIniDefaultsToEmpty(): void
+    {
+        $this->assertSame([], BuildConfig::load($this->tempDir)->phpIni);
+    }
+
     public function testBuildJsonPharExclude(): void
     {
         file_put_contents($this->tempDir . '/build.json', json_encode([

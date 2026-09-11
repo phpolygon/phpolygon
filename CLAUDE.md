@@ -643,6 +643,15 @@ classic per-target build.
 | `PlatformPackager` | Creates .app bundle, Linux dir, Windows .exe |
 | `GameBuilder` | Orchestrates the 7-phase pipeline |
 | `BuildHookRunner` | Runs build.json `hooks.beforeBuild` before staging (see below) |
+| `MicroIni` | Encodes build.json `php.ini` as the ini section between micro.sfx and PHAR (see below) |
+
+### Embedded php.ini
+
+The combined executable ignores php.ini files, and startup-only settings (OPcache, its JIT) cannot be changed with `ini_set()`. `build.json` `php.ini` embeds them: `GameBuilder` writes the section `spc micro:combine -I` would (`"\xfd\xf6\x69\xe6"`, big-endian length, `key=value` lines) between micro.sfx and the PHAR. No runtime rebuild is needed; OPcache is compiled into PHP 8.5 runtimes.
+
+```json
+"php": { "ini": { "opcache.enable_cli": "1", "opcache.jit": "tracing", "opcache.jit_buffer_size": "128M" } }
+```
 
 ### Build hooks
 

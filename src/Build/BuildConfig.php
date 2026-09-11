@@ -17,6 +17,14 @@ class BuildConfig
     /** @var array<string> */
     public array $phpExtensions = ['glfw', 'mbstring', 'zip', 'phar'];
 
+    /**
+     * build.json `php.ini`: settings embedded into the combined executable (see
+     * {@see MicroIni}) – for startup-only settings such as OPcache and its JIT.
+     *
+     * @var array<string, string>
+     */
+    public array $phpIni = [];
+
     /** Enable multithreading support (requires ZTS PHP + parallel extension) */
     public bool $enableThreading = false;
 
@@ -121,6 +129,18 @@ class BuildConfig
         }
         if (isset($php['threading']) && $php['threading'] === true) {
             $this->enableThreading = true;
+        }
+        if (isset($php['ini']) && is_array($php['ini'])) {
+            foreach ($php['ini'] as $key => $value) {
+                if (!is_string($key) || $key === '') {
+                    continue;
+                }
+                if (is_bool($value)) {
+                    $this->phpIni[$key] = $value ? '1' : '0';
+                } elseif (is_string($value) || is_int($value) || is_float($value)) {
+                    $this->phpIni[$key] = (string) $value;
+                }
+            }
         }
         if (isset($php['bundleLibs']) && is_array($php['bundleLibs'])) {
             /** @var array<string, array<array{src: string, optional?: bool}>> $bundleLibs */
@@ -257,6 +277,7 @@ class BuildConfig
             'php.extensions' => $this->getResolvedExtensions(),
             'php.threading' => $this->enableThreading,
             'php.variant' => $this->getPhpVariant(),
+            'php.ini' => $this->phpIni,
             'php.bundleLibs' => $this->bundleLibs,
             'phar.exclude' => $this->pharExclude,
             'phar.additionalRequires' => $this->additionalRequires,
