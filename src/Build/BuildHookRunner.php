@@ -28,8 +28,11 @@ namespace PHPolygon\Build;
  *      `runtimeVariant` (default: the build variant), wrapped as a runner that
  *      takes `[-d key=value]... script.php [args...]`. A hook can so use the
  *      extensions the shipped game has, also inside a build container whose own
- *      PHP lacks them. PHP_BINARY inside the hook is the runner, so a hook can
- *      start further PHP processes the same way.
+ *      PHP lacks them.
+ *
+ * PHPOLYGON_HOOK_PHP in the environment of an `@php` hook names its interpreter.
+ * A hook starts further PHP processes with it: PHP_BINARY is empty inside a
+ * micro runtime.
  *
  * The environment carries PHPOLYGON_BUILD_PLATFORM, PHPOLYGON_BUILD_ARCH,
  * PHPOLYGON_BUILD_VARIANT and PHPOLYGON_BUILD_TYPE. A failing hook fails the
@@ -67,6 +70,9 @@ final class BuildHookRunner
     /** @var \Closure(string, string, string, string): string */
     private \Closure $runtimeResolver;
 
+    /** @var \Closure(string, string, string, string): list<string> */
+    private \Closure $runtimeLibsResolver;
+
     /** @var \Closure(string, string): void */
     private \Closure $logger;
 
@@ -75,13 +81,20 @@ final class BuildHookRunner
     /**
      * @param callable(string, string, string, string): string $runtimeResolver
      *        micro.sfx path for (platform, arch, variant, PHP version)
+     * @param (callable(string, string, string, string): list<string>)|null $runtimeLibsResolver
+     *        libraries the runtime loads from its own directory (Windows DLLs, the
+     *        Steam API library), for the same arguments
      */
     public function __construct(
         private readonly BuildConfig $config,
         callable $runtimeResolver,
         ?string $runnerDir = null,
+        ?callable $runtimeLibsResolver = null,
     ) {
         $this->runtimeResolver = \Closure::fromCallable($runtimeResolver);
+        $this->runtimeLibsResolver = $runtimeLibsResolver !== null
+            ? \Closure::fromCallable($runtimeLibsResolver)
+            : static fn (string $platform, string $arch, string $variant, string $phpVersion): array => [];
         $this->logger = static function (string $level, string $message): void {};
         $this->runnerDir = $runnerDir ?? sys_get_temp_dir() . '/phpolygon-hook-runtime';
     }
@@ -117,11 +130,13 @@ final class BuildHookRunner
 
         foreach ($this->config->hooksBeforeBuild as $index => $hook) {
             $command = $hook['run'];
+            $hookEnvironment = $environment;
             if ($command[0] === '@php') {
                 $command[0] = $this->interpreter($hook, $context);
+                $hookEnvironment['PHPOLYGON_HOOK_PHP'] = $command[0];
             }
             ($this->logger)('info', 'Build hook: ' . implode(' ', $hook['run']));
-            $exit = $this->execute($command, $environment);
+            $exit = $this->execute($command, $hookEnvironment);
             if ($exit !== 0) {
                 throw new \RuntimeException(sprintf('Build hook #%d (%s) failed with exit code %d', $index + 1, implode(' ', $hook['run']), $exit));
             }
@@ -148,13 +163,21 @@ final class BuildHookRunner
 
         $variant = $hook['runtimeVariant'] ?? $context['variant'];
         ($this->logger)('info', sprintf('Build PHP lacks %s: running the hook with the %s game runtime', implode(', ', $missing), $variant));
-        $microSfx = ($this->runtimeResolver)(self::hostPlatform(), StaticPhpResolver::detectArch(), $variant, $context['phpVersion']);
+        $platform = self::hostPlatform();
+        $arch = StaticPhpResolver::detectArch();
+        $microSfx = ($this->runtimeResolver)($platform, $arch, $variant, $context['phpVersion']);
 
-        return $this->runner($microSfx);
+        return $this->runner($microSfx, ($this->runtimeLibsResolver)($platform, $arch, $variant, $context['phpVersion']));
     }
 
-    /** The micro.sfx at $microSfx with {@see RUNNER_BOOTSTRAP} appended, built once per runtime file. */
-    public function runner(string $microSfx): string
+    /**
+     * The micro.sfx at $microSfx with {@see RUNNER_BOOTSTRAP} appended, built once per
+     * runtime file, with $libs next to it: the runtime loads them from its own
+     * directory and does not start without them (0xC0000135 on Windows).
+     *
+     * @param list<string> $libs
+     */
+    public function runner(string $microSfx, array $libs = []): string
     {
         $size = filesize($microSfx);
         if ($size === false) {
@@ -162,21 +185,28 @@ final class BuildHookRunner
         }
         $key = substr(md5($microSfx . '|' . $size . '|' . (int) filemtime($microSfx) . '|' . self::RUNNER_BOOTSTRAP), 0, 16);
         $path = $this->runnerDir . '/' . $key . '/php-runtime' . (PHP_OS_FAMILY === 'Windows' ? '.exe' : '');
-        if (is_file($path)) {
-            return $path;
+
+        if (!is_file($path)) {
+            if (!is_dir(dirname($path)) && !mkdir(dirname($path), 0755, true) && !is_dir(dirname($path))) {
+                throw new \RuntimeException('Cannot create ' . dirname($path));
+            }
+            $runtime = file_get_contents($microSfx);
+            if ($runtime === false) {
+                throw new \RuntimeException("Game runtime not readable: {$microSfx}");
+            }
+            $tmp = $path . '.tmp' . getmypid();
+            file_put_contents($tmp, $runtime . self::RUNNER_BOOTSTRAP);
+            chmod($tmp, 0755);
+            rename($tmp, $path);
         }
 
-        if (!is_dir(dirname($path)) && !mkdir(dirname($path), 0755, true) && !is_dir(dirname($path))) {
-            throw new \RuntimeException('Cannot create ' . dirname($path));
+        // Checked on every call, so a runner built before its libraries were known gets them too.
+        foreach ($libs as $lib) {
+            $target = dirname($path) . '/' . basename($lib);
+            if (is_file($lib) && (!is_file($target) || filesize($target) !== filesize($lib)) && !copy($lib, $target)) {
+                throw new \RuntimeException("Cannot copy runtime library {$lib} next to the hook runner");
+            }
         }
-        $runtime = file_get_contents($microSfx);
-        if ($runtime === false) {
-            throw new \RuntimeException("Game runtime not readable: {$microSfx}");
-        }
-        $tmp = $path . '.tmp' . getmypid();
-        file_put_contents($tmp, $runtime . self::RUNNER_BOOTSTRAP);
-        chmod($tmp, 0755);
-        rename($tmp, $path);
 
         return $path;
     }
@@ -207,11 +237,18 @@ final class BuildHookRunner
             throw new \RuntimeException('Cannot create a log file for the build hook');
         }
         try {
+            // One handle for both streams: two handles on the same file overwrite
+            // each other's output on Windows.
+            $sink = fopen($log, 'ab');
+            if ($sink === false) {
+                throw new \RuntimeException('Cannot open the log file for the build hook');
+            }
             $process = proc_open($command, [
                 0 => ['file', PHP_OS_FAMILY === 'Windows' ? 'NUL' : '/dev/null', 'r'],
-                1 => ['file', $log, 'a'],
-                2 => ['file', $log, 'a'],
+                1 => $sink,
+                2 => $sink,
             ], $pipes, $this->config->projectRoot, $environment);
+            fclose($sink);
             if (!is_resource($process)) {
                 throw new \RuntimeException('Cannot start build hook: ' . implode(' ', $command));
             }

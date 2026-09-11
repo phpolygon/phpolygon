@@ -121,4 +121,31 @@ class StaticPhpResolverTest extends TestCase
         );
         $this->assertArrayHasKey('bin/arm64/dxil.dll', StaticPhpResolver::dxcZipEntries('aarch64'));
     }
+
+    public function testZipEntriesAreFoundWithBackslashPaths(): void
+    {
+        if (!class_exists(\ZipArchive::class)) {
+            $this->markTestSkipped('zip extension missing');
+        }
+        // The DXC release archives store their paths as bin\x64\dxcompiler.dll.
+        $file = tempnam(sys_get_temp_dir(), 'phpolygon-zip-');
+        $this->assertIsString($file);
+        $zip = new \ZipArchive();
+        $this->assertTrue($zip->open($file, \ZipArchive::OVERWRITE));
+        $zip->addFromString('bin\\x64\\dxcompiler.dll', 'COMPILER');
+        $zip->addFromString('bin/x64/dxil.dll', 'DXIL');
+        $zip->addFromString('bin\\x64\\empty.dll', '');
+        $zip->close();
+
+        $this->assertTrue($zip->open($file));
+        try {
+            $this->assertSame('COMPILER', StaticPhpResolver::zipEntry($zip, 'bin/x64/dxcompiler.dll'));
+            $this->assertSame('DXIL', StaticPhpResolver::zipEntry($zip, 'bin/x64/dxil.dll'));
+            $this->assertNull(StaticPhpResolver::zipEntry($zip, 'bin/x64/empty.dll'));
+            $this->assertNull(StaticPhpResolver::zipEntry($zip, 'bin/arm64/dxil.dll'));
+        } finally {
+            $zip->close();
+            @unlink($file);
+        }
+    }
 }

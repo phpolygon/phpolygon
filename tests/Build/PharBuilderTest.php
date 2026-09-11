@@ -145,6 +145,39 @@ class PharBuilderTest extends TestCase
         $this->assertStringContainsString('vendor/autoload.php', $stub);
     }
 
+    /**
+     * The stub's error handler logs every warning of the shipped game. Errors
+     * silenced with @ (probing mkdir, optional files) must stay out of the log:
+     * a start produced over a thousand such lines.
+     */
+    public function testStubErrorHandlerSkipsSilencedErrors(): void
+    {
+        $stub = (new PharBuilder(BuildConfig::load($this->projectDir)))->generateStub();
+        $start = strpos($stub, 'set_error_handler(');
+        $this->assertIsInt($start);
+        $end = strpos($stub, "\n});", $start);
+        $this->assertIsInt($end);
+
+        $logged = [];
+        $__engineLog = static function (string $message) use (&$logged): void {
+            $logged[] = $message;
+        };
+        $displayErrors = ini_set('display_errors', '0');
+        $reporting = error_reporting(E_ALL);
+        eval(substr($stub, $start, $end + 4 - $start));
+        try {
+            @trigger_error('silenced', E_USER_WARNING);
+            trigger_error('loud', E_USER_WARNING);
+        } finally {
+            restore_error_handler();
+            error_reporting($reporting);
+            ini_set('display_errors', (string) $displayErrors);
+        }
+
+        $this->assertCount(1, $logged);
+        $this->assertStringStartsWith('WARNING: loud in ', $logged[0]);
+    }
+
     public function testGenerateStubIncludesAdditionalRequires(): void
     {
         file_put_contents($this->projectDir . '/build.json', json_encode([

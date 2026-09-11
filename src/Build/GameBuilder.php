@@ -27,6 +27,8 @@ class GameBuilder
             $config,
             fn (string $platform, string $arch, string $variant, string $phpVersion): string
                 => $this->staticPhpResolver->resolve(null, $platform, $arch, $variant, $phpVersion),
+            runtimeLibsResolver: fn (string $platform, string $arch, string $variant, string $phpVersion): array
+                => $this->staticPhpResolver->resolveRuntimeLibs($platform, $arch, $variant, $phpVersion),
         );
     }
 

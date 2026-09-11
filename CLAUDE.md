@@ -663,7 +663,7 @@ The combined executable ignores php.ini files, and startup-only settings (OPcach
 ] }
 ```
 
-`@php` resolves to `PHPOLYGON_HOOK_PHP`, else the PHP running the build when it has every `requires` function, else the game's static runtime (micro.sfx for the host, variant `runtimeVariant`) wrapped as a runner taking `[-d key=value]... script [args]` - so a hook can use the shipped game's extensions inside a build container whose PHP lacks them. Hooks see `PHPOLYGON_BUILD_PLATFORM/ARCH/VARIANT/TYPE`.
+`@php` resolves to `PHPOLYGON_HOOK_PHP`, else the PHP running the build when it has every `requires` function, else the game's static runtime (micro.sfx for the host, variant `runtimeVariant`) wrapped as a runner taking `[-d key=value]... script [args]` with the runtime's libraries (Windows DLLs, Steam API) copied next to it - so a hook can use the shipped game's extensions inside a build container whose PHP lacks them. Hooks see `PHPOLYGON_BUILD_PLATFORM/ARCH/VARIANT/TYPE`, and `PHPOLYGON_HOOK_PHP` names the interpreter of an `@php` hook: start further PHP processes with it, because `PHP_BINARY` is empty inside a micro runtime.
 
 ### PHAR stub constants
 

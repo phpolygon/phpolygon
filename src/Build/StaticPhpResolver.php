@@ -430,8 +430,8 @@ class StaticPhpResolver
                 mkdir($dir, 0755, true);
             }
             foreach (self::dxcZipEntries($arch) as $entry => $name) {
-                $data = $zip->getFromName($entry);
-                if (is_string($data) && $data !== '') {
+                $data = self::zipEntry($zip, $entry);
+                if ($data !== null) {
                     file_put_contents($dir . '/' . $name, $data);
                 }
             }
@@ -474,6 +474,21 @@ class StaticPhpResolver
             "bin/{$dir}/dxcompiler.dll" => 'dxcompiler.dll',
             "bin/{$dir}/dxil.dll" => 'dxil.dll',
         ];
+    }
+
+    /**
+     * A non-empty zip entry by its `/` path, also when the archive stores the path
+     * with backslashes (the DXC release archives do), or null.
+     */
+    public static function zipEntry(\ZipArchive $zip, string $entry): ?string
+    {
+        foreach ([$entry, str_replace('/', '\\', $entry)] as $name) {
+            $data = $zip->getFromName($name);
+            if (is_string($data) && $data !== '') {
+                return $data;
+            }
+        }
+        return null;
     }
 
     private function downloadD3DCompilerDllIfNewer(string $platform, string $arch, string $variant, string $phpVersion, string $cachedPath): ?string

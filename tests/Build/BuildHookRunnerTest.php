@@ -65,6 +65,32 @@ final class BuildHookRunnerTest extends TestCase
         self::assertContains('hook: prepared', $lines, 'hook output is relayed');
     }
 
+    public function testOutputOnBothStreamsIsRelayedInOrder(): void
+    {
+        file_put_contents($this->dir . '/talk.php', '<?php echo "first\n"; fwrite(STDERR, "second\n"); echo "third\n"; fwrite(STDERR, "fourth\n");');
+        $runner = new BuildHookRunner($this->config([['@php', 'talk.php']]), $this->neverResolve());
+        $lines = [];
+        $runner->setLogger(function (string $level, string $message) use (&$lines): void {
+            if ($level === 'hook') {
+                $lines[] = $message;
+            }
+        });
+
+        $runner->runBeforeBuild($this->context);
+
+        self::assertSame(['first', 'second', 'third', 'fourth'], $lines);
+    }
+
+    public function testHookEnvironmentNamesItsInterpreter(): void
+    {
+        file_put_contents($this->dir . '/which.php', '<?php file_put_contents("php.txt", (string) getenv("PHPOLYGON_HOOK_PHP"));');
+        $runner = new BuildHookRunner($this->config([['@php', 'which.php']]), $this->neverResolve());
+
+        $runner->runBeforeBuild($this->context);
+
+        self::assertSame(PHP_BINARY, file_get_contents($this->dir . '/php.txt'));
+    }
+
     public function testFailingHookFailsTheBuild(): void
     {
         file_put_contents($this->dir . '/fail.php', '<?php exit(3);');
@@ -110,6 +136,35 @@ final class BuildHookRunnerTest extends TestCase
 
         putenv('PHPOLYGON_HOOK_PHP=/opt/php/bin/php');
         self::assertSame('/opt/php/bin/php', $runner->interpreter(['run' => ['@php'], 'requires' => ['no_such_function_for_hooks'], 'runtimeVariant' => null], $this->context));
+    }
+
+    public function testRunnerCarriesTheLibrariesTheRuntimeLoads(): void
+    {
+        mkdir($this->dir . '/cache');
+        $sfx = $this->dir . '/cache/micro.sfx';
+        $lib = $this->dir . '/cache/runtime-lib.dll';
+        file_put_contents($sfx, 'MICROSFX');
+        file_put_contents($lib, 'LIB');
+        $libCalls = [];
+        $runner = new BuildHookRunner(
+            $this->config([]),
+            static fn (string $platform, string $arch, string $variant, string $php): string => $sfx,
+            $this->dir . '/runners',
+            static function (string $platform, string $arch, string $variant, string $php) use (&$libCalls, $lib): array {
+                $libCalls[] = [$platform, $variant, $php];
+                return [$lib];
+            },
+        );
+
+        $interpreter = $runner->interpreter(['run' => ['@php'], 'requires' => ['no_such_function_for_hooks'], 'runtimeVariant' => 'steam'], $this->context);
+
+        self::assertSame([[BuildHookRunner::hostPlatform(), 'steam', '8.5']], $libCalls);
+        self::assertSame('LIB', file_get_contents(dirname($interpreter) . '/runtime-lib.dll'));
+
+        // A runner that exists already still gets a library it lacks.
+        unlink(dirname($interpreter) . '/runtime-lib.dll');
+        self::assertSame($interpreter, $runner->runner($sfx, [$lib]));
+        self::assertFileExists(dirname($interpreter) . '/runtime-lib.dll');
     }
 
     /**

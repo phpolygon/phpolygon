@@ -157,6 +157,9 @@ $__engineLog = function(string $msg) use ($engineLogPath) {
     file_put_contents($engineLogPath, '[' . date('Y-m-d H:i:s') . '] ' . $msg . "\n", FILE_APPEND);
 };
 set_error_handler(function($severity, $message, $file, $line) use ($__engineLog) {
+    if (!(error_reporting() & $severity)) {
+        return false; // silenced with @: a probe that may fail, not a problem worth logging
+    }
     $type = match($severity) {
         E_WARNING, E_USER_WARNING => 'WARNING',
         E_NOTICE, E_USER_NOTICE => 'NOTICE',
