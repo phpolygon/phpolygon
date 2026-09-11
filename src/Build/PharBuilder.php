@@ -205,10 +205,16 @@ unset($__arg);
 $__engineLog("Resource base: " . $resourceBase);
 $__engineLog("PHAR base: " . $pharBase);
 
-@mkdir(PHPOLYGON_PATH_ASSETS, 0755, true);
-@mkdir(PHPOLYGON_PATH_RESOURCES, 0755, true);
-@mkdir(PHPOLYGON_PATH_SAVES, 0755, true);
-@mkdir(PHPOLYGON_PATH_MODS, 0755, true);
+// Create directories only where they are missing: mkdir() on an existing one
+// fails with a warning, and the extraction below would do that per file.
+$__ensureDir = static function (string $dir): void {
+    if (!is_dir($dir)) {
+        @mkdir($dir, 0755, true);
+    }
+};
+foreach ([PHPOLYGON_PATH_ASSETS, PHPOLYGON_PATH_RESOURCES, PHPOLYGON_PATH_SAVES, PHPOLYGON_PATH_MODS] as $__dir) {
+    $__ensureDir($__dir);
+}
 
 // Extract assets from PHAR (always overwrite to ensure updates)
 $pharAssets = $pharBase . '/assets';
@@ -222,9 +228,9 @@ if (is_dir($pharAssets)) {
         $relPath = substr($assetItem->getPathname(), $pharAssetsLen + 1);
         $targetPath = PHPOLYGON_PATH_ASSETS . DS . $relPath;
         if ($assetItem->isDir()) {
-            @mkdir($targetPath, 0755, true);
+            $__ensureDir($targetPath);
         } else {
-            @mkdir(dirname($targetPath), 0755, true);
+            $__ensureDir(dirname($targetPath));
             copy($assetItem->getPathname(), $targetPath);
         }
     }
@@ -242,9 +248,9 @@ if (is_dir($pharResources)) {
         $relPath = substr($resItem->getPathname(), $pharResLen + 1);
         $targetPath = PHPOLYGON_PATH_RESOURCES . DS . $relPath;
         if ($resItem->isDir()) {
-            @mkdir($targetPath, 0755, true);
+            $__ensureDir($targetPath);
         } else {
-            @mkdir(dirname($targetPath), 0755, true);
+            $__ensureDir(dirname($targetPath));
             copy($resItem->getPathname(), $targetPath);
         }
     }

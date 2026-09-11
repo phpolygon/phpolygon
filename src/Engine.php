@@ -1244,7 +1244,9 @@ class Engine
 
         // Extract engine fonts if not already present
         if (!is_dir($targetDir . DIRECTORY_SEPARATOR . 'noto-sans-cjk') && is_dir($pharDir)) {
-            @mkdir($targetDir, 0755, true);
+            if (!is_dir($targetDir)) {
+                @mkdir($targetDir, 0755, true);
+            }
             $iterator = new \RecursiveIteratorIterator(
                 new \RecursiveDirectoryIterator($pharDir, \FilesystemIterator::SKIP_DOTS),
                 \RecursiveIteratorIterator::SELF_FIRST
@@ -1255,9 +1257,13 @@ class Engine
                 $relPath = substr($item->getPathname(), $pharDirLen + 1);
                 $targetPath = $targetDir . DIRECTORY_SEPARATOR . $relPath;
                 if ($item->isDir()) {
-                    @mkdir($targetPath, 0755, true);
+                    if (!is_dir($targetPath)) {
+                        @mkdir($targetPath, 0755, true);
+                    }
                 } elseif (!file_exists($targetPath)) {
-                    @mkdir(dirname($targetPath), 0755, true);
+                    if (!is_dir(dirname($targetPath))) {
+                        @mkdir(dirname($targetPath), 0755, true);
+                    }
                     copy($item->getPathname(), $targetPath);
                 }
             }

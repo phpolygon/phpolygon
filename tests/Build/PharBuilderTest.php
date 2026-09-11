@@ -146,6 +146,18 @@ class PharBuilderTest extends TestCase
     }
 
     /**
+     * mkdir() on an existing directory warns, and the stub extracts every asset on
+     * every start: it must only create directories that are missing.
+     */
+    public function testStubCreatesOnlyMissingDirectories(): void
+    {
+        $stub = (new PharBuilder(BuildConfig::load($this->projectDir)))->generateStub();
+
+        $this->assertSame(1, substr_count($stub, '@mkdir('), 'one guarded mkdir() call, in $__ensureDir');
+        $this->assertStringContainsString("if (!is_dir(\$dir)) {", $stub);
+    }
+
+    /**
      * The stub's error handler logs every warning of the shipped game. Errors
      * silenced with @ (probing mkdir, optional files) must stay out of the log:
      * a start produced over a thousand such lines.
