@@ -163,6 +163,7 @@ class PharBuilderTest extends TestCase
             $logged[] = $message;
         };
         $displayErrors = ini_set('display_errors', '0');
+        $logErrors = ini_set('log_errors', '0');
         $reporting = error_reporting(E_ALL);
         eval(substr($stub, $start, $end + 4 - $start));
         try {
@@ -171,6 +172,7 @@ class PharBuilderTest extends TestCase
         } finally {
             restore_error_handler();
             error_reporting($reporting);
+            ini_set('log_errors', (string) $logErrors);
             ini_set('display_errors', (string) $displayErrors);
         }
 
