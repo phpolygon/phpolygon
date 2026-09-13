@@ -1002,7 +1002,10 @@ class UIContext
             };
         }
 
-        $this->advance($h);
+        // Horizontal flow steps along by the field's width, the way label() and
+        // button() do. Advancing by the height instead put the next widget in the
+        // row a fraction of a field along, drawing it over this one.
+        $this->advance($this->flow === 'horizontal' ? $w : $h);
         return $selectedIndex;
     }
 

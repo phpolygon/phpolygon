@@ -567,4 +567,60 @@ class UIContextTest extends TestCase
         );
         $this->assertNotEmpty($rounded, 'scrollbar thumb drawn when content overflows');
     }
+
+    /**
+     * In a horizontal region every widget has to step the cursor along by its
+     * WIDTH. label() and button() do; dropdown() advanced by its height, which
+     * is a fraction of the width, so a second dropdown in the same row was drawn
+     * on top of the first and only a sliver of the first stayed visible.
+     */
+    public function testTwoDropdownsInAHorizontalRegionDoNotOverlap(): void
+    {
+        $before = count($this->drawCalls);
+
+        $this->ctx->begin(0.0, 0.0, 400.0, 'horizontal');
+        $this->ctx->dropdown('d_left', ['1980', '1981'], 0, 110.0);
+        $this->ctx->dropdown('d_right', ['Jan', 'Feb'], 0, 96.0);
+        $this->ctx->end();
+
+        // Each closed dropdown draws its field as one rounded rect.
+        $fields = array_values(array_filter(
+            array_slice($this->drawCalls, $before),
+            fn($c) => $c['method'] === 'drawRoundedRect',
+        ));
+        $this->assertCount(2, $fields, 'one field per dropdown');
+
+        [$leftX, , $leftW] = [$fields[0]['args'][0], $fields[0]['args'][1], $fields[0]['args'][2]];
+        $rightX = $fields[1]['args'][0];
+
+        $this->assertGreaterThanOrEqual(
+            $leftX + $leftW,
+            $rightX,
+            'the second dropdown starts inside the first one',
+        );
+    }
+
+    public function testADropdownInAVerticalRegionStillAdvancesDownwards(): void
+    {
+        $before = count($this->drawCalls);
+
+        $this->ctx->begin(0.0, 0.0, 400.0);
+        $this->ctx->dropdown('d_top', ['a', 'b'], 0, 110.0);
+        $this->ctx->dropdown('d_bottom', ['c', 'd'], 0, 110.0);
+        $this->ctx->end();
+
+        $fields = array_values(array_filter(
+            array_slice($this->drawCalls, $before),
+            fn($c) => $c['method'] === 'drawRoundedRect',
+        ));
+        $this->assertCount(2, $fields);
+
+        $topY = $fields[0]['args'][1];
+        $topH = $fields[0]['args'][3];
+        $bottomY = $fields[1]['args'][1];
+        $bottomX = $fields[1]['args'][0];
+
+        $this->assertGreaterThanOrEqual($topY + $topH, $bottomY, 'vertical stacking must not change');
+        $this->assertSame($fields[0]['args'][0], $bottomX, 'vertical flow keeps the same x');
+    }
 }
