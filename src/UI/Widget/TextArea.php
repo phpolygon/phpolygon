@@ -108,8 +108,13 @@ class TextArea extends TextInput
                     $lines[] = [$start, $breakAt];
                     $start = $breakAt;
                 } else {
-                    $lines[] = [$start, $i];
-                    $start = $i;
+                    // Cut between characters, but never off a combining mark.
+                    $cut = $i;
+                    while ($cut > $start + 1 && LineBreaks::isMark($chars[$cut])) {
+                        $cut--;
+                    }
+                    $lines[] = [$start, $cut];
+                    $start = $cut;
                 }
                 $breakAt = -1;
                 // Re-examine $i as the first character(s) of the new line.

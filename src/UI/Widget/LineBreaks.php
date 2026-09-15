@@ -28,6 +28,15 @@ final class LineBreaks
     }
 
     /**
+     * A combining mark (a Thai tone or vowel sign, an accent) belongs to the
+     * letter before it and must never begin a line on its own.
+     */
+    public static function isMark(string $char): bool
+    {
+        return preg_match('/^\p{M}$/u', $char) === 1;
+    }
+
+    /**
      * Whether a line may end between $chars[$index - 1] and $chars[$index].
      *
      * @param list<string> $chars single characters
@@ -39,6 +48,9 @@ final class LineBreaks
         }
         $before = $chars[$index - 1];
         $char = $chars[$index];
+        if (self::isMark($char)) {
+            return false;
+        }
         if ($before === ' ') {
             return true;
         }

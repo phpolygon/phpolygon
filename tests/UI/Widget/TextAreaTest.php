@@ -100,6 +100,19 @@ class TextAreaTest extends TestCase
         self::assertSame(['あいうえ', 'お。かき'], self::texts($text, $lines));
     }
 
+    public function testCombiningMarksStayWithTheirLetter(): void
+    {
+        $text = str_repeat("\u{0E01}\u{0E48}\u{0E32}", 8);
+
+        foreach ([30.0, 40.0, 50.0] as $width) {
+            $texts = self::texts($text, TextArea::wrap($text, $width, self::mono()));
+            foreach ($texts as $line) {
+                self::assertDoesNotMatchRegularExpression('/^\p{M}/u', $line, "width {$width}");
+            }
+            self::assertSame($text, implode('', $texts));
+        }
+    }
+
     public function testEmptyTextIsOneEmptyLine(): void
     {
         self::assertSame([[0, 0]], TextArea::wrap('', 100.0, self::mono()));

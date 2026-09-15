@@ -224,8 +224,10 @@ class Label extends Widget
                 }
                 $line = '';
                 $lineWidth = 0.0;
-                // A single token wider than the line is cut glyph by glyph.
-                foreach (mb_str_split($token) as $glyph) {
+                // A single token wider than the line is cut between graphemes:
+                // a letter keeps its combining marks (Thai tone and vowel signs).
+                preg_match_all('/\X/u', $token, $graphemes);
+                foreach ($graphemes[0] as $glyph) {
                     $glyphWidth = self::textWidth($glyph, $fontSize);
                     if ($line !== '' && $lineWidth + $glyphWidth > $limit) {
                         $lines[] = $line;

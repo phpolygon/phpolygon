@@ -86,6 +86,22 @@ class LabelWrapTest extends TestCase
         $this->assertSame(['go', 'abcdefghij', 'klm'], $this->drawnLines('go abcdefghijklm', 62.0));
     }
 
+    public function testASplitWordKeepsCombiningMarksWithTheirLetter(): void
+    {
+        // Thai writes words without spaces, so a long run is split to fit. A
+        // tone or vowel mark belongs to the consonant before it; a line that
+        // starts with the mark alone draws a dangling glyph (and has crashed a
+        // renderer).
+        $text = str_repeat("\u{0E01}\u{0E48}\u{0E32}", 12); // กา with a tone mark, twelve times
+
+        foreach ([20.0, 31.0, 44.0, 57.0] as $width) {
+            foreach ($this->drawnLines($text, $width) as $line) {
+                $this->assertDoesNotMatchRegularExpression('/^\p{M}/u', $line, "width {$width}");
+            }
+            $this->assertSame($text, implode('', $this->drawnLines($text, $width)), 'no character is lost');
+        }
+    }
+
     public function testHardBreaksStillStartNewLines(): void
     {
         $this->assertSame(['ab', 'cd'], $this->drawnLines("ab\ncd", 62.0));
