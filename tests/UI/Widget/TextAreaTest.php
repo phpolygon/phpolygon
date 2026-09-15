@@ -82,6 +82,24 @@ class TextAreaTest extends TestCase
         self::assertSame(['äöüäöü', 'äöüäöü'], self::texts($text, $lines));
     }
 
+    public function testTextWithoutSpacesFillsTheLineBeforeBreaking(): void
+    {
+        // Between full-width characters a line may break anywhere, so a line
+        // after a space-separated word is filled instead of left short.
+        $text = 'F8 キーを押してください';
+        $lines = TextArea::wrap($text, 60.0, self::mono());
+
+        self::assertSame(['F8 キーを', '押してくださ', 'い'], self::texts($text, $lines));
+    }
+
+    public function testClosingPunctuationNeverStartsALine(): void
+    {
+        $text = 'あいうえお。かき';
+        $lines = TextArea::wrap($text, 50.0, self::mono());
+
+        self::assertSame(['あいうえ', 'お。かき'], self::texts($text, $lines));
+    }
+
     public function testEmptyTextIsOneEmptyLine(): void
     {
         self::assertSame([[0, 0]], TextArea::wrap('', 100.0, self::mono()));

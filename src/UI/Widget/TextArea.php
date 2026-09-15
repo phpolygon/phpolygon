@@ -72,9 +72,10 @@ class TextArea extends TextInput
      * Greedy word wrap into [start, end) character offsets of $text.
      *
      * Hard breaks end a line (the newline itself belongs to no line); a soft
-     * break keeps the space at the end of the line it ends. A word wider than
-     * the line is broken between characters. Offsets are characters, not
-     * bytes, so a multi-byte letter is never split.
+     * break keeps the space at the end of the line it ends. Between full-width
+     * characters a line may break without a space ({@see LineBreaks}). A word
+     * wider than the line is broken between characters. Offsets are
+     * characters, not bytes, so a multi-byte letter is never split.
      *
      * @param \Closure(string): float $measure width of a piece of text
      * @return list<array{int, int}>
@@ -98,6 +99,10 @@ class TextArea extends TextInput
                 continue;
             }
 
+            if ($i > $start && LineBreaks::canBreakBefore($chars, $i)) {
+                $breakAt = $i;
+            }
+
             if ($i > $start && $measure(implode('', array_slice($chars, $start, $i - $start + 1))) > $maxWidth) {
                 if ($breakAt > $start) {
                     $lines[] = [$start, $breakAt];
@@ -108,17 +113,14 @@ class TextArea extends TextInput
                 }
                 $breakAt = -1;
                 // Re-examine $i as the first character(s) of the new line.
-                for ($j = $start; $j < $i; $j++) {
-                    if ($chars[$j] === ' ') {
-                        $breakAt = $j + 1;
+                for ($j = $start + 1; $j < $i; $j++) {
+                    if (LineBreaks::canBreakBefore($chars, $j)) {
+                        $breakAt = $j;
                     }
                 }
                 continue;
             }
 
-            if ($char === ' ') {
-                $breakAt = $i + 1;
-            }
             $i++;
         }
 

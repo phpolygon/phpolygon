@@ -170,13 +170,6 @@ class Label extends Widget
     /** Advance of a full-width (CJK, Hangul, full-width form) glyph. */
     private const WIDE_ADVANCE = 1.0;
 
-    /** Code point ranges drawn as full-width glyphs. */
-    private const WIDE = '\x{1100}-\x{115F}\x{2E80}-\x{A4CF}\x{AC00}-\x{D7A3}\x{F900}-\x{FAFF}'
-        . '\x{FE30}-\x{FE4F}\x{FF00}-\x{FF60}\x{FFE0}-\x{FFE6}\x{20000}-\x{3FFFD}';
-
-    /** Full-width punctuation that must not begin a line. */
-    private const NO_LINE_START = '、。，．！？：；）」』】〉》〕｝ー々ぁぃぅぇぉっゃゅょァィゥェォッャュョ';
-
     /**
      * Estimated drawn width: fontSize * 0.62 per regular glyph (average advance
      * of the UI font; 0.55 under-measured and clipped auto-sized text) and a
@@ -185,7 +178,7 @@ class Label extends Widget
     private static function textWidth(string $text, float $fontSize): float
     {
         $length = mb_strlen($text);
-        $wide = preg_match_all('/[' . self::WIDE . ']/u', $text);
+        $wide = preg_match_all('/[' . LineBreaks::WIDE . ']/u', $text);
 
         return (($length - $wide) * self::NARROW_ADVANCE + $wide * self::WIDE_ADVANCE) * $fontSize;
     }
@@ -203,7 +196,7 @@ class Label extends Widget
     {
         $limit = $maxWidth > 0.0 ? $maxWidth + 1e-6 : INF;
         $space = self::textWidth(' ', $fontSize);
-        $tokenPattern = '/ +|[' . self::WIDE . '][' . self::NO_LINE_START . ']*|[^ ' . self::WIDE . ']+/u';
+        $tokenPattern = '/ +|[' . LineBreaks::WIDE . '][' . LineBreaks::NO_LINE_START . ']*|[^ ' . LineBreaks::WIDE . ']+/u';
 
         $lines = [];
         $paragraphs = preg_split('/\r\n?|\n/', $text) ?: [$text];
