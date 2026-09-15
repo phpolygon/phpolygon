@@ -93,9 +93,7 @@ class Label extends Widget
             return;
         }
 
-        // Approximate text width: chars * fontSize * 0.62 (avg glyph advance for
-        // the UI font; 0.55 under-measured and clipped auto-sized text).
-        $textW = mb_strlen($this->text) * $fs * 0.62;
+        $textW = self::textWidth($this->text, $fs);
         $textH = $fs;
 
         $this->measuredWidth = $this->sizing->fillWidth ? $availableWidth
@@ -166,33 +164,83 @@ class Label extends Widget
         }
     }
 
+    /** Advance of a regular glyph, as a multiple of the font size. */
+    private const NARROW_ADVANCE = 0.62;
+
+    /** Advance of a full-width (CJK, Hangul, full-width form) glyph. */
+    private const WIDE_ADVANCE = 1.0;
+
+    /** Code point ranges drawn as full-width glyphs. */
+    private const WIDE = '\x{1100}-\x{115F}\x{2E80}-\x{A4CF}\x{AC00}-\x{D7A3}\x{F900}-\x{FAFF}'
+        . '\x{FE30}-\x{FE4F}\x{FF00}-\x{FF60}\x{FFE0}-\x{FFE6}\x{20000}-\x{3FFFD}';
+
+    /** Full-width punctuation that must not begin a line. */
+    private const NO_LINE_START = '、。，．！？：；）」』】〉》〕｝ー々ぁぃぅぇぉっゃゅょァィゥェォッャュョ';
+
     /**
-     * Greedy word-wrap to $maxWidth using the same char-advance estimate the
-     * label measures width with (fontSize * 0.62), so measure() and draw() agree
-     * on the line count. Hard breaks (\n / \r\n) always start a new line.
+     * Estimated drawn width: fontSize * 0.62 per regular glyph (average advance
+     * of the UI font; 0.55 under-measured and clipped auto-sized text) and a
+     * whole fontSize per full-width glyph.
+     */
+    private static function textWidth(string $text, float $fontSize): float
+    {
+        $length = mb_strlen($text);
+        $wide = preg_match_all('/[' . self::WIDE . ']/u', $text);
+
+        return (($length - $wide) * self::NARROW_ADVANCE + $wide * self::WIDE_ADVANCE) * $fontSize;
+    }
+
+    /**
+     * Greedy wrap to $maxWidth using the same width estimate measure() uses, so
+     * both agree on the line count. Lines break at spaces and between full-width
+     * characters (scripts without spaces), never before closing punctuation; a
+     * word wider than the whole line is split. Hard breaks (\n / \r\n) always
+     * start a new line.
      *
      * @return list<string>
      */
     private static function wrapLines(string $text, float $maxWidth, float $fontSize): array
     {
-        $charW = max(0.001, $fontSize * 0.62);
-        $maxChars = $maxWidth > 0.0 ? (int) max(1, floor($maxWidth / $charW)) : PHP_INT_MAX;
+        $limit = $maxWidth > 0.0 ? $maxWidth + 1e-6 : INF;
+        $space = self::textWidth(' ', $fontSize);
+        $tokenPattern = '/ +|[' . self::WIDE . '][' . self::NO_LINE_START . ']*|[^ ' . self::WIDE . ']+/u';
 
         $lines = [];
         $paragraphs = preg_split('/\r\n?|\n/', $text) ?: [$text];
         foreach ($paragraphs as $paragraph) {
-            if ($paragraph === '') {
-                $lines[] = '';
-                continue;
-            }
             $line = '';
-            foreach (explode(' ', $paragraph) as $word) {
-                $candidate = $line === '' ? $word : $line . ' ' . $word;
-                if (mb_strlen($candidate) <= $maxChars || $line === '') {
-                    $line = $candidate;
-                } else {
+            $lineWidth = 0.0;
+            $spaceBefore = false;
+            preg_match_all($tokenPattern, $paragraph, $matches);
+            foreach ($matches[0] as $token) {
+                if ($token[0] === ' ') {
+                    $spaceBefore = true;
+                    continue;
+                }
+                $gap = $spaceBefore && $line !== '' ? $space : 0.0;
+                $spaceBefore = false;
+                $width = self::textWidth($token, $fontSize);
+
+                if ($line !== '' && $lineWidth + $gap + $width <= $limit) {
+                    $line .= ($gap > 0.0 ? ' ' : '') . $token;
+                    $lineWidth += $gap + $width;
+                    continue;
+                }
+                if ($line !== '') {
                     $lines[] = $line;
-                    $line = $word;
+                }
+                $line = '';
+                $lineWidth = 0.0;
+                // A single token wider than the line is cut glyph by glyph.
+                foreach (mb_str_split($token) as $glyph) {
+                    $glyphWidth = self::textWidth($glyph, $fontSize);
+                    if ($line !== '' && $lineWidth + $glyphWidth > $limit) {
+                        $lines[] = $line;
+                        $line = '';
+                        $lineWidth = 0.0;
+                    }
+                    $line .= $glyph;
+                    $lineWidth += $glyphWidth;
                 }
             }
             $lines[] = $line;
