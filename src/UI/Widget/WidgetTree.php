@@ -257,8 +257,14 @@ class WidgetTree
             $this->handleTextInput($this->focusedWidget);
         }
 
-        // Scroll handling
-        if ($this->hoveredWidget !== null) {
+        // Scroll handling. A text area scrolls its own lines and takes the wheel,
+        // so a ScrollView around it does not move at the same time.
+        if ($this->hoveredWidget instanceof TextArea) {
+            $lines = (int) round(-$this->input->getScrollY());
+            if ($lines !== 0) {
+                $this->hoveredWidget->scrollLines($lines);
+            }
+        } elseif ($this->hoveredWidget !== null) {
             $scrollView = $this->findParentScrollView($this->hoveredWidget);
             if ($scrollView !== null) {
                 $scrollView->handleScroll($this->input);
@@ -548,10 +554,25 @@ class WidgetTree
         $ti->insertChars($this->input->getCharsTyped());
 
         // GLFW key codes
-        if ($this->input->isKeyPressed(259)) $ti->backspace();  // BACKSPACE
-        if ($this->input->isKeyPressed(261)) $ti->delete();     // DELETE
-        if ($this->input->isKeyPressed(263)) $ti->moveCursorLeft();  // LEFT
-        if ($this->input->isKeyPressed(262)) $ti->moveCursorRight(); // RIGHT
+        if ($ti instanceof TextArea) {
+            // Multi-line text is edited and navigated with held keys, so it
+            // takes the auto-repeat edges; a single-line field keeps its
+            // one-press behaviour.
+            if ($this->input->isKeyTyped(257) || $this->input->isKeyTyped(335)) $ti->newline(); // ENTER, KP_ENTER
+            if ($this->input->isKeyTyped(259)) $ti->backspace();                // BACKSPACE
+            if ($this->input->isKeyTyped(261)) $ti->delete();                   // DELETE
+            if ($this->input->isKeyTyped(263)) $ti->moveCursorLeft();           // LEFT
+            if ($this->input->isKeyTyped(262)) $ti->moveCursorRight();          // RIGHT
+            if ($this->input->isKeyTyped(265)) $ti->moveCursorVertically(-1);   // UP
+            if ($this->input->isKeyTyped(264)) $ti->moveCursorVertically(1);    // DOWN
+            if ($this->input->isKeyTyped(268)) $ti->moveCursorToLineEdge(false); // HOME
+            if ($this->input->isKeyTyped(269)) $ti->moveCursorToLineEdge(true);  // END
+        } else {
+            if ($this->input->isKeyPressed(259)) $ti->backspace();  // BACKSPACE
+            if ($this->input->isKeyPressed(261)) $ti->delete();     // DELETE
+            if ($this->input->isKeyPressed(263)) $ti->moveCursorLeft();  // LEFT
+            if ($this->input->isKeyPressed(262)) $ti->moveCursorRight(); // RIGHT
+        }
 
         $ti->emit('input', $ti->text);
     }
