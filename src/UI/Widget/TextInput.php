@@ -77,9 +77,15 @@ class TextInput extends Widget
             $textColor,
         );
 
-        // Cursor (blinking would need a time param — draw solid for now)
+        // Cursor (blinking would need a time param — draw solid for now).
+        // Measured against the same renderer the text is drawn with: a fixed
+        // per-character estimate drifts away from proportional text, so the
+        // caret sat left of where typing actually appended (visibly so after a
+        // handful of words).
         if ($this->focused) {
-            $cursorX = $b->x + $this->padding->left + $this->cursorPos * $style->fontSize * 0.55;
+            $head = mb_substr($this->text, 0, max(0, min($this->cursorPos, mb_strlen($this->text))));
+            $headWidth = $head === '' ? 0.0 : $renderer->measureText($head, $style->fontSize)->width;
+            $cursorX = $b->x + $this->padding->left + $headWidth;
             $renderer->drawRect($cursorX, $fieldY + $this->padding->top, 1.5, $style->fontSize, $style->accentColor);
         }
     }
