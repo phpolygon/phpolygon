@@ -8,3 +8,4 @@ parameters:
         - stubs/vulkan.stub.php
         - stubs/vio.stub.php
         - stubs/glfw.stub.php
+        - stubs/steamworks.stub.php
