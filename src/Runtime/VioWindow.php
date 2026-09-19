@@ -29,8 +29,10 @@ class VioWindow extends Window
         float $hdrPaperWhite = 200.0,
         int $shaderModel = 0,
         string $dxcDir = '',
+        bool $offscreen = false,
     ) {
         parent::__construct($width, $height, $title, $vsync, $resizable);
+        $this->offscreen = $offscreen;
         $this->backend = $backend;
         $this->debug = $debug;
         $this->shaderCachePath = $shaderCachePath;
@@ -55,10 +57,24 @@ class VioWindow extends Window
     /** Directory handed to vio_create as 'shader_cache' ('' = no cache). */
     private string $shaderCachePath = '';
 
+    /** vio_create 'headless': an invisible surface, drawn into but never shown. */
+    private bool $offscreen = false;
+
     public function initialize(InputInterface $input): void
     {
-        \PHPolygon\Engine::log('VioWindow::initialize() backend=' . $this->backend . ' size=' . $this->width . 'x' . $this->height);
+        \PHPolygon\Engine::log('VioWindow::initialize() backend=' . $this->backend . ' size=' . $this->width . 'x' . $this->height
+            . ($this->offscreen ? ' offscreen' : ''));
 
+        $this->openContext($this->createConfig(), $input);
+    }
+
+    /**
+     * What this window asks vio_create for.
+     *
+     * @return array<string, mixed>
+     */
+    private function createConfig(): array
+    {
         $config = [
             'width'   => $this->width,
             'height'  => $this->height,
@@ -71,6 +87,12 @@ class VioWindow extends Window
             // the log with benign hints; Engine threads $effectiveDevMode here.
             'debug'   => $this->debug ? 1 : 0,
         ];
+        // An invisible surface (php-vio 'headless'): the frame is drawn and can
+        // be read back, but no window shows up and none takes the focus. What
+        // screenshot and shader tests want, and never a game.
+        if ($this->offscreen) {
+            $config['headless'] = true;
+        }
         // On-disk shader / pipeline cache (EngineConfig::$shaderCachePath). A
         // directory that cannot be created just leaves the cache off.
         if ($this->shaderCachePath !== '') {
@@ -98,10 +120,19 @@ class VioWindow extends Window
             }
         }
 
-        // Try the requested backend first; on failure, walk a platform-aware
-        // fallback list. On Linux a missing Vulkan loader / driver makes the
-        // 'auto' picker return false and we'd otherwise leave the user with
-        // a hard "Failed to create Vulkan instance" without trying OpenGL.
+        return $config;
+    }
+
+    /**
+     * Open the context: the requested backend first, then a platform-aware
+     * fallback list. On Linux a missing Vulkan loader / driver makes the 'auto'
+     * picker return false and we'd otherwise leave the user with a hard
+     * "Failed to create Vulkan instance" without trying OpenGL.
+     *
+     * @param array<string, mixed> $config
+     */
+    private function openContext(array $config, InputInterface $input): void
+    {
         $candidates = self::backendCandidates($this->backend);
         $ctx = false;
         $chosen = '';

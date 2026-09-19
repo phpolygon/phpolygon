@@ -34,6 +34,12 @@ class EngineConfig
         public readonly string $savePath = 'saves',
         public readonly int $maxSaveSlots = 10,
         public readonly bool $headless = false,
+        /**
+         * Draw into an invisible surface: the window is created and never
+         * shown. For screenshot and shader tests, which have no business
+         * taking the focus off whatever the person is doing meanwhile.
+         */
+        public readonly bool $offscreen = false,
         public readonly bool $is3D = false,
         public readonly string $renderBackend3D = 'opengl',
         public readonly ?ThreadingMode $threadingMode = null,

@@ -37,6 +37,7 @@ use PHPolygon\Rendering\ShaderManager;
 use PHPolygon\Rendering\TextureManager;
 use PHPolygon\Testing\NullTextureManager;
 use PHPolygon\Runtime\Clock;
+use PHPolygon\Runtime\CrashGuard;
 use PHPolygon\Runtime\DevLogger;
 use PHPolygon\Runtime\GameLoop;
 use PHPolygon\Runtime\HardwareProfile;
@@ -297,6 +298,7 @@ class Engine
                 $this->graphics->settings()->hdrPaperWhite,
                 $config->vioShaderModel,
                 $config->vioDxcDir,
+                $config->offscreen,
             );
         } else {
             $noApi = $config->is3D && in_array($config->renderBackend3D, ['vulkan', 'metal'], true);
@@ -547,6 +549,22 @@ class Engine
     }
 
     /**
+     * Run a listener when the game crashes - an uncaught throwable or a fatal
+     * error - to save what can be saved or leave a report behind.
+     *
+     * Installs the process-wide {@see CrashGuard} right away, so a crash in the
+     * game's own setup before run() is caught too. See the guard for what a
+     * listener may rely on.
+     *
+     * @param callable(\PHPolygon\Runtime\CrashInfo): void $listener
+     */
+    public function onCrash(callable $listener): self
+    {
+        CrashGuard::install()->onCrash($listener);
+        return $this;
+    }
+
+    /**
      * Capture framebuffer via VIO's vio_read_pixels.
      * @param positive-int $fbW Framebuffer width
      * @param positive-int $fbH Framebuffer height
@@ -709,6 +727,12 @@ class Engine
 
     public function run(): void
     {
+        // Every windowed game gets its crashes into the log, listener or not.
+        // Headless runs are tests and tools that keep their own handlers.
+        if (!$this->headless) {
+            CrashGuard::install();
+        }
+
         self::log('Window initializing...');
         $this->window->initialize($this->input);
         self::log('Window initialized, framebuffer: ' . $this->window->getFramebufferWidth() . 'x' . $this->window->getFramebufferHeight());
