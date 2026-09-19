@@ -32,6 +32,13 @@ final class HostSession
     /** Commands one partner may send per tick; the rest wait. */
     public const MAX_COMMANDS_PER_TICK = 20;
 
+    /**
+     * Commands one partner may have waiting. A partner cannot click faster than
+     * the host works through them; more than this is a broken or a hostile
+     * game, and the rest is refused rather than kept.
+     */
+    public const MAX_QUEUED = 100;
+
     /** @var array<int, Player> peer => partner who said hello */
     private array $players = [];
 
@@ -52,11 +59,13 @@ final class HostSession
     private float $clock = 0.0;
     private bool $dirty = true;
 
-    /** @var array<int, string> state object id => hash of what its players last got */
-    private array $lastHash = [];
-
-    /** @var array<int, float> state object id => $clock when its players last got it */
-    private array $lastSentAt = [];
+    /**
+     * @var \WeakMap<object, array{hash: string, at: float}> what a game last
+     *      went out as, and when. Held by the game itself: a game nobody plays
+     *      any more is forgotten with it, and PHP hands a freed object's id out
+     *      again - remembering one would mix two games up.
+     */
+    private \WeakMap $lastSeen;
 
     /** @var null|\Closure(Player): object whose game a partner plays */
     private ?\Closure $stateOf = null;
@@ -97,6 +106,7 @@ final class HostSession
         private readonly int $maxPlayers = 4,
     ) {
         $this->reassembler = new Reassembler();
+        $this->lastSeen = new \WeakMap();
         // What the state has to say now is the host's past, not news for partners.
         $this->channel->news($state);
     }
@@ -268,11 +278,26 @@ final class HostSession
             return;
         }
         match (true) {
-            $type === 'cmd'                  => $this->queue[$peer][] = $message,
+            $type === 'cmd'                  => $this->enqueue($peer, $message),
             $type === 'bye'                  => $this->leave($peer),
             isset($this->handlers[$type])    => ($this->handlers[$type])($player, $message),
             default                          => null,
         };
+    }
+
+    /**
+     * A partner's command, unless they have that many waiting already.
+     *
+     * @param array<string, mixed> $message
+     */
+    private function enqueue(int $peer, array $message): void
+    {
+        if (count($this->queue[$peer] ?? []) >= self::MAX_QUEUED) {
+            $n = is_int($message['n'] ?? null) ? $message['n'] : 0;
+            $this->sendTo($peer, ['t' => 'refused', 'n' => $n, 'key' => 'commands.busy', 'params' => []]);
+            return;
+        }
+        $this->queue[$peer][] = $message;
     }
 
     /** @param array<string, mixed> $message */
@@ -357,27 +382,27 @@ final class HostSession
             $groups[spl_object_id($state)] ??= ['state' => $state, 'peers' => []];
             $groups[spl_object_id($state)]['peers'][] = $peer;
         }
-        foreach ($groups as $key => $group) {
-            $this->sendState($key, $group['state'], $group['peers']);
+        foreach ($groups as $group) {
+            $this->sendState($group['state'], $group['peers']);
         }
         $this->dirty = false;
     }
 
     /** @param list<int> $peers */
-    private function sendState(int $key, object $state, array $peers): void
+    private function sendState(object $state, array $peers): void
     {
         $data = $this->channel->capture($state);
         $hash = md5(json_encode($data, JSON_THROW_ON_ERROR));
         $news = $this->channel->news($state);
 
-        $changed = $hash !== ($this->lastHash[$key] ?? '') || $news !== [];
-        $quiet = $this->clock - ($this->lastSentAt[$key] ?? -INF);
+        $seen = $this->lastSeen[$state] ?? null;
+        $changed = $seen === null || $hash !== $seen['hash'] || $news !== [];
+        $quiet = $this->clock - ($seen['at'] ?? -INF);
         if (!$changed && !$this->dirty && $quiet < self::KEEPALIVE_INTERVAL) {
             return;
         }
 
-        $this->lastHash[$key] = $hash;
-        $this->lastSentAt[$key] = $this->clock;
+        $this->lastSeen[$state] = ['hash' => $hash, 'at' => $this->clock];
         $frames = Protocol::encode([
             't'    => 'state',
             'seq'  => ++$this->seq,

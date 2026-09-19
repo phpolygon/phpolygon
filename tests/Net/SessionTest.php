@@ -15,63 +15,6 @@ use PHPolygon\Net\LoopbackTransport;
 use PHPolygon\Net\Player;
 use PHPolygon\Net\StateChannel;
 
-/** The little game these sessions play: a number and what it was told. */
-final class Tally
-{
-    public int $value = 0;
-
-    /** @var list<string> */
-    public array $told = [];
-
-    /** @var list<string> news not yet passed on */
-    public array $news = [];
-}
-
-final class Add extends Command
-{
-    public function __construct(public readonly int $amount) {}
-
-    public static function type(): string { return 'tally.add'; }
-}
-
-/** The game's side of a session: what a state is, and what a player is told. */
-final class TallyChannel implements StateChannel
-{
-    public function capture(object $state): array
-    {
-        assert($state instanceof Tally);
-        return ['value' => $state->value];
-    }
-
-    public function restore(object $state, array $data): void
-    {
-        assert($state instanceof Tally);
-        $state->value = is_int($data['value'] ?? null) ? $data['value'] : 0;
-    }
-
-    public function news(object $state): array
-    {
-        assert($state instanceof Tally);
-        $news = $state->news;
-        $state->news = [];
-        return $news === [] ? [] : ['lines' => $news];
-    }
-
-    public function showNews(object $state, array $news): void
-    {
-        assert($state instanceof Tally);
-        foreach (is_array($news['lines'] ?? null) ? $news['lines'] : [] as $line) {
-            $state->told[] = (string) $line;
-        }
-    }
-
-    public function refused(object $state, Refusal $refusal): void
-    {
-        assert($state instanceof Tally);
-        $state->told[] = $refusal->key;
-    }
-}
-
 /**
  * A host and its partners over the in-process network: a partner's click
  * becomes a command, the host decides, and everyone sees the same game.
