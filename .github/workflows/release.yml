@@ -15,10 +15,63 @@ on:
         description: 'Pre-release label (e.g. alpha, beta, rc — leave empty for stable)'
         required: false
         type: string
+      ignore_ci:
+        description: 'Release even though CI on this commit is not green (emergencies only)'
+        required: false
+        default: false
+        type: boolean
 
 jobs:
+  # A release is what other repositories install; it may not carry a state
+  # nobody has run. v0.48.0 shipped an Engine that referenced a class the tag
+  # did not contain, because tagging never looked at CI.
+  ci:
+    name: CI must be green
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Wait for the CI run on this commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          if [ "${{ inputs.ignore_ci }}" = "true" ]; then
+            echo "::warning::Releasing without the CI check, on request."
+            exit 0
+          fi
+
+          # A release is usually dispatched right after the push, so the run
+          # may still be starting - or still running. Wait for it.
+          for attempt in $(seq 1 90); do
+            run=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$GITHUB_SHA&per_page=1" --jq '.workflow_runs[0] // empty' || true)
+            if [ -z "$run" ]; then
+              echo "No CI run for $GITHUB_SHA yet (attempt $attempt)."
+            else
+              status=$(echo "$run" | jq -r '.status')
+              conclusion=$(echo "$run" | jq -r '.conclusion // "pending"')
+              url=$(echo "$run" | jq -r '.html_url')
+              echo "CI: status=$status conclusion=$conclusion - $url"
+              if [ "$status" = "completed" ]; then
+                if [ "$conclusion" = "success" ]; then
+                  echo "CI is green; releasing."
+                  exit 0
+                fi
+                echo "::error::CI on this commit is $conclusion - no release. $url"
+                exit 1
+              fi
+            fi
+            sleep 20
+          done
+
+          echo "::error::CI on this commit did not finish within 30 minutes - no release."
+          exit 1
+
   release:
     name: Create Release
+    needs: ci
     runs-on: ubuntu-latest
     permissions:
       contents: write
