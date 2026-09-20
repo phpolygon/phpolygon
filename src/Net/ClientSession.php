@@ -43,6 +43,13 @@ final class ClientSession
     /** @var null|\Closure(array<string, mixed>): void */
     private ?\Closure $onWelcome = null;
 
+    /** Seconds since this session started, for the beat and the silence. */
+    private float $clock = 0.0;
+
+    /** When the host was last heard from, and when this end last spoke. */
+    private float $heardAt = 0.0;
+    private float $beatAt = 0.0;
+
     private Reassembler $reassembler;
 
     /**
@@ -122,6 +129,7 @@ final class ClientSession
 
     public function tick(float $dt): void
     {
+        $this->clock += $dt;
         foreach ($this->transport->poll() as $event) {
             if ($event->kind === NetEvent::CONNECTED) {
                 $this->hostPeer = $event->peer;
@@ -135,11 +143,27 @@ final class ClientSession
             } elseif ($event->kind === NetEvent::DISCONNECTED) {
                 $this->end($this->closeReason !== '' ? $this->closeReason : 'lost');
             } else {
+                $this->heardAt = $this->clock;
                 $message = $this->reassembler->feed($event->peer, $event->bytes);
                 if ($message !== null) {
                     $this->handle($message);
                 }
             }
+        }
+
+        if ($this->status !== self::JOINED) {
+            return;
+        }
+        // Say something now and then, so the host can tell a quiet partner
+        // from a dead line - and give up on a host that has gone quiet, since
+        // its state goes out at least every KEEPALIVE_INTERVAL.
+        if ($this->clock - $this->beatAt >= HostSession::HEARTBEAT_INTERVAL) {
+            $this->beatAt = $this->clock;
+            $this->post(['t' => 'beat']);
+        }
+        if ($this->clock - $this->heardAt > HostSession::SILENCE_TIMEOUT) {
+            $this->end('lost');
+            $this->transport->close();
         }
     }
 

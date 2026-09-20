@@ -29,6 +29,20 @@ final class HostSession
     /** An unchanged state still goes out this often, so a partner who missed one catches up. */
     public const KEEPALIVE_INTERVAL = 3.0;
 
+    /**
+     * A partner with nothing to say still says so this often, so both ends can
+     * tell a quiet game from a dead line.
+     */
+    public const HEARTBEAT_INTERVAL = 3.0;
+
+    /**
+     * After this much silence the other end is given up on. A connection can
+     * die without a word - a cable out, a sleeping laptop, a router that
+     * forgets the way back - and nothing would ever report it: the host would
+     * hold a seat, a role and a company for somebody long gone.
+     */
+    public const SILENCE_TIMEOUT = 15.0;
+
     /** Commands one partner may send per tick; the rest wait. */
     public const MAX_COMMANDS_PER_TICK = 20;
 
@@ -50,6 +64,9 @@ final class HostSession
      *      that event carries it; the messages that follow do not.
      */
     private array $accounts = [];
+
+    /** @var array<int, float> peer => $clock when it last said anything */
+    private array $lastHeard = [];
 
     private Reassembler $reassembler;
 
@@ -152,7 +169,7 @@ final class HostSession
      */
     public function on(string $type, \Closure $handler): void
     {
-        if (!in_array($type, ['hello', 'cmd', 'bye'], true)) {
+        if (!in_array($type, ['hello', 'cmd', 'bye', 'beat'], true)) {
             $this->handlers[$type] = $handler;
         }
     }
@@ -218,6 +235,7 @@ final class HostSession
 
         $this->sinceState += $dt;
         $this->clock += $dt;
+        $this->dropTheSilent();
         if ($this->players !== [] && ($this->dirty || $this->sinceState >= self::STATE_INTERVAL)) {
             $this->sinceState = 0.0;
             $this->broadcastState();
@@ -260,10 +278,22 @@ final class HostSession
     {
         $this->strangers[$peer] = true;
         $this->accounts[$peer] = $account;
+        $this->lastHeard[$peer] = $this->clock;
+    }
+
+    /** Partners nothing has been heard from for too long are gone, whatever the transport says. */
+    private function dropTheSilent(): void
+    {
+        foreach (array_keys($this->players) as $peer) {
+            if ($this->clock - ($this->lastHeard[$peer] ?? $this->clock) > self::SILENCE_TIMEOUT) {
+                $this->kick($peer, 'lost');
+            }
+        }
     }
 
     private function receive(int $peer, string $bytes, int $account): void
     {
+        $this->lastHeard[$peer] = $this->clock;
         $message = $this->reassembler->feed($peer, $bytes);
         if ($message === null) {
             return;
@@ -278,6 +308,8 @@ final class HostSession
             return;
         }
         match (true) {
+            // A beat says only that the line is alive; it was noted above.
+            $type === 'beat'                 => null,
             $type === 'cmd'                  => $this->enqueue($peer, $message),
             $type === 'bye'                  => $this->leave($peer),
             isset($this->handlers[$type])    => ($this->handlers[$type])($player, $message),
@@ -329,7 +361,7 @@ final class HostSession
 
     private function leave(int $peer): void
     {
-        unset($this->strangers[$peer], $this->queue[$peer], $this->accounts[$peer]);
+        unset($this->strangers[$peer], $this->queue[$peer], $this->accounts[$peer], $this->lastHeard[$peer]);
         $this->reassembler->forget($peer);
         if (isset($this->players[$peer])) {
             $this->events[] = ['kind' => 'left', 'player' => $this->players[$peer]];
