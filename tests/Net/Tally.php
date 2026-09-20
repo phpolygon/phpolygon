@@ -14,4 +14,7 @@ final class Tally
 
     /** @var list<string> news not yet passed on */
     public array $news = [];
+
+    /** Something big enough that the state does not fit in one frame. */
+    public string $blob = '';
 }

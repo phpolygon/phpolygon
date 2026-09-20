@@ -13,13 +13,14 @@ final class TallyChannel implements StateChannel
     public function capture(object $state): array
     {
         assert($state instanceof Tally);
-        return ['value' => $state->value];
+        return ['value' => $state->value, 'blob' => $state->blob];
     }
 
     public function restore(object $state, array $data): void
     {
         assert($state instanceof Tally);
         $state->value = is_int($data['value'] ?? null) ? $data['value'] : 0;
+        $state->blob = is_string($data['blob'] ?? null) ? $data['blob'] : '';
     }
 
     public function news(object $state): array
