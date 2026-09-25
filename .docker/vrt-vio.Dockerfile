@@ -21,9 +21,16 @@ FROM ubuntu:24.04
 ENV DEBIAN_FRONTEND=noninteractive
 
 # PHP 8.5 (engine requires >=8.5) from the ondrej/php PPA (the sury feed for Ubuntu).
+# add-apt-repository asks the Launchpad API for the PPA's key; a 503 there failed
+# whole CI runs, so it gets a few tries before the build gives up.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates software-properties-common \
-    && add-apt-repository -y ppa:ondrej/php \
+    && for try in 1 2 3 4 5; do \
+           add-apt-repository -y ppa:ondrej/php && break; \
+           [ "$try" = 5 ] && exit 1; \
+           echo "add-apt-repository failed (try $try), retrying in $((try * 15))s"; \
+           sleep $((try * 15)); \
+       done \
     && apt-get update && apt-get install -y --no-install-recommends \
         php8.5-cli php8.5-dev php8.5-gd php8.5-mbstring php8.5-xml \
         php8.5-zip php8.5-tokenizer \
