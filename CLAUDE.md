@@ -845,6 +845,33 @@ The `headless` flag in `EngineConfig` switches all backends automatically.
 
 ---
 
+## Multiplayer — the primitives live here
+
+`PHPolygon\Net` and `PHPolygon\Command` are the engine's answer to "two copies
+of this game, talking". They are framework-free like everything else here, and
+they are the only place in the PHPolygon stack where sockets, wire framing and
+sessions belong. `phpolygon/multiplayer` builds rooms, tick-based ECS
+replication and a control plane **on top of them** — it does not carry its own
+transports. Nothing may rebuild these:
+
+| Class | What it is |
+|---|---|
+| `Net\Transport` | The seam: `poll()` returns `NetEvent`s (connected / message / disconnected), `send()`, `disconnect()`, `close()`. Reliable and ordered throughout. |
+| `Net\SteamTransport` | Steam's relay network; joining over Rich Presence. |
+| `Net\SocketTransport` | TCP via ext-sockets, 4-byte length prefix, non-blocking, an 8-byte account on connect. Two processes, a LAN, two containers. |
+| `Net\LoopbackTransport` | In-process pair (`host()` / `connectClient()`) for tests. |
+| `Net\Protocol` + `Reassembler` | The wire format: gzip, `MAGIC` + version, chunked up to 32 MB so a whole save game fits. |
+| `Net\HostSession` / `ClientSession` | The only end that simulates, and the end that sends commands and takes state. Heartbeats, keepalive, silence timeout. |
+| `Net\StateChannel` | The game's side: capture state, restore it, carry news and refusals. |
+| `Command\Command` + `CommandBus` + `CommandRegistry` + `Refusal` | Serializable player actions that check their own preconditions. Single-player takes the same path, so there is one code path, not two. |
+
+What deliberately is **not** here: ticks, client prediction, interpolation,
+lag compensation, unreliable datagrams, ECS delta replication. A game whose
+state is a save file rather than a world of moving entities does not need them;
+one that does takes `phpolygon/multiplayer`.
+
+---
+
 ## Splash screen
 
 The engine displays a branded splash screen before `onInit` runs. It shows
