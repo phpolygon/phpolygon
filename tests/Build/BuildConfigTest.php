@@ -113,7 +113,8 @@ class BuildConfigTest extends TestCase
 
         $config = BuildConfig::load($this->tempDir);
 
-        $this->assertSame(['**/tests', '**/vendor-extra'], $config->pharExclude);
+        // build.json adds to the defaults; it never drops them.
+        $this->assertSame([...BuildConfig::DEFAULT_PHAR_EXCLUDE, '**/vendor-extra'], $config->pharExclude);
     }
 
     public function testBuildJsonExternalResources(): void

@@ -70,6 +70,84 @@ class PharBuilderTest extends TestCase
         $this->assertFileDoesNotExist($stagingDir . '/vendor/some-lib/tests/SomeTest.php');
     }
 
+    public function testBuildJsonExcludeKeepsDefaultExcludes(): void
+    {
+        file_put_contents($this->projectDir . '/build.json', json_encode([
+            'phar' => ['exclude' => ['**/fixtures']],
+        ]));
+        @mkdir($this->projectDir . '/vendor/some-lib/examples', 0755, true);
+        @mkdir($this->projectDir . '/vendor/some-lib/fixtures', 0755, true);
+        file_put_contents($this->projectDir . '/vendor/some-lib/examples/demo.gif', 'gif');
+        file_put_contents($this->projectDir . '/vendor/some-lib/fixtures/data.json', '{}');
+        file_put_contents($this->projectDir . '/vendor/some-lib/debug.log', 'log');
+
+        $stagingDir = $this->tempDir . '/staging';
+        (new PharBuilder(BuildConfig::load($this->projectDir)))->stage($stagingDir);
+
+        $this->assertDirectoryDoesNotExist($stagingDir . '/vendor/some-lib/examples');
+        $this->assertDirectoryDoesNotExist($stagingDir . '/vendor/some-lib/fixtures');
+        $this->assertFileDoesNotExist($stagingDir . '/vendor/some-lib/debug.log');
+        $this->assertFileExists($stagingDir . '/vendor/some-lib/src/Lib.php');
+    }
+
+    public function testStageSkipsComposerLeftoversAndEngineDevFiles(): void
+    {
+        $engine = $this->projectDir . '/vendor/phpolygon/phpolygon';
+        @mkdir($this->projectDir . '/vendor/composer', 0755, true);
+        @mkdir($engine . '/src/Geometry/Generated', 0755, true);
+        @mkdir($engine . '/benchmarks/micro', 0755, true);
+        @mkdir($engine . '/.github/workflows', 0755, true);
+        @mkdir($engine . '/resources/shaders', 0755, true);
+        file_put_contents($this->projectDir . '/vendor/composer/tmp-0123abcd.zip', 'zip');
+        file_put_contents($this->projectDir . '/vendor/composer/installed.php', '<?php');
+        file_put_contents($engine . '/game.log', 'log');
+        file_put_contents($engine . '/.github/workflows/ci.yml', 'on: push');
+        file_put_contents($engine . '/.gitignore', '/vendor/');
+        file_put_contents($engine . '/CLAUDE.md', '#');
+        file_put_contents($engine . '/LICENSE', 'MIT');
+        file_put_contents($engine . '/composer.json', '{}');
+        file_put_contents($engine . '/composer.lock', '{}');
+        file_put_contents($engine . '/benchmarks/micro/Bench.php', '<?php');
+        file_put_contents($engine . '/src/Engine.php', '<?php');
+        file_put_contents($engine . '/src/Geometry/Generated/CarMesh.php', '<?php');
+        file_put_contents($engine . '/src/Geometry/Generated/CarMesh.php.json', '{}');
+        file_put_contents($engine . '/resources/shaders/mesh3d.frag.glsl', 'void main(){}');
+        $lib = $this->projectDir . '/vendor/acme/lib';
+        @mkdir($lib . '/src', 0755, true);
+        file_put_contents($lib . '/composer.lock', '{}');
+        file_put_contents($lib . '/README.md', '#');
+        file_put_contents($lib . '/phpunit.xml.dist', '<phpunit/>');
+        file_put_contents($lib . '/LICENSE.md', 'MIT');
+        file_put_contents($lib . '/src/NOTES.md', 'kept: only package roots are cleaned');
+
+        $stagingDir = $this->tempDir . '/staging';
+        (new PharBuilder(BuildConfig::load($this->projectDir)))->stage($stagingDir);
+
+        $staged = $stagingDir . '/vendor/phpolygon/phpolygon';
+        $this->assertFileDoesNotExist($stagingDir . '/vendor/composer/tmp-0123abcd.zip');
+        $this->assertFileDoesNotExist($staged . '/game.log');
+        $this->assertFileDoesNotExist($staged . '/CLAUDE.md');
+        $this->assertFileDoesNotExist($staged . '/composer.lock');
+        $this->assertDirectoryDoesNotExist($staged . '/benchmarks');
+        $this->assertDirectoryDoesNotExist($staged . '/.github');
+        $this->assertFileDoesNotExist($staged . '/.gitignore');
+        $this->assertFileDoesNotExist($staged . '/src/Geometry/Generated/CarMesh.php.json');
+
+        $stagedLib = $stagingDir . '/vendor/acme/lib';
+        $this->assertFileDoesNotExist($stagedLib . '/composer.lock');
+        $this->assertFileDoesNotExist($stagedLib . '/README.md');
+        $this->assertFileDoesNotExist($stagedLib . '/phpunit.xml.dist');
+        $this->assertFileExists($stagedLib . '/LICENSE.md');
+        $this->assertFileExists($stagedLib . '/src/NOTES.md');
+
+        $this->assertFileExists($stagingDir . '/vendor/composer/installed.php');
+        $this->assertFileExists($staged . '/LICENSE');
+        $this->assertFileExists($staged . '/composer.json');
+        $this->assertFileExists($staged . '/src/Engine.php');
+        $this->assertFileExists($staged . '/src/Geometry/Generated/CarMesh.php');
+        $this->assertFileExists($staged . '/resources/shaders/mesh3d.frag.glsl');
+    }
+
     public function testStageRespectsExternalResources(): void
     {
         // Mark shaders as external

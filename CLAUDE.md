@@ -636,6 +636,16 @@ classic per-target build.
 }
 ```
 
+`phar.exclude` adds per-segment patterns to `BuildConfig::DEFAULT_PHAR_EXCLUDE`
+(tests, docs, examples, benchmarks, `*.log`, …) — it never replaces them. The
+patterns filter the staged `vendor/` only; `src/`, `assets/` and `resources/`
+ship in full. On top, `PharBuilder::VENDOR_CLEANUP` drops whole vendor paths:
+Composer's `vendor/composer/tmp-*` download leftovers, development files in
+every package root (dotfiles, `*.md`, `composer.lock`, phpunit/phpstan/psalm
+configs — a path-repo checkout carries all of them) and the engine's tooling
+directories and `Generated/*.json` sidecars. A package root's LICENSE/COPYING/
+NOTICE file always ships.
+
 ### Build classes
 
 | Class | Purpose |

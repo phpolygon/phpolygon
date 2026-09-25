@@ -8,6 +8,33 @@ use Phar;
 
 class PharBuilder
 {
+    /**
+     * Paths under vendor/ that never belong in a release, matched against the
+     * whole vendor-relative path (a `*` stays inside one segment): Composer's
+     * leftover archives from interrupted downloads, the development files in
+     * any package's root - which a path-repo checkout carries in full - and the
+     * engine's own tooling directories. License files are always kept
+     * ({@see isLicenseFile()}), since the packages' licenses require shipping them.
+     */
+    public const VENDOR_CLEANUP = [
+        'composer/tmp-*',
+        '*/*/.*',
+        '*/*/*.md',
+        '*/*/composer.lock',
+        '*/*/phpbench.json',
+        '*/*/phpstan*.neon*',
+        '*/*/phpunit.xml*',
+        '*/*/psalm*.xml*',
+        '*/*/rector.php',
+        'phpolygon/phpolygon/docker',
+        'phpolygon/phpolygon/scripts',
+        'phpolygon/phpolygon/stubs',
+        'phpolygon/phpolygon/tools',
+        'phpolygon/phpolygon/website',
+        // bin/svg2mesh's sidecars; the generated PHP classes next to them ship.
+        'phpolygon/phpolygon/src/Geometry/Generated/*.json',
+    ];
+
     private BuildConfig $config;
 
     public function __construct(BuildConfig $config)
@@ -287,9 +314,12 @@ STUB_END;
     /**
      * Copy directory with symlink resolution and glob-based exclude filtering.
      *
+     * `$prefix` is the vendor-relative path of `$src`, so the whole-path
+     * {@see VENDOR_CLEANUP} rules still match inside a linked dependency.
+     *
      * @param array<string> $excludePatterns
      */
-    private function copyDirectoryFiltered(string $src, string $dst, array $excludePatterns): void
+    private function copyDirectoryFiltered(string $src, string $dst, array $excludePatterns, string $prefix = ''): void
     {
         @mkdir($dst, 0755, true);
         $excludes = array_map(fn(string $p) => str_replace('**/', '', $p), $excludePatterns);
@@ -297,6 +327,10 @@ STUB_END;
         // The keys are '/'-separated on Windows too, so explode('/') below splits
         // the segments the exclude patterns (e.g. '**/tests') match against.
         foreach (FileTree::walk($src) as $relPath => $item) {
+            if (self::isVendorCleanup($prefix . $relPath)) {
+                continue;
+            }
+
             // Check if any path segment matches an exclude pattern
             $skip = false;
             $segments = explode('/', $relPath);
@@ -325,7 +359,7 @@ STUB_END;
                     '**/.git', '**/.github', '**/.idea',
                     '**/node_modules', '**/vendor', '**/build', '**/dist',
                 ]);
-                $this->copyDirectoryFiltered($source, $target, $depExcludes);
+                $this->copyDirectoryFiltered($source, $target, $depExcludes, $prefix . $relPath . '/');
             } elseif ($item->isDir()) {
                 @mkdir($target, 0755, true);
             } else {
@@ -333,5 +367,30 @@ STUB_END;
                 copy($source, $target);
             }
         }
+    }
+
+    /** Whether a vendor-relative path, or one of its parent directories, is a {@see VENDOR_CLEANUP} path. */
+    private static function isVendorCleanup(string $vendorPath): bool
+    {
+        // A package's own license (vendor/<vendor>/<package>/LICENSE.md) always ships.
+        if (substr_count($vendorPath, '/') === 2 && self::isLicenseFile(basename($vendorPath))) {
+            return false;
+        }
+        $path = '';
+        foreach (explode('/', $vendorPath) as $segment) {
+            $path .= ($path === '' ? '' : '/') . $segment;
+            foreach (self::VENDOR_CLEANUP as $pattern) {
+                if (fnmatch($pattern, $path, FNM_PATHNAME)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    /** LICENSE, LICENSE.md, COPYING, NOTICE.txt, ... */
+    private static function isLicenseFile(string $name): bool
+    {
+        return preg_match('/^(licen[cs]e|copying|notice)(\.|$)/i', $name) === 1;
     }
 }

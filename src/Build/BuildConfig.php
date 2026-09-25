@@ -31,13 +31,21 @@ class BuildConfig
     /** @var array<string, array<array{src: string, optional?: bool}>> Platform-specific native libs to bundle alongside the binary */
     public array $bundleLibs = [];
 
-    /** @var array<string> Glob patterns to exclude from PHAR */
-    public array $pharExclude = [
+    /**
+     * Patterns every build excludes from the staged vendor/ tree. build.json
+     * `phar.exclude` adds to them - it never replaces them, so a game listing
+     * one extra pattern does not quietly ship tests, examples or logs again.
+     */
+    public const DEFAULT_PHAR_EXCLUDE = [
         '**/tests', '**/Tests', '**/test',
         '**/docs', '**/doc',
         '**/editor', '**/.git', '**/.idea',
-        '**/.phpunit*', '**/examples',
+        '**/.phpunit*', '**/examples', '**/benchmarks',
+        '**/*.log',
     ];
+
+    /** @var array<string> Glob patterns (per path segment) to exclude from the staged vendor/ tree */
+    public array $pharExclude = self::DEFAULT_PHAR_EXCLUDE;
 
     /** @var array<string> Additional PHP files to require in stub */
     public array $additionalRequires = [];
@@ -152,7 +160,7 @@ class BuildConfig
         if (isset($phar['exclude']) && is_array($phar['exclude'])) {
             /** @var array<string> $exclude */
             $exclude = $phar['exclude'];
-            $this->pharExclude = $exclude;
+            $this->pharExclude = array_values(array_unique([...self::DEFAULT_PHAR_EXCLUDE, ...$exclude]));
         }
         if (isset($phar['additionalRequires']) && is_array($phar['additionalRequires'])) {
             /** @var array<string> $additionalRequires */
