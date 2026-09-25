@@ -16,8 +16,11 @@ jobs:
         include:
           - php: '8.5'
             os: ubuntu-latest
+          # setup-php installs PHP through the shivammathur/php Homebrew tap, which
+          # ships prebuilt PHP 8.5 only for macOS 15 and newer. On macos-14 it
+          # compiles PHP from source: ~10 minutes, and often "Could not setup PHP".
           - php: '8.5'
-            os: macos-14
+            os: macos-15
 
     steps:
       - uses: actions/checkout@v5
