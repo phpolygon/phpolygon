@@ -577,16 +577,36 @@ class WidgetTree
         $ti->emit('input', $ti->text);
     }
 
+    /**
+     * The scroll view the wheel belongs to: the nearest one above $widget that
+     * actually has something to scroll.
+     *
+     * A view whose content fits is passed over. Nesting one inside another is
+     * ordinary - a long list of cards where a card holds a short list of its
+     * own - and taking the nearest one unconditionally meant the wheel
+     * disappeared into a view that could not move, while the outer list sat
+     * still. To the eye that is a dead patch in the middle of the page.
+     *
+     * A nested view that CAN scroll still keeps the wheel: moving both at once
+     * would leave neither controllable.
+     */
     private function findParentScrollView(Widget $widget): ?ScrollView
     {
         $current = $widget;
+        $fallback = null;
         while ($current !== null) {
             if ($current instanceof ScrollView) {
-                return $current;
+                if ($current->getMaxScroll() > 0.0) {
+                    return $current;
+                }
+                // Keep the first one as a fallback: with no scrollable view
+                // anywhere up the chain, the old behaviour stands and nothing
+                // changes for a single view that happens to fit.
+                $fallback ??= $current;
             }
             $current = $current->getParent();
         }
-        return null;
+        return $fallback;
     }
 
     private function findParentDropdown(Widget $widget): ?Dropdown
