@@ -16,6 +16,16 @@ class Slider extends Widget
     public float $max;
     public bool $dragging = false;
 
+    /**
+     * The whole line the slider prints, instead of "label: 0.50".
+     *
+     * A bare float is the right caption for a debug knob and the wrong one for
+     * anything a person reads: a currency, a percentage and a duration each need
+     * their own formatting, and only the host knows which one this is. Set this
+     * and the host writes the line; leave it empty and the default stands.
+     */
+    public string $valueText = '';
+
     public function __construct(string $label = '', float $value = 0.0, float $min = 0.0, float $max = 1.0)
     {
         parent::__construct();
@@ -50,7 +60,7 @@ class Slider extends Widget
         // Label + value
         $renderer->setTextAlign(TextAlign::LEFT | TextAlign::TOP);
         $renderer->drawText(
-            sprintf('%s: %.2f', $this->label, $this->value),
+            $this->valueText !== '' ? $this->valueText : sprintf('%s: %.2f', $this->label, $this->value),
             $b->x + $this->padding->left,
             $b->y + $this->padding->top,
             $style->fontSize,
