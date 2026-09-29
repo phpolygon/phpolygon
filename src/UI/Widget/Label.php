@@ -175,7 +175,7 @@ class Label extends Widget
      * of the UI font; 0.55 under-measured and clipped auto-sized text) and a
      * whole fontSize per full-width glyph.
      */
-    private static function textWidth(string $text, float $fontSize): float
+    public static function textWidth(string $text, float $fontSize): float
     {
         $length = mb_strlen($text);
         $wide = preg_match_all('/[' . LineBreaks::WIDE . ']/u', $text);

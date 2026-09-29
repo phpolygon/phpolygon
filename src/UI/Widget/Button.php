@@ -40,10 +40,10 @@ class Button extends Widget
     public function measure(float $availableWidth, float $availableHeight, UIStyle $style): void
     {
         $style = $this->resolveStyle($style);
-        // 0.62 avg glyph-advance / font-size for the semibold UI font. The old
-        // 0.55 under-measured, so auto-sized buttons were narrower than their
-        // (often longer, German) labels and clipped the text.
-        $textW = mb_strlen($this->label) * $style->fontSize * 0.62;
+        // The label's own estimate: 0.62 of the font size per regular glyph, a
+        // whole font size per full-width one. Counting every glyph as narrow made
+        // auto-sized buttons with CJK labels too small, and a row of them overlapped.
+        $textW = Label::textWidth($this->label, $style->fontSize);
         $textH = $style->fontSize;
 
         $this->measuredWidth = $this->sizing->fillWidth ? $availableWidth
