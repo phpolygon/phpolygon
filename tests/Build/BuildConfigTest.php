@@ -117,6 +117,34 @@ class BuildConfigTest extends TestCase
         $this->assertSame([...BuildConfig::DEFAULT_PHAR_EXCLUDE, '**/vendor-extra'], $config->pharExclude);
     }
 
+    public function testPharCompressionDefaultsToGzip(): void
+    {
+        $config = BuildConfig::load($this->tempDir);
+
+        $this->assertSame(BuildConfig::PHAR_COMPRESSION_GZIP, $config->pharCompression);
+        $this->assertSame('gzip', $config->toArray()['phar.compression']);
+    }
+
+    public function testBuildJsonPharCompressionNone(): void
+    {
+        file_put_contents($this->tempDir . '/build.json', json_encode([
+            'phar' => ['compression' => 'none'],
+        ]));
+
+        $this->assertSame(BuildConfig::PHAR_COMPRESSION_NONE, BuildConfig::load($this->tempDir)->pharCompression);
+    }
+
+    public function testBuildJsonPharCompressionRejectsUnknownValues(): void
+    {
+        file_put_contents($this->tempDir . '/build.json', json_encode([
+            'phar' => ['compression' => 'bzip2'],
+        ]));
+
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('phar.compression');
+        BuildConfig::load($this->tempDir);
+    }
+
     public function testBuildJsonExternalResources(): void
     {
         file_put_contents($this->tempDir . '/build.json', json_encode([

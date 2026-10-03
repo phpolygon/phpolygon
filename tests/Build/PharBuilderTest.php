@@ -298,6 +298,101 @@ class PharBuilderTest extends TestCase
         $this->assertStringContainsString('\App\Game::start();', $stub);
     }
 
+    public function testBuildCompressesEveryEntryWithGzipByDefault(): void
+    {
+        if (!\Phar::canCompress(\Phar::GZ)) {
+            $this->markTestSkipped('zlib missing: gzip PHAR entries cannot be written or read');
+        }
+        $pharPath = $this->buildPhar();
+
+        $entries = $this->pharEntries($pharPath);
+        $this->assertNotEmpty($entries);
+        foreach ($entries as $path => $info) {
+            $this->assertTrue($info->isCompressed(\Phar::GZ), "entry $path is gzip-compressed");
+        }
+        // Compressed entries still read back unchanged through phar://.
+        $base = 'phar://' . str_replace('\\', '/', $pharPath);
+        $this->assertSame('fake-image', file_get_contents($base . '/assets/sprites/hero.png'));
+        $this->assertSame('<?php class Game {}', file_get_contents($base . '/src/Game.php'));
+    }
+
+    public function testBuildJsonCompressionNoneStoresEntriesPlain(): void
+    {
+        file_put_contents($this->projectDir . '/build.json', json_encode([
+            'phar' => ['compression' => 'none'],
+        ]));
+        $pharPath = $this->buildPhar();
+
+        foreach ($this->pharEntries($pharPath) as $path => $info) {
+            $this->assertFalse($info->isCompressed(), "entry $path is stored plain");
+        }
+    }
+
+    /**
+     * Without zlib a compressed archive fails on its first include with an opaque
+     * phar error; the stub has to refuse up front and say why in game.log.
+     */
+    public function testStubRefusesARuntimeWithoutZlibOnlyWhenCompressed(): void
+    {
+        $gzipStub = (new PharBuilder(BuildConfig::load($this->projectDir)))->generateStub();
+        $guard = strpos($gzipStub, "if (!extension_loaded('zlib'))");
+        $this->assertIsInt($guard);
+        $this->assertLessThan(strpos($gzipStub, 'vendor/autoload.php'), $guard, 'checked before the first read from the archive');
+        $this->assertLessThan(strpos($gzipStub, '$pharAssets'), $guard, 'checked before the asset extraction');
+        $this->assertStringNotContainsString('@@ZLIB_GUARD@@', $gzipStub);
+
+        file_put_contents($this->projectDir . '/build.json', json_encode([
+            'phar' => ['compression' => 'none'],
+        ]));
+        $plainStub = (new PharBuilder(BuildConfig::load($this->projectDir)))->generateStub();
+        $this->assertStringNotContainsString("extension_loaded('zlib')", $plainStub);
+        $this->assertStringNotContainsString('@@ZLIB_GUARD@@', $plainStub);
+    }
+
+    /**
+     * Builds the fixture project's PHAR in a child process: creating a PHAR needs
+     * phar.readonly=0, which cannot be switched off at runtime.
+     */
+    private function buildPhar(): string
+    {
+        $stagingDir = $this->tempDir . '/staging';
+        // A fresh name per build: PHP caches an opened PHAR's manifest (and its
+        // alias, the basename) for the life of the process.
+        $pharPath = $this->tempDir . '/game-' . uniqid() . '.phar';
+        $autoload = dirname(__DIR__, 2) . '/vendor/autoload.php';
+        $code = sprintf(
+            'require %s; $b = new PHPolygon\Build\PharBuilder(PHPolygon\Build\BuildConfig::load(%s)); $b->stage(%s); $b->build(%s, %s);',
+            var_export($autoload, true),
+            var_export($this->projectDir, true),
+            var_export($stagingDir, true),
+            var_export($stagingDir, true),
+            var_export($pharPath, true),
+        );
+        $cmd = escapeshellarg(PHP_BINARY) . ' -d phar.readonly=0 -r ' . escapeshellarg($code) . ' 2>&1';
+        exec($cmd, $output, $exit);
+        $this->assertSame(0, $exit, "PHAR build failed:\n" . implode("\n", $output));
+        $this->assertFileExists($pharPath);
+
+        return $pharPath;
+    }
+
+    /**
+     * @return array<string, \PharFileInfo>
+     */
+    private function pharEntries(string $pharPath): array
+    {
+        $phar = new \Phar($pharPath);
+        $prefix = 'phar://' . str_replace('\\', '/', $pharPath) . '/';
+        $entries = [];
+        foreach (new \RecursiveIteratorIterator($phar) as $info) {
+            /** @var \PharFileInfo $info */
+            $entries[substr(str_replace('\\', '/', $info->getPathname()), strlen($prefix))] = $info;
+        }
+        unset($phar);
+
+        return $entries;
+    }
+
     public function testGenerateStubHandlesMacOSAppBundle(): void
     {
         $config = BuildConfig::load($this->projectDir);

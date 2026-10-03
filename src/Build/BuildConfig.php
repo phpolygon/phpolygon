@@ -47,6 +47,16 @@ class BuildConfig
     /** @var array<string> Glob patterns (per path segment) to exclude from the staged vendor/ tree */
     public array $pharExclude = self::DEFAULT_PHAR_EXCLUDE;
 
+    public const PHAR_COMPRESSION_GZIP = 'gzip';
+    public const PHAR_COMPRESSION_NONE = 'none';
+
+    /**
+     * build.json `phar.compression`: how the PHAR stores its entries. `gzip`
+     * (default) compresses every entry - the runtime then needs ext-zlib, which
+     * the stub checks before it reads anything. `none` stores them plain.
+     */
+    public string $pharCompression = self::PHAR_COMPRESSION_GZIP;
+
     /** @var array<string> Additional PHP files to require in stub */
     public array $additionalRequires = [];
 
@@ -166,6 +176,18 @@ class BuildConfig
             /** @var array<string> $additionalRequires */
             $additionalRequires = $phar['additionalRequires'];
             $this->additionalRequires = $additionalRequires;
+        }
+        if (isset($phar['compression'])) {
+            $compression = $phar['compression'];
+            if (!in_array($compression, [self::PHAR_COMPRESSION_GZIP, self::PHAR_COMPRESSION_NONE], true)) {
+                throw new \InvalidArgumentException(sprintf(
+                    'build.json phar.compression must be "%s" or "%s", got %s',
+                    self::PHAR_COMPRESSION_GZIP,
+                    self::PHAR_COMPRESSION_NONE,
+                    json_encode($compression),
+                ));
+            }
+            $this->pharCompression = $compression;
         }
 
         $ui = isset($data['ui']) && is_array($data['ui']) ? $data['ui'] : [];
@@ -289,6 +311,7 @@ class BuildConfig
             'php.bundleLibs' => $this->bundleLibs,
             'phar.exclude' => $this->pharExclude,
             'phar.additionalRequires' => $this->additionalRequires,
+            'phar.compression' => $this->pharCompression,
             'resources.external' => $this->externalResources,
             'platforms' => $this->platforms,
             'buildTypes' => $this->buildTypes,

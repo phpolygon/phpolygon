@@ -646,6 +646,16 @@ configs — a path-repo checkout carries all of them) and the engine's tooling
 directories and `Generated/*.json` sidecars. A package root's LICENSE/COPYING/
 NOTICE file always ships.
 
+`phar.compression` (`"gzip"` default, or `"none"`) decides how the PHAR stores
+its entries. gzip compresses every entry (`Phar::compressFiles(Phar::GZ)`); asset-heavy
+archives (mesh JSON, BC7 texture data) shrink to roughly a sixth, while the stub's
+start-up extraction costs the same, because inflating is paid back by reading far
+fewer bytes. The build PHP needs zlib (the build fails loudly otherwise), and so
+does the runtime: the stub refuses to start without `ext-zlib` and says so in
+`game.log`, before it reads anything from the archive. The engine's static runtimes
+carry zlib (static-php-cli pulls it in for phar/openssl, and for zip/curl on
+Windows). Any other runtime must too, or the game sets `"compression": "none"`.
+
 ### Build classes
 
 | Class | Purpose |

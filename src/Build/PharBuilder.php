@@ -136,10 +136,25 @@ class PharBuilder
             unlink($pharPath);
         }
 
+        $compress = $this->config->pharCompression === BuildConfig::PHAR_COMPRESSION_GZIP;
+        if ($compress && !Phar::canCompress(Phar::GZ)) {
+            throw new \RuntimeException(
+                'build.json phar.compression is "gzip", but the PHP running the build has no zlib extension. '
+                . 'Enable zlib or set "phar": {"compression": "none"}.'
+            );
+        }
+
         $phar = new Phar($pharPath, 0, basename($pharPath));
         $phar->startBuffering();
         $phar->buildFromDirectory($stagingDir);
         $phar->setStub($this->generateStub());
+        if ($compress) {
+            // Every entry, gzip per file: the archive shrinks to a fraction (meshes
+            // as JSON, BC7 texture data), while the stub's start-up extraction costs
+            // the same - inflating is paid back by reading far fewer bytes. The stub
+            // itself stays plain, so it can still refuse a runtime without zlib.
+            $phar->compressFiles(Phar::GZ);
+        }
         $phar->stopBuffering();
     }
 
@@ -161,7 +176,18 @@ class PharBuilder
             $runCode = "\n" . $this->config->run;
         }
 
-        return <<<'STUB_START'
+        // A compressed archive can only be read with zlib. Without it every
+        // include below fails with an opaque phar error, so the stub checks first
+        // and says what is wrong - in game.log, where a player's report starts.
+        $zlibGuard = $this->config->pharCompression === BuildConfig::PHAR_COMPRESSION_GZIP
+            ? 'if (!extension_loaded(\'zlib\')) {'
+                . "\n    \$__engineLog('FATAL: this build stores its files gzip-compressed, but the PHP runtime has no zlib extension.');"
+                . "\n    if (defined('STDERR')) { fwrite(STDERR, \"This build needs a PHP runtime with the zlib extension.\\n\"); }"
+                . "\n    exit(1);"
+                . "\n}"
+            : '';
+
+        return str_replace('/*@@ZLIB_GUARD@@*/', $zlibGuard, <<<'STUB_START'
 <?php
 // In micro SAPI, PHP_BINARY is empty but __FILE__ points to the binary
 $binaryPath = PHP_BINARY ?: __FILE__;
@@ -205,7 +231,7 @@ register_shutdown_function(function() use ($__engineLog) {
     }
     $__engineLog("Engine shutdown.");
 });
-
+/*@@ZLIB_GUARD@@*/
 define('DS', DIRECTORY_SEPARATOR);
 define('PHPOLYGON_PATH_ROOT', $resourceBase);
 define('PHPOLYGON_PATH_ASSETS', $resourceBase . DS . 'assets');
@@ -289,7 +315,7 @@ spl_autoload_register(function(string $class) use ($__engineLog) {
     $__engineLog("Autoloading: $class");
 }, prepend: true);
 
-STUB_START
+STUB_START)
         . $additionalRequires
         . "\n\$__engineLog('Running game...');"
         . "\n\$__engineLog('Loaded extensions: ' . implode(', ', get_loaded_extensions()));"
