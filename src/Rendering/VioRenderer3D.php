@@ -1907,6 +1907,13 @@ class VioRenderer3D implements Renderer3DInterface
         if ($this->outlineSupported()) {
             try {
                 $this->compileShaderFromFiles('outline', 'outline.vert.glsl', 'outline.frag.glsl');
+                // Build the stencil mask + ring pipelines (LDR and HDR scene
+                // target) now as well. Created on first use they cost ~30 ms on
+                // D3D12 – a hitch the moment the first object gets outlined.
+                foreach ([false, true] as $hdr) {
+                    $this->outlinePipeline(true, $hdr);
+                    $this->outlinePipeline(false, $hdr);
+                }
             } catch (\RuntimeException $e) {
                 $this->outlineSupported = false;
                 fwrite(STDERR, "[VioRenderer3D] outline shader unavailable, outlines are off: {$e->getMessage()}\n");
