@@ -12,8 +12,8 @@ use ReflectionClass;
  * VioInput buffers key-press/-release EDGES across render frames (the fixed
  * timestep may run fewer update ticks than renders, so an edge must survive until
  * a tick consumes it — this is also what buffers a jump pressed a hair early).
- * The edges are set by the GLFW callback independently of suppression and are NOT
- * cleared per frame, so a key mashed during a suppress window (boot / menu /
+ * The edges are set by the GLFW callback independently of suppression and live up to
+ * VioInput::KEY_BUFFER_SECONDS, so a key mashed during a suppress window (boot / menu /
  * intro-skip handoff) used to linger and fire the instant gameplay input resumed —
  * a phantom "held" key nobody was pressing.
  *
@@ -24,10 +24,10 @@ use ReflectionClass;
  */
 final class VioInputTest extends TestCase
 {
-    /** @return array<int, bool> */
+    /** @return array<int, float> */
     private static function edge(VioInput $in, string $prop): array
     {
-        /** @var array<int, bool> $val */
+        /** @var array<int, float> $val */
         $val = (new ReflectionClass($in))->getProperty($prop)->getValue($in);
 
         return $val;
@@ -35,7 +35,7 @@ final class VioInputTest extends TestCase
 
     private static function setEdge(VioInput $in, string $prop, int $key): void
     {
-        (new ReflectionClass($in))->getProperty($prop)->setValue($in, [$key => true]);
+        (new ReflectionClass($in))->getProperty($prop)->setValue($in, [$key => microtime(true)]);
     }
 
     public function testSuppressedFrameDrainsBufferedKeyEdges(): void
@@ -61,6 +61,35 @@ final class VioInputTest extends TestCase
         // press (e.g. jump pressed just before landing) still fires later.
         $in->endFrame();
 
-        self::assertSame([32 => true], self::edge($in, 'keyJustPressed'), 'a live buffered press must survive a normal frame');
+        self::assertTrue($in->hasBufferedPress(32), 'a live buffered press must survive a normal frame');
+    }
+
+    /**
+     * A press nobody read is dropped once it is older than the buffer window:
+     * an interact key pressed in the open must not fire the moment the player
+     * later walks up to something.
+     */
+    public function testAnUnreadPressExpiresAfterTheBufferWindow(): void
+    {
+        $in = new VioInput();
+        $in->recordKeyEdge(69, 1, 100.0);
+
+        $in->expireKeyEdges(100.0 + VioInput::KEY_BUFFER_SECONDS * 0.5);
+        self::assertTrue($in->hasBufferedPress(69), 'a fresh press survives (jump buffering, ticks without update)');
+
+        $in->expireKeyEdges(100.0 + VioInput::KEY_BUFFER_SECONDS + 0.01);
+        self::assertFalse($in->hasBufferedPress(69), 'a stale press is gone');
+    }
+
+    public function testReleaseAndRepeatEdgesExpireToo(): void
+    {
+        $in = new VioInput();
+        $in->recordKeyEdge(69, 0, 10.0);
+        $in->recordKeyEdge(70, 2, 10.0);
+
+        $in->expireKeyEdges(11.0);
+
+        self::assertSame([], self::edge($in, 'keyJustReleased'));
+        self::assertSame([], self::edge($in, 'keyRepeated'));
     }
 }

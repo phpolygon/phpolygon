@@ -12,16 +12,27 @@ class VioInput implements InputInterface
     private ?VioContext $ctx = null;
 
     /**
-     * Buffered key press events from GLFW callback. Survives across multiple
-     * render frames until consumed by isKeyPressed(). This decouples edge
-     * detection from the render frame rate (vio_begin resets C-level keys_prev
-     * every render, but the fixed timestep may run fewer updates than renders).
+     * How long an unread key edge stays buffered, in seconds.
      *
-     * @var array<int, bool>
+     * Long enough that a press survives render frames without an update tick
+     * (a fixed timestep may run fewer updates than renders) and that a jump
+     * pressed a hair before landing still fires. Short enough that a press
+     * nobody was listening for does not fire much later – e.g. an interact key
+     * pressed in the open triggering the moment the player walks up to
+     * something.
+     */
+    public const float KEY_BUFFER_SECONDS = 0.2;
+
+    /**
+     * Buffered key press events from GLFW callback: key => time of the press.
+     * Survives across render frames until consumed by isKeyPressed() or until
+     * it is older than {@see KEY_BUFFER_SECONDS}.
+     *
+     * @var array<int, float>
      */
     private array $keyJustPressed = [];
 
-    /** @var array<int, bool> */
+    /** @var array<int, float> */
     private array $keyJustReleased = [];
 
     /** @var array<int, bool> Previous frame mouse button state */
@@ -37,7 +48,7 @@ class VioInput implements InputInterface
     private array $charBuffer = [];
 
     /**
-     * @var array<int, bool> Auto-repeat edges from a held key (GLFW_REPEAT).
+     * @var array<int, float> Auto-repeat edges from a held key (GLFW_REPEAT), key => time.
      *
      * Held SEPARATE from $keyJustPressed on purpose. Mixing them would make a
      * held key fire every gameplay action that reads isKeyPressed() - jump,
@@ -72,13 +83,7 @@ class VioInput implements InputInterface
         $this->ctx = $ctx;
 
         vio_on_key($ctx, function (int $key, int $action, int $mods): void {
-            if ($action === 1) { // GLFW_PRESS
-                $this->keyJustPressed[$key] = true;
-            } elseif ($action === 0) { // GLFW_RELEASE
-                $this->keyJustReleased[$key] = true;
-            } elseif ($action === 2) { // GLFW_REPEAT
-                $this->keyRepeated[$key] = true;
-            }
+            $this->recordKeyEdge($key, $action, microtime(true));
         });
 
         vio_on_char($ctx, function (int $codepoint): void {
@@ -99,11 +104,51 @@ class VioInput implements InputInterface
         if ($this->ctx === null || $this->isSuppressed()) {
             return false;
         }
-        if ($this->keyJustPressed[$key] ?? false) {
+        if (isset($this->keyJustPressed[$key])) {
             unset($this->keyJustPressed[$key]);
             return true;
         }
         return false;
+    }
+
+    /**
+     * Buffer one GLFW key event (press 1, release 0, repeat 2) stamped with $now.
+     *
+     * @internal Public so the buffering can be tested without a VioContext.
+     */
+    public function recordKeyEdge(int $key, int $action, float $now): void
+    {
+        if ($action === 1) {
+            $this->keyJustPressed[$key] = $now;
+        } elseif ($action === 0) {
+            $this->keyJustReleased[$key] = $now;
+        } elseif ($action === 2) {
+            $this->keyRepeated[$key] = $now;
+        }
+    }
+
+    /**
+     * Drop key edges nobody read within {@see KEY_BUFFER_SECONDS}.
+     *
+     * @internal Public so the buffering can be tested without a VioContext.
+     */
+    public function expireKeyEdges(float $now): void
+    {
+        $cutoff = $now - self::KEY_BUFFER_SECONDS;
+        $keep = static fn (float $at): bool => $at >= $cutoff;
+        $this->keyJustPressed = array_filter($this->keyJustPressed, $keep);
+        $this->keyJustReleased = array_filter($this->keyJustReleased, $keep);
+        $this->keyRepeated = array_filter($this->keyRepeated, $keep);
+    }
+
+    /**
+     * Whether a press of $key is still buffered (unread and not expired).
+     *
+     * @internal For tests.
+     */
+    public function hasBufferedPress(int $key): bool
+    {
+        return isset($this->keyJustPressed[$key]);
     }
 
     /**
@@ -141,11 +186,11 @@ class VioInput implements InputInterface
     public function consumeTypedEdge(int $key): bool
     {
         $typed = false;
-        if ($this->keyJustPressed[$key] ?? false) {
+        if (isset($this->keyJustPressed[$key])) {
             unset($this->keyJustPressed[$key]);
             $typed = true;
         }
-        if ($this->keyRepeated[$key] ?? false) {
+        if (isset($this->keyRepeated[$key])) {
             unset($this->keyRepeated[$key]);
             $typed = true;
         }
@@ -158,7 +203,7 @@ class VioInput implements InputInterface
         if ($this->ctx === null || $this->isSuppressed()) {
             return false;
         }
-        if ($this->keyJustReleased[$key] ?? false) {
+        if (isset($this->keyJustReleased[$key])) {
             unset($this->keyJustReleased[$key]);
             return true;
         }
@@ -295,9 +340,10 @@ class VioInput implements InputInterface
      * the buffer and fire as a jump the moment the modal closes.
      *
      * Key edges are otherwise *not* cleared per frame: isKeyPressed() consumes
-     * them on read, and leaving unread presses buffered is deliberate — it lets
-     * a jump pressed a hair before landing still fire (the controller only
-     * reads Space once it's grounded).
+     * them on read, and an unread press stays buffered for
+     * {@see KEY_BUFFER_SECONDS} – it lets a jump pressed a hair before landing
+     * still fire (the controller only reads Space once it's grounded), but not
+     * an interact pressed seconds before reaching something.
      */
     public function clearKeyEdges(): void
     {
@@ -330,6 +376,8 @@ class VioInput implements InputInterface
         }
 
         $this->charBuffer = [];
+
+        $this->expireKeyEdges(microtime(true));
 
         if ($this->suppressed) {
             // Suppression DISCARDS input, it does not merely defer it. isKeyPressed()
