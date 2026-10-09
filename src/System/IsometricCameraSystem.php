@@ -10,6 +10,7 @@ use PHPolygon\ECS\AbstractSystem;
 use PHPolygon\ECS\World;
 use PHPolygon\Math\Mat4;
 use PHPolygon\Math\Vec3;
+use PHPolygon\Rendering\CameraCutDetector;
 use PHPolygon\Rendering\Command\SetCamera;
 use PHPolygon\Rendering\RenderCommandList;
 
@@ -24,11 +25,22 @@ class IsometricCameraSystem extends AbstractSystem
 {
     private ?Vec3 $smoothedTarget = null;
 
+    /** Flags SetCamera::$cut on the first frame, camera switches and jumps. */
+    private readonly CameraCutDetector $cuts;
+
     public function __construct(
         private readonly RenderCommandList $commandList,
         private readonly int $viewportWidth,
         private readonly int $viewportHeight,
-    ) {}
+    ) {
+        $this->cuts = new CameraCutDetector();
+    }
+
+    public function onWorldClear(World $world): void
+    {
+        $this->smoothedTarget = null;
+        $this->cuts->reset();
+    }
 
     public function render(World $world): void
     {
@@ -75,7 +87,8 @@ class IsometricCameraSystem extends AbstractSystem
                 $cam->near, $cam->far,
             );
 
-            $this->commandList->add(new SetCamera($viewMatrix, $projectionMatrix));
+            $cut = $this->cuts->observe($entity->id, $eye);
+            $this->commandList->add(new SetCamera($viewMatrix, $projectionMatrix, $cut));
             break; // Only one active camera per frame
         }
     }

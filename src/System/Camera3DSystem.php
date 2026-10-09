@@ -13,6 +13,7 @@ use PHPolygon\Engine;
 use PHPolygon\Math\Mat4;
 use PHPolygon\Math\Quaternion;
 use PHPolygon\Math\Vec3;
+use PHPolygon\Rendering\CameraCutDetector;
 use PHPolygon\Rendering\Command\SetCamera;
 use PHPolygon\Rendering\RenderCommandList;
 use PHPolygon\Runtime\Window;
@@ -39,6 +40,9 @@ class Camera3DSystem extends AbstractSystem
      */
     private array $interp = [];
 
+    /** Flags SetCamera::$cut on teleports, camera switches and the first frame. */
+    private readonly CameraCutDetector $cuts;
+
     public function __construct(
         private readonly RenderCommandList $commandList,
         private int $viewportWidth,
@@ -50,6 +54,7 @@ class Camera3DSystem extends AbstractSystem
         // (snap-to-tick) camera if interpolation ever feels off.
         $this->interpolate = $engine !== null
             && getenv('PHPOLYGON_NO_CAMERA_INTERP') !== '1';
+        $this->cuts = new CameraCutDetector(self::SNAP_DIST_SQ);
     }
 
     public function setViewport(int $width, int $height): void
@@ -66,6 +71,7 @@ class Camera3DSystem extends AbstractSystem
     public function onWorldClear(World $world): void
     {
         $this->interp = [];
+        $this->cuts->reset();
     }
 
     /**
@@ -168,7 +174,10 @@ class Camera3DSystem extends AbstractSystem
                 ),
             };
 
-            $this->commandList->add(new SetCamera($viewMatrix, $projectionMatrix));
+            // A snapped teleport shows up as an eye jump between two rendered
+            // frames, interpolated or not; it is reported on the first frame only.
+            $cut = $this->cuts->observe($entity->id, $worldPos);
+            $this->commandList->add(new SetCamera($viewMatrix, $projectionMatrix, $cut));
             break; // Only one active camera per frame
         }
     }
