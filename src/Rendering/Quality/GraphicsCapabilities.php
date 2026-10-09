@@ -25,6 +25,8 @@ final class GraphicsCapabilities
      * @param bool          $fieldtracingSdf        SDF occlusion/bounce tiers (3D textures)
      * @param bool          $surfaceRelief          Cavity + parallax on procedural patterns
      * @param list<Upscaler> $upscalers             Upscalers this renderer implements
+     * @param array<string, string> $upscalerNotes  Why an upscaler is missing, keyed by
+     *                                              {@see Upscaler} value (settings tooltips)
      */
     public function __construct(
         public readonly bool $shadingRate = false,
@@ -36,6 +38,7 @@ final class GraphicsCapabilities
         public readonly bool $fieldtracingSdf = false,
         public readonly bool $surfaceRelief = true,
         public readonly array $upscalers = [Upscaler::Off],
+        public readonly array $upscalerNotes = [],
     ) {}
 
     /** No renderer to ask (headless, before the window exists): nothing is disabled. */
@@ -57,6 +60,26 @@ final class GraphicsCapabilities
     public function supportsUpscaler(Upscaler $upscaler): bool
     {
         return in_array($upscaler, $this->upscalers, true);
+    }
+
+    /**
+     * The upscaler that actually runs for a requested one: the first entry of
+     * its {@see Upscaler::fallbackChain()} this renderer implements, Off at worst.
+     */
+    public function resolveUpscaler(Upscaler $requested): Upscaler
+    {
+        foreach ($requested->fallbackChain() as $candidate) {
+            if ($this->supportsUpscaler($candidate)) {
+                return $candidate;
+            }
+        }
+        return Upscaler::Off;
+    }
+
+    /** Why the renderer cannot offer this upscaler, when it said so. */
+    public function upscalerNote(Upscaler $upscaler): ?string
+    {
+        return $this->upscalerNotes[$upscaler->value] ?? null;
     }
 
     public function supportsAntiAliasing(AntiAliasing $antiAliasing): bool

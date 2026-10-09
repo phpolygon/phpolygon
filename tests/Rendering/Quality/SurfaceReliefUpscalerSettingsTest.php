@@ -55,7 +55,7 @@ final class SurfaceReliefUpscalerSettingsTest extends TestCase
         $this->assertSame('fsr1', $json['upscaler']);
         $this->assertEquals($s, GraphicsSettings::fromJson($json));
 
-        $broken = GraphicsSettings::fromJson(['surfaceRelief' => 'bumpy', 'upscaler' => 'dlss', 'upscaleSharpness' => 9]);
+        $broken = GraphicsSettings::fromJson(['surfaceRelief' => 'bumpy', 'upscaler' => 'fsr9', 'upscaleSharpness' => 9]);
         $this->assertSame(SurfaceRelief::Parallax, $broken->surfaceRelief);
         $this->assertSame(Upscaler::Off, $broken->upscaler);
         $this->assertSame(1.0, $broken->upscaleSharpness);

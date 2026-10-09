@@ -15,7 +15,9 @@ use PHPolygon\Rendering\Quality\ShaderQuality;
 use PHPolygon\Rendering\Quality\ShadowQuality;
 use PHPolygon\Rendering\Quality\ShadingRate;
 use PHPolygon\Rendering\Quality\SurfaceRelief;
+use PHPolygon\Rendering\Quality\GraphicsCapabilities;
 use PHPolygon\Rendering\Quality\TextureQuality;
+use PHPolygon\Rendering\Quality\UpscaleQuality;
 use PHPolygon\Rendering\Quality\Upscaler;
 
 /**
@@ -32,6 +34,12 @@ use PHPolygon\Rendering\Quality\Upscaler;
  */
 final class GraphicsSettings
 {
+    /** Lowest render scale without a temporal upscaler (and the slider minimum). */
+    public const RENDER_SCALE_MIN = 0.5;
+    /** Lowest render scale a temporal upscaler may reconstruct from (~1/3, Ultra Performance). */
+    public const TEMPORAL_RENDER_SCALE_MIN = 0.33;
+    public const RENDER_SCALE_MAX = 2.0;
+
     public function __construct(
         public readonly QualityMode $mode = QualityMode::Manual,
         public readonly float $targetFps = 60.0,
@@ -97,6 +105,12 @@ final class GraphicsSettings
         public readonly Upscaler $upscaler = Upscaler::Off,
         /** Sharpening of the FSR upscaler: 0 = soft, 1 = strongest. */
         public readonly float $upscaleSharpness = 0.9,
+        /**
+         * Render-scale preset of the upscaler. Custom (the default) keeps
+         * $renderScale in charge; any other preset overrides it while an
+         * upscaler is selected - see effectiveRenderScale().
+         */
+        public readonly UpscaleQuality $upscaleQuality = UpscaleQuality::Custom,
     ) {
     }
 
@@ -135,11 +149,17 @@ final class GraphicsSettings
         ?SurfaceRelief $surfaceRelief = null,
         ?Upscaler $upscaler = null,
         ?float $upscaleSharpness = null,
+        ?UpscaleQuality $upscaleQuality = null,
     ): self {
+        $nextUpscaler = $upscaler ?? $this->upscaler;
+        // Leaving a temporal upscaler re-clamps a sub-half render scale.
+        $nextRenderScale = $renderScale !== null || $nextUpscaler !== $this->upscaler
+            ? self::clampRenderScale($renderScale ?? $this->renderScale, $nextUpscaler)
+            : $this->renderScale;
         return new self(
             mode: $mode ?? $this->mode,
             targetFps: $targetFps ?? $this->targetFps,
-            renderScale: $renderScale !== null ? self::clampRenderScale($renderScale) : $this->renderScale,
+            renderScale: $nextRenderScale,
             shadowQuality: $shadowQuality ?? $this->shadowQuality,
             shadowDistance: $shadowDistance ?? $this->shadowDistance,
             viewDistance: $viewDistance ?? $this->viewDistance,
@@ -165,8 +185,9 @@ final class GraphicsSettings
             ssr: $ssr ?? $this->ssr,
             fieldtracing: $fieldtracing ?? $this->fieldtracing,
             surfaceRelief: $surfaceRelief ?? $this->surfaceRelief,
-            upscaler: $upscaler ?? $this->upscaler,
+            upscaler: $nextUpscaler,
             upscaleSharpness: $upscaleSharpness !== null ? max(0.0, min(1.0, $upscaleSharpness)) : $this->upscaleSharpness,
+            upscaleQuality: $upscaleQuality ?? $this->upscaleQuality,
         );
     }
 
@@ -206,6 +227,7 @@ final class GraphicsSettings
             'surfaceRelief' => $this->surfaceRelief->value,
             'upscaler' => $this->upscaler->value,
             'upscaleSharpness' => $this->upscaleSharpness,
+            'upscaleQuality' => $this->upscaleQuality->value,
         ];
     }
 
@@ -215,10 +237,11 @@ final class GraphicsSettings
     public static function fromJson(array $data): self
     {
         $defaults = new self();
+        $upscaler = self::enumFrom(Upscaler::class, $data['upscaler'] ?? null) ?? $defaults->upscaler;
         return new self(
             mode: self::enumFrom(QualityMode::class, $data['mode'] ?? null) ?? $defaults->mode,
             targetFps: self::asFloat($data['targetFps'] ?? null) ?? $defaults->targetFps,
-            renderScale: ($v = self::asFloat($data['renderScale'] ?? null)) !== null ? self::clampRenderScale($v) : $defaults->renderScale,
+            renderScale: ($v = self::asFloat($data['renderScale'] ?? null)) !== null ? self::clampRenderScale($v, $upscaler) : $defaults->renderScale,
             shadowQuality: self::enumFrom(ShadowQuality::class, $data['shadowQuality'] ?? null) ?? $defaults->shadowQuality,
             shadowDistance: self::asFloat($data['shadowDistance'] ?? null) ?? $defaults->shadowDistance,
             viewDistance: self::asFloat($data['viewDistance'] ?? null) ?? $defaults->viewDistance,
@@ -244,9 +267,32 @@ final class GraphicsSettings
             ssr: self::enumFrom(ScreenSpaceReflections::class, $data['ssr'] ?? null) ?? $defaults->ssr,
             fieldtracing: self::enumFrom(FieldtracingMode::class, $data['fieldtracing'] ?? null) ?? $defaults->fieldtracing,
             surfaceRelief: self::enumFrom(SurfaceRelief::class, $data['surfaceRelief'] ?? null) ?? $defaults->surfaceRelief,
-            upscaler: self::enumFrom(Upscaler::class, $data['upscaler'] ?? null) ?? $defaults->upscaler,
+            upscaler: $upscaler,
             upscaleSharpness: ($v = self::asFloat($data['upscaleSharpness'] ?? null)) !== null ? max(0.0, min(1.0, $v)) : $defaults->upscaleSharpness,
+            upscaleQuality: self::enumFrom(UpscaleQuality::class, $data['upscaleQuality'] ?? null) ?? $defaults->upscaleQuality,
         );
+    }
+
+    /**
+     * The upscaler that runs: the selected one, or - given the renderer's
+     * capabilities - the first of its fallback chain the renderer implements.
+     */
+    public function effectiveUpscaler(?GraphicsCapabilities $capabilities = null): Upscaler
+    {
+        return $capabilities !== null ? $capabilities->resolveUpscaler($this->upscaler) : $this->upscaler;
+    }
+
+    /**
+     * The per-axis scale the 3D scene renders at. With an upscaler selected, a
+     * preset other than Custom replaces $renderScale. The result is clamped to
+     * the floor of the upscaler that actually runs: a third of the resolution
+     * only for a temporal one, half otherwise - so a temporal choice that falls
+     * back to a spatial upscaler never renders below what that one can rescue.
+     */
+    public function effectiveRenderScale(?GraphicsCapabilities $capabilities = null): float
+    {
+        $preset = $this->upscaler !== Upscaler::Off ? $this->upscaleQuality->renderScale() : null;
+        return self::clampRenderScale($preset ?? $this->renderScale, $this->effectiveUpscaler($capabilities));
     }
 
     private static function asFloat(mixed $v): ?float
@@ -285,9 +331,10 @@ final class GraphicsSettings
         return null;
     }
 
-    private static function clampRenderScale(float $v): float
+    private static function clampRenderScale(float $v, Upscaler $upscaler): float
     {
-        return max(0.5, min(2.0, $v));
+        $min = $upscaler->isTemporal() ? self::TEMPORAL_RENDER_SCALE_MIN : self::RENDER_SCALE_MIN;
+        return max($min, min(self::RENDER_SCALE_MAX, $v));
     }
 
     private static function clampAnisotropy(int $v): int
