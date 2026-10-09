@@ -111,11 +111,11 @@ All commands are plain PHP value objects (no methods, only constructor propertie
 
 | Command class | Purpose |
 |---|---|
-| `SetCamera` | `viewMatrix: Mat4`, `projectionMatrix: Mat4` |
+| `SetCamera` | `viewMatrix: Mat4`, `projectionMatrix: Mat4`, `cut: bool` (first frame / teleport / camera switch: temporal passes drop their history; camera systems set it via `CameraCutDetector`) |
 | `SetAmbientLight` | `color: Color`, `intensity: float` |
 | `SetDirectionalLight` | `direction: Vec3`, `color: Color`, `intensity: float` |
 | `AddPointLight` | `position: Vec3`, `color: Color`, `intensity: float`, `radius: float` |
-| `DrawMesh` | `meshId: string`, `materialId: string`, `modelMatrix: Mat4` |
+| `DrawMesh` | `meshId: string`, `materialId: string`, `modelMatrix: Mat4`, `prevModelMatrix: ?Mat4` (last frame's matrix when the entity moved, else null; set by `Renderer3DSystem`) |
 | `DrawMeshInstanced` | `meshId: string`, `materialId: string`, `matrices: Mat4[]` |
 | `SetSkybox` | `cubemapId: string` |
 | `SetFog` | `color: Color`, `near: float`, `far: float` |
