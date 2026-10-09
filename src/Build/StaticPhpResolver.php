@@ -19,6 +19,12 @@ class StaticPhpResolver
         $this->cacheDir = $home . '/.phpolygon/build-cache';
     }
 
+    /** The build cache (`~/.phpolygon/build-cache`) runtimes are kept in. */
+    public function getCacheDir(): string
+    {
+        return $this->cacheDir;
+    }
+
     /**
      * @param callable(string): void $logger
      */

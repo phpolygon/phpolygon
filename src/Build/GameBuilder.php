@@ -12,6 +12,7 @@ class GameBuilder
     private PlatformPackager $platformPackager;
     private IosAppBuilder $iosAppBuilder;
     private BuildHookRunner $hookRunner;
+    private NativeUpscalerResolver $upscalerResolver;
 
     /** @var callable|null */
     private $logger = null;
@@ -23,6 +24,7 @@ class GameBuilder
         $this->staticPhpResolver = new StaticPhpResolver();
         $this->platformPackager = new PlatformPackager($config);
         $this->iosAppBuilder = new IosAppBuilder($config);
+        $this->upscalerResolver = new NativeUpscalerResolver($config->projectRoot, $this->staticPhpResolver->getCacheDir());
         $this->hookRunner = new BuildHookRunner(
             $config,
             fn (string $platform, string $arch, string $variant, string $phpVersion): string
@@ -41,6 +43,7 @@ class GameBuilder
         $this->staticPhpResolver->setLogger(fn(string $msg) => $logger('info', $msg));
         $this->iosAppBuilder->setLogger(fn(string $msg) => $logger('info', $msg));
         $this->hookRunner->setLogger(fn(string $level, string $msg) => $logger($level, $msg));
+        $this->upscalerResolver->setLogger(fn(string $level, string $msg) => $logger($level, $msg));
     }
 
     /**
@@ -190,16 +193,30 @@ class GameBuilder
                 $this->log('success', 'Found runtime lib: ' . $lib);
             }
 
+            // Phase 4c: build.json upscalers - FSR 3 / DLSS runtimes next to the
+            // binary, their notices, the DLSS project id for the embedded ini.
+            $upscalers = $this->config->upscalers->isEmpty()
+                ? new NativeUpscalerBundle()
+                : $this->upscalerResolver->resolve($this->config->upscalers, $platform);
+            array_push($runtimeLibs, ...$upscalers->files);
+
             // Phase 5: Combine executable
             $combinedPath = $tempDir . '/' . $this->config->name;
             $this->log('info', 'Combining executable...');
-            $this->combineExecutable($sfxPath, $pharPath, $combinedPath);
+            $this->combineExecutable($sfxPath, $pharPath, $combinedPath, [...$this->config->phpIni, ...$upscalers->ini]);
             $binarySize = filesize($combinedPath);
             $this->log('success', sprintf('Binary: %.2f MB', $binarySize / 1024 / 1024));
 
             // Phase 6: Package for platform
             $this->log('info', "Packaging for {$platform}...");
-            $outputPath = $this->platformPackager->package($combinedPath, $platformOutputDir, $platform, $variant, $runtimeLibs);
+            $outputPath = $this->platformPackager->package(
+                $combinedPath,
+                $platformOutputDir,
+                $platform,
+                $variant,
+                $runtimeLibs,
+                $upscalers->notices($platform === 'windows' ? "\r\n" : "\n"),
+            );
             $this->log('success', 'Output: ' . $outputPath);
 
             // Phase 7: Report
@@ -279,7 +296,10 @@ class GameBuilder
         exec($cmd);
     }
 
-    private function combineExecutable(string $sfxPath, string $pharPath, string $outputPath): void
+    /**
+     * @param array<string, string> $ini settings embedded between runtime and PHAR
+     */
+    private function combineExecutable(string $sfxPath, string $pharPath, string $outputPath, array $ini): void
     {
         $out = fopen($outputPath, 'wb');
         if ($out === false) {
@@ -294,12 +314,12 @@ class GameBuilder
                 stream_copy_to_stream($in, $out);
                 fclose($in);
                 // build.json php.ini goes between the runtime and the PHAR.
-                if ($inputFile === $sfxPath && $this->config->phpIni !== []) {
-                    fwrite($out, MicroIni::block($this->config->phpIni));
+                if ($inputFile === $sfxPath && $ini !== []) {
+                    fwrite($out, MicroIni::block($ini));
                     $this->log('info', 'Embedded php.ini: ' . implode(', ', array_map(
                         static fn (string $key, string $value): string => "{$key}={$value}",
-                        array_keys($this->config->phpIni),
-                        $this->config->phpIni,
+                        array_keys($ini),
+                        $ini,
                     )));
                 }
             }
