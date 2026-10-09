@@ -336,6 +336,66 @@ final class VioNativeUpscalerTest extends TestCase
         $this->assertSame($live - 1, vio_upscaler_info($this->ctx, $provider)['live'], 'leaving the provider destroys it');
     }
 
+    /** An off-screen image (thumbnails, captures) between frames leaves the upscaler alone. */
+    #[DataProvider('backends')]
+    public function testRenderToImageKeepsTheUpscaler(string $backend): void
+    {
+        $this->prepare($backend);
+        $this->open();
+        $provider = $this->requireProvider(Upscaler::Fsr3);
+        self::assertNotNull($this->ctx);
+        $renderer = $this->renderer(Upscaler::Fsr3, UpscaleQuality::Quality);
+        $this->frame($renderer, self::scene(0.0, 1.0));
+        $live = vio_upscaler_info($this->ctx, $provider)['live'];
+        $renderer->renderToImage(self::scene(0.0, 1.0), 64, 48);
+        $this->assertSame($live, vio_upscaler_info($this->ctx, $provider)['live'], 'not destroyed by renderToImage');
+        $this->frame($renderer, self::scene(0.0, 1.0));
+        $this->assertSame(Upscaler::Fsr3, $renderer->temporalUpscalerThisFrame());
+    }
+
+    /** Custom: the render-scale slider decides, the provider takes that size. */
+    #[DataProvider('providers')]
+    public function testCustomPresetRendersAtTheSliderScale(string $backend, Upscaler $upscaler): void
+    {
+        $this->prepare($backend);
+        $this->open();
+        $this->requireProvider($upscaler);
+        $renderer = $this->renderer($upscaler, UpscaleQuality::Custom);
+        $renderer->applySettings($renderer->getSettings()->with(renderScale: 0.6));
+        for ($i = 0; $i < 3; $i++) {
+            $this->frame($renderer, self::scene(0.0, 1.0));
+        }
+        $frame = $renderer->temporalFrame();
+        $this->assertNotNull($frame);
+        $this->assertSame([(int) round(self::W * 0.6), (int) round(self::H * 0.6)], [$frame->renderWidth, $frame->renderHeight]);
+        $this->assertSame($upscaler, $renderer->temporalUpscalerThisFrame());
+    }
+
+    /** FP16 scene target (HDR on D3D): linear colour goes in, the result matches TAAU's. */
+    #[DataProvider('providers')]
+    public function testHdrSceneTargetResolvesLikeTaau(string $backend, Upscaler $upscaler): void
+    {
+        $this->prepare($backend);
+        $this->open();
+        $this->requireProvider($upscaler);
+        $images = [];
+        foreach ([Upscaler::Taau, $upscaler] as $which) {
+            $renderer = $this->renderer($which, UpscaleQuality::Quality);
+            $renderer->applySettings($renderer->getSettings()->with(hdr: true));
+            for ($i = 0; $i < 24; $i++) {
+                $this->frame($renderer, self::scene(0.0, 1.0));
+            }
+            $this->assertSame($which, $renderer->temporalUpscalerThisFrame());
+            $images[$which->value] = $this->resolved($renderer);
+        }
+        $ssim = self::ssim($images[$upscaler->value], $images['taau']);
+        $meanNative = array_sum($images[$upscaler->value]) / count($images['taau']);
+        $meanTaau = array_sum($images['taau']) / count($images['taau']);
+        fprintf(STDERR, "[native %s %s] HDR vs TAAU SSIM %.4f, mean luma %.1f / %.1f\n", $backend, $upscaler->value, $ssim, $meanNative, $meanTaau);
+        $this->assertGreaterThanOrEqual(0.95, $ssim);
+        $this->assertEqualsWithDelta($meanTaau, $meanNative, 3.0, 'no exposure shift');
+    }
+
     // ── helpers ────────────────────────────────────────────────────────
 
     private function prepare(string $backend): void

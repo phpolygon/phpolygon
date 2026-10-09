@@ -661,6 +661,11 @@ class VioRenderer3D implements Renderer3DInterface
      */
     private function syncNativeUpscaler(): void
     {
+        // renderToImage() draws without the temporal path; the live upscaler
+        // (and its history) is for the next real frame.
+        if ($this->renderingToImage) {
+            return;
+        }
         $native = $this->nativeUpscalerSelected();
         $target = $this->offscreenTarget;
         if ($native === null || !$this->offscreenActive || $target === null || $target->samples() > 1
@@ -700,7 +705,7 @@ class VioRenderer3D implements Renderer3DInterface
             $message = $message !== '' ? $message : 'unknown error';
             $this->nativeUpscalerFailures[$upscaler->value] = $message;
             $this->capabilities = null;
-            $next =$this->settings->effectiveUpscaler($this->graphicsCapabilities());
+            $next = $this->settings->effectiveUpscaler($this->graphicsCapabilities());
             fwrite(STDERR, "[VioRenderer3D] {$upscaler->label()} failed, falling back to {$next->label()}: {$message}\n");
         }
         $this->capabilities = null;
