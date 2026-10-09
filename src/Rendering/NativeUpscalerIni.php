@@ -14,9 +14,16 @@ use PHPolygon\EngineConfig;
  *                             random GUID; NGX rejects anything else. Empty:
  *                             php-vio's own id - fine for development, a
  *                             shipping game uses its own.
- *   vio.ffx_path, vio.dlss_path  where the FidelityFX / DLSS runtime libraries
- *                             live when not next to the executable. Empty: next
- *                             to the executable, next to php_vio, then PATH.
+ *   vio.ffx_path, vio.dlss_path, vio.dlss_plugin_path
+ *                             where the FidelityFX runtimes, the DLSS runtime
+ *                             and php-vio's DLSS plugin (vio_dlss.dll) live when
+ *                             not next to the executable. Empty: next to the
+ *                             executable, next to php_vio, then PATH - so a
+ *                             built game, which ships them beside its exe
+ *                             (build.json `upscalers`), needs none of this.
+ *
+ * A project id baked into the executable by the build (build.json
+ * `upscalers.dlss.projectId`, embedded ini) stays unless the game sets one here.
  *
  * {@see apply()} runs before the vio context is created (NGX reads the id when
  * it initialises on first use; the libraries are looked up then too).
@@ -32,20 +39,31 @@ final class NativeUpscalerIni
     public static function settings(string $dlssProjectId, string $runtimePath): array
     {
         $settings = [];
-        $id = trim($dlssProjectId);
-        if ($id !== '') {
-            if (preg_match(self::GUID, $id, $m) !== 1) {
-                throw new \InvalidArgumentException(
-                    "DLSS project id '{$dlssProjectId}' is not a GUID (xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx)"
-                );
-            }
-            $settings['vio.dlss_project_id'] = strtolower($m[1]);
+        if (trim($dlssProjectId) !== '') {
+            $settings['vio.dlss_project_id'] = self::projectId($dlssProjectId);
         }
         if ($runtimePath !== '') {
             $settings['vio.ffx_path'] = $runtimePath;
             $settings['vio.dlss_path'] = $runtimePath;
+            $settings['vio.dlss_plugin_path'] = $runtimePath;
         }
         return $settings;
+    }
+
+    /**
+     * A DLSS project id the way php-vio wants it: a GUID, braces dropped,
+     * lower case.
+     *
+     * @throws \InvalidArgumentException when it is no GUID
+     */
+    public static function projectId(string $id): string
+    {
+        if (preg_match(self::GUID, trim($id), $m) !== 1) {
+            throw new \InvalidArgumentException(
+                "DLSS project id '{$id}' is not a GUID (xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx)"
+            );
+        }
+        return strtolower($m[1]);
     }
 
     /**

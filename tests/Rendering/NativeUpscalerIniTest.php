@@ -30,6 +30,8 @@ final class NativeUpscalerIniTest extends TestCase
             'vio.dlss_project_id' => self::GUID,
             'vio.ffx_path' => 'C:\\Game\\redist',
             'vio.dlss_path' => 'C:\\Game\\redist',
+            // DLSS comes through php-vio's plugin, which sits beside its runtime
+            'vio.dlss_plugin_path' => 'C:\\Game\\redist',
         ], NativeUpscalerIni::settings(self::GUID, 'C:\\Game\\redist'));
     }
 

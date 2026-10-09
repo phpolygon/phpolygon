@@ -157,9 +157,11 @@ class EngineConfig
         public readonly string $dlssProjectId = '',
         /**
          * Directory of the native upscaler runtimes the game ships
-         * (amd_fidelityfx_dx12.dll / _vk.dll, nvngx_dlss.dll /
-         * libnvidia-ngx-dlss.so): php-vio ini vio.ffx_path and vio.dlss_path.
-         * '' = next to the executable, next to php_vio, then PATH.
+         * (amd_fidelityfx_dx12.dll / _vk.dll, php-vio's DLSS plugin
+         * vio_dlss.dll + nvngx_dlss.dll / libnvidia-ngx-dlss.so): php-vio ini
+         * vio.ffx_path, vio.dlss_path and vio.dlss_plugin_path.
+         * '' = next to the executable, next to php_vio, then PATH - where a
+         * build puts them (build.json `upscalers`), so a built game leaves it ''.
          */
         public readonly string $upscalerRuntimePath = '',
     ) {}
