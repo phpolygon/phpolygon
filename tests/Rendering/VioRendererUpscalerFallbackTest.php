@@ -16,9 +16,11 @@ use PHPolygon\Rendering\VioRenderer3D;
 /**
  * The vio renderer offers TAA and TAAU (its own temporal resolve) wherever the
  * MRT scene path can carry motion vectors and a colour target's depth can be
- * sampled. FSR 3 and DLSS wait for the native php-vio modules: it says why,
- * and a graphics.json that picked one of them falls back along the chain -
- * to TAAU where it runs, including the temporal render-scale floor.
+ * sampled. FSR 3 and DLSS need php-vio's native module on a hardware GPU; the
+ * default headless context (WARP on Windows) has none, so the renderer says
+ * why and a graphics.json that picked one of them falls back along the chain -
+ * to TAAU where it runs, including the temporal render-scale floor
+ * (VioNativeUpscalerTest covers the hardware side).
  */
 #[RequiresPhpExtension('vio')]
 #[Group('native-gpu')]

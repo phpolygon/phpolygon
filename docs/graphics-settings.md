@@ -339,8 +339,20 @@ At a render scale below 1 the scene has to reach the display resolution:
 |---|---|
 | `Off` | The present pass stretches the image bilinearly. |
 | `Fsr1` | AMD FidelityFX Super Resolution 1 (vio). The scene is resolved at render resolution (bloom, tonemap, grade, vignette, FXAA), upscaled with EASU and sharpened with RCAS. `$upscaleSharpness` sets the sharpening, 0 = soft, 1 = strongest. |
+| `Taau` | The engine's own temporal resolve (`VioTaaPass`) from a jittered render with motion vectors; RCAS afterwards. Every vio backend with MRT + `VIO_FEATURE_RENDER_TARGET_DEPTH_SAMPLE`. |
+| `Fsr3` | AMD FidelityFX Super Resolution 3.1 upscaling through php-vio's native module (D3D12 / Vulkan). FSR runs its own RCAS with `$upscaleSharpness`. |
+| `Dlss` | NVIDIA DLSS Super Resolution through php-vio (D3D12 / Vulkan, RTX GPUs); `NativeAa` is DLAA. The engine's RCAS sharpens afterwards. |
 
-FSR 1 is spatial, so it needs no motion vectors and runs on every vio backend. Temporal upscalers (FSR 2/3, DLSS, XeSS) need per-pixel motion vectors and a jittered projection, which the renderer does not produce yet.
+FSR 1 is spatial, so it needs no motion vectors and runs on every vio backend. The temporal ones take a preset, `GraphicsSettings::$upscaleQuality`: `NativeAa` (1.0), `Quality` (1/1.5), `Balanced` (1/1.7), `Performance` (1/2), `UltraPerformance` (1/3) or `Custom` (the render-scale slider decides). With FSR 3 / DLSS a preset renders at the size the provider asks for (`vio_upscaler_render_size`; DLSS: NGX's optimal settings, e.g. Balanced 1114x626 at 1080p instead of 1129x635), with the provider's jitter cycle.
+
+The native upscalers get the scene colour, the MRT depth, motion (`prevUv - uv`, handed over with `mv_scale` = render size, y sign by render-target orientation) and the reactive mask; the jitter goes over as render pixels with y down (`Quality\UpscalerDispatch` holds the conversion). The upscaler object is created at the frame boundary and recreated on a change of provider, preset, render / display size or HDR format. Bloom and present follow as for TAAU; FXAA never runs on top.
+
+A provider that fails at runtime (`vio_upscaler_create` / `vio_upscaler_dispatch` returns false) is reported once on STDERR, drops out of the capabilities with the error as its note, and the selection walks down `Upscaler::fallbackChain()` (Dlss -> Fsr3 -> Taau -> Fsr1 -> Off). The stored setting stays. `PHPOLYGON_VIO_UPSCALER_FAIL=create|dispatch` forces such a failure for testing.
+
+What the game provides for the native upscalers:
+- the runtime libraries next to the executable (or in `EngineConfig::$upscalerRuntimePath`): `amd_fidelityfx_dx12.dll` / `amd_fidelityfx_vk.dll` (FidelityFX SDK 1.1.4, MIT) and `nvngx_dlss.dll` / `libnvidia-ngx-dlss.so.*` (DLSS SDK, NVIDIA RTX SDK licence);
+- its own NGX project id, a random GUID: `new EngineConfig(dlssProjectId: '…')` (set as `vio.dlss_project_id` before the context is created);
+- the licence notices and, for DLSS, the NVIDIA attribution in its credits.
 
 ### Hardware capabilities (`GraphicsCapabilities`)
 
@@ -348,9 +360,9 @@ FSR 1 is spatial, so it needs no motion vectors and runs on every vio backend. T
 - variable rate shading, HDR10 output and the waitable swapchain
 - MSAA and a real TAA pass
 - SSR and the SDF fieldtracing tiers
-- surface relief and the implemented upscalers
+- surface relief and the upscalers that run here; `upscalerNote()` says why one does not (FSR 3 / DLSS: php-vio's `vio_upscaler_info()['reason']` - missing runtime library, not an RTX GPU, driver too old, software adapter ...)
 
-`GraphicsOptionsPanel` draws unsupported options non-interactive and marks them "(not supported)". Game menus should do the same. The stored settings stay untouched, so a graphics.json carried to a more capable machine keeps its choices. Without a renderer (headless, before the window) `GraphicsCapabilities::unknown()` disables nothing.
+`GraphicsOptionsPanel` draws unsupported options non-interactive and marks them "(not supported)". For a stored upscaler that does not run it shows the one that runs instead plus `GraphicsOptionsPanel::upscalerHint()`; temporal upscalers get the quality-preset dropdown, sharpness shows wherever a sharpening pass runs. Game menus should do the same. The stored settings stay untouched, so a graphics.json carried to a more capable machine keeps its choices. Without a renderer (headless, before the window) `GraphicsCapabilities::unknown()` disables nothing.
 
 ### Wetness (SSR surrogate)
 
