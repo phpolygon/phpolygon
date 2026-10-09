@@ -197,6 +197,20 @@ layout(location = 3) out vec4 o_gbuffer;
 #define frag_color o_local
 uniform mat4 u_gbuffer_view;   // camera view matrix (fragment-stage copy)
 uniform int  u_gbuffer_write;  // 0 => this draw opts out of the G-buffer (excludeFromGbuffer)
+#ifdef PHPOLYGON_MOTION
+// Temporal techniques (only together with PHPOLYGON_MRT) add two attachments:
+//   o_motion    RG16F  prevUv - uv in the scene target's texture space (opaque pass)
+//   o_reactive  R8     how little the history should be trusted: the coverage of
+//                      transparent surfaces, which carry no motion of their own
+//                      (transparent pass, additive)
+// The pipelines mask whichever of the two a pass must not touch.
+in vec4 v_currClip;
+in vec4 v_prevClip;
+layout(location = 4) out vec4 o_motion;
+layout(location = 5) out vec4 o_reactive;
+uniform float u_motion_flip_y;  // +1 GL, -1 where render-target row 0 is NDC top
+uniform float u_mip_bias;       // texture LOD bias for the upscale ratio (negative = sharper)
+#endif
 #else
 out vec4 frag_color;
 #endif
@@ -893,6 +907,13 @@ void main() {
     o_local   = vec4(0.0, 0.0, 0.0, u_alpha);
     o_ambient = vec4(0.0, 0.0, 0.0, u_alpha);
     o_gbuffer = gbufferValue(N);
+#ifdef PHPOLYGON_MOTION
+    vec2 currNdc = v_currClip.xy / v_currClip.w;
+    vec2 prevNdc = v_prevClip.xy / v_prevClip.w;
+    o_motion = vec4((prevNdc - currNdc) * vec2(0.5, 0.5 * u_motion_flip_y), 0.0, 0.0);
+    float reactive = clamp(u_alpha, 0.0, 1.0);
+    o_reactive = vec4(reactive, reactive, reactive, 1.0);
+#endif
 #endif
     // View-facing normal for specular/fresnel (flipped for back faces)
     vec3 Nv = gl_FrontFacing ? N : -N;
@@ -921,7 +942,14 @@ void main() {
 
     vec3 texAlbedo = u_albedo;
     if (u_has_albedo_texture == 1) {
+#ifdef PHPOLYGON_MOTION
+        // Temporal upscaling reconstructs display-resolution detail: pick the
+        // mip for the display, not the render resolution (2^bias scales the LOD).
+        float mipScale = exp2(u_mip_bias);
+        texAlbedo *= textureGrad(u_albedo_texture, patternUv, uvDx * mipScale, uvDy * mipScale).rgb;
+#else
         texAlbedo *= textureGrad(u_albedo_texture, patternUv, uvDx, uvDy).rgb;
+#endif
     }
 
     // ---- Material selection ----

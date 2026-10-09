@@ -233,6 +233,30 @@ class VioRenderer3D implements Renderer3DInterface
     /** Sticky value of u_gbuffer_write in the bound cbuffer (null = unknown / re-upload). */
     private ?int $lastGbufferWrite = null;
 
+    // Temporal techniques (TAA / temporal upscaling). While one runs, the MRT
+    // scene target gains a motion (RG16F) and a reactive (R8) attachment, written
+    // by mesh3d with PHPOLYGON_MOTION, and the scene rasterises with a jittered
+    // projection. temporalCamera remembers last frame's unjittered camera.
+    /** MRT attachment holding prevUv - uv per pixel (RG16F). */
+    public const MOTION_ATTACHMENT = 4;
+    /** MRT attachment holding the transparent coverage the resolve trusts less (R8). */
+    public const REACTIVE_ATTACHMENT = 5;
+    private Quality\TemporalCamera $temporalCamera;
+    /** This frame's temporal camera; null when no temporal technique ran this frame. */
+    private ?Quality\TemporalFrame $temporalFrame = null;
+    /** Motion attachments are written this frame (the MRT pipelines use their ':mv' variants). */
+    private bool $motionThisFrame = false;
+    /** The MRT target was allocated with the motion attachments. */
+    private bool $mrtTargetHasMotion = false;
+    /** Lazily probed: MRT + depth sampling + RG16F/R8 formats (or PHPOLYGON_VIO_TEMPORAL=0). */
+    private ?bool $temporalSupported = null;
+    /** Sticky value of u_has_prev in the bound cbuffer (null = unknown / re-upload). */
+    private ?int $lastHasPrev = null;
+    /** The camera's own projection of the frame (currentProjectionMatrix is the jittered copy while temporal runs). */
+    private ?Mat4 $cameraProjectionMatrix = null;
+    /** The camera of the frame was flagged as a cut (SetCamera::$cut). */
+    private bool $cameraCutThisFrame = false;
+
     // The baked SDF volume (vio_texture_3d), uploaded from SetFieldtracingVolume.
     private ?VioTexture $sdfVolumeTex = null;
     private int $sdfVolumeVersion = -1;
@@ -411,6 +435,7 @@ class VioRenderer3D implements Renderer3DInterface
         $this->width = $width;
         $this->height = $height;
         $this->settings = $settings ?? new GraphicsSettings();
+        $this->temporalCamera = new Quality\TemporalCamera();
         // Batch uniform uploads through one native call when the extension
         // provides vio_set_uniforms (new php-vio); otherwise fall back to
         // per-uniform vio_set_uniform so an older DLL still works.
@@ -481,9 +506,156 @@ class VioRenderer3D implements Renderer3DInterface
                 !== $settings->effectiveRenderScale($this->graphicsCapabilities())
             || $previous->antiAliasing !== $settings->antiAliasing
             || $previous->bloom !== $settings->bloom
-            || $previous->hdr !== $settings->hdr) {
+            || $previous->hdr !== $settings->hdr
+            || $previous->upscaler !== $settings->upscaler) {
             $this->offscreenDirty = true;
+            // The accumulated history was rendered at another size, format or
+            // technique: start over instead of blending it in.
+            $this->temporalCamera->reset('settings');
         }
+    }
+
+    /**
+     * Drop the temporal history (TAA / temporal upscaling) at the next frame,
+     * e.g. after the world was cleared or the scene swapped without a camera
+     * cut. Camera cuts ({@see SetCamera::$cut}) do this on their own.
+     */
+    public function resetTemporalHistory(string $reason = 'reset'): void
+    {
+        $this->temporalCamera->reset($reason);
+    }
+
+    /**
+     * This frame's temporal camera (jitter, last frame's unjittered
+     * view-projection, whether the history is valid); null when no temporal
+     * technique ran this frame. Test / diagnostic hook.
+     */
+    public function temporalFrame(): ?Quality\TemporalFrame
+    {
+        return $this->temporalFrame;
+    }
+
+    /**
+     * The MRT scene target while it carries the motion ({@see MOTION_ATTACHMENT})
+     * and reactive ({@see REACTIVE_ATTACHMENT}) attachments, null otherwise.
+     * Test / diagnostic hook (raw readback of the vectors).
+     */
+    public function motionVectorTarget(): ?VioRenderTarget
+    {
+        return $this->motionThisFrame ? $this->mrtTarget : null;
+    }
+
+    /**
+     * A temporal technique is selected: TAA, or an upscaler that resolves to a
+     * temporal one on this renderer.
+     */
+    private function temporalRequested(): bool
+    {
+        return $this->settings->antiAliasing === AntiAliasing::Taa
+            || $this->settings->effectiveUpscaler($this->graphicsCapabilities())->isTemporal();
+    }
+
+    /**
+     * Whether this backend can run the temporal path (probed once): the MRT
+     * scene path, sampling the depth of a colour target (the resolve reads the
+     * MRT depth) and the RG16F / R8 attachment formats. PHPOLYGON_VIO_TEMPORAL=0
+     * switches it off.
+     */
+    private function temporalSupported(): bool
+    {
+        if ($this->temporalSupported !== null) {
+            return $this->temporalSupported;
+        }
+        return $this->temporalSupported = getenv('PHPOLYGON_VIO_TEMPORAL') !== '0'
+            && $this->mrtSupported()
+            && defined('VIO_RT_DEPTH')
+            && defined('VIO_FORMAT_RG16F')
+            && defined('VIO_FORMAT_R8')
+            && defined('VIO_FEATURE_RENDER_TARGET_DEPTH_SAMPLE')
+            && vio_supports_feature($this->ctx, (int) constant('VIO_FEATURE_RENDER_TARGET_DEPTH_SAMPLE'));
+    }
+
+    /**
+     * The temporal path runs this frame: requested, supported, the motion
+     * shaders compiled and the scene goes through the offscreen target the
+     * present stage resolves (never for renderToImage()).
+     */
+    private function temporalWantedThisFrame(): bool
+    {
+        return $this->offscreenActive
+            && $this->temporalRequested()
+            && $this->temporalSupported()
+            && $this->ensureMotionShaders();
+    }
+
+    /** Compile the PHPOLYGON_MOTION variant of the MRT mesh program once; false when it fails. */
+    private function ensureMotionShaders(): bool
+    {
+        if (isset($this->shaderCache['default_mrt_mv'])) {
+            return true;
+        }
+        if (!$this->mrtSupported() || !isset($this->shaderCache['default_mrt'])) {
+            return false;
+        }
+        try {
+            $this->compileShaderFromFiles('default_mrt_mv', 'mesh3d.vert.glsl', 'mesh3d.frag.glsl', true, true);
+        } catch (\RuntimeException $e) {
+            $this->temporalSupported = false;
+            fwrite(STDERR, "[VioRenderer3D] motion-vector shaders unavailable, temporal AA is off: {$e->getMessage()}\n");
+            return false;
+        }
+        return true;
+    }
+
+    /**
+     * Jitter the frame's camera and upload nothing yet: currentProjectionMatrix
+     * becomes the jittered copy every scene pass rasterises with (sky, opaque,
+     * transparent, outlines); shadow and environment passes use their own
+     * matrices and stay unjittered.
+     */
+    private function beginTemporalFrame(int $renderW, int $renderH): void
+    {
+        $view = $this->currentViewMatrix;
+        $projection = $this->cameraProjectionMatrix;
+        if ($view === null || $projection === null) {
+            return;
+        }
+        $this->temporalFrame = $this->temporalCamera->begin(
+            $view,
+            $projection,
+            $this->cameraCutThisFrame,
+            $renderW,
+            $renderH,
+            max(1, $this->backbufferWidth),
+            max(1, $this->backbufferHeight),
+            true,
+            $this->globalTime,
+        );
+        $this->currentProjectionMatrix = $this->temporalFrame->jitter->projection;
+    }
+
+    /**
+     * Per-frame motion uniforms on the bound MRT mesh program (uploadFrameUniforms).
+     * u_has_prev starts at 0; drawMeshCommand raises it for moved entities.
+     */
+    private function uploadMotionUniforms(): void
+    {
+        $frame = $this->temporalFrame;
+        if (!$this->motionThisFrame || $frame === null) {
+            return;
+        }
+        $renderW = max(1, $this->mrtWidth);
+        $displayW = max(1, $this->backbufferWidth);
+        $this->setUniforms([
+            'u_curr_view_proj' => $frame->jitter->unjitteredViewProjection->toArray(),
+            'u_prev_view_proj' => $frame->prevViewProjection->toArray(),
+            'u_time_prev'      => $frame->prevTime,
+            'u_has_prev'       => 0,
+            'u_motion_flip_y'  => $this->conventions()->flipRenderTargetClipY() ? -1.0 : 1.0,
+            // FSR / DLSS guidance: log2(render / display) - 1.
+            'u_mip_bias'       => log($renderW / $displayW, 2) - 1.0,
+        ]);
+        $this->lastHasPrev = 0;
     }
 
     /**
@@ -897,7 +1069,8 @@ class VioRenderer3D implements Renderer3DInterface
         // the rendered scene). Each is individually toggleable via GraphicsSettings.
         return $this->settings->antiAliasing !== AntiAliasing::Off
             || $this->settings->effectiveRenderScale($this->graphicsCapabilities()) !== 1.0
-            || $this->settings->bloom;
+            || $this->settings->bloom
+            || $this->temporalRequested();
     }
 
     /**
@@ -1504,10 +1677,12 @@ class VioRenderer3D implements Renderer3DInterface
         $ftIntensity = 1.0;
         $ftAoRadius = 1.5;
 
+        $this->cameraCutThisFrame = false;
         foreach ($commands as $cmd) {
             if ($cmd instanceof SetCamera) {
                 $this->currentViewMatrix = $cmd->viewMatrix;
-                $this->currentProjectionMatrix = $cmd->projectionMatrix;
+                $this->cameraProjectionMatrix = $cmd->projectionMatrix;
+                $this->cameraCutThisFrame = $this->cameraCutThisFrame || $cmd->cut;
                 $this->cameraPosition = $this->extractCameraPosition($cmd->viewMatrix);
             } elseif ($cmd instanceof SetAmbientLight) {
                 $ambientColor = $cmd->color;
@@ -1561,6 +1736,10 @@ class VioRenderer3D implements Renderer3DInterface
                 $this->ingestProbeField($cmd);
             }
         }
+
+        // The camera's own projection; a temporal frame swaps in its jittered copy
+        // below. Kept apart so a frame without SetCamera never jitters twice.
+        $this->currentProjectionMatrix = $this->cameraProjectionMatrix;
 
         if ($this->currentViewMatrix === null || $this->currentProjectionMatrix === null) {
             if (getenv('VIO_DEBUG') === '1') {
@@ -1629,12 +1808,25 @@ class VioRenderer3D implements Renderer3DInterface
         // The MRT target matches the scene viewport exactly so compositeMrt() is a
         // 1:1 fullscreen pass and the G-buffer attachment has the same resolution
         // the forward G-buffer pass had.
+        // A temporal technique needs the MRT path (motion + reactive attachments
+        // next to the lighting split) whether or not the G-buffer is used.
+        $temporal = $hdrTarget === null && $this->temporalWantedThisFrame();
         $mrtTarget = null;
-        if ($hdrTarget === null && $this->mrtEnabledThisFrame()) {
-            $this->ensureMrtTarget($sceneViewportW, $sceneViewportH);
+        if ($hdrTarget === null && $this->mrtEnabledThisFrame($temporal)) {
+            $this->ensureMrtTarget($sceneViewportW, $sceneViewportH, $temporal);
             $mrtTarget = $this->mrtTarget; // null when the backend refused it: forward path
         }
         $this->mrtThisFrame = $mrtTarget !== null;
+        $this->motionThisFrame = $this->mrtThisFrame && $temporal;
+        $wasTemporal = $this->temporalFrame !== null;
+        $this->temporalFrame = null;
+        if ($this->motionThisFrame) {
+            $this->beginTemporalFrame($sceneViewportW, $sceneViewportH);
+        } elseif ($wasTemporal) {
+            // Paused (shader override, MSAA, settings): the history is stale
+            // by the time the technique resumes.
+            $this->temporalCamera->reset('paused');
+        }
 
         if ($mrtTarget !== null) {
             // The AO passes run AFTER the geometry (renderAoFromMrt); until then
@@ -1702,6 +1894,8 @@ class VioRenderer3D implements Renderer3DInterface
         $this->frameUniformsShaderId = $this->activeShaderId();
         $this->sceneUniformInputs = [$frameState, $hasShadowMap, $dirLights];
 
+        $this->uploadMotionUniforms();
+
         // Collect opaque-eligible draws (resolving each material ONCE) and sort by
         // (materialId, meshId) so identical draws cluster — that makes the per-draw
         // material-uniform / mesh-AABB dedup in drawMeshCommand effective (a sorted
@@ -1721,7 +1915,7 @@ class VioRenderer3D implements Renderer3DInterface
         usort($opaque, static fn (array $a, array $b): int => ($a[0] <=> $b[0]) ?: ($a[1] <=> $b[1]));
         foreach ($opaque as [, , $cmd, $material]) {
             if ($cmd instanceof DrawMesh) {
-                $this->drawMeshCommand($cmd->meshId, $material, $cmd->modelMatrix, $cmd->materialId, $cmd->excludeFromGbuffer);
+                $this->drawMeshCommand($cmd->meshId, $material, $cmd->modelMatrix, $cmd->materialId, $cmd->excludeFromGbuffer, $cmd->prevModelMatrix);
             } else {
                 $this->drawMeshInstancedCommand($cmd, $material);
             }
@@ -1740,6 +1934,7 @@ class VioRenderer3D implements Renderer3DInterface
             $this->uploadShadowUniforms($hasShadowMap, $dirLights);
             $this->uploadSsaoUniforms();
             $this->uploadSdfAoUniforms();
+            $this->uploadMotionUniforms();
             $this->frameUniformsShaderId = $transparentShaderId;
         }
 
@@ -1766,7 +1961,7 @@ class VioRenderer3D implements Renderer3DInterface
                 }
             }
             if ($cmd instanceof DrawMesh) {
-                $this->drawMeshCommand($cmd->meshId, $material, $cmd->modelMatrix, $cmd->materialId, $cmd->excludeFromGbuffer);
+                $this->drawMeshCommand($cmd->meshId, $material, $cmd->modelMatrix, $cmd->materialId, $cmd->excludeFromGbuffer, $cmd->prevModelMatrix);
             } else {
                 $this->drawMeshInstancedCommand($cmd, $material);
             }
@@ -2006,18 +2201,23 @@ class VioRenderer3D implements Renderer3DInterface
 
     }
 
-    private function compileShaderFromFiles(string $id, string $vertFile, string $fragFile, bool $mrt = false): void
+    private function compileShaderFromFiles(string $id, string $vertFile, string $fragFile, bool $mrt = false, bool $motion = false): void
     {
         $vertSrc = $this->loadShader($vertFile);
         $fragSrc = $this->loadShader($fragFile);
 
-        // Only the übershader (mesh3d = 'default' program, and its MRT twin)
+        // Only the übershader (mesh3d = 'default' program, and its MRT twins)
         // carries the per-material u_proc_mode ladder. Splice any game-registered
         // proc_mode snippets into its two sentinels before transpilation; with none
         // registered this is a no-op (sentinels resolve to empty). The other
         // programs have no sentinels.
-        if ($id === 'default' || $id === 'default_mrt') {
+        if ($id === 'default' || $id === 'default_mrt' || $id === 'default_mrt_mv') {
             $fragSrc = ProcModeShaderRegistry::spliceGlsl($fragSrc, ProcModeShaderRegistry::FAMILY_VIO);
+        }
+        if ($motion) {
+            // Motion vectors ride on the MRT outputs: both stages need the define.
+            $vertSrc = self::withDefine($vertSrc, 'PHPOLYGON_MOTION');
+            $fragSrc = self::withDefine($fragSrc, 'PHPOLYGON_MOTION');
         }
         if ($mrt) {
             $fragSrc = self::withMrtDefine($fragSrc);
@@ -2111,10 +2311,11 @@ class VioRenderer3D implements Renderer3DInterface
         $shaderId = $storageInstances ? 'default_storage' : $this->activeShaderId();
         $hdr = $this->sceneTargetIsHdr();
         $mrt = $this->mrtThisFrame;
+        $mv = $mrt && $this->motionThisFrame;
         // Cache LDR, HDR and MRT pipeline variants under distinct keys: on D3D12
-        // the PSO RTV formats (R8 vs FP16, 1 vs 4 attachments) are baked in and
-        // must match the bound target.
-        $key = $pass . ':' . $shaderId . ($mrt ? ':mrt' : ($hdr ? ':hdr' : ''));
+        // the PSO RTV formats (R8 vs FP16, 1 vs 4 vs 6 attachments) are baked in
+        // and must match the bound target.
+        $key = $pass . ':' . $shaderId . ($mrt ? ':mrt' . ($mv ? ':mv' : '') : ($hdr ? ':hdr' : ''));
 
         if (!isset($this->pipelineCache[$key])) {
             if ($mrt) {
@@ -2122,18 +2323,33 @@ class VioRenderer3D implements Renderer3DInterface
                 // and its MRT twin compiled. Attachments 0-2 are colour (alpha
                 // blend on the transparent pass), attachment 3 is DATA: never
                 // blended, and written only by opaque geometry (+ water for SSR).
+                // With motion, attachment 4 (vectors) is written by opaque
+                // geometry only and attachment 5 (reactive) by transparent
+                // geometry only, additively.
+                $program = ($storageInstances ? 'default_storage_mrt' : 'default_mrt') . ($mv ? '_mv' : '');
                 $cfg = [
-                    'shader' => $this->shaderCache[$storageInstances ? 'default_storage_mrt' : 'default_mrt'],
+                    'shader' => $this->shaderCache[$program],
                     'depth_test' => true,
                     'cull_mode' => VIO_CULL_NONE,
                     'blend' => $pass === 'opaque' ? VIO_BLEND_NONE : VIO_BLEND_ALPHA,
-                    'attachments' => self::mrtFormats(),
+                    'attachments' => self::mrtFormats($mv),
                 ];
                 if ($pass !== 'opaque') {
                     $cfg['attachment_blend'] = [VIO_BLEND_ALPHA, VIO_BLEND_ALPHA, VIO_BLEND_ALPHA, VIO_BLEND_NONE];
                     $cfg['attachment_color_mask'] = [
                         VIO_COLOR_RGBA, VIO_COLOR_RGBA, VIO_COLOR_RGBA,
                         $pass === 'transparent_water' ? VIO_COLOR_RGBA : 0,
+                    ];
+                    if ($mv) {
+                        $cfg['attachment_blend'][] = VIO_BLEND_NONE;
+                        $cfg['attachment_blend'][] = VIO_BLEND_ADDITIVE;
+                        $cfg['attachment_color_mask'][] = 0;
+                        $cfg['attachment_color_mask'][] = VIO_COLOR_RGBA;
+                    }
+                } elseif ($mv) {
+                    $cfg['attachment_blend'] = array_fill(0, 6, VIO_BLEND_NONE);
+                    $cfg['attachment_color_mask'] = [
+                        VIO_COLOR_RGBA, VIO_COLOR_RGBA, VIO_COLOR_RGBA, VIO_COLOR_RGBA, VIO_COLOR_RGBA, 0,
                     ];
                 }
                 $pipeline = vio_pipeline($this->ctx, $cfg);
@@ -2181,6 +2397,7 @@ class VioRenderer3D implements Renderer3DInterface
         $this->lastMaterialId = null;
         $this->lastMeshId = null;
         $this->lastGbufferWrite = null;
+        $this->lastHasPrev = null;
     }
 
     // ----------------------------------------------------------------
@@ -2195,9 +2412,38 @@ class VioRenderer3D implements Renderer3DInterface
      *
      * @return list<int>
      */
-    private static function mrtFormats(): array
+    private static function mrtFormats(bool $motion = false): array
     {
-        return [VIO_FORMAT_RGBA16F, VIO_FORMAT_RGBA16F, VIO_FORMAT_RGBA16F, VIO_FORMAT_RGBA16F];
+        $formats = [VIO_FORMAT_RGBA16F, VIO_FORMAT_RGBA16F, VIO_FORMAT_RGBA16F, VIO_FORMAT_RGBA16F];
+        if ($motion) {
+            // MOTION_ATTACHMENT (RG16F vectors) + REACTIVE_ATTACHMENT (R8).
+            $formats[] = (int) constant('VIO_FORMAT_RG16F');
+            $formats[] = (int) constant('VIO_FORMAT_R8');
+        }
+        return $formats;
+    }
+
+    /**
+     * Blend / write mask arrays of a pipeline that only touches the MRT lighting
+     * attachment 1 (sky, skybox), padded for the motion attachments, which such
+     * a pass leaves at their cleared value (no motion of its own; the resolve
+     * reconstructs the sky's from the depth).
+     *
+     * @return array{attachments: list<int>, attachment_blend: list<int>, attachment_color_mask: list<int>}
+     */
+    private function localOnlyMrtConfig(int $blend): array
+    {
+        $mv = $this->motionThisFrame;
+        $count = $mv ? 6 : 4;
+        $blends = array_fill(0, $count, VIO_BLEND_NONE);
+        $blends[1] = $blend;
+        $masks = array_fill(0, $count, 0);
+        $masks[1] = VIO_COLOR_RGBA;
+        return [
+            'attachments' => self::mrtFormats($mv),
+            'attachment_blend' => $blends,
+            'attachment_color_mask' => $masks,
+        ];
     }
 
     /**
@@ -2232,13 +2478,14 @@ class VioRenderer3D implements Renderer3DInterface
      * MRT shaders compiled, and the scene target is single-sampled (the MRT
      * target is not multisampled, so MSAA geometry edges would be lost).
      */
-    private function mrtEnabledThisFrame(): bool
+    private function mrtEnabledThisFrame(bool $temporal = false): bool
     {
-        if (!$this->mrtSupported() || !$this->gbufferNeededThisFrame()) {
+        if (!$this->mrtSupported() || !($temporal || $this->gbufferNeededThisFrame())) {
             return false;
         }
         if ($this->activeShaderId() !== 'default'
             || !isset($this->shaderCache['default_mrt'], $this->shaderCache['composite'])
+            || ($temporal && !isset($this->shaderCache['default_mrt_mv']))
             || $this->screenQuad === null) {
             return false;
         }
@@ -2255,20 +2502,22 @@ class VioRenderer3D implements Renderer3DInterface
     }
 
     /** (Re)allocate the MRT scene target at the scene viewport size. */
-    private function ensureMrtTarget(int $w, int $h): void
+    private function ensureMrtTarget(int $w, int $h, bool $motion = false): void
     {
         $w = max(1, $w);
         $h = max(1, $h);
-        if ($this->mrtTarget !== null && $this->mrtWidth === $w && $this->mrtHeight === $h) {
+        if ($this->mrtTarget !== null && $this->mrtWidth === $w && $this->mrtHeight === $h
+            && $this->mrtTargetHasMotion === $motion) {
             return;
         }
         $this->mrtTarget = vio_render_target($this->ctx, [
             'width' => $w,
             'height' => $h,
-            'attachments' => self::mrtFormats(),
+            'attachments' => self::mrtFormats($motion),
         ]) ?: null;
         $this->mrtWidth = $w;
         $this->mrtHeight = $h;
+        $this->mrtTargetHasMotion = $motion;
     }
 
     /** Attachment 3 of the MRT target — the G-buffer the AO / SSR passes read. */
@@ -2399,7 +2648,13 @@ class VioRenderer3D implements Renderer3DInterface
      */
     private static function withMrtDefine(string $src): string
     {
-        $define = "#define PHPOLYGON_MRT 1\n";
+        return self::withDefine($src, 'PHPOLYGON_MRT');
+    }
+
+    /** Inject `#define $name 1` right after the #version line. */
+    private static function withDefine(string $src, string $name): string
+    {
+        $define = "#define {$name} 1\n";
         if (preg_match('/^\s*#version[^\n]*\n/', $src, $m) === 1) {
             return $m[0] . $define . substr($src, strlen($m[0]));
         }
@@ -3825,7 +4080,7 @@ class VioRenderer3D implements Renderer3DInterface
     private function bindSkyPipeline(string $shaderId, int $blend, ?bool $hdrOverride = null, bool $mrt = false): void
     {
         $hdr = $hdrOverride ?? $this->sceneTargetIsHdr();
-        $key = 'sky:' . $shaderId . ($mrt ? ':mrt' : ($hdr ? ':hdr' : ''));
+        $key = 'sky:' . $shaderId . ($mrt ? ':mrt' . ($this->motionThisFrame ? ':mv' : '') : ($hdr ? ':hdr' : ''));
         if (!isset($this->pipelineCache[$key])) {
             $shader = $this->shaderCache[$mrt ? $shaderId . '_mrt' : $shaderId] ?? null;
             if ($shader === null) {
@@ -3844,9 +4099,7 @@ class VioRenderer3D implements Renderer3DInterface
                 // Into the MRT scene target the sky is unlit local light: write
                 // attachment 1 only (with this layer's blend), leave sun / ambient
                 // at 0 and the G-buffer at its cleared "sky" value.
-                $cfg['attachments'] = self::mrtFormats();
-                $cfg['attachment_blend'] = [VIO_BLEND_NONE, $blend, VIO_BLEND_NONE, VIO_BLEND_NONE];
-                $cfg['attachment_color_mask'] = [0, VIO_COLOR_RGBA, 0, 0];
+                $cfg = $this->localOnlyMrtConfig($blend) + $cfg;
             }
             $pipeline = vio_pipeline($this->ctx, $cfg);
             if ($pipeline === false) {
@@ -3905,7 +4158,7 @@ class VioRenderer3D implements Renderer3DInterface
     {
         $hdr = $this->sceneTargetIsHdr();
         $mrt = $this->mrtThisFrame;
-        $key = 'skybox:skybox' . ($mrt ? ':mrt' : ($hdr ? ':hdr' : ''));
+        $key = 'skybox:skybox' . ($mrt ? ':mrt' . ($this->motionThisFrame ? ':mv' : '') : ($hdr ? ':hdr' : ''));
 
         if (!isset($this->pipelineCache[$key])) {
             $shader = $this->shaderCache[$mrt ? 'skybox_mrt' : 'skybox'] ?? $this->shaderCache['skybox'];
@@ -3926,8 +4179,7 @@ class VioRenderer3D implements Renderer3DInterface
             ];
             if ($mrt) {
                 // Local (unlit) light only — see bindSkyPipeline().
-                $cfg['attachments'] = self::mrtFormats();
-                $cfg['attachment_color_mask'] = [0, VIO_COLOR_RGBA, 0, 0];
+                $cfg = $this->localOnlyMrtConfig(VIO_BLEND_NONE) + $cfg;
             }
             $pipeline = vio_pipeline($this->ctx, $cfg);
 
@@ -4007,7 +4259,7 @@ class VioRenderer3D implements Renderer3DInterface
     // Drawing
     // ----------------------------------------------------------------
 
-    private function drawMeshCommand(string $meshId, Material $material, Mat4 $modelMatrix, string $materialId = '', bool $excludeFromGbuffer = false): void
+    private function drawMeshCommand(string $meshId, Material $material, Mat4 $modelMatrix, string $materialId = '', bool $excludeFromGbuffer = false, ?Mat4 $prevModelMatrix = null): void
     {
         $mesh = $this->uploadMesh($meshId);
         if ($mesh === null) {
@@ -4021,11 +4273,26 @@ class VioRenderer3D implements Renderer3DInterface
             $matrices = [$modelMatrix->toArray(), $this->computeNormalMatrix($modelMatrix)];
             $memo[$modelMatrix] = $matrices;
         }
-        $this->setUniforms([
+        $perDraw = [
             'u_model'          => $matrices[0],
             'u_use_instancing' => 0,
             'u_normal_matrix'  => $matrices[1],
-        ]);
+        ];
+        // Motion vectors: only a moved entity uploads last frame's matrix; the
+        // flag itself is sticky, so runs of static draws add nothing.
+        if ($this->motionThisFrame) {
+            if ($prevModelMatrix !== null) {
+                $perDraw['u_prev_model'] = $prevModelMatrix->toArray();
+                if ($this->lastHasPrev !== 1) {
+                    $perDraw['u_has_prev'] = 1;
+                    $this->lastHasPrev = 1;
+                }
+            } elseif ($this->lastHasPrev !== 0) {
+                $perDraw['u_has_prev'] = 0;
+                $this->lastHasPrev = 0;
+            }
+        }
+        $this->setUniforms($perDraw);
         $this->applyGbufferWrite($excludeFromGbuffer ? 0 : 1);
 
         // Sticky-uniform dedup: skip the ~28 material uniforms / mesh AABB when
@@ -4441,12 +4708,16 @@ class VioRenderer3D implements Renderer3DInterface
         }
 
         $pass = $this->currentScenePass;
+        if ($this->motionThisFrame && !$this->ensureStorageMotionShader()) {
+            return;
+        }
         $this->bindPipeline($pass, storageInstances: true);
         [$frameState, $hasShadowMap, $dirLights] = $inputs;
         $this->uploadFrameUniforms($frameState);
         $this->uploadShadowUniforms($hasShadowMap, $dirLights);
         $this->uploadSsaoUniforms();
         $this->uploadSdfAoUniforms();
+        $this->uploadMotionUniforms();
         $this->applyMaterialUniforms($material, $cmd->materialId);
         $this->bindMaterialTextures($material);
         $this->bindMeshAabb($cmd->meshId);
@@ -4478,6 +4749,26 @@ class VioRenderer3D implements Renderer3DInterface
     {
         $this->warmShaders();
         return $this->ensureStorageInstancing();
+    }
+
+    /** The PHPOLYGON_MOTION twin of the storage-instance MRT program, compiled on first temporal use. */
+    private function ensureStorageMotionShader(): bool
+    {
+        if (isset($this->shaderCache['default_storage_mrt_mv'])) {
+            return true;
+        }
+        try {
+            $vert = self::withDefine(
+                self::storageInstancingVertexSource($this->loadShader('mesh3d.vert.glsl')),
+                'PHPOLYGON_MOTION',
+            );
+            $frag = ProcModeShaderRegistry::spliceGlsl($this->loadShader('mesh3d.frag.glsl'), ProcModeShaderRegistry::FAMILY_VIO);
+            $this->compileShader('default_storage_mrt_mv', $vert, self::withMrtDefine(self::withDefine($frag, 'PHPOLYGON_MOTION')));
+        } catch (\RuntimeException $e) {
+            fwrite(STDERR, "[VioRenderer3D] storage-instance motion shader unavailable: {$e->getMessage()}\n");
+            return false;
+        }
+        return true;
     }
 
     private function ensureStorageInstancing(): bool

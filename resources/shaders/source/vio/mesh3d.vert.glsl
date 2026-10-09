@@ -42,16 +42,27 @@ out vec3 v_localPos;
 out vec3 v_localNormal;
 out vec3 v_objectScale;
 
-void main() {
-    mat4 model = u_model;
-    if (u_use_instancing == 1) {
-        model = mat4(a_instance_col0, a_instance_col1, a_instance_col2, a_instance_col3);
-    }
-    vec3 pos = a_position;
+#ifdef PHPOLYGON_MOTION
+// Motion vectors (temporal AA / upscaling). Both clip positions are UNJITTERED:
+// the surface point projected with this frame's and with last frame's camera,
+// moved by last frame's model matrix (u_has_prev; non-instanced draws only) and
+// animated at last frame's clock. The fragment stage turns them into a texture-
+// space offset. Both go through the same expression, so a static surface under
+// a still camera has exactly zero motion.
+uniform mat4  u_curr_view_proj;
+uniform mat4  u_prev_view_proj;
+uniform mat4  u_prev_model;
+uniform int   u_has_prev;
+uniform float u_time_prev;
+out vec4 v_currClip;
+out vec4 v_prevClip;
+#endif
 
+// Wave + cloth displacement of an object-space vertex at a given clock.
+vec3 animatePosition(vec3 pos, mat4 model, float time) {
     if (u_vertex_anim == 1) {
         vec4 worldPosRaw = model * vec4(pos, 1.0);
-        float t = u_time + u_wave_phase;
+        float t = time + u_wave_phase;
         float f = u_wave_frequency;
         float a = u_wave_amplitude;
         // Long rolling swell (dominant wave direction)
@@ -70,13 +81,22 @@ void main() {
         float yNorm = clamp((pos.y - u_mesh_local_aabb_min.y) / aabbHeight, 0.0, 1.0);
         float anchorWeight = u_cloth_anchor_top == 1 ? yNorm : (1.0 - yNorm);
         float swayMask = 1.0 - anchorWeight;
-        float ct = u_time * u_cloth_frequency + u_cloth_phase;
+        float ct = time * u_cloth_frequency + u_cloth_phase;
         float cwave = sin(ct + pos.x * 2.0) * 0.7 + cos(ct * 1.3 + pos.z * 1.5) * 0.3;
         vec3 windDir = length(u_wind_direction) > 1e-4 ? normalize(u_wind_direction) : vec3(0.0, 0.0, 1.0);
         vec3 sway = windDir * (cwave * u_cloth_strength * u_wind_intensity * swayMask);
         sway.y *= 0.15;
         pos += sway;
     }
+    return pos;
+}
+
+void main() {
+    mat4 model = u_model;
+    if (u_use_instancing == 1) {
+        model = mat4(a_instance_col0, a_instance_col1, a_instance_col2, a_instance_col3);
+    }
+    vec3 pos = animatePosition(a_position, model, u_time);
 
     vec4 worldPos = model * vec4(pos, 1.0);
     v_worldPos = worldPos.xyz;
@@ -102,4 +122,11 @@ void main() {
     v_uv = a_uv;
     v_lightSpacePos = u_light_space_matrix * worldPos;
     gl_Position = u_projection * u_view * worldPos;
+
+#ifdef PHPOLYGON_MOTION
+    mat4 prevModel = (u_has_prev == 1 && u_use_instancing == 0) ? u_prev_model : model;
+    vec3 prevPos = animatePosition(a_position, prevModel, u_time_prev);
+    v_currClip = u_curr_view_proj * (model * vec4(pos, 1.0));
+    v_prevClip = u_prev_view_proj * (prevModel * vec4(prevPos, 1.0));
+#endif
 }
