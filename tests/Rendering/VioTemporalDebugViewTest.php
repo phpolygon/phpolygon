@@ -94,6 +94,16 @@ final class VioTemporalDebugViewTest extends TestCase
     }
 
     #[DataProvider('backends')]
+    public function testHistoryViewShowsTheResolvedColour(string $backend): void
+    {
+        putenv(VioMotionDebugPass::ENV . '=history');
+        $img = $this->renderPan($backend, 0.0);
+        $ground = self::px($img, intdiv(self::W, 2), self::H - 4);
+        $this->assertGreaterThan(60, $ground[1], 'the grey ground, accumulated');
+        $this->assertEqualsWithDelta($ground[0], $ground[2], 12, 'grey, not a debug colour');
+    }
+
+    #[DataProvider('backends')]
     public function testReactiveViewMarksTransparentSurfacesOnly(string $backend): void
     {
         putenv(VioMotionDebugPass::ENV . '=reactive');

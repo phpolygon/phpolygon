@@ -26,6 +26,7 @@ use PHPolygon\Rendering\Command\SetWind;
 use PHPolygon\Rendering\PostProcess\VioFxaaPass;
 use PHPolygon\Rendering\PostProcess\VioMotionDebugPass;
 use PHPolygon\Rendering\PostProcess\VioShadowDebugPass;
+use PHPolygon\Rendering\PostProcess\VioTaaPass;
 use PHPolygon\Rendering\Quality\AntiAliasing;
 use VioContext;
 use VioCubemap;
@@ -411,6 +412,12 @@ class VioRenderer3D implements Renderer3DInterface
 
     private ?Quality\GraphicsCapabilities $capabilities = null;
 
+    /** Lazy temporal resolve (TAA / TAAU). Allocated on the first temporal frame. */
+    private ?VioTaaPass $taaPass = null;
+    /** RGBA8 display-size target the temporal present sharpens from (RCAS). */
+    private ?\VioRenderTarget $temporalSharpenTarget = null;
+    private string $temporalSharpenKey = '';
+
     /** Lazy temporal-input debug view. Allocated when PHPOLYGON_VIO_DEBUG_VIEW is set. */
     private ?VioMotionDebugPass $motionDebugPass = null;
 
@@ -547,6 +554,15 @@ class VioRenderer3D implements Renderer3DInterface
     public function motionVectorTarget(): ?VioRenderTarget
     {
         return $this->motionThisFrame ? $this->mrtTarget : null;
+    }
+
+    /**
+     * The temporal resolve's output of this frame (display size, RGBA16F),
+     * null when no temporal technique ran. Test / diagnostic hook.
+     */
+    public function temporalOutputTarget(): ?VioRenderTarget
+    {
+        return $this->temporalFrame !== null ? $this->taaPass?->historyTarget() : null;
     }
 
     /**
@@ -977,7 +993,7 @@ class VioRenderer3D implements Renderer3DInterface
             return;
         }
 
-        if ($this->settings->antiAliasing === AntiAliasing::Fxaa && $this->fxaaPass === null) {
+        if ($this->fxaaSelected() && $this->fxaaPass === null) {
             $this->fxaaPass = new VioFxaaPass($this->ctx);
         }
 
@@ -1109,12 +1125,32 @@ class VioRenderer3D implements Renderer3DInterface
         // Unbind the offscreen target so subsequent draws hit the swapchain.
         $target->unbind();
 
+        // Temporal resolve (TAA / TAAU): after composite, SSR and outlines -
+        // the finished scene colour - and before bloom, at display resolution.
+        // From here on the resolve's output stands in for the scene colour.
+        $temporal = false;
+        if ($this->motionThisFrame) {
+            PerfProfiler::begin('render3d.post.taa');
+            $resolved = $this->resolveTemporal($sceneTex, $target, $quad);
+            PerfProfiler::end();
+            if ($resolved !== null) {
+                $sceneTex = $resolved;
+                $temporal = true;
+            }
+        }
+
         // Bloom (GraphicsSettings::$bloom): extract + blur the bright pixels of
         // the rendered scene; the present shader adds the glow back. Runs while
         // the offscreen colour is in shader-resource state (just unbound), and
         // leaves the swapchain bound for the present pass below.
         $bloomTex = $this->settings->bloom ? $this->renderBloom($sceneTex, $quad) : null;
         $post = $this->postFinishParams();
+
+        if ($temporal) {
+            $this->presentTemporal($sceneTex, $quad, $bloomTex, $post);
+            $this->offscreenActive = false;
+            return;
+        }
 
         if ($this->fsrApplies($target) && $this->presentWithFsr($sceneTex, $target, $quad, $bloomTex, $post)) {
             $this->offscreenActive = false;
@@ -1123,27 +1159,129 @@ class VioRenderer3D implements Renderer3DInterface
 
         vio_viewport($this->ctx, 0, 0, $this->backbufferWidth, $this->backbufferHeight);
 
-        if ($this->settings->antiAliasing === AntiAliasing::Fxaa && $this->fxaaPass !== null) {
+        if ($this->fxaaSelected() && $this->fxaaPass !== null) {
             $this->fxaaPass->apply(
                 $sceneTex, $target->width(), $target->height(), $quad,
                 $bloomTex, $this->bloomIntensity, $post,
             );
         } else {
-            $this->bindPostProcessPipeline('passthrough_blit');
-            vio_bind_texture($this->ctx, $sceneTex, 0);
-            vio_set_uniform($this->ctx, 'u_source', 0);
-            if ($bloomTex !== null) {
-                vio_bind_texture($this->ctx, $bloomTex, 1);
-                vio_set_uniform($this->ctx, 'u_bloom', 1);
-                vio_set_uniform($this->ctx, 'u_bloom_intensity', $this->bloomIntensity);
-            } else {
-                vio_set_uniform($this->ctx, 'u_bloom_intensity', 0.0);
-            }
-            $this->setPostFinishUniforms($post);
-            vio_draw($this->ctx, $quad);
+            $this->drawPassthrough($sceneTex, $quad, $bloomTex, $post);
         }
 
         $this->offscreenActive = false;
+    }
+
+    /**
+     * FXAA runs in the present: selected, or TAA selected on a backend without
+     * the temporal path ({@see AntiAliasing::fallback()}). A frame that went
+     * through the temporal resolve never reaches it.
+     */
+    private function fxaaSelected(): bool
+    {
+        $aa = $this->settings->antiAliasing;
+        return $aa === AntiAliasing::Fxaa || ($aa === AntiAliasing::Taa && !$this->temporalSupported());
+    }
+
+    /**
+     * Bloom, tonemap, grade and vignette of $sceneTex into the bound target
+     * (passthrough_blit at the current viewport).
+     *
+     * @param array{lift: list<float>, gamma: list<float>, gain: list<float>, saturation: float, vignette: float, viewport: list<float>, hdr: int, exposure: float, pq: int, paperWhite: float} $post
+     */
+    private function drawPassthrough(VioTexture $sceneTex, VioMesh $quad, ?VioTexture $bloomTex, array $post): void
+    {
+        $this->bindPostProcessPipeline('passthrough_blit');
+        vio_bind_texture($this->ctx, $sceneTex, 0);
+        vio_set_uniform($this->ctx, 'u_source', 0);
+        if ($bloomTex !== null) {
+            vio_bind_texture($this->ctx, $bloomTex, 1);
+            vio_set_uniform($this->ctx, 'u_bloom', 1);
+            vio_set_uniform($this->ctx, 'u_bloom_intensity', $this->bloomIntensity);
+        } else {
+            vio_set_uniform($this->ctx, 'u_bloom_intensity', 0.0);
+        }
+        $this->setPostFinishUniforms($post);
+        vio_draw($this->ctx, $quad);
+    }
+
+    /**
+     * Run the temporal resolve on the finished scene colour. Returns the
+     * display-size result, or null when the pass cannot run (the frame is then
+     * presented without it and the history starts over next time).
+     */
+    private function resolveTemporal(VioTexture $sceneTex, VioOffscreenTarget $target, VioMesh $quad): ?VioTexture
+    {
+        $frame = $this->temporalFrame;
+        $mrt = $this->mrtTarget;
+        if ($frame === null || $mrt === null) {
+            return null;
+        }
+        $this->taaPass ??= new VioTaaPass($this->ctx, $this->conventions());
+        $resolved = $this->taaPass->apply(
+            $sceneTex,
+            vio_render_target_texture($mrt, self::MOTION_ATTACHMENT),
+            vio_render_target_texture($mrt, (int) constant('VIO_RT_DEPTH')),
+            vio_render_target_texture($mrt, self::REACTIVE_ATTACHMENT),
+            $target->width(),
+            $target->height(),
+            max(1, $this->backbufferWidth),
+            max(1, $this->backbufferHeight),
+            $frame,
+            $quad,
+        );
+        if ($resolved === null) {
+            $this->temporalCamera->reset('resolve-unavailable');
+        }
+        return $resolved;
+    }
+
+    /**
+     * Present the temporal resolve. With sharpening on (upscaleSharpness > 0)
+     * the finished colour goes through an RGBA8 display-size target into FSR 1's
+     * RCAS - the temporal blend softens, RCAS restores the edges - otherwise
+     * straight into the swapchain. FXAA never runs on top of a temporal resolve.
+     *
+     * @param array{lift: list<float>, gamma: list<float>, gain: list<float>, saturation: float, vignette: float, viewport: list<float>, hdr: int, exposure: float, pq: int, paperWhite: float} $post
+     */
+    private function presentTemporal(VioTexture $sceneTex, VioMesh $quad, ?VioTexture $bloomTex, array $post): void
+    {
+        $w = max(1, $this->backbufferWidth);
+        $h = max(1, $this->backbufferHeight);
+        $sharpenTarget = null;
+        if ($this->settings->upscaleSharpness > 0.0 && ($this->shaderCache['fsr_rcas'] ?? null) instanceof \VioShader) {
+            $key = "{$w}x{$h}";
+            if ($this->temporalSharpenKey !== $key || $this->temporalSharpenTarget === null) {
+                $this->temporalSharpenTarget = vio_render_target($this->ctx, ['width' => $w, 'height' => $h]) ?: null;
+                $this->temporalSharpenKey = $key;
+            }
+            $sharpenTarget = $this->temporalSharpenTarget;
+        }
+        if ($sharpenTarget === null) {
+            vio_viewport($this->ctx, 0, 0, $w, $h);
+            $this->drawPassthrough($sceneTex, $quad, $bloomTex, $post);
+            return;
+        }
+
+        // 1. Finish (bloom, tonemap, grade, vignette) into the RGBA8 target; the
+        //    HDR10 encoding waits for the last pass.
+        $finish = $post;
+        $finish['pq'] = 0;
+        vio_bind_render_target($this->ctx, $sharpenTarget);
+        vio_viewport($this->ctx, 0, 0, $w, $h);
+        vio_clear($this->ctx, 0, 0, 0, 1);
+        $this->drawPassthrough($sceneTex, $quad, $bloomTex, $finish);
+        vio_unbind_render_target($this->ctx);
+
+        // 2. RCAS into the swapchain.
+        vio_viewport($this->ctx, 0, 0, $w, $h);
+        $this->bindPostProcessPipeline('fsr_rcas');
+        vio_bind_texture($this->ctx, vio_render_target_texture($sharpenTarget), 0);
+        vio_set_uniform($this->ctx, 'u_source', 0);
+        vio_set_uniform($this->ctx, 'u_size', [(float) $w, (float) $h]);
+        vio_set_uniform($this->ctx, 'u_sharpness', 2.0 * (1.0 - $this->settings->upscaleSharpness));
+        vio_set_uniform($this->ctx, 'u_output_pq', $post['pq']);
+        vio_set_uniform($this->ctx, 'u_paper_white', $post['paperWhite']);
+        vio_draw($this->ctx, $quad);
     }
 
     /**
@@ -1198,7 +1336,7 @@ class VioRenderer3D implements Renderer3DInterface
         vio_bind_render_target($this->ctx, $low);
         vio_viewport($this->ctx, 0, 0, $lowW, $lowH);
         vio_clear($this->ctx, 0, 0, 0, 1);
-        if ($this->settings->antiAliasing === AntiAliasing::Fxaa && $this->fxaaPass !== null) {
+        if ($this->fxaaSelected() && $this->fxaaPass !== null) {
             $this->fxaaPass->apply($sceneTex, $lowW, $lowH, $quad, $bloomTex, $this->bloomIntensity, $lowPost);
         } else {
             $this->bindPostProcessPipeline('passthrough_blit');
@@ -1270,27 +1408,39 @@ class VioRenderer3D implements Renderer3DInterface
             && $this->fsrShadersReady()) {
             $this->capabilities = null;
         }
+        if ($this->capabilities !== null) {
+            return $this->capabilities;
+        }
+        // TAA and TAAU run where the MRT scene path can carry motion vectors and
+        // the resolve can sample the depth of a colour target (php-vio >= 2.32).
+        $temporal = $this->temporalSupported();
+        $upscalers = [Quality\Upscaler::Off];
+        if ($this->fsrShadersReady()) {
+            $upscalers[] = Quality\Upscaler::Fsr1;
+        }
+        if ($temporal) {
+            $upscalers[] = Quality\Upscaler::Taau;
+        }
+        // Not offered (yet): a selection falls back along Upscaler::fallbackChain().
+        $notes = [
+            Quality\Upscaler::Fsr3->value => 'Needs the native FidelityFX module in php-vio (not available yet)',
+            Quality\Upscaler::Dlss->value => 'Needs the native DLSS module in php-vio (not available yet)',
+        ];
+        if (!$temporal) {
+            $notes[Quality\Upscaler::Taau->value] = 'Needs multiple render targets and depth sampling (php-vio 2.32+)';
+        }
         return $this->capabilities ??= new Quality\GraphicsCapabilities(
             shadingRate: $this->shadingRateAvailable(),
             hdrOutput: defined('VIO_FEATURE_HDR_OUTPUT') && vio_supports_feature($this->ctx, VIO_FEATURE_HDR_OUTPUT),
             lowLatency: $this->conventions()->isDirect3D(),
             msaa: !defined('VIO_FEATURE_RENDER_TARGET_MSAA')
                 || vio_supports_feature($this->ctx, VIO_FEATURE_RENDER_TARGET_MSAA),
-            // AntiAliasing::Taa falls back to FXAA on this renderer.
-            temporalAntiAliasing: false,
+            temporalAntiAliasing: $temporal,
             screenSpaceReflections: true,
             fieldtracingSdf: $this->supportsTexture3D(),
             surfaceRelief: true,
-            upscalers: $this->fsrShadersReady()
-                ? [Quality\Upscaler::Off, Quality\Upscaler::Fsr1]
-                : [Quality\Upscaler::Off],
-            // Not offered until the temporal resolve / native upscaler modules
-            // land; a selection falls back along Upscaler::fallbackChain().
-            upscalerNotes: [
-                Quality\Upscaler::Taau->value => 'Needs the temporal resolve pass (not available yet)',
-                Quality\Upscaler::Fsr3->value => 'Needs the native FidelityFX module in php-vio (not available yet)',
-                Quality\Upscaler::Dlss->value => 'Needs the native DLSS module in php-vio (not available yet)',
-            ],
+            upscalers: $upscalers,
+            upscalerNotes: $notes,
         );
     }
 
@@ -1603,7 +1753,7 @@ class VioRenderer3D implements Renderer3DInterface
             'motion' => vio_render_target_texture($mrt, self::MOTION_ATTACHMENT),
             'reactive' => vio_render_target_texture($mrt, self::REACTIVE_ATTACHMENT),
             'depth' => vio_render_target_texture($mrt, (int) constant('VIO_RT_DEPTH')),
-            default => false, // history: the temporal resolve's output (see VioTaaPass)
+            default => $this->taaPass?->historyTexture() ?? false,
         };
         if (!$source instanceof VioTexture) {
             return;
@@ -2024,6 +2174,13 @@ class VioRenderer3D implements Renderer3DInterface
             PerfProfiler::end();
             $this->bindSceneTarget($hdrTarget);
             vio_viewport($this->ctx, 0, 0, $sceneViewportW, $sceneViewportH);
+            if ($this->motionThisFrame) {
+                // The composite blends over the scene target and keeps it where
+                // nothing was drawn; the offscreen target is not cleared per
+                // frame, so without a sky last frame's pixels would stay - and
+                // the temporal resolve would take them for this frame's.
+                vio_clear($this->ctx, 0.0, 0.0, 0.0, 1.0);
+            }
             PerfProfiler::begin('render3d.submit.composite');
             $this->compositeMrt();
             PerfProfiler::end();
