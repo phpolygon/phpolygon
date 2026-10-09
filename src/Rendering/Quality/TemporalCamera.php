@@ -36,6 +36,8 @@ final class TemporalCamera
      * @param bool  $jitter       false: the camera's own projection (motion
      *                            vectors without temporal accumulation)
      * @param float $time         the frame clock the vertex animation runs on
+     * @param ?int  $phaseCount   jitter cycle length a native upscaler asks for
+     *                            (null: {@see TemporalJitter::phaseCount()})
      */
     public function begin(
         Mat4 $view,
@@ -47,6 +49,7 @@ final class TemporalCamera
         int $displayHeight,
         bool $jitter,
         float $time = 0.0,
+        ?int $phaseCount = null,
     ): TemporalFrame {
         $size = [$renderWidth, $renderHeight, $displayWidth, $displayHeight];
         $reason = $this->pendingReset;
@@ -61,7 +64,7 @@ final class TemporalCamera
         $this->size = $size;
 
         $frame = $jitter
-            ? TemporalJitter::jitter($view, $projection, $this->frameIndex, $renderWidth, $renderHeight, $displayWidth)
+            ? TemporalJitter::jitter($view, $projection, $this->frameIndex, $renderWidth, $renderHeight, $displayWidth, $phaseCount)
             : TemporalJitter::none($view, $projection);
         $this->frameIndex++;
 

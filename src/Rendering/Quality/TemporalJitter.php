@@ -57,6 +57,8 @@ final class TemporalJitter
      * The frame's jittered camera. $renderWidth/$renderHeight are the size of
      * the target the scene rasterises into, $displayWidth the width it is
      * finally presented at (equal to $renderWidth for TAA without upscaling).
+     * $phaseCount overrides the sequence length (a native upscaler names its
+     * own: FSR and DLSS truncate 8 * ratio^2 where {@see phaseCount()} rounds up).
      */
     public static function jitter(
         Mat4 $view,
@@ -65,8 +67,9 @@ final class TemporalJitter
         int $renderWidth,
         int $renderHeight,
         int $displayWidth,
+        ?int $phaseCount = null,
     ): JitteredProjection {
-        $phases = self::phaseCount($renderWidth, $displayWidth);
+        $phases = $phaseCount !== null && $phaseCount > 0 ? $phaseCount : self::phaseCount($renderWidth, $displayWidth);
         $phase = (($frameIndex % $phases) + $phases) % $phases;
         [$px, $py] = self::pixelOffset($phase, $phases);
         $dx = 2.0 * $px / max(1, $renderWidth);
