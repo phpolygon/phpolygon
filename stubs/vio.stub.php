@@ -330,20 +330,36 @@ function vio_bind_cubemap(VioContext $ctx, VioCubemap $cubemap, int $unit): void
 // ----------------------------------------------------------------
 
 /**
- * @param array<string, mixed> $config Keys: width, height, depth_only (bool)
+ * Keys: width, height, depth_only (bool), hdr, samples, cube, size, mipmaps, layers,
+ * 'attachments' => VIO_FORMAT_*[] (MRT; php-vio >= 2.32: up to VIO_MAX_COLOR_ATTACHMENTS = 8,
+ * before 4), 'storage' => bool (php-vio >= 2.32, VIO_FEATURE_RENDER_TARGET_STORAGE = 69, D3D12 /
+ * Vulkan: the colour attachments double as compute storage images; the output of
+ * vio_upscaler_dispatch()).
+ *
+ * @param array<string, mixed> $config
  * @return VioRenderTarget|false
  */
 function vio_render_target(VioContext $ctx, array $config): VioRenderTarget|false {}
 
 function vio_bind_render_target(VioContext $ctx, VioRenderTarget $target, int $face = -1, int $level = 0): void {}
 function vio_render_target_cubemap(VioRenderTarget $target): VioCubemap|false {}
-function vio_read_render_target(VioRenderTarget $target, int $face = -1, int $attachment = 0): string|false {}
+
+/**
+ * Top-down RGBA8 readback. php-vio >= 2.32: ['raw' => true] returns the attachment's texels
+ * in its own format instead (bit-exact halves / floats / packed uint32; not for depth_only).
+ *
+ * @param array{raw?: bool}|null $options
+ */
+function vio_read_render_target(VioRenderTarget $target, int $face = -1, int $attachment = 0, ?array $options = null): string|false {}
 function vio_generate_mipmaps(VioContext $ctx, VioRenderTarget|VioTexture|VioCubemap $object): bool {}
 
 function vio_unbind_render_target(VioContext $ctx): void {}
 
 /**
  * Get the depth or color texture from a render target for sampling ($attachment = MRT index).
+ * php-vio >= 2.32: $attachment = VIO_RT_DEPTH selects the depth of a colour target
+ * (VIO_FEATURE_RENDER_TARGET_DEPTH_SAMPLE = 68; single-sample 2D targets). VIO_RT_DEPTH (-1) and the
+ * feature id are looked up with constant() - older builds lack them.
  */
 function vio_render_target_texture(VioRenderTarget $target, int $attachment = 0): VioTexture {}
 
@@ -567,19 +583,39 @@ function vio_texture_ktx2(VioContext $context, string $bytes, ?array $options = 
 function vio_set_shading_rate(VioContext $context, int $rate): bool {}
 
 /**
- * php-vio >= 2.32 / 2.33: native temporal upscalers (FSR 3.1, DLSS) on D3D12 / Vulkan.
- * Provider ids VIO_UPSCALER_FSR3 = 1, VIO_UPSCALER_DLSS = 2; quality modes
- * VIO_UPSCALE_NATIVE_AA = 0 .. VIO_UPSCALE_ULTRA_PERFORMANCE = 4;
+ * php-vio >= 2.32: native temporal upscalers (FSR 3.1, DLSS) on D3D12 / Vulkan.
+ * Provider ids VIO_UPSCALER_FSR3 = 1, VIO_UPSCALER_DLSS = 2 (VIO_UPSCALER_XESS = 3 reserved);
+ * quality modes VIO_UPSCALE_NATIVE_AA = 0 .. VIO_UPSCALE_ULTRA_PERFORMANCE = 4;
  * feature VIO_FEATURE_UPSCALER_NATIVE = 70 (looked up with constant(), older builds lack it).
+ *
+ * FSR 3.1 is built in and loads the FidelityFX runtime (`vio.ffx_path` / VIO_FFX_PATH).
+ * DLSS is not part of php-vio: it comes from the plugin vio_dlss.dll (upscaler plugin ABI 1)
+ * found via `vio.dlss_plugin_path` / VIO_DLSS_PLUGIN, else next to the PHP executable,
+ * php_vio, PATH; the plugin loads NVIDIA's nvngx_dlss.dll (`vio.dlss_path` / VIO_DLSS_PATH)
+ * and reads `vio.dlss_project_id` / `vio.dlss_engine_version`. Missing pieces: false, no warning.
  */
 final class VioUpscaler {}
 
 function vio_upscaler_supported(VioContext $context, int $provider = 1): bool {}
 
-/** @return array<string, mixed> */
+/**
+ * Provider state: provider ('fsr3' | 'dlss'), backend, supported, reason, version, driver,
+ * library, plugin (the plugin library the provider came from, '' when built in), device,
+ * live, host_bytes; with a VioUpscaler also valid, quality, render_width, render_height,
+ * display_width, display_height, preset ('' = provider default), jitter_phases, gpu_memory.
+ *
+ * @return array<string, mixed>
+ */
 function vio_upscaler_info(VioContext $context, VioUpscaler|int $which = 1): array {}
 
-/** @param array<string, mixed> $options */
+/**
+ * Options: display_width, display_height (required), provider, quality, render_width,
+ * render_height, hdr, depth_inverted, depth_infinite, auto_exposure, dynamic_resolution,
+ * jittered_motion, debug, 'preset' => one letter or null (DLSS model: 'j' | 'k' | 'l' | 'm',
+ * CNN 'e' | 'f'; null = the provider's default per mode; FSR 3.1 has none: false + warning).
+ *
+ * @param array<string, mixed> $options
+ */
 function vio_upscaler_create(VioContext $context, array $options): VioUpscaler|false {}
 
 /** @param array<string, mixed> $inputs */
