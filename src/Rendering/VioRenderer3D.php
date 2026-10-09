@@ -2173,13 +2173,16 @@ class VioRenderer3D implements Renderer3DInterface
         // naive mapping comes out vertically mirrored. Flipping v here once makes
         // every fullscreen pass that samples an RT (present blit, FXAA, bloom)
         // render upright. The atmospheric sky reconstructs its ray from NDC, not
-        // v_uv, so it is unaffected.
+        // v_uv, so it is unaffected. OpenGL render targets keep row 0 at the
+        // bottom (NDC -1): there V maps straight - flipping it there presented
+        // every offscreen frame upside down.
+        [$vBottom, $vTop] = $this->conventions()->flipRenderTargetClipY() ? [1, 0] : [0, 1];
         $this->screenQuad = vio_mesh($this->ctx, [
             'vertices' => [
-                -1, -1, 0,  0, 1,
-                 1, -1, 0,  1, 1,
-                 1,  1, 0,  1, 0,
-                -1,  1, 0,  0, 0,
+                -1, -1, 0,  0, $vBottom,
+                 1, -1, 0,  1, $vBottom,
+                 1,  1, 0,  1, $vTop,
+                -1,  1, 0,  0, $vTop,
             ],
             'indices' => [0, 1, 2, 0, 2, 3],
             'layout' => [VIO_FLOAT3, VIO_FLOAT2],
