@@ -282,6 +282,8 @@ class Engine
             $this->window = new NullWindow($config->width, $config->height, $config->title);
             $this->renderer2D = new NullRenderer2D($config->width, $config->height);
         } elseif ($this->useVio) {
+            // DLSS project id / upscaler runtime directory: before the context.
+            \PHPolygon\Rendering\NativeUpscalerIni::apply($config);
             $this->window = new VioWindow(
                 $config->width,
                 $config->height,

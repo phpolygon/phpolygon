@@ -147,5 +147,20 @@ class EngineConfig
          * Append-only; rotation is left to the developer.
          */
         public readonly string $devLogPath = 'saves/dev.log',
+        /**
+         * The game's NVIDIA NGX project id for DLSS (php-vio ini
+         * vio.dlss_project_id), a random GUID the game generates once and
+         * keeps. '' leaves php-vio's own id - fine for development; a game
+         * that ships DLSS sets its own. Set before the vio context exists
+         * ({@see \PHPolygon\Rendering\NativeUpscalerIni}).
+         */
+        public readonly string $dlssProjectId = '',
+        /**
+         * Directory of the native upscaler runtimes the game ships
+         * (amd_fidelityfx_dx12.dll / _vk.dll, nvngx_dlss.dll /
+         * libnvidia-ngx-dlss.so): php-vio ini vio.ffx_path and vio.dlss_path.
+         * '' = next to the executable, next to php_vio, then PATH.
+         */
+        public readonly string $upscalerRuntimePath = '',
     ) {}
 }
