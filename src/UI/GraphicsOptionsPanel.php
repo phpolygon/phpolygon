@@ -18,6 +18,7 @@ use PHPolygon\Rendering\Quality\ShadingRate;
 use PHPolygon\Rendering\Quality\ShadowQuality;
 use PHPolygon\Rendering\Quality\SurfaceRelief;
 use PHPolygon\Rendering\Quality\TextureQuality;
+use PHPolygon\Rendering\Quality\UpscaleQuality;
 use PHPolygon\Rendering\Quality\Upscaler;
 
 /**
@@ -126,19 +127,25 @@ final class GraphicsOptionsPanel
 
         $this->ui->label($enabled ? 'Manual Settings' : 'Manual Settings (locked - Adaptive mode active)');
 
-        // Render scale
-        $rs = $this->ui->slider('graphics.renderScale', 'Render Scale', $s->renderScale,
+        $effective = $s->effectiveUpscaler($caps);
+
+        // Render scale - a temporal upscaler's quality preset decides it unless Custom.
+        $presetDecides = $effective->isTemporal() && $s->upscaleQuality !== UpscaleQuality::Custom;
+        $rsLabel = $presetDecides ? "Render Scale (set by {$s->upscaleQuality->label()})" : 'Render Scale';
+        $rs = $this->gated(!$presetDecides, fn(): float => $this->ui->slider('graphics.renderScale', $rsLabel,
+            $presetDecides ? $s->effectiveRenderScale($caps) : $s->renderScale,
             $s->upscaler->isTemporal() ? GraphicsSettings::TEMPORAL_RENDER_SCALE_MIN : GraphicsSettings::RENDER_SCALE_MIN,
             GraphicsSettings::RENDER_SCALE_MAX,
-        );
-        if ($enabled && abs($rs - $s->renderScale) > 0.01) {
+        ));
+        if ($enabled && !$presetDecides && abs($rs - $s->renderScale) > 0.01) {
             $manager->update(static fn(GraphicsSettings $g): GraphicsSettings => $g->with(renderScale: $rs));
         }
 
-        // Upscaler for render scales below 1 - only the ones this renderer implements.
+        // Upscaler - only the ones this renderer runs. A stored choice it does not
+        // run shows what runs instead, and a hint says why.
         $upscalers = $caps->upscalers;
         $upscalerLabels = array_map(static fn(Upscaler $u): string => $u->label(), $upscalers);
-        $idx = array_search($s->upscaler, $upscalers, true);
+        $idx = array_search($effective, $upscalers, true);
         if (!is_int($idx)) {
             $idx = 0;
         }
@@ -149,7 +156,30 @@ final class GraphicsOptionsPanel
             $picked = $upscalers[$newIdx];
             $manager->update(static fn(GraphicsSettings $g): GraphicsSettings => $g->with(upscaler: $picked));
         }
-        if ($s->upscaler === Upscaler::Fsr1 && $caps->supportsUpscaler(Upscaler::Fsr1)) {
+        $hint = self::upscalerHint($s, $caps);
+        if ($hint !== null) {
+            $this->ui->label($hint, $this->ui->getStyle()->disabledTextColor);
+        }
+
+        // Quality preset of the temporal upscalers (TAAU, FSR 3, DLSS).
+        if ($effective->isTemporal()) {
+            $qualities = UpscaleQuality::cases();
+            $qualityLabels = array_map(static fn(UpscaleQuality $q): string => $q->label(), $qualities);
+            $qIdx = array_search($s->upscaleQuality, $qualities, true);
+            if (!is_int($qIdx)) {
+                $qIdx = 0;
+            }
+            $this->ui->label('Upscale Quality');
+            $newQ = $this->ui->dropdown('graphics.upscaleQuality', $qualityLabels, $qIdx, 0.0, 0);
+            if ($enabled && $newQ !== $qIdx && isset($qualities[$newQ])) {
+                $pickedQ = $qualities[$newQ];
+                $manager->update(static fn(GraphicsSettings $g): GraphicsSettings => $g->with(upscaleQuality: $pickedQ));
+            }
+        }
+
+        // Sharpening runs after FSR 1, after every temporal resolve (FSR 3 sharpens
+        // inside its own pass) and after TAA.
+        if ($effective !== Upscaler::Off || $s->antiAliasing === AntiAliasing::Taa) {
             $sharp = $this->ui->slider('graphics.upscaleSharpness', 'Sharpness', $s->upscaleSharpness, 0.0, 1.0);
             if ($enabled && abs($sharp - $s->upscaleSharpness) > 0.01) {
                 $manager->update(static fn(GraphicsSettings $g): GraphicsSettings => $g->with(upscaleSharpness: $sharp));
@@ -405,6 +435,23 @@ final class GraphicsOptionsPanel
         } finally {
             $this->ui->setInteractive($wasInteractive);
         }
+    }
+
+    /**
+     * Why the stored upscaler does not run on this machine and what runs
+     * instead, from the renderer's note ({@see GraphicsCapabilities::upscalerNote()});
+     * null when the selection runs. The stored choice is kept either way, so a
+     * settings file carried to a capable machine picks it up again.
+     */
+    public static function upscalerHint(GraphicsSettings $settings, GraphicsCapabilities $caps): ?string
+    {
+        $selected = $settings->upscaler;
+        if ($caps->supportsUpscaler($selected)) {
+            return null;
+        }
+        $instead = $settings->effectiveUpscaler($caps);
+        $note = $caps->upscalerNote($selected) ?? 'not supported here';
+        return "{$selected->label()}: {$note} \u{2013} using {$instead->label()}";
     }
 
     private static function supportLabel(string $label, bool $supported): string
