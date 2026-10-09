@@ -246,6 +246,29 @@ object share a single outline. Depth test is off: the outline shows through geom
 same forward and MRT. Backends without stencil (Metal) skip it; `outlineSupported()` reports it.
 `VioRendererOutlineTest` pins ring position, seam-free parts and the MRT path.
 
+**Temporal AA / TAAU** (`AntiAliasing::Taa`, `Upscaler::Taau`; needs MRT plus
+`VIO_FEATURE_RENDER_TARGET_DEPTH_SAMPLE`, gated per feature, not per php-vio version):
+- The frame takes the MRT path even without G-buffer consumers. `Quality\TemporalCamera` jitters the
+  projection (`TemporalJitter`, phases scale with the upscale ratio) and keeps last frame's UNJITTERED
+  view-projection; shadow and environment passes stay unjittered. History resets on `SetCamera::$cut`,
+  render/display resize, `applySettings()` and `resetTemporalHistory()`; `temporalFrame()` reports it.
+- `mesh3d` with `PHPOLYGON_MOTION` (only together with `PHPOLYGON_MRT`) adds `o_motion` (RG16F,
+  attachment 4, `prevUv - uv` in texture space - the Y sign follows `flipRenderTargetClipY()`) and
+  `o_reactive` (R8, attachment 5, transparent coverage, additive). Opaque pipelines mask 5, transparent
+  ones mask 4, sky/skybox both; their cache keys carry `:mv`. Moved entities upload `u_prev_model`
+  behind a sticky `u_has_prev` (from `DrawMesh::$prevModelMatrix`); vertex animation replays at
+  `u_time_prev`. Without a temporal technique nothing of this exists (4 attachments, same shaders).
+- `PostProcess\VioTaaPass` runs in the present stage after composite/SSR/outlines and before bloom:
+  `taa_dilate` (render size: nearest-depth motion, sky motion reconstructed from depth, farthest depth)
+  and `taa_resolve` (display size: narrow jitter-aware reconstruction, Catmull-Rom history, YCoCg
+  variance clip - wider where nothing moves -, disocclusion, weighted accumulation in Karis space).
+  History ping-pongs in RGBA16F; RCAS sharpens the finished frame (`upscaleSharpness`); FXAA never
+  runs on top. Without the feature TAA falls back to FXAA and TAAU along `Upscaler::fallbackChain()`.
+- Debug: `PHPOLYGON_VIO_DEBUG_VIEW=motion|reactive|depth|history` (`VioMotionDebugPass`, also listed in
+  the DevMonitor); `PHPOLYGON_VIO_TEMPORAL=0` switches the path off. Tests: `VioRendererMotionVectorTest`
+  (vector error against the analytic reprojection), `VioTaaResolveTest` (SSIM against 4x SSAA, trail,
+  cut), `VioTemporalDebugViewTest`.
+
 **Storage-buffer instances** (`DrawMeshInstanced::fromStorageBuffer`, e.g. GPU particles): the matrices never
 leave GPU memory, but the regular programs read instance matrices from vertex attributes. The draw
 therefore switches to `default_storage` (`storageInstancingVertexSource()`: mesh3d.vert with
