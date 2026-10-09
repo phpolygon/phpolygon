@@ -565,3 +565,27 @@ function vio_texture_ktx2(VioContext $context, string $bytes, ?array $options = 
  * draw, sticky until changed; false when the backend has no VRS or the rate is not offered.
  */
 function vio_set_shading_rate(VioContext $context, int $rate): bool {}
+
+/**
+ * php-vio >= 2.32 / 2.33: native temporal upscalers (FSR 3.1, DLSS) on D3D12 / Vulkan.
+ * Provider ids VIO_UPSCALER_FSR3 = 1, VIO_UPSCALER_DLSS = 2; quality modes
+ * VIO_UPSCALE_NATIVE_AA = 0 .. VIO_UPSCALE_ULTRA_PERFORMANCE = 4;
+ * feature VIO_FEATURE_UPSCALER_NATIVE = 70 (looked up with constant(), older builds lack it).
+ */
+final class VioUpscaler {}
+
+function vio_upscaler_supported(VioContext $context, int $provider = 1): bool {}
+
+/** @return array<string, mixed> */
+function vio_upscaler_info(VioContext $context, VioUpscaler|int $which = 1): array {}
+
+/** @param array<string, mixed> $options */
+function vio_upscaler_create(VioContext $context, array $options): VioUpscaler|false {}
+
+/** @param array<string, mixed> $inputs */
+function vio_upscaler_dispatch(VioContext $context, VioUpscaler $upscaler, array $inputs): bool {}
+
+function vio_upscaler_destroy(VioUpscaler $upscaler): void {}
+
+/** @return array{width: int, height: int}|false */
+function vio_upscaler_render_size(VioContext $context, int $provider, int $quality, int $display_width, int $display_height): array|false {}

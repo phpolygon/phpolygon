@@ -146,7 +146,7 @@ final class UpscalerDispatch
      * layout ({@see \PHPolygon\Math\Mat4::perspective()}: column-major,
      * clip.w = -z_view); nulls for anything else.
      *
-     * @param array<int, float> $m
+     * @param array<float> $m
      * @return array{0: ?float, 1: ?float, 2: ?float}
      */
     private static function cameraData(array $m): array
