@@ -6,10 +6,13 @@ namespace PHPolygon\UI;
 
 use PHPolygon\Engine;
 use PHPolygon\Rendering\Color;
+use PHPolygon\Rendering\PostProcess\VioMotionDebugPass;
+use PHPolygon\Rendering\Quality\TemporalFrame;
 use PHPolygon\Rendering\Renderer2DInterface;
 use PHPolygon\Rendering\Quality\ThermalSourceFrametime;
 use PHPolygon\Rendering\Quality\ThermalSourceOs;
 use PHPolygon\Rendering\TextAlign;
+use PHPolygon\Rendering\VioRenderer3D;
 
 /**
  * Expanded developer panel rendered in place of the compact PerfOverlay
@@ -139,11 +142,54 @@ final class DevMonitorPanel
             $out[] = ['text' => sprintf('  render work: %.2f ms / frame', $latest), 'tone' => 'dim'];
         }
 
+        $out[] = ['text' => '', 'tone' => 'dim'];
+        $renderer = $engine->renderer3D;
+        foreach (self::temporalLines(
+            $renderer instanceof VioRenderer3D ? $renderer->temporalFrame() : null,
+            VioMotionDebugPass::selectedView(),
+        ) as $line) {
+            $out[] = $line;
+        }
+
         if ($engine->devLogger !== null) {
             $out[] = ['text' => '', 'tone' => 'dim'];
             $out[] = ['text' => 'Log: ' . $engine->devLogger->path(), 'tone' => 'dim'];
         }
 
+        return $out;
+    }
+
+    /**
+     * The temporal section: technique state (render -> display size, jitter
+     * phase, whether the history was dropped this frame) and the active
+     * PHPOLYGON_VIO_DEBUG_VIEW.
+     *
+     * @return list<array{text:string, tone:string}>
+     */
+    public static function temporalLines(?TemporalFrame $frame, ?string $debugView): array
+    {
+        $out = [['text' => 'Temporal:', 'tone' => 'dim']];
+        if ($frame === null) {
+            $out[] = ['text' => '  TAA: off', 'tone' => 'dim'];
+        } else {
+            $out[] = [
+                'text' => sprintf(
+                    '  TAA: %dx%d -> %dx%d, phase %d/%d, %s',
+                    $frame->renderWidth,
+                    $frame->renderHeight,
+                    $frame->displayWidth,
+                    $frame->displayHeight,
+                    $frame->jitter->phase + 1,
+                    $frame->jitter->phaseCount,
+                    $frame->historyValid ? 'history ok' : 'history reset (' . ($frame->resetReason ?? '?') . ')',
+                ),
+                'tone' => $frame->historyValid ? 'ok' : 'warn',
+            ];
+        }
+        $out[] = [
+            'text' => '  debug view: ' . ($debugView ?? 'off') . ' (' . VioMotionDebugPass::ENV . ')',
+            'tone' => $debugView !== null ? 'warn' : 'dim',
+        ];
         return $out;
     }
 

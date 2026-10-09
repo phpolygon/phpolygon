@@ -25,5 +25,10 @@ final class TemporalFrame
         public readonly ?string $resetReason,
         /** Last frame's animation clock (this frame's when the history was dropped). */
         public readonly float $prevTime,
+        /** Size the scene rasterises at and the size the resolve writes. */
+        public readonly int $renderWidth = 0,
+        public readonly int $renderHeight = 0,
+        public readonly int $displayWidth = 0,
+        public readonly int $displayHeight = 0,
     ) {}
 }

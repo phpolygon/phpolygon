@@ -80,6 +80,10 @@ final class TemporalCamera
             historyValid: $valid,
             resetReason: $reason,
             prevTime: $prevTime,
+            renderWidth: $renderWidth,
+            renderHeight: $renderHeight,
+            displayWidth: $displayWidth,
+            displayHeight: $displayHeight,
         );
     }
 

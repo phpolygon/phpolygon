@@ -24,6 +24,7 @@ use PHPolygon\Rendering\Command\SetSkybox;
 use PHPolygon\Rendering\Command\SetWaveAnimation;
 use PHPolygon\Rendering\Command\SetWind;
 use PHPolygon\Rendering\PostProcess\VioFxaaPass;
+use PHPolygon\Rendering\PostProcess\VioMotionDebugPass;
 use PHPolygon\Rendering\PostProcess\VioShadowDebugPass;
 use PHPolygon\Rendering\Quality\AntiAliasing;
 use VioContext;
@@ -409,6 +410,9 @@ class VioRenderer3D implements Renderer3DInterface
     private string $fsrTargetKey = '';
 
     private ?Quality\GraphicsCapabilities $capabilities = null;
+
+    /** Lazy temporal-input debug view. Allocated when PHPOLYGON_VIO_DEBUG_VIEW is set. */
+    private ?VioMotionDebugPass $motionDebugPass = null;
 
     /** Lazy shadow-map raw-depth debug blit. Allocated when PHPOLYGON_DEBUG_SHADOWMAP=1. */
     private ?VioShadowDebugPass $shadowDebugPass = null;
@@ -1480,6 +1484,7 @@ class VioRenderer3D implements Renderer3DInterface
         // UI and post-processing shade every pixel; only the scene pass ran coarse.
         $this->applyShadingRate(Quality\ShadingRate::Full);
         $this->presentOffscreenIfActive();
+        $this->renderTemporalDebugView();
         $this->renderShadowMapDebug();
         vio_draw_3d($this->ctx);
         $this->sampleGpuFrameTime();
@@ -1580,6 +1585,46 @@ class VioRenderer3D implements Renderer3DInterface
      * shows what the shadow map actually STORES, as opposed to the in-game disc
      * which is the comparison RESULT — the two answer different questions.
      */
+    /**
+     * Debug view of the temporal inputs (env PHPOLYGON_VIO_DEBUG_VIEW =
+     * motion | reactive | depth | history), drawn fullscreen over the presented
+     * frame while a temporal technique runs. See {@see VioMotionDebugPass}.
+     */
+    private function renderTemporalDebugView(): void
+    {
+        $view = VioMotionDebugPass::selectedView();
+        $quad = $this->screenQuad;
+        $mrt = $this->mrtTarget;
+        $frame = $this->temporalFrame;
+        if ($view === null || $quad === null || $mrt === null || $frame === null || !$this->motionThisFrame) {
+            return;
+        }
+        $source = match ($view) {
+            'motion' => vio_render_target_texture($mrt, self::MOTION_ATTACHMENT),
+            'reactive' => vio_render_target_texture($mrt, self::REACTIVE_ATTACHMENT),
+            'depth' => vio_render_target_texture($mrt, (int) constant('VIO_RT_DEPTH')),
+            default => false, // history: the temporal resolve's output (see VioTaaPass)
+        };
+        if (!$source instanceof VioTexture) {
+            return;
+        }
+        $this->motionDebugPass ??= new VioMotionDebugPass($this->ctx);
+        $projection = $frame->jitter->unjitteredProjection;
+        // Far plane of a GL-convention perspective projection: m22 = (f+n)/(n-f), m32 = 2fn/(n-f).
+        $m = $projection->toArray();
+        $far = abs($m[10] + 1.0) > 1e-6 ? $m[14] / ($m[10] + 1.0) : 1000.0;
+        vio_viewport($this->ctx, 0, 0, $this->backbufferWidth, $this->backbufferHeight);
+        $this->motionDebugPass->draw(
+            $view,
+            $source,
+            $quad,
+            [(float) $this->mrtWidth, (float) $this->mrtHeight],
+            $projection->inverse()->toArray(),
+            abs($far),
+            $this->sceneTargetIsHdr(),
+        );
+    }
+
     private function renderShadowMapDebug(): void
     {
         if (getenv('PHPOLYGON_DEBUG_SHADOWMAP') !== '1') {
