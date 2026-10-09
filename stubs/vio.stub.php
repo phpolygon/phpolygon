@@ -117,6 +117,21 @@ const VIO_SHADING_RATE_1X2 = 1;
 const VIO_SHADING_RATE_2X1 = 2;
 const VIO_SHADING_RATE_2X2 = 3;
 const VIO_SHADING_RATE_4X4 = 4;
+// php-vio >= 2.32 (temporal rendering, native upscalers); the engine probes them with
+// defined() / constant() because older builds lack them
+const VIO_FEATURE_RENDER_TARGET_DEPTH_SAMPLE = 68;
+const VIO_FEATURE_RENDER_TARGET_STORAGE = 69;
+const VIO_FEATURE_UPSCALER_NATIVE = 70;
+const VIO_MAX_COLOR_ATTACHMENTS = 8;
+const VIO_RT_DEPTH = -1; // vio_render_target_texture($rt, VIO_RT_DEPTH): depth of a colour target
+const VIO_UPSCALER_FSR3 = 1;
+const VIO_UPSCALER_DLSS = 2; // served by the vio_dlss plugin
+const VIO_UPSCALER_XESS = 3; // reserved
+const VIO_UPSCALE_NATIVE_AA = 0;
+const VIO_UPSCALE_QUALITY = 1;
+const VIO_UPSCALE_BALANCED = 2;
+const VIO_UPSCALE_PERFORMANCE = 3;
+const VIO_UPSCALE_ULTRA_PERFORMANCE = 4;
 
 // Render-target colour attachment formats (vio_render_target 'attachments', vio_pipeline 'attachments')
 const VIO_FORMAT_RGBA8      = 0;
