@@ -25,9 +25,11 @@ use PHPolygon\Rendering\Command\SetWaveAnimation;
 use PHPolygon\Rendering\Command\SetWind;
 use PHPolygon\Rendering\PostProcess\VioFxaaPass;
 use PHPolygon\Rendering\PostProcess\VioMotionDebugPass;
+use PHPolygon\Rendering\PostProcess\VioNativeUpscalerPass;
 use PHPolygon\Rendering\PostProcess\VioShadowDebugPass;
 use PHPolygon\Rendering\PostProcess\VioTaaPass;
 use PHPolygon\Rendering\Quality\AntiAliasing;
+use PHPolygon\Rendering\Quality\UpscalerDispatch;
 use VioContext;
 use VioCubemap;
 use VioMesh;
@@ -422,6 +424,18 @@ class VioRenderer3D implements Renderer3DInterface
     private ?\VioRenderTarget $temporalSharpenTarget = null;
     private string $temporalSharpenKey = '';
 
+    /** Native temporal upscaler (FSR 3 / DLSS through php-vio), synced at the frame boundary. */
+    private ?VioNativeUpscalerPass $nativeUpscaler = null;
+    /** @var array<string, string> runtime failures by Upscaler value; those providers are no longer offered */
+    private array $nativeUpscalerFailures = [];
+    /** @var array<string, array{0: int, 1: int}|null> provider render sizes by provider:mode:display */
+    private array $nativeRenderSizes = [];
+    /** The temporal technique that resolved the frame (Taau = the engine's own resolve). */
+    private ?Quality\Upscaler $temporalUpscalerThisFrame = null;
+    /** Wall-clock frame time handed to the native upscaler. */
+    private float $frameTimeMs = 1000.0 / 60.0;
+    private float $lastFrameStart = 0.0;
+
     /** Lazy temporal-input debug view. Allocated when PHPOLYGON_VIO_DEBUG_VIEW is set. */
     private ?VioMotionDebugPass $motionDebugPass = null;
 
@@ -522,7 +536,8 @@ class VioRenderer3D implements Renderer3DInterface
             || $previous->antiAliasing !== $settings->antiAliasing
             || $previous->bloom !== $settings->bloom
             || $previous->hdr !== $settings->hdr
-            || $previous->upscaler !== $settings->upscaler) {
+            || $previous->upscaler !== $settings->upscaler
+            || $previous->upscaleQuality !== $settings->upscaleQuality) {
             $this->offscreenDirty = true;
             // The accumulated history was rendered at another size, format or
             // technique: start over instead of blending it in.
@@ -566,7 +581,133 @@ class VioRenderer3D implements Renderer3DInterface
      */
     public function temporalOutputTarget(): ?VioRenderTarget
     {
-        return $this->temporalFrame !== null ? $this->taaPass?->historyTarget() : null;
+        if ($this->temporalFrame === null) {
+            return null;
+        }
+        $upscaler = $this->temporalUpscalerThisFrame;
+        if ($upscaler !== null && UpscalerDispatch::providerId($upscaler) !== null) {
+            return $this->nativeUpscaler?->outputTarget();
+        }
+        return $this->taaPass?->historyTarget();
+    }
+
+    /**
+     * The temporal technique that resolved this frame: Fsr3 / Dlss (the native
+     * upscaler), Taau (the engine's own resolve, also for plain TAA), null when
+     * none ran. Test / diagnostic hook.
+     */
+    public function temporalUpscalerThisFrame(): ?Quality\Upscaler
+    {
+        return $this->temporalFrame !== null ? $this->temporalUpscalerThisFrame : null;
+    }
+
+    /**
+     * Native upscalers that failed at runtime (create or dispatch returned
+     * false), keyed by {@see Quality\Upscaler} value with php-vio's message.
+     * They are not offered again for the lifetime of the renderer; the
+     * selection walks on along the fallback chain, the stored setting stays.
+     *
+     * @return array<string, string>
+     */
+    public function nativeUpscalerFailures(): array
+    {
+        return $this->nativeUpscalerFailures;
+    }
+
+    /**
+     * The native upscaler (FSR 3 / DLSS) the settings resolve to on this
+     * renderer, null when the engine's own path (or none) runs.
+     */
+    private function nativeUpscalerSelected(): ?Quality\Upscaler
+    {
+        $upscaler = $this->settings->effectiveUpscaler($this->graphicsCapabilities());
+        return UpscalerDispatch::providerId($upscaler) !== null ? $upscaler : null;
+    }
+
+    /**
+     * The size the scene renders at: display x effective render scale, or -
+     * for a native upscaler with a quality preset - the size its provider
+     * asks for (DLSS: NGX's optimal settings).
+     *
+     * @return array{0: int, 1: int}
+     */
+    private function sceneRenderSize(): array
+    {
+        $scale = $this->settings->effectiveRenderScale($this->graphicsCapabilities());
+        $size = [
+            max(1, (int) round($this->backbufferWidth * $scale)),
+            max(1, (int) round($this->backbufferHeight * $scale)),
+        ];
+        $native = $this->nativeUpscalerSelected();
+        if ($native === null || $this->settings->upscaleQuality === Quality\UpscaleQuality::Custom) {
+            return $size;
+        }
+        $provider = (int) UpscalerDispatch::providerId($native);
+        $mode = UpscalerDispatch::qualityMode($this->settings->upscaleQuality, $scale);
+        $key = "{$provider}:{$mode}:{$this->backbufferWidth}x{$this->backbufferHeight}";
+        if (!array_key_exists($key, $this->nativeRenderSizes)) {
+            $wanted = vio_upscaler_render_size($this->ctx, $provider, $mode, max(1, $this->backbufferWidth), max(1, $this->backbufferHeight));
+            $this->nativeRenderSizes[$key] = is_array($wanted) && $wanted['width'] > 0 && $wanted['height'] > 0
+                ? [(int) $wanted['width'], (int) $wanted['height']]
+                : null;
+        }
+        return $this->nativeRenderSizes[$key] ?? $size;
+    }
+
+    /**
+     * Frame boundary: keep, recreate or drop the native upscaler so it matches
+     * the selection, the scene target's size and format and the display size.
+     * Recreation (and destruction) only ever happens here, never mid-frame.
+     */
+    private function syncNativeUpscaler(): void
+    {
+        $native = $this->nativeUpscalerSelected();
+        $target = $this->offscreenTarget;
+        if ($native === null || !$this->offscreenActive || $target === null || $target->samples() > 1
+            || !$this->temporalSupported() || !$this->ensureMotionShaders()) {
+            if ($this->nativeUpscaler?->active()) {
+                $this->nativeUpscaler->release();
+            }
+            return;
+        }
+        $this->nativeUpscaler ??= new VioNativeUpscalerPass($this->ctx);
+        $ok = $this->nativeUpscaler->sync(
+            (int) UpscalerDispatch::providerId($native),
+            UpscalerDispatch::qualityMode(
+                $this->settings->upscaleQuality,
+                $this->settings->effectiveRenderScale($this->graphicsCapabilities()),
+            ),
+            $target->width(),
+            $target->height(),
+            max(1, $this->backbufferWidth),
+            max(1, $this->backbufferHeight),
+            $target->isHdr(),
+        );
+        if (!$ok) {
+            $this->nativeUpscalerFailed($native, $this->nativeUpscaler->lastError());
+        }
+    }
+
+    /**
+     * A native upscaler failed at runtime: say so once, stop offering it (the
+     * capabilities are probed again, so the selection resolves to the next
+     * entry of the fallback chain), and start the next technique from scratch.
+     * The player's setting is left alone.
+     */
+    private function nativeUpscalerFailed(Quality\Upscaler $upscaler, string $message): void
+    {
+        if (!isset($this->nativeUpscalerFailures[$upscaler->value])) {
+            $message = $message !== '' ? $message : 'unknown error';
+            $this->nativeUpscalerFailures[$upscaler->value] = $message;
+            $this->capabilities = null;
+            $next =$this->settings->effectiveUpscaler($this->graphicsCapabilities());
+            fwrite(STDERR, "[VioRenderer3D] {$upscaler->label()} failed, falling back to {$next->label()}: {$message}\n");
+        }
+        $this->capabilities = null;
+        $this->nativeUpscaler?->release();
+        // The render size may change with the technique; history is useless.
+        $this->offscreenDirty = true;
+        $this->temporalCamera->reset('upscaler-fallback');
     }
 
     /**
@@ -654,6 +795,8 @@ class VioRenderer3D implements Renderer3DInterface
             max(1, $this->backbufferHeight),
             true,
             $this->globalTime,
+            // A native upscaler names its own jitter cycle.
+            $this->nativeUpscaler?->jitterPhases(),
         );
         $this->currentProjectionMatrix = $this->temporalFrame->jitter->projection;
     }
@@ -1035,9 +1178,7 @@ class VioRenderer3D implements Renderer3DInterface
             $this->offscreenTarget = new VioOffscreenTarget($this->ctx);
         }
 
-        $scale = $this->settings->effectiveRenderScale($this->graphicsCapabilities());
-        $targetW = max(1, (int)round($this->backbufferWidth  * $scale));
-        $targetH = max(1, (int)round($this->backbufferHeight * $scale));
+        [$targetW, $targetH] = $this->sceneRenderSize();
         $samples = max(1, $this->settings->antiAliasing->sampleCount());
 
         $this->offscreenTarget->resize($targetW, $targetH, $samples, $this->offscreenIsHdr());
@@ -1134,7 +1275,7 @@ class VioRenderer3D implements Renderer3DInterface
         // From here on the resolve's output stands in for the scene colour.
         $temporal = false;
         if ($this->motionThisFrame) {
-            PerfProfiler::begin('render3d.post.taa');
+            PerfProfiler::begin($this->nativeUpscaler?->active() ? 'render3d.post.upscale' : 'render3d.post.taa');
             $resolved = $this->resolveTemporal($sceneTex, $target, $quad);
             PerfProfiler::end();
             if ($resolved !== null) {
@@ -1220,6 +1361,28 @@ class VioRenderer3D implements Renderer3DInterface
         if ($frame === null || $mrt === null) {
             return null;
         }
+
+        // Native upscaler (FSR 3 / DLSS): colour, depth, motion and reactive
+        // straight from the scene targets into its display-size storage output.
+        $native = $this->nativeUpscalerSelected();
+        $scene = $target->renderTarget();
+        if ($native !== null && $this->nativeUpscaler?->active() && $scene !== null) {
+            $dispatch = UpscalerDispatch::fromFrame(
+                $frame,
+                $this->conventions()->flipRenderTargetClipY(),
+                // FSR sharpens itself (RCAS); DLSS has no pass, the present adds ours.
+                $native === Quality\Upscaler::Fsr3 ? $this->settings->upscaleSharpness : 0.0,
+                $this->frameTimeMs,
+            );
+            $output = $this->nativeUpscaler->dispatch($scene, $mrt, self::MOTION_ATTACHMENT, self::REACTIVE_ATTACHMENT, $dispatch);
+            if ($output !== null) {
+                $this->temporalUpscalerThisFrame = $native;
+                return $output;
+            }
+            // This frame goes through the engine's own resolve instead.
+            $this->nativeUpscalerFailed($native, $this->nativeUpscaler->lastError());
+        }
+
         $this->taaPass ??= new VioTaaPass($this->ctx, $this->conventions());
         // The MRT target's textures, looked up once per (re)allocation.
         $inputs = $this->temporalInputs;
@@ -1247,6 +1410,8 @@ class VioRenderer3D implements Renderer3DInterface
         );
         if ($resolved === null) {
             $this->temporalCamera->reset('resolve-unavailable');
+        } else {
+            $this->temporalUpscalerThisFrame = Quality\Upscaler::Taau;
         }
         return $resolved;
     }
@@ -1264,7 +1429,9 @@ class VioRenderer3D implements Renderer3DInterface
         $w = max(1, $this->backbufferWidth);
         $h = max(1, $this->backbufferHeight);
         $sharpenTarget = null;
-        if ($this->settings->upscaleSharpness > 0.0 && ($this->shaderCache['fsr_rcas'] ?? null) instanceof \VioShader) {
+        // FSR 3 ran its own RCAS inside the dispatch: sharpening twice would halo.
+        $sharpened = $this->temporalUpscalerThisFrame === Quality\Upscaler::Fsr3;
+        if (!$sharpened && $this->settings->upscaleSharpness > 0.0 && ($this->shaderCache['fsr_rcas'] ?? null) instanceof \VioShader) {
             $key = "{$w}x{$h}";
             if ($this->temporalSharpenKey !== $key || $this->temporalSharpenTarget === null) {
                 $this->temporalSharpenTarget = vio_render_target($this->ctx, ['width' => $w, 'height' => $h]) ?: null;
@@ -1434,16 +1601,21 @@ class VioRenderer3D implements Renderer3DInterface
         if ($this->fsrShadersReady()) {
             $upscalers[] = Quality\Upscaler::Fsr1;
         }
+        $notes = [];
         if ($temporal) {
             $upscalers[] = Quality\Upscaler::Taau;
-        }
-        // Not offered (yet): a selection falls back along Upscaler::fallbackChain().
-        $notes = [
-            Quality\Upscaler::Fsr3->value => 'Needs the native FidelityFX module in php-vio (not available yet)',
-            Quality\Upscaler::Dlss->value => 'Needs the native DLSS module in php-vio (not available yet)',
-        ];
-        if (!$temporal) {
+        } else {
             $notes[Quality\Upscaler::Taau->value] = 'Needs multiple render targets and depth sampling (php-vio 2.32+)';
+        }
+        // Native upscalers: only what the provider runs on this device. What is
+        // not offered falls back along Upscaler::fallbackChain().
+        foreach ([Quality\Upscaler::Fsr3, Quality\Upscaler::Dlss] as $native) {
+            $note = $this->nativeUpscalerNote($native, $temporal);
+            if ($note === null) {
+                $upscalers[] = $native;
+            } else {
+                $notes[$native->value] = $note;
+            }
         }
         return $this->capabilities ??= new Quality\GraphicsCapabilities(
             shadingRate: $this->shadingRateAvailable(),
@@ -1458,6 +1630,38 @@ class VioRenderer3D implements Renderer3DInterface
             upscalers: $upscalers,
             upscalerNotes: $notes,
         );
+    }
+
+    /**
+     * Why a native upscaler is not offered here, null when it is: it needs the
+     * temporal path (motion vectors), php-vio's native upscaler module
+     * (VIO_FEATURE_UPSCALER_NATIVE) and its provider running on this device -
+     * otherwise php-vio's own reason (missing runtime library, not an RTX GPU,
+     * driver too old, WARP ...). A provider that failed at runtime stays out.
+     */
+    private function nativeUpscalerNote(Quality\Upscaler $upscaler, bool $temporal): ?string
+    {
+        $provider = UpscalerDispatch::providerId($upscaler);
+        if ($provider === null) {
+            return 'Not a native upscaler';
+        }
+        if (isset($this->nativeUpscalerFailures[$upscaler->value])) {
+            return 'Failed on this device: ' . $this->nativeUpscalerFailures[$upscaler->value];
+        }
+        if (!function_exists('vio_upscaler_supported') || !defined('VIO_FEATURE_UPSCALER_NATIVE')) {
+            return 'Needs php-vio with native upscalers (2.32+)';
+        }
+        if (!$temporal) {
+            return 'Needs motion vectors: multiple render targets and depth sampling';
+        }
+        if (!vio_upscaler_supported($this->ctx, $provider)) {
+            $reason = vio_upscaler_info($this->ctx, $provider)['reason'] ?? '';
+            return is_string($reason) && $reason !== '' ? $reason : 'Not supported on this device';
+        }
+        if (!vio_supports_feature($this->ctx, (int) constant('VIO_FEATURE_UPSCALER_NATIVE'))) {
+            return 'Not supported on this device';
+        }
+        return null;
     }
 
     /**
@@ -1633,6 +1837,12 @@ class VioRenderer3D implements Renderer3DInterface
 
         $this->shaderOverride = null;
         $this->globalTime += 1.0 / 60.0;
+        $now = microtime(true);
+        if ($this->lastFrameStart > 0.0) {
+            $this->frameTimeMs = max(0.1, min(250.0, ($now - $this->lastFrameStart) * 1000.0));
+        }
+        $this->lastFrameStart = $now;
+        $this->temporalUpscalerThisFrame = null;
 
         // Apply any settings change queued by applySettings() since the last
         // frame. MUST run here — before beginOffscreenIfRequired() binds the
@@ -1642,6 +1852,7 @@ class VioRenderer3D implements Renderer3DInterface
         $this->applyDeferredSettings();
 
         $this->beginOffscreenIfRequired();
+        $this->syncNativeUpscaler();
         $this->applyShadingRate($this->settings->shadingRate);
     }
 
