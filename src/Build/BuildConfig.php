@@ -86,11 +86,18 @@ class BuildConfig
      */
     public array $hooksBeforeBuild = [];
 
+    /**
+     * build.json `upscalers`: native upscaler runtimes (FSR 3, DLSS) the build
+     * ships next to the executable, see {@see UpscalerConfig}.
+     */
+    public UpscalerConfig $upscalers;
+
     public string $projectRoot;
 
     private function __construct(string $projectRoot)
     {
         $this->projectRoot = $projectRoot;
+        $this->upscalers = new UpscalerConfig();
     }
 
     /**
@@ -230,6 +237,8 @@ class BuildConfig
                 }
             }
         }
+
+        $this->upscalers = UpscalerConfig::fromBuildJson($data['upscalers'] ?? null, $this->phpIni);
     }
 
     /**
@@ -316,6 +325,7 @@ class BuildConfig
             'platforms' => $this->platforms,
             'buildTypes' => $this->buildTypes,
             'hooks.beforeBuild' => $this->hooksBeforeBuild,
+            'upscalers' => $this->upscalers->toArray(),
         ];
     }
 }
