@@ -477,7 +477,8 @@ class VioRenderer3D implements Renderer3DInterface
         // the realloc is deferred to applyDeferredSettings() at beginFrame so the
         // format change never frees mid-frame. Any of these means the offscreen
         // target must be rebuilt (or released) at the next safe boundary.
-        if ($previous->renderScale !== $settings->renderScale
+        if ($previous->effectiveRenderScale($this->graphicsCapabilities())
+                !== $settings->effectiveRenderScale($this->graphicsCapabilities())
             || $previous->antiAliasing !== $settings->antiAliasing
             || $previous->bloom !== $settings->bloom
             || $previous->hdr !== $settings->hdr) {
@@ -838,8 +839,9 @@ class VioRenderer3D implements Renderer3DInterface
             $this->offscreenTarget = new VioOffscreenTarget($this->ctx);
         }
 
-        $targetW = max(1, (int)round($this->backbufferWidth  * $this->settings->renderScale));
-        $targetH = max(1, (int)round($this->backbufferHeight * $this->settings->renderScale));
+        $scale = $this->settings->effectiveRenderScale($this->graphicsCapabilities());
+        $targetW = max(1, (int)round($this->backbufferWidth  * $scale));
+        $targetH = max(1, (int)round($this->backbufferHeight * $scale));
         $samples = max(1, $this->settings->antiAliasing->sampleCount());
 
         $this->offscreenTarget->resize($targetW, $targetH, $samples, $this->offscreenIsHdr());
@@ -894,7 +896,7 @@ class VioRenderer3D implements Renderer3DInterface
         // offscreen path: FXAA/TAA, render-scale, or bloom (which extracts from
         // the rendered scene). Each is individually toggleable via GraphicsSettings.
         return $this->settings->antiAliasing !== AntiAliasing::Off
-            || $this->settings->renderScale !== 1.0
+            || $this->settings->effectiveRenderScale($this->graphicsCapabilities()) !== 1.0
             || $this->settings->bloom;
     }
 
@@ -968,13 +970,14 @@ class VioRenderer3D implements Renderer3DInterface
     }
 
     /**
-     * AMD FidelityFX Super Resolution 1 applies when the player picked it and the
-     * scene renders below the display resolution; at full resolution it would only
-     * add two passes.
+     * AMD FidelityFX Super Resolution 1 applies when the player picked it - or a
+     * temporal upscaler this renderer does not run yet, whose fallback chain ends
+     * here - and the scene renders below the display resolution; at full
+     * resolution it would only add two passes.
      */
     private function fsrApplies(VioOffscreenTarget $target): bool
     {
-        return $this->settings->upscaler === Quality\Upscaler::Fsr1
+        return $this->settings->effectiveUpscaler($this->graphicsCapabilities()) === Quality\Upscaler::Fsr1
             && ($target->width() < $this->backbufferWidth || $target->height() < $this->backbufferHeight)
             && $this->fsrShadersReady();
     }
@@ -1083,6 +1086,13 @@ class VioRenderer3D implements Renderer3DInterface
      */
     public function graphicsCapabilities(): Quality\GraphicsCapabilities
     {
+        // The render path resolves the upscaler through this too; a probe taken
+        // before the FSR shaders compiled must not pin the fallback for good.
+        if ($this->capabilities !== null
+            && !$this->capabilities->supportsUpscaler(Quality\Upscaler::Fsr1)
+            && $this->fsrShadersReady()) {
+            $this->capabilities = null;
+        }
         return $this->capabilities ??= new Quality\GraphicsCapabilities(
             shadingRate: $this->shadingRateAvailable(),
             hdrOutput: defined('VIO_FEATURE_HDR_OUTPUT') && vio_supports_feature($this->ctx, VIO_FEATURE_HDR_OUTPUT),
@@ -1097,6 +1107,13 @@ class VioRenderer3D implements Renderer3DInterface
             upscalers: $this->fsrShadersReady()
                 ? [Quality\Upscaler::Off, Quality\Upscaler::Fsr1]
                 : [Quality\Upscaler::Off],
+            // Not offered until the temporal resolve / native upscaler modules
+            // land; a selection falls back along Upscaler::fallbackChain().
+            upscalerNotes: [
+                Quality\Upscaler::Taau->value => 'Needs the temporal resolve pass (not available yet)',
+                Quality\Upscaler::Fsr3->value => 'Needs the native FidelityFX module in php-vio (not available yet)',
+                Quality\Upscaler::Dlss->value => 'Needs the native DLSS module in php-vio (not available yet)',
+            ],
         );
     }
 

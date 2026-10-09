@@ -127,7 +127,10 @@ final class GraphicsOptionsPanel
         $this->ui->label($enabled ? 'Manual Settings' : 'Manual Settings (locked - Adaptive mode active)');
 
         // Render scale
-        $rs = $this->ui->slider('graphics.renderScale', 'Render Scale', $s->renderScale, 0.5, 2.0);
+        $rs = $this->ui->slider('graphics.renderScale', 'Render Scale', $s->renderScale,
+            $s->upscaler->isTemporal() ? GraphicsSettings::TEMPORAL_RENDER_SCALE_MIN : GraphicsSettings::RENDER_SCALE_MIN,
+            GraphicsSettings::RENDER_SCALE_MAX,
+        );
         if ($enabled && abs($rs - $s->renderScale) > 0.01) {
             $manager->update(static fn(GraphicsSettings $g): GraphicsSettings => $g->with(renderScale: $rs));
         }
