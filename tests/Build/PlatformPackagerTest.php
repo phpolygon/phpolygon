@@ -5,6 +5,10 @@ declare(strict_types=1);
 namespace PHPolygon\Tests\Build;
 
 use PHPolygon\Build\BuildConfig;
+use PHPolygon\Build\HttpClient;
+use PHPolygon\Build\HttpResponse;
+use PHPolygon\Build\MicroIni;
+use PHPolygon\Build\NativeUpscalerResolver;
 use PHPolygon\Build\PlatformPackager;
 use PHPUnit\Framework\TestCase;
 
@@ -154,6 +158,68 @@ class PlatformPackagerTest extends TestCase
         $result = $packager->package($binaryPath, $this->outputDir, 'linux');
 
         $this->assertFileExists($result . '/resources/audio/music.ogg');
+    }
+
+    public function testThirdPartyNoticesLandNextToTheExe(): void
+    {
+        $config = BuildConfig::load($this->tempDir);
+        $config->name = 'TestGame';
+        $binaryPath = $this->tempDir . '/test-binary';
+        file_put_contents($binaryPath, 'fake');
+
+        $result = (new PlatformPackager($config))->package($binaryPath, $this->outputDir, 'windows', 'base', [], "Third-party software notices\r\n");
+
+        $this->assertSame("Third-party software notices\r\n", file_get_contents($result . '/THIRD-PARTY-NOTICES.txt'));
+    }
+
+    public function testNoNoticesNoFile(): void
+    {
+        $config = BuildConfig::load($this->tempDir);
+        $binaryPath = $this->tempDir . '/test-binary';
+        file_put_contents($binaryPath, 'fake');
+
+        $result = (new PlatformPackager($config))->package($binaryPath, $this->outputDir, 'windows');
+
+        $this->assertFileDoesNotExist($result . '/THIRD-PARTY-NOTICES.txt');
+    }
+
+    /**
+     * build.json `upscalers` with local folders, resolved and packaged the way
+     * GameBuilder does it: the runtimes sit next to the exe (php-vio looks there
+     * first), the notices beside them, the project id goes into the embedded ini.
+     */
+    public function testWindowsBuildShipsLocalUpscalerRuntimesNextToTheExe(): void
+    {
+        $guid = '3f2a9c1e-7b4d-4e8a-9f60-1c2d3e4f5a6b';
+        foreach (['redist/ffx/amd_fidelityfx_dx12.dll', 'redist/ffx/amd_fidelityfx_vk.dll', 'redist/dlss/vio_dlss.dll', 'redist/dlss/nvngx_dlss.dll'] as $file) {
+            @mkdir(dirname($this->tempDir . '/' . $file), 0755, true);
+            file_put_contents($this->tempDir . '/' . $file, basename($file));
+        }
+        file_put_contents($this->tempDir . '/build.json', json_encode([
+            'name' => 'UpscaledGame',
+            'upscalers' => ['fsr' => 'redist/ffx', 'dlss' => ['plugin' => 'redist/dlss', 'projectId' => $guid]],
+        ]));
+        $config = BuildConfig::load($this->tempDir);
+        $resolver = new NativeUpscalerResolver($this->tempDir, $this->tempDir . '/cache', new class implements HttpClient {
+            public function get(string $url, array $headers): HttpResponse
+            {
+                throw new \LogicException("no network for local folders: {$url}");
+            }
+        });
+        $bundle = $resolver->resolve($config->upscalers, 'windows');
+        $binaryPath = $this->tempDir . '/test-binary';
+        file_put_contents($binaryPath, 'fake');
+
+        $result = (new PlatformPackager($config))->package($binaryPath, $this->outputDir, 'windows', 'base', $bundle->files, $bundle->notices("\r\n"));
+
+        foreach (['UpscaledGame.exe', 'amd_fidelityfx_dx12.dll', 'amd_fidelityfx_vk.dll', 'vio_dlss.dll', 'nvngx_dlss.dll', 'THIRD-PARTY-NOTICES.txt'] as $file) {
+            $this->assertFileExists($result . '/' . $file);
+        }
+        $notices = (string) file_get_contents($result . '/THIRD-PARTY-NOTICES.txt');
+        $this->assertStringContainsString('Advanced Micro Devices', $notices);
+        $this->assertStringContainsString('NVIDIA Corporation', $notices);
+        $this->assertSame(['vio.dlss_project_id' => $guid], $bundle->ini);
+        $this->assertStringContainsString("vio.dlss_project_id={$guid}", MicroIni::block([...$config->phpIni, ...$bundle->ini]));
     }
 
     private function removeDir(string $dir): void

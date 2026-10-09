@@ -17,17 +17,25 @@ class PlatformPackager
      * Package the combined binary for the target platform
      *
      * @param list<string> $runtimeLibs Extra platform-specific libs resolved by
-     *                                  StaticPhpResolver (e.g. vulkan-1.dll on Windows)
+     *                                  StaticPhpResolver / NativeUpscalerResolver
+     *                                  (e.g. vulkan-1.dll, amd_fidelityfx_dx12.dll)
+     * @param string $thirdPartyNotices Text of {@see ThirdPartyNotices::FILE},
+     *                                  written next to the binary unless ''
      * @return string Path to the output directory/bundle
      */
-    public function package(string $binaryPath, string $outputDir, string $platform, string $variant = 'base', array $runtimeLibs = []): string
+    public function package(string $binaryPath, string $outputDir, string $platform, string $variant = 'base', array $runtimeLibs = [], string $thirdPartyNotices = ''): string
     {
-        return match ($platform) {
+        $output = match ($platform) {
             'macos' => $this->packageMacOS($binaryPath, $outputDir, $variant, $runtimeLibs),
             'windows' => $this->packageFlat($binaryPath, $outputDir, '.exe', 'windows', $variant, $runtimeLibs),
             'linux' => $this->packageFlat($binaryPath, $outputDir, '', 'linux', $variant, $runtimeLibs),
             default => throw new \RuntimeException("Unsupported platform: {$platform}"),
         };
+        if ($thirdPartyNotices !== '') {
+            $dir = $platform === 'macos' ? $output . '/Contents/Resources' : $output;
+            file_put_contents($dir . '/' . ThirdPartyNotices::FILE, $thirdPartyNotices);
+        }
+        return $output;
     }
 
     /**
