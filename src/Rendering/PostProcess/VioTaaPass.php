@@ -54,6 +54,11 @@ final class VioTaaPass
     /** @var array{0: VioRenderTarget|null, 1: VioRenderTarget|null} */
     private array $history = [null, null];
     private int $current = 0;
+    /** @var array<int, VioTexture> colour textures of the ping-pong targets, by target object id */
+    private array $textures = [];
+    private ?\PHPolygon\Math\Mat4 $invProjectionOf = null;
+    /** @var array<float> */
+    private array $invProjection = [];
     private string $sizeKey = '';
     /** Both ping-pong slots hold frames of the current size (the previous one is usable). */
     private bool $primed = false;
@@ -106,19 +111,28 @@ final class VioTaaPass
         $jitterPx = [$frame->jitter->pixelX, $frame->jitter->pixelY * $flipY];
         $historyValid = $frame->historyValid && $this->primed;
 
+        // The inverse projection only changes with the camera's projection.
+        $projection = $frame->jitter->unjitteredProjection;
+        if ($projection !== $this->invProjectionOf) {
+            $this->invProjectionOf = $projection;
+            $this->invProjection = $projection->inverse()->toArray();
+        }
+
         // 1. Dilate (render resolution).
         vio_bind_render_target($this->ctx, $dilatedOut);
         vio_viewport($this->ctx, 0, 0, $renderW, $renderH);
         vio_bind_pipeline($this->ctx, $dilate);
         vio_bind_texture($this->ctx, $motion, 0);
-        vio_set_uniform($this->ctx, 'u_motion', 0);
         vio_bind_texture($this->ctx, $depth, 1);
-        vio_set_uniform($this->ctx, 'u_depth', 1);
-        vio_set_uniform($this->ctx, 'u_texel', [1.0 / $renderW, 1.0 / $renderH]);
-        vio_set_uniform($this->ctx, 'u_jitter_uv', [$jitterPx[0] / $renderW, $jitterPx[1] / $renderH]);
-        vio_set_uniform($this->ctx, 'u_uv_flip_y', $flipY);
-        vio_set_uniform($this->ctx, 'u_reprojection', $frame->reprojection->toArray());
-        vio_set_uniform($this->ctx, 'u_inv_proj', $frame->jitter->unjitteredProjection->inverse()->toArray());
+        $this->setUniforms([
+            'u_motion' => 0,
+            'u_depth' => 1,
+            'u_texel' => [1.0 / $renderW, 1.0 / $renderH],
+            'u_jitter_uv' => [$jitterPx[0] / $renderW, $jitterPx[1] / $renderH],
+            'u_uv_flip_y' => $flipY,
+            'u_reprojection' => $frame->reprojection->toArray(),
+            'u_inv_proj' => $this->invProjection,
+        ]);
         vio_draw($this->ctx, $quad);
         vio_unbind_render_target($this->ctx);
 
@@ -127,30 +141,55 @@ final class VioTaaPass
         vio_viewport($this->ctx, 0, 0, $displayW, $displayH);
         vio_bind_pipeline($this->ctx, $resolve);
         vio_bind_texture($this->ctx, $color, 0);
-        vio_set_uniform($this->ctx, 'u_color', 0);
-        vio_bind_texture($this->ctx, vio_render_target_texture($prevHistory), 1);
-        vio_set_uniform($this->ctx, 'u_history', 1);
-        vio_bind_texture($this->ctx, vio_render_target_texture($dilatedOut), 2);
-        vio_set_uniform($this->ctx, 'u_dilated', 2);
-        vio_bind_texture($this->ctx, vio_render_target_texture($prevDilated), 3);
-        vio_set_uniform($this->ctx, 'u_prev_dilated', 3);
+        vio_bind_texture($this->ctx, $this->texture($prevHistory), 1);
+        vio_bind_texture($this->ctx, $this->texture($dilatedOut), 2);
+        vio_bind_texture($this->ctx, $this->texture($prevDilated), 3);
         vio_bind_texture($this->ctx, $reactive, 4);
-        vio_set_uniform($this->ctx, 'u_reactive', 4);
-        vio_set_uniform($this->ctx, 'u_render_size', [(float) $renderW, (float) $renderH]);
-        vio_set_uniform($this->ctx, 'u_display_size', [(float) $displayW, (float) $displayH]);
-        vio_set_uniform($this->ctx, 'u_jitter_px', $jitterPx);
-        vio_set_uniform($this->ctx, 'u_history_valid', $historyValid ? 1.0 : 0.0);
-        vio_set_uniform($this->ctx, 'u_history_weight_static', self::HISTORY_WEIGHT_STATIC);
-        vio_set_uniform($this->ctx, 'u_history_weight_moving', self::HISTORY_WEIGHT_MOVING);
-        vio_set_uniform($this->ctx, 'u_reactive_strength', self::REACTIVE_STRENGTH);
-        vio_set_uniform($this->ctx, 'u_variance_gamma', self::VARIANCE_GAMMA);
-        vio_set_uniform($this->ctx, 'u_variance_gamma_static', self::VARIANCE_GAMMA_STATIC);
+        $this->setUniforms([
+            'u_color' => 0,
+            'u_history' => 1,
+            'u_dilated' => 2,
+            'u_prev_dilated' => 3,
+            'u_reactive' => 4,
+            'u_render_size' => [(float) $renderW, (float) $renderH],
+            'u_display_size' => [(float) $displayW, (float) $displayH],
+            'u_jitter_px' => $jitterPx,
+            'u_history_valid' => $historyValid ? 1.0 : 0.0,
+            'u_history_weight_static' => self::HISTORY_WEIGHT_STATIC,
+            'u_history_weight_moving' => self::HISTORY_WEIGHT_MOVING,
+            'u_reactive_strength' => self::REACTIVE_STRENGTH,
+            'u_variance_gamma' => self::VARIANCE_GAMMA,
+            'u_variance_gamma_static' => self::VARIANCE_GAMMA_STATIC,
+        ]);
         vio_draw($this->ctx, $quad);
         vio_unbind_render_target($this->ctx);
 
         $this->current = $next;
         $this->primed = true;
-        return vio_render_target_texture($historyOut);
+        return $this->texture($historyOut);
+    }
+
+    /** The colour texture of one of the pass's own targets (looked up once per target). */
+    private function texture(VioRenderTarget $target): VioTexture
+    {
+        $id = spl_object_id($target);
+        return $this->textures[$id] ??= vio_render_target_texture($target);
+    }
+
+    /**
+     * One native call per pass where php-vio has vio_set_uniforms.
+     *
+     * @param array<string, int|float|array<float>> $uniforms
+     */
+    private function setUniforms(array $uniforms): void
+    {
+        if (function_exists('vio_set_uniforms')) {
+            vio_set_uniforms($this->ctx, $uniforms);
+            return;
+        }
+        foreach ($uniforms as $name => $value) {
+            vio_set_uniform($this->ctx, $name, $value);
+        }
     }
 
     /** The latest resolve (debug view), null before the first frame. */
@@ -160,7 +199,7 @@ final class VioTaaPass
         if ($rt === null || !$this->primed) {
             return null;
         }
-        return vio_render_target_texture($rt);
+        return $this->texture($rt);
     }
 
     /** The latest resolve as a render target (tests read it back), null before the first frame. */
@@ -173,6 +212,7 @@ final class VioTaaPass
     {
         $this->dilated = [null, null];
         $this->history = [null, null];
+        $this->textures = [];
         $this->sizeKey = '';
         $this->primed = false;
     }
@@ -187,6 +227,7 @@ final class VioTaaPass
         // the resize, so the first resolve ignores it either way).
         $this->primed = false;
         $this->sizeKey = $key;
+        $this->textures = [];
         for ($i = 0; $i < 2; $i++) {
             $this->dilated[$i] = vio_render_target($this->ctx, [
                 'width' => max(1, $renderW), 'height' => max(1, $renderH), 'hdr' => true,

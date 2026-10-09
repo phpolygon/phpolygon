@@ -414,6 +414,10 @@ class VioRenderer3D implements Renderer3DInterface
 
     /** Lazy temporal resolve (TAA / TAAU). Allocated on the first temporal frame. */
     private ?VioTaaPass $taaPass = null;
+    /** The MRT target whose motion / depth / reactive textures temporalInputs holds. */
+    private ?VioRenderTarget $temporalInputsOf = null;
+    /** @var array{0: VioTexture, 1: VioTexture, 2: VioTexture}|null */
+    private ?array $temporalInputs = null;
     /** RGBA8 display-size target the temporal present sharpens from (RCAS). */
     private ?\VioRenderTarget $temporalSharpenTarget = null;
     private string $temporalSharpenKey = '';
@@ -1217,11 +1221,23 @@ class VioRenderer3D implements Renderer3DInterface
             return null;
         }
         $this->taaPass ??= new VioTaaPass($this->ctx, $this->conventions());
+        // The MRT target's textures, looked up once per (re)allocation.
+        $inputs = $this->temporalInputs;
+        if ($inputs === null || $this->temporalInputsOf !== $mrt) {
+            $inputs = [
+                vio_render_target_texture($mrt, self::MOTION_ATTACHMENT),
+                vio_render_target_texture($mrt, (int) constant('VIO_RT_DEPTH')),
+                vio_render_target_texture($mrt, self::REACTIVE_ATTACHMENT),
+            ];
+            $this->temporalInputsOf = $mrt;
+            $this->temporalInputs = $inputs;
+        }
+        [$motion, $depth, $reactive] = $inputs;
         $resolved = $this->taaPass->apply(
             $sceneTex,
-            vio_render_target_texture($mrt, self::MOTION_ATTACHMENT),
-            vio_render_target_texture($mrt, (int) constant('VIO_RT_DEPTH')),
-            vio_render_target_texture($mrt, self::REACTIVE_ATTACHMENT),
+            $motion,
+            $depth,
+            $reactive,
             $target->width(),
             $target->height(),
             max(1, $this->backbufferWidth),
@@ -2104,10 +2120,13 @@ class VioRenderer3D implements Renderer3DInterface
                 if ($material === null || $material->alpha < 1.0) {
                     continue;
                 }
-                $opaque[] = [$cmd->materialId, $cmd->meshId, $cmd, $material];
+                // Moved entities last within their material + mesh run: the
+                // sticky u_has_prev then flips once per run, not per draw.
+                $moved = $this->motionThisFrame && $cmd instanceof DrawMesh && $cmd->prevModelMatrix !== null ? 1 : 0;
+                $opaque[] = [$cmd->materialId, $cmd->meshId, $cmd, $material, $moved];
             }
         }
-        usort($opaque, static fn (array $a, array $b): int => ($a[0] <=> $b[0]) ?: ($a[1] <=> $b[1]));
+        usort($opaque, static fn (array $a, array $b): int => ($a[0] <=> $b[0]) ?: ($a[1] <=> $b[1]) ?: ($a[4] <=> $b[4]));
         foreach ($opaque as [, , $cmd, $material]) {
             if ($cmd instanceof DrawMesh) {
                 $this->drawMeshCommand($cmd->meshId, $material, $cmd->modelMatrix, $cmd->materialId, $cmd->excludeFromGbuffer, $cmd->prevModelMatrix);
