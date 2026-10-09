@@ -349,10 +349,11 @@ The native upscalers get the scene colour, the MRT depth, motion (`prevUv - uv`,
 
 A provider that fails at runtime (`vio_upscaler_create` / `vio_upscaler_dispatch` returns false) is reported once on STDERR, drops out of the capabilities with the error as its note, and the selection walks down `Upscaler::fallbackChain()` (Dlss -> Fsr3 -> Taau -> Fsr1 -> Off). The stored setting stays. `PHPOLYGON_VIO_UPSCALER_FAIL=create|dispatch` forces such a failure for testing.
 
-What the game provides for the native upscalers:
-- the runtime libraries next to the executable (or in `EngineConfig::$upscalerRuntimePath`): `amd_fidelityfx_dx12.dll` / `amd_fidelityfx_vk.dll` (FidelityFX SDK 1.1.4, MIT) and `nvngx_dlss.dll` / `libnvidia-ngx-dlss.so.*` (DLSS SDK, NVIDIA RTX SDK licence);
-- its own NGX project id, a random GUID: `new EngineConfig(dlssProjectId: '…')` (set as `vio.dlss_project_id` before the context is created);
-- the licence notices and, for DLSS, the NVIDIA attribution in its credits.
+What the game provides for the native upscalers (a build does the first three from `build.json` `upscalers`, see [build-native-upscalers.md](build-native-upscalers.md)):
+- the runtime libraries next to the executable (or in `EngineConfig::$upscalerRuntimePath`): `amd_fidelityfx_dx12.dll` / `amd_fidelityfx_vk.dll` (FidelityFX SDK 1.1.4, MIT) and for DLSS php-vio's plugin `vio_dlss.dll` plus `nvngx_dlss.dll` (DLSS SDK, NVIDIA RTX SDK licence; Linux `libvio_dlss.so` + `libnvidia-ngx-dlss.so.*`, untested);
+- its own NGX project id, a random GUID: `upscalers.dlss.projectId` (baked into the executable's ini) or `new EngineConfig(dlssProjectId: '…')` (set as `vio.dlss_project_id` before the context is created, overrides the baked one);
+- the licence notices (`THIRD-PARTY-NOTICES.txt`);
+- for DLSS the NVIDIA attribution in its splash or credits, the notification to NVIDIA before release and EULA terms that protect NVIDIA's components.
 
 ### Hardware capabilities (`GraphicsCapabilities`)
 

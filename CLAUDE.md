@@ -279,8 +279,10 @@ same forward and MRT. Backends without stencil (Metal) skip it; `outlineSupporte
   the unjittered projection). FSR's RCAS replaces the engine's. A failed create/dispatch is logged once,
   the provider leaves the capabilities and the chain moves on; the stored setting stays
   (`PHPOLYGON_VIO_UPSCALER_FAIL=create|dispatch` forces it). CPU section `render3d.post.upscale`.
-  Game side: `EngineConfig::$dlssProjectId` (GUID, -> `vio.dlss_project_id`), `$upscalerRuntimePath`
-  (-> `vio.ffx_path` / `vio.dlss_path`), runtime DLLs shipped by the game. Tests:
+  Game side: `EngineConfig::$dlssProjectId` (GUID, -> `vio.dlss_project_id`, overrides the build's baked
+  one), `$upscalerRuntimePath` (-> `vio.ffx_path` / `vio.dlss_path` / `vio.dlss_plugin_path`; '' for a built
+  game - php-vio looks next to the exe first), runtime DLLs shipped by the build (`build.json` `upscalers`,
+  see "Native upscaler runtimes" under Build system). Tests:
   `VioNativeUpscalerTest` (needs `'headless_hardware' => true`: WARP refuses), `UpscalerDispatchTest`.
 
 **Storage-buffer instances** (`DrawMeshInstanced::fromStorageBuffer`, e.g. GPU particles): the matrices never
@@ -704,6 +706,10 @@ Windows). Any other runtime must too, or the game sets `"compression": "none"`.
 | `GameBuilder` | Orchestrates the 7-phase pipeline |
 | `BuildHookRunner` | Runs build.json `hooks.beforeBuild` before staging (see below) |
 | `MicroIni` | Encodes build.json `php.ini` as the ini section between micro.sfx and PHAR (see below) |
+| `UpscalerConfig` | Parses/validates build.json `upscalers` (see below) |
+| `NativeUpscalerResolver` | FSR 3 / DLSS runtimes for a target: FidelityFX SDK tag (checksummed) or folder; DLSS plugin from a folder or a private GitHub release; cached; warnings, never a failed build |
+| `ThirdPartyNotices` | `THIRD-PARTY-NOTICES.txt` next to the binary (AMD MIT text, NVIDIA notices) |
+| `HttpClient` / `StreamHttpClient` | GET without auto-redirect (the resolver decides who gets the token); fake it in tests |
 
 ### Embedded php.ini
 
@@ -724,6 +730,25 @@ The combined executable ignores php.ini files, and startup-only settings (OPcach
 ```
 
 `@php` resolves to `PHPOLYGON_HOOK_PHP`, else the PHP running the build when it has every `requires` function, else the game's static runtime (micro.sfx for the host, variant `runtimeVariant`) wrapped as a runner taking `[-d key=value]... script [args]` with the runtime's libraries (Windows DLLs, Steam API) copied next to it - so a hook can use the shipped game's extensions inside a build container whose PHP lacks them. Hooks see `PHPOLYGON_BUILD_PLATFORM/ARCH/VARIANT/TYPE`, and `PHPOLYGON_HOOK_PHP` names the interpreter of an `@php` hook: start further PHP processes with it, because `PHP_BINARY` is empty inside a micro runtime.
+
+### Native upscaler runtimes
+
+`build.json` `upscalers` ships FSR 3 / DLSS runtimes next to the binary. Details: `docs/build-native-upscalers.md`.
+
+```json
+"upscalers": {
+  "fsr": true,
+  "dlss": { "plugin": "github:<owner>/<private-repo>@<tag>", "projectId": "<random GUID>" }
+}
+```
+
+- `fsr`: `true` = `amd_fidelityfx_dx12.dll` / `_vk.dll` (MIT) from the FidelityFX SDK tag `v1.1.4` (`PrebuiltSignedDLL/`, fetched raw by tag; the release asset is the whole 470 MB SDK), SHA-256 pinned, cached in `~/.phpolygon/build-cache/upscalers/`. A folder string / `{"path"}` = from there. Windows only, unless a folder has `libamd_fidelityfx_vk.so`.
+- `dlss.plugin`: a folder with `vio_dlss.dll` + `nvngx_dlss.dll`, or `github:owner/repo@tag`: a release of a private repository (`GITHUB_TOKEN` / `GH_TOKEN` / `gh auth token`; a public repository is refused; the token never goes to the redirect host; cached per tag). Linux only with `libvio_dlss.so` + `libnvidia-ngx-dlss.so.*`, otherwise "not supported"; never macOS.
+- `dlss.projectId` -> embedded ini `vio.dlss_project_id`. `EngineConfig::$dlssProjectId` overrides it when set; it must not contradict `php.ini`.
+- Anything missing is a warning, and the game builds without that upscaler.
+- `THIRD-PARTY-NOTICES.txt` lands next to the binary: the AMD MIT text, plus for DLSS NVIDIA's copyright and trademark lines, "This software contains source code provided by NVIDIA Corporation." and the RTX SDK restrictions passed on to users.
+- At runtime php-vio looks next to the executable first (`GetModuleFileName(NULL)` = the game's exe), so a built game needs no ini.
+- **Game duties (licences):** NVIDIA attribution in the splash or credits (RTX UI Developer Guidelines), notify NVIDIA before the commercial release (https://developer.nvidia.com/sw-notification), EULA terms that protect NVIDIA's components (§2c), its own project id. NVIDIA files travel **only inside the game**: never in php-vio, the engine or a public release. Keep the AMD notice.
 
 ### PHAR stub constants
 
