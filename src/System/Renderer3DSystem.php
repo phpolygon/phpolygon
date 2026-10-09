@@ -108,6 +108,18 @@ class Renderer3DSystem extends AbstractSystem
 
     private int $frameCount = 0;
 
+    /**
+     * World matrix each entity was DRAWN with last frame (entity id => matrix),
+     * rebuilt every frame from the draws that survived culling. A draw whose
+     * matrix instance differs gets it as DrawMesh::$prevModelMatrix; identity is
+     * enough because Transform3DSystem only replaces worldMatrix when the
+     * transform changed. Entities not drawn last frame have no entry, so a mover
+     * coming back into view never reports a stale, frames-old motion.
+     *
+     * @var array<int, Mat4>
+     */
+    private array $lastDrawnMatrix = [];
+
     /** Throttle counters for the env-gated [LIGHTS]/[DRAWS] debug dumps. */
     private int $lightDebugFrame = 0;
     private int $drawDebugFrame = 0;
@@ -152,6 +164,9 @@ class Renderer3DSystem extends AbstractSystem
         $this->binAabbs = [];
         $this->entityBin = [];
         $this->frameCount = 0;
+        // Ids restart after clear(): a fresh entity must not inherit the
+        // previous occupant's matrix as fake motion.
+        $this->lastDrawnMatrix = [];
     }
 
     public function update(World $world, float $dt): void
@@ -383,6 +398,8 @@ class Renderer3DSystem extends AbstractSystem
         /** @var list<array{0: float, 1: DrawMesh}> $transparentDraws */
         $transparentDraws = [];
         $drawnOpaque = 0;
+        $lastDrawn = $this->lastDrawnMatrix;
+        $drawnNow = [];
 
         foreach ($world->query(MeshRenderer::class, Transform3D::class) as $entity) {
             $mesh = $entity->get(MeshRenderer::class);
@@ -467,7 +484,15 @@ class Renderer3DSystem extends AbstractSystem
 
             $material = MaterialRegistry::get($mesh->materialId);
             $isTransparent = $material !== null && $material->alpha < 1.0;
-            $draw = new DrawMesh($mesh->meshId, $mesh->materialId, $matrix, $mesh->excludeFromGbuffer);
+            $prev = $lastDrawn[$entity->id] ?? null;
+            $drawnNow[$entity->id] = $matrix;
+            $draw = new DrawMesh(
+                $mesh->meshId,
+                $mesh->materialId,
+                $matrix,
+                $mesh->excludeFromGbuffer,
+                $prev !== $matrix ? $prev : null,
+            );
 
             if ($isTransparent) {
                 // Use the mesh's bounding-sphere centre (transformed into
@@ -482,6 +507,8 @@ class Renderer3DSystem extends AbstractSystem
                 $drawnOpaque++;
             }
         }
+
+        $this->lastDrawnMatrix = $drawnNow;
 
         if ($transparentDraws !== []) {
             // Sort descending: farthest first, so back-to-front blending is
