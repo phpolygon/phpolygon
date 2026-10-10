@@ -301,6 +301,7 @@ class Engine
                 $config->vioShaderModel,
                 $config->vioDxcDir,
                 $config->offscreen,
+                $config->offscreenHardware,
             );
         } else {
             $noApi = $config->is3D && in_array($config->renderBackend3D, ['vulkan', 'metal'], true);

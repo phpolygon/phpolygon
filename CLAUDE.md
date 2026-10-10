@@ -904,6 +904,13 @@ $engine = new Engine(new EngineConfig(headless: true));
 
 The `headless` flag in `EngineConfig` switches all backends automatically.
 
+`EngineConfig::$offscreen` is different: real vio backends, but an invisible
+surface (php-vio `headless`) - for screenshot tests and offline rendering. It
+renders on the hardware GPU (`headless_hardware`; `$offscreenHardware`, default
+true) and falls back to the D3D software adapter (WARP) only when no hardware
+context opens. Set `offscreenHardware: false` for images that must match across
+machines.
+
 ### Null objects
 
 - `NullWindow` — returns configured width/height, `shouldClose()` returns false

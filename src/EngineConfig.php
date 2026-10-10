@@ -164,5 +164,15 @@ class EngineConfig
          * build puts them (build.json `upscalers`), so a built game leaves it ''.
          */
         public readonly string $upscalerRuntimePath = '',
+        /**
+         * Where an $offscreen surface renders. True (default) asks php-vio for
+         * the hardware GPU ('headless_hardware'): a headless D3D11 / D3D12
+         * context otherwise opens on the WARP software adapter - seconds per
+         * frame and no native upscalers. When no hardware context opens, the
+         * window falls back to the software adapter. False keeps the software
+         * adapter on purpose, for images that must match across machines.
+         * Ignored unless $offscreen is set.
+         */
+        public readonly bool $offscreenHardware = true,
     ) {}
 }

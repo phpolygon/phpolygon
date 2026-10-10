@@ -30,9 +30,11 @@ class VioWindow extends Window
         int $shaderModel = 0,
         string $dxcDir = '',
         bool $offscreen = false,
+        bool $offscreenHardware = true,
     ) {
         parent::__construct($width, $height, $title, $vsync, $resizable);
         $this->offscreen = $offscreen;
+        $this->offscreenHardware = $offscreenHardware;
         $this->backend = $backend;
         $this->debug = $debug;
         $this->shaderCachePath = $shaderCachePath;
@@ -60,10 +62,16 @@ class VioWindow extends Window
     /** vio_create 'headless': an invisible surface, drawn into but never shown. */
     private bool $offscreen = false;
 
+    /**
+     * vio_create 'headless_hardware' for the offscreen surface: the hardware
+     * GPU instead of the D3D software adapter (EngineConfig::$offscreenHardware).
+     */
+    private bool $offscreenHardware = true;
+
     public function initialize(InputInterface $input): void
     {
         \PHPolygon\Engine::log('VioWindow::initialize() backend=' . $this->backend . ' size=' . $this->width . 'x' . $this->height
-            . ($this->offscreen ? ' offscreen' : ''));
+            . ($this->offscreen ? ' offscreen' . ($this->offscreenHardware ? ' (hardware GPU)' : ' (software adapter)') : ''));
 
         $this->openContext($this->createConfig(), $input);
     }
@@ -92,6 +100,13 @@ class VioWindow extends Window
         // screenshot and shader tests want, and never a game.
         if ($this->offscreen) {
             $config['headless'] = true;
+            // php-vio opens a headless D3D11 / D3D12 context on the WARP
+            // software adapter unless asked otherwise: seconds per frame and
+            // no native upscalers. openContext() falls back to WARP when no
+            // hardware context opens. Other backends ignore the option.
+            if ($this->offscreenHardware) {
+                $config['headless_hardware'] = true;
+            }
         }
         // On-disk shader / pipeline cache (EngineConfig::$shaderCachePath). A
         // directory that cannot be created just leaves the cache off.
@@ -139,6 +154,14 @@ class VioWindow extends Window
         foreach ($candidates as $backend) {
             \PHPolygon\Engine::log('VioWindow: trying vio_create backend=' . $backend);
             $ctx = vio_create($backend, $config);
+            if ($ctx === false && isset($config['headless_hardware'])) {
+                // No hardware adapter for an invisible surface (CI, a remote
+                // session): the software adapter still renders it.
+                \PHPolygon\Engine::log('VioWindow: backend=' . $backend . ' has no hardware headless context, trying the software adapter');
+                $software = $config;
+                unset($software['headless_hardware']);
+                $ctx = vio_create($backend, $software);
+            }
             if ($ctx !== false) {
                 $chosen = $backend;
                 break;
