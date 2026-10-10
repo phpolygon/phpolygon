@@ -227,6 +227,83 @@ final class ParticleSystemGpuTest extends TestCase
         }
     }
 
+    /** @return array<string, array{array<string, mixed>}> */
+    public static function adapters(): array
+    {
+        return [
+            'default headless adapter' => [[]],
+            'hardware GPU' => [['headless_hardware' => true]],
+        ];
+    }
+
+    /**
+     * More emitters than a backend's ring of per-dispatch descriptor blocks
+     * holds (php-vio's D3D12 backend reuses 16 blocks without waiting): every
+     * frame records ~3 dispatches per emitter. When a recorded dispatch's
+     * descriptors are overwritten before the frame runs, it integrates and
+     * counts into another emitter's buffers - instance counts past the ring's
+     * capacity, which the indirect draw turns into screen-crossing beams.
+     *
+     * @param array<string, mixed> $adapter
+     */
+    #[DataProvider('adapters')]
+    public function testManyEmittersInsideFramesKeepTheirOwnBuffers(array $adapter): void
+    {
+        $ctx = $this->ctx;
+        self::assertNotNull($ctx);
+        if ($adapter !== []) {
+            // One context at a time: the D3D backends keep process-wide state.
+            $backend = vio_backend_name($ctx);
+            vio_destroy($ctx);
+            $this->ctx = null;
+            $hw = @vio_create($backend, ['width' => 32, 'height' => 32, 'headless' => true, 'vsync' => false] + $adapter);
+            if ($hw === false) {
+                $this->markTestSkipped('no hardware headless context');
+            }
+            $this->ctx = $ctx = $hw;
+            if (!GpuParticleBaker::isIndirectDraw($ctx)) {
+                $this->markTestSkipped('hardware context has no compute + vertex storage + indirect draws');
+            }
+        }
+
+        $origins = [];
+        $capacities = [];
+        for ($i = 0; $i < 24; $i++) {
+            $origins[] = new Vec3(($i % 6) * 100.0, 0.0, -intdiv($i, 6) * 100.0);
+            $capacities[] = $i % 2 === 0 ? 16 : 48;
+        }
+        $frames = 40;
+
+        mt_srand(2468);
+        [$cpuEmitters] = $this->simulateMany(null, $capacities, $origins, $frames);
+        mt_srand(2468);
+        [$gpuEmitters, $draws] = $this->simulateMany($ctx, $capacities, $origins, $frames);
+
+        self::assertCount(count($origins), $draws);
+        $mesh = MeshRegistry::get(self::MESH);
+        self::assertNotNull($mesh);
+        foreach ($draws as $i => $cmd) {
+            self::assertInstanceOf(\VioBuffer::class, $cmd->indirectArgs);
+            self::assertInstanceOf(\VioBuffer::class, $cmd->storageBuffer);
+            $rec = unpack('V5', (string) vio_storage_buffer_read($ctx, $cmd->indirectArgs));
+            self::assertIsArray($rec);
+            $rec = array_values($rec);
+            self::assertSame(count($mesh->indices), $rec[0], "emitter {$i}: index count of the argument record");
+            self::assertLessThanOrEqual($capacities[$i], $rec[1], "emitter {$i}: instance count within the ring");
+            self::assertSame(count($cpuEmitters[$i]->particles), $rec[1], "emitter {$i}: GPU count == CPU simulation count");
+            self::assertSame($gpuEmitters[$i]->count(), $rec[1], "emitter {$i}: GPU count == ledger count");
+
+            $m = unpack('f*', (string) vio_storage_buffer_read($ctx, $cmd->storageBuffer));
+            self::assertIsArray($m);
+            $m = array_values($m);
+            for ($k = 0; $k < $rec[1]; $k++) {
+                self::assertSame(1.0, $m[$k * 16 + 15], "emitter {$i} particle {$k}: a finished billboard matrix");
+                self::assertEqualsWithDelta($origins[$i]->x, $m[$k * 16 + 12], 1.0, "emitter {$i} particle {$k} x");
+                self::assertEqualsWithDelta($origins[$i]->z, $m[$k * 16 + 14], 1.0, "emitter {$i} particle {$k} z");
+            }
+        }
+    }
+
     /**
      * One world with an emitter per capacity at the matching origin, stepped
      * $frames times. With a context every frame runs inside vio_begin/vio_end,

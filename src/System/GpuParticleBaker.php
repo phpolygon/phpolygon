@@ -52,6 +52,9 @@ use PHPolygon\Math\Vec3;
  *     GPU. Outside vio_begin/vio_end they run synchronously. Since php-vio
  *     2.24.3 a recorded dispatch keeps the params it was staged with, also when
  *     the shared kernel is dispatched again before the frame runs.
+ *   - On D3D12 at most {@see D3D12_DESCRIPTOR_BLOCKS} dispatches may be pending
+ *     on the GPU at once (php-vio's descriptor ring); past a budget below that
+ *     the frame is flushed with vio_compute_wait() ({@see reserveDescriptorBlock()}).
  *   - CPU-written buffers (spawn rows, billboard input) rotate through
  *     {@see GpuParticleState::UPLOAD_ROTATION} upload buffers. Reusing one
  *     sooner would change what an already recorded dispatch reads: on D3D12
@@ -68,6 +71,15 @@ final class GpuParticleBaker
      * shared kernel's slots, 2.24.3 keeps the params of every async dispatch.
      */
     public const MIN_VIO_VERSION = '2.24.3';
+
+    /**
+     * Descriptor blocks of php-vio's D3D12 compute heap ring (one per dispatch,
+     * reused without a fence); see {@see reserveDescriptorBlock()}.
+     */
+    private const D3D12_DESCRIPTOR_BLOCKS = 16;
+
+    /** Blocks left to compute work outside this class between two waits. */
+    private const DESCRIPTOR_HEADROOM = 4;
 
     private const KERNEL_STEP = 'step';
     private const KERNEL_SPAWN = 'spawn';
@@ -99,6 +111,12 @@ final class GpuParticleBaker
      * @var \WeakMap<ParticleEmitter, array{0: list<\VioBuffer>, 1: \VioBuffer, 2: int, 3: int}>|null
      */
     private static ?\WeakMap $billboards = null;
+
+    /** Dispatches the current context's descriptor ring takes between waits (null = not probed). */
+    private static ?int $descriptorBudget = null;
+
+    /** Dispatches recorded since the last {@see vio_compute_wait()}. */
+    private static int $descriptorBlocksUsed = 0;
 
     /**
      * GLSL compute shader: one thread per slot. Reads the RW state row
@@ -251,6 +269,8 @@ final class GpuParticleBaker
         self::$cacheContext = \WeakReference::create($ctx);
         self::$kernels = [];
         self::$billboards = null;
+        self::$descriptorBudget = null;
+        self::$descriptorBlocksUsed = 0;
     }
 
     /** The context's shared kernel $name, compiled on first use; null when it does not compile. */
@@ -280,11 +300,52 @@ final class GpuParticleBaker
      */
     private static function dispatch(\VioContext $ctx, \VioComputePipeline $kernel, array $bindings, string $params, int $groups): void
     {
+        self::reserveDescriptorBlock($ctx);
         foreach ($bindings as [$buffer, $slot, $access]) {
             vio_compute_bind_buffer($ctx, $kernel, $buffer, $slot, $access);
         }
         vio_compute_set_uniforms($ctx, $kernel, $params);
         vio_compute_dispatch($ctx, $kernel, $groups, 1, 1, ['async' => true]);
+    }
+
+    /**
+     * Keep the recorded dispatches inside the backend's descriptor ring.
+     *
+     * php-vio's D3D12 backend writes each dispatch's buffer views into the next
+     * of {@see D3D12_DESCRIPTOR_BLOCKS} blocks of one shader-visible heap and
+     * wraps around without waiting for the GPU. A dispatch recorded into the
+     * frame (['async' => true]) reads its block when the frame executes, so the
+     * 17th dispatch since the GPU last went idle overwrites the views of the
+     * first: that kernel then integrates, compacts and counts into another
+     * emitter's buffers, and the indirect draw reads instance counts past the
+     * end of the matrix buffer — screen-crossing beams. The count persists
+     * across frames because the previous frame may still be executing.
+     *
+     * Before the budget is spent, vio_compute_wait() submits what the frame has
+     * recorded so far and waits for the GPU (mid-frame it closes, executes and
+     * reopens the frame's command list), which frees every block again. The
+     * budget leaves headroom for blocks other compute work takes in between.
+     */
+    private static function reserveDescriptorBlock(\VioContext $ctx): void
+    {
+        self::useContext($ctx);
+        self::$descriptorBudget ??= self::descriptorBudget($ctx);
+        if (self::$descriptorBudget <= 0) {
+            return;
+        }
+        if (self::$descriptorBlocksUsed >= self::$descriptorBudget) {
+            vio_compute_wait($ctx);
+            self::$descriptorBlocksUsed = 0;
+        }
+        self::$descriptorBlocksUsed++;
+    }
+
+    /** Dispatches the backend's descriptor ring takes between GPU waits; 0 = no ring limit. */
+    private static function descriptorBudget(\VioContext $ctx): int
+    {
+        return vio_backend_name($ctx) === 'd3d12'
+            ? self::D3D12_DESCRIPTOR_BLOCKS - self::DESCRIPTOR_HEADROOM
+            : 0;
     }
 
     /**
