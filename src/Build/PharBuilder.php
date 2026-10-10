@@ -44,8 +44,11 @@ class PharBuilder
 
     /**
      * Create staging directory with resolved symlinks and filtered content
+     *
+     * @param ?string $vendorDir the vendor directory to stage, e.g. the production
+     *   install from {@see ProductionVendor}; null stages the project's own vendor/
      */
-    public function stage(string $stagingDir): void
+    public function stage(string $stagingDir, ?string $vendorDir = null): void
     {
         if (is_dir($stagingDir)) {
             FileTree::remove($stagingDir);
@@ -55,7 +58,7 @@ class PharBuilder
         $projectRoot = $this->config->projectRoot;
 
         // Stage vendor/ with symlink resolution and exclude filtering
-        $vendorSrc = $projectRoot . '/vendor';
+        $vendorSrc = $vendorDir ?? $projectRoot . '/vendor';
         $vendorDst = $stagingDir . '/vendor';
         if (is_dir($vendorSrc)) {
             $this->copyDirectoryFiltered($vendorSrc, $vendorDst, $this->config->pharExclude);

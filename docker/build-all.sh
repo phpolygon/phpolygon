@@ -242,7 +242,8 @@ git config --global url."https://github.com/".insteadOf "git@github.com:" || tru
 # Resolve VCS repos (phpolygon/phpolygon) by git-clone over HTTPS instead of the
 # GitHub commits API. That API endpoint gets secondary-throttled (HTTP 429 "this
 # endpoint is temporarily being throttled") on repeated builds even WITH a token,
-# which breaks the composer update phpolygon build runs internally.
+# which breaks the production `composer install --no-dev` phpolygon build runs
+# internally (in a working copy; the project's vendor/ stays untouched).
 composer config --global use-github-api false >/dev/null 2>&1 || true
 
 # ── micro.sfx prefetch (cache key + osName MUST match StaticPhpResolver) ──────

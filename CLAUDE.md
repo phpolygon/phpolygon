@@ -638,16 +638,22 @@ classic per-target build.
 
 ### 7-phase pipeline
 
-1. **Vendor** — `composer update --no-dev` (restored after build)
-2. **Stage** — copy src/, vendor/, assets/, resources/ into temp dir, resolve
+1. **Vendor** — `ProductionVendor`: copies composer.json + composer.lock (path
+   repositories made absolute, root autoload paths mirrored for the classmap)
+   into `<build temp>/composer` and runs `composer install --no-dev
+   --optimize-autoloader --no-scripts` there. The project's `vendor/` and
+   `composer.lock` are only read, so parallel or failed builds never touch the
+   dev install, and a failing Composer fails the build with its output.
+   `PHPOLYGON_COMPOSER` overrides the Composer command. The temp dir is unique
+   per build call.
+2. **Stage** — copy src/, the production vendor/, assets/, resources/ into temp dir, resolve
    symlinks, exclude tests/docs/editor via glob patterns
 3. **PHAR** — create game.phar with a custom stub that handles micro SAPI
    detection, macOS .app bundle paths, resource extraction, and engine bootstrap
 
 > Phases 1–3 are PHAR-producing and identical across desktop targets of the same
 > variant/build-type. With `--phar PATH`, they run once for the first target and
-> are skipped on every later target (the cached PHAR is reused). The vendor
-> restore only runs in the call that prepared vendor.
+> are skipped on every later target (the cached PHAR is reused).
 4. **micro.sfx** — resolve static PHP binary (explicit path → cache
    `~/.phpolygon/build-cache/` → download from GitHub Release)
 5. **Combine** — concatenate micro.sfx + game.phar into single executable
@@ -700,6 +706,7 @@ Windows). Any other runtime must too, or the game sets `"compression": "none"`.
 | Class | Purpose |
 |---|---|
 | `BuildConfig` | Loads build.json + composer.json, provides all settings |
+| `ProductionVendor` | `composer install --no-dev` into a working copy of composer.json/lock; the project's vendor/ and lock stay untouched |
 | `PharBuilder` | Stages sources, builds PHAR with custom stub |
 | `StaticPhpResolver` | Finds/downloads/caches micro.sfx binary + Windows runtime libs (vulkan-1, d3dcompiler_47, DXC `dxcompiler.dll`/`dxil.dll` from the latest DirectXShaderCompiler release for Shader Model 6, Steam API) |
 | `PlatformPackager` | Creates .app bundle, Linux dir, Windows .exe |
