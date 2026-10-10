@@ -17,6 +17,20 @@ class AudioManager
     /** @var array<int, AudioChannel> playbackId => channel */
     private array $playbackChannels = [];
 
+    /**
+     * Each playback's own volume (0.0–1.0), before channel and master are
+     * applied – kept so a channel or master change can recompute the voice
+     * without losing it.
+     *
+     * @var array<int, float> playbackId => voice volume
+     */
+    private array $playbackVolumes = [];
+
+    /** Tracked-voice count at which finished voices are swept on play. */
+    private int $pruneThreshold = self::PRUNE_MIN_THRESHOLD;
+
+    private const PRUNE_MIN_THRESHOLD = 64;
+
     /** @var array<string, AudioClip> id => clip */
     private array $clips = [];
 
@@ -114,7 +128,19 @@ class AudioManager
     {
         $effectiveVolume = $this->calculateEffectiveVolume($channel, $volume);
         $playbackId = $this->backend->play($clipId, $effectiveVolume, $loop);
+        if ($playbackId === 0) {
+            return 0;
+        }
+
+        // Amortised sweep: fire-and-forget voices are never stopped
+        // explicitly, so drop finished ones once the map has doubled.
+        if (count($this->playbackChannels) >= $this->pruneThreshold) {
+            $this->pruneFinishedPlaybacks();
+            $this->pruneThreshold = max(self::PRUNE_MIN_THRESHOLD, 2 * count($this->playbackChannels));
+        }
+
         $this->playbackChannels[$playbackId] = $channel;
+        $this->playbackVolumes[$playbackId] = $volume;
 
         return $playbackId;
     }
@@ -126,6 +152,9 @@ class AudioManager
     public function setPlaybackVolume(int $playbackId, float $volume): void
     {
         $channel = $this->playbackChannels[$playbackId] ?? AudioChannel::SFX;
+        if (isset($this->playbackChannels[$playbackId])) {
+            $this->playbackVolumes[$playbackId] = $volume;
+        }
         $effective = $this->calculateEffectiveVolume($channel, $volume);
         $this->backend->setVolume($playbackId, $effective);
     }
@@ -136,7 +165,7 @@ class AudioManager
     public function stop(int $playbackId): void
     {
         $this->backend->stop($playbackId);
-        unset($this->playbackChannels[$playbackId]);
+        unset($this->playbackChannels[$playbackId], $this->playbackVolumes[$playbackId]);
     }
 
     /**
@@ -147,7 +176,7 @@ class AudioManager
         foreach ($this->playbackChannels as $playbackId => $ch) {
             if ($ch === $channel) {
                 $this->backend->stop($playbackId);
-                unset($this->playbackChannels[$playbackId]);
+                unset($this->playbackChannels[$playbackId], $this->playbackVolumes[$playbackId]);
             }
         }
 
@@ -164,6 +193,8 @@ class AudioManager
     {
         $this->backend->stopAll();
         $this->playbackChannels = [];
+        $this->playbackVolumes = [];
+        $this->pruneThreshold = self::PRUNE_MIN_THRESHOLD;
         $this->currentMusicPlaybackId = null;
         $this->currentMusicClipId = null;
     }
@@ -187,11 +218,14 @@ class AudioManager
 
     /**
      * Set the master volume (shortcut for Master channel).
+     *
+     * Master is folded into every voice's volume here, so it is deliberately
+     * not forwarded to the backend's own output gain – that would apply it
+     * a second time.
      */
     public function setMasterVolume(float $volume): void
     {
         $this->setChannelVolume(AudioChannel::Master, $volume);
-        $this->backend->setMasterVolume($volume);
     }
 
     /**
@@ -237,6 +271,16 @@ class AudioManager
     }
 
     /**
+     * Number of playbacks the manager still tracks for channel/master
+     * updates. Finished voices are swept lazily, so this may briefly include
+     * voices that have already ended.
+     */
+    public function getTrackedPlaybackCount(): int
+    {
+        return count($this->playbackChannels);
+    }
+
+    /**
      * Dispose of all resources.
      */
     public function dispose(): void
@@ -263,10 +307,32 @@ class AudioManager
     private function updateActivePlaybacks(AudioChannel $channel): void
     {
         foreach ($this->playbackChannels as $playbackId => $ch) {
-            if ($ch === $channel || $channel === AudioChannel::Master) {
-                $effective = $this->calculateEffectiveVolume($ch, 1.0);
-                $this->backend->setVolume($playbackId, $effective);
+            if ($ch !== $channel && $channel !== AudioChannel::Master) {
+                continue;
+            }
+            if (!$this->backend->isPlaying($playbackId)) {
+                $this->forgetPlayback($playbackId);
+                continue;
+            }
+            $voice = $this->playbackVolumes[$playbackId] ?? 1.0;
+            $this->backend->setVolume($playbackId, $this->calculateEffectiveVolume($ch, $voice));
+        }
+    }
+
+    /**
+     * Drop bookkeeping for voices the backend reports as finished.
+     */
+    private function pruneFinishedPlaybacks(): void
+    {
+        foreach ($this->playbackChannels as $playbackId => $_) {
+            if (!$this->backend->isPlaying($playbackId)) {
+                $this->forgetPlayback($playbackId);
             }
         }
+    }
+
+    private function forgetPlayback(int $playbackId): void
+    {
+        unset($this->playbackChannels[$playbackId], $this->playbackVolumes[$playbackId]);
     }
 }

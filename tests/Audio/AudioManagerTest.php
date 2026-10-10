@@ -184,4 +184,123 @@ class AudioManagerTest extends TestCase
 
         $this->assertSame($backend, $manager->getBackend());
     }
+
+    // ── Effective volume reaching the backend ───────────────────
+
+    public function testMasterVolumeIsAppliedExactlyOnce(): void
+    {
+        $spy = new SpyAudioBackend();
+        $audio = new AudioManager($spy);
+
+        $audio->setMasterVolume(0.5);
+        $id = $audio->playSfx('boom', 0.8);
+
+        $this->assertEqualsWithDelta(0.4, $spy->volumes[$id], 1e-6);
+        // Master is folded into the voice volume; the backend's own output
+        // gain must stay neutral or master would be applied a second time.
+        $this->assertEqualsWithDelta(1.0, $spy->getMasterVolume(), 1e-6);
+    }
+
+    public function testChangingMasterKeepsEachVoiceVolume(): void
+    {
+        $spy = new SpyAudioBackend();
+        $audio = new AudioManager($spy);
+
+        $sfx = $audio->playSfx('boom', 0.5);
+        $music = $audio->playMusic('track', 0.25);
+
+        $audio->setMasterVolume(0.8);
+
+        $this->assertEqualsWithDelta(0.4, $spy->volumes[$sfx], 1e-6);
+        $this->assertEqualsWithDelta(0.2, $spy->volumes[$music], 1e-6);
+    }
+
+    public function testChangingChannelVolumeKeepsVoiceVolume(): void
+    {
+        $spy = new SpyAudioBackend();
+        $audio = new AudioManager($spy);
+
+        $id = $audio->playOnChannel('wind', AudioChannel::Voice, 0.3, true);
+        $audio->setChannelVolume(AudioChannel::Voice, 0.5);
+
+        $this->assertEqualsWithDelta(0.15, $spy->volumes[$id], 1e-6);
+    }
+
+    public function testChannelVolumeUsesLatestPlaybackVolume(): void
+    {
+        $spy = new SpyAudioBackend();
+        $audio = new AudioManager($spy);
+
+        $id = $audio->playOnChannel('wind', AudioChannel::Voice, 1.0, true);
+        $audio->setPlaybackVolume($id, 0.4);
+        $audio->setChannelVolume(AudioChannel::Voice, 0.5);
+
+        $this->assertEqualsWithDelta(0.2, $spy->volumes[$id], 1e-6);
+    }
+
+    public function testUnmuteRestoresVoiceVolume(): void
+    {
+        $spy = new SpyAudioBackend();
+        $audio = new AudioManager($spy);
+
+        $id = $audio->playSfx('boom', 0.6);
+        $audio->muteChannel(AudioChannel::SFX);
+        $this->assertEqualsWithDelta(0.0, $spy->volumes[$id], 1e-6);
+
+        $audio->unmuteChannel(AudioChannel::SFX);
+        $this->assertEqualsWithDelta(0.6, $spy->volumes[$id], 1e-6);
+    }
+
+    public function testChannelChangeLeavesOtherChannelsAlone(): void
+    {
+        $spy = new SpyAudioBackend();
+        $audio = new AudioManager($spy);
+
+        $sfx = $audio->playSfx('boom', 0.6);
+        $audio->playMusic('track', 0.5);
+        $spy->setVolumeCalls = [];
+
+        $audio->setChannelVolume(AudioChannel::Music, 0.1);
+
+        $this->assertArrayNotHasKey($sfx, $spy->setVolumeCalls);
+    }
+
+    public function testFinishedVoicesArePrunedOnChannelChange(): void
+    {
+        $spy = new SpyAudioBackend();
+        $audio = new AudioManager($spy);
+
+        $done = $audio->playSfx('boom', 0.5);
+        $running = $audio->playSfx('boom', 0.5);
+        $spy->finish($done);
+        $spy->setVolumeCalls = [];
+
+        $audio->setChannelVolume(AudioChannel::SFX, 0.5);
+
+        $this->assertArrayNotHasKey($done, $spy->setVolumeCalls);
+        $this->assertArrayHasKey($running, $spy->setVolumeCalls);
+        $this->assertSame(1, $audio->getTrackedPlaybackCount());
+    }
+
+    public function testFireAndForgetVoicesDoNotAccumulate(): void
+    {
+        $spy = new SpyAudioBackend();
+        $audio = new AudioManager($spy);
+
+        for ($i = 0; $i < 1000; $i++) {
+            $spy->finish($audio->playSfx('click'));
+        }
+
+        $this->assertLessThan(200, $audio->getTrackedPlaybackCount());
+    }
+
+    public function testFailedPlayIsNotTracked(): void
+    {
+        $spy = new SpyAudioBackend();
+        $spy->failPlays = true;
+        $audio = new AudioManager($spy);
+
+        $this->assertSame(0, $audio->playSfx('missing'));
+        $this->assertSame(0, $audio->getTrackedPlaybackCount());
+    }
 }

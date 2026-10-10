@@ -6,6 +6,14 @@ namespace PHPolygon\Audio;
 
 use VioSound;
 
+/**
+ * Audio backend on php-vio.
+ *
+ * Voices play at exactly the volume they are given. php-vio has no
+ * device-level gain, so the backend's own output gain (setMasterVolume) is
+ * emulated per voice; AudioManager never sets it (it folds its master volume
+ * into each voice), so through the manager it stays at 1.0.
+ */
 class VioAudioBackend implements AudioBackendInterface
 {
     /** @var array<string, string> clipId => file path */
@@ -13,6 +21,9 @@ class VioAudioBackend implements AudioBackendInterface
 
     /** @var array<int, VioSound> playbackId => VioSound */
     private array $activeSounds = [];
+
+    /** @var array<int, float> playbackId => volume the voice was given */
+    private array $voiceVolumes = [];
 
     private int $nextPlaybackId = 1;
     private float $masterVolume = 1.0;
@@ -42,6 +53,7 @@ class VioAudioBackend implements AudioBackendInterface
 
         $playbackId = $this->nextPlaybackId++;
         $this->activeSounds[$playbackId] = $sound;
+        $this->voiceVolumes[$playbackId] = $volume;
 
         return $playbackId;
     }
@@ -50,7 +62,7 @@ class VioAudioBackend implements AudioBackendInterface
     {
         if (isset($this->activeSounds[$playbackId])) {
             vio_audio_stop($this->activeSounds[$playbackId]);
-            unset($this->activeSounds[$playbackId]);
+            unset($this->activeSounds[$playbackId], $this->voiceVolumes[$playbackId]);
         }
     }
 
@@ -60,11 +72,13 @@ class VioAudioBackend implements AudioBackendInterface
             vio_audio_stop($sound);
         }
         $this->activeSounds = [];
+        $this->voiceVolumes = [];
     }
 
     public function setVolume(int $playbackId, float $volume): void
     {
         if (isset($this->activeSounds[$playbackId])) {
+            $this->voiceVolumes[$playbackId] = $volume;
             vio_audio_volume($this->activeSounds[$playbackId], $volume * $this->masterVolume);
         }
     }
@@ -74,12 +88,20 @@ class VioAudioBackend implements AudioBackendInterface
         if (!isset($this->activeSounds[$playbackId])) {
             return false;
         }
-        return vio_audio_playing($this->activeSounds[$playbackId]);
+        if (vio_audio_playing($this->activeSounds[$playbackId])) {
+            return true;
+        }
+        // Finished one-shot: release the sound handle.
+        unset($this->activeSounds[$playbackId], $this->voiceVolumes[$playbackId]);
+        return false;
     }
 
     public function setMasterVolume(float $volume): void
     {
         $this->masterVolume = max(0.0, min(1.0, $volume));
+        foreach ($this->activeSounds as $playbackId => $sound) {
+            vio_audio_volume($sound, ($this->voiceVolumes[$playbackId] ?? 1.0) * $this->masterVolume);
+        }
     }
 
     public function getMasterVolume(): float

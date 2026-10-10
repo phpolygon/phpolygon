@@ -56,7 +56,9 @@ class PHPGLFWAudioBackend implements AudioBackendInterface
     public function play(string $clipId, float $volume = 1.0, bool $loop = false): int
     {
         $sound = $this->getOrLoadSound($clipId);
-        $sound->setVolume($volume * $this->masterVolume);
+        // Output gain lives on the engine (setMasterVolume); the voice gets
+        // exactly what it was given.
+        $sound->setVolume($volume);
         $sound->setLoop($loop);
         $sound->play();
 
@@ -85,7 +87,7 @@ class PHPGLFWAudioBackend implements AudioBackendInterface
     public function setVolume(int $playbackId, float $volume): void
     {
         if (isset($this->playbacks[$playbackId])) {
-            $this->playbacks[$playbackId]['sound']->setVolume($volume * $this->masterVolume);
+            $this->playbacks[$playbackId]['sound']->setVolume($volume);
         }
     }
 
@@ -100,6 +102,7 @@ class PHPGLFWAudioBackend implements AudioBackendInterface
     public function setMasterVolume(float $volume): void
     {
         $this->masterVolume = max(0.0, min(1.0, $volume));
+        $this->engine->setMasterVolume($this->masterVolume);
     }
 
     public function getMasterVolume(): float

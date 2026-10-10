@@ -44,7 +44,9 @@ class GLFWAudioBackend implements AudioBackendInterface
         }
 
         $sound = $this->engine->soundFromDisk($path);
-        $sound->setVolume($volume * $this->masterVolume);
+        // Output gain lives on the engine (setMasterVolume); the voice gets
+        // exactly what it was given.
+        $sound->setVolume($volume);
         $sound->setLoop($loop);
         $sound->play();
 
@@ -73,7 +75,7 @@ class GLFWAudioBackend implements AudioBackendInterface
     public function setVolume(int $playbackId, float $volume): void
     {
         if (isset($this->activeSounds[$playbackId])) {
-            $this->activeSounds[$playbackId]->setVolume($volume * $this->masterVolume);
+            $this->activeSounds[$playbackId]->setVolume($volume);
         }
     }
 
