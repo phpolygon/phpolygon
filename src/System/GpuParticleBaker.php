@@ -52,9 +52,10 @@ use PHPolygon\Math\Vec3;
  *     GPU. Outside vio_begin/vio_end they run synchronously. Since php-vio
  *     2.24.3 a recorded dispatch keeps the params it was staged with, also when
  *     the shared kernel is dispatched again before the frame runs.
- *   - On D3D12 at most {@see D3D12_DESCRIPTOR_BLOCKS} dispatches may be pending
- *     on the GPU at once (php-vio's descriptor ring); past a budget below that
- *     the frame is flushed with vio_compute_wait() ({@see reserveDescriptorBlock()}).
+ *   - On D3D12 before php-vio 2.32.1 at most {@see D3D12_DESCRIPTOR_BLOCKS}
+ *     dispatches may be pending on the GPU at once (php-vio's descriptor ring);
+ *     past a budget below that the frame is flushed with vio_compute_wait()
+ *     ({@see reserveDescriptorBlock()}). 2.32.1 fences the blocks, no flush.
  *   - CPU-written buffers (spawn rows, billboard input) rotate through
  *     {@see GpuParticleState::UPLOAD_ROTATION} upload buffers. Reusing one
  *     sooner would change what an already recorded dispatch reads: on D3D12
@@ -77,6 +78,9 @@ final class GpuParticleBaker
      * reused without a fence); see {@see reserveDescriptorBlock()}.
      */
     private const D3D12_DESCRIPTOR_BLOCKS = 16;
+
+    /** First php-vio whose D3D12 compute descriptors are fenced instead of a 16-block ring. */
+    public const FENCED_DESCRIPTOR_VIO_VERSION = '2.32.1';
 
     /** Blocks left to compute work outside this class between two waits. */
     private const DESCRIPTOR_HEADROOM = 4;
@@ -343,9 +347,22 @@ final class GpuParticleBaker
     /** Dispatches the backend's descriptor ring takes between GPU waits; 0 = no ring limit. */
     private static function descriptorBudget(\VioContext $ctx): int
     {
-        return vio_backend_name($ctx) === 'd3d12'
-            ? self::D3D12_DESCRIPTOR_BLOCKS - self::DESCRIPTOR_HEADROOM
-            : 0;
+        return self::descriptorBudgetFor(vio_backend_name($ctx), (string) phpversion('vio'));
+    }
+
+    /**
+     * The ring limit only exists on D3D12 before php-vio
+     * {@see FENCED_DESCRIPTOR_VIO_VERSION}; from there on every dispatch gets
+     * a block the GPU is done with (fenced per frame, the heap grows on demand).
+     *
+     * @internal exposed for tests
+     */
+    public static function descriptorBudgetFor(string $backend, string $vioVersion): int
+    {
+        if ($backend !== 'd3d12' || version_compare($vioVersion, self::FENCED_DESCRIPTOR_VIO_VERSION, '>=')) {
+            return 0;
+        }
+        return self::D3D12_DESCRIPTOR_BLOCKS - self::DESCRIPTOR_HEADROOM;
     }
 
     /**
