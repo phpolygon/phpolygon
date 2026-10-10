@@ -13,13 +13,19 @@ class GameBuilder
     private IosAppBuilder $iosAppBuilder;
     private BuildHookRunner $hookRunner;
     private NativeUpscalerResolver $upscalerResolver;
+    private ProductionVendor $productionVendor;
 
     /** @var callable|null */
     private $logger = null;
 
-    public function __construct(BuildConfig $config)
+    /**
+     * @param ?string $composerCommand shell command prefix that runs Composer for
+     *   the production install (see {@see ProductionVendor}); null = PHPOLYGON_COMPOSER or `composer`
+     */
+    public function __construct(BuildConfig $config, ?string $composerCommand = null)
     {
         $this->config = $config;
+        $this->productionVendor = new ProductionVendor($config->projectRoot, $composerCommand);
         $this->pharBuilder = new PharBuilder($config);
         $this->staticPhpResolver = new StaticPhpResolver();
         $this->platformPackager = new PlatformPackager($config);
@@ -44,6 +50,7 @@ class GameBuilder
         $this->iosAppBuilder->setLogger(fn(string $msg) => $logger('info', $msg));
         $this->hookRunner->setLogger(fn(string $level, string $msg) => $logger($level, $msg));
         $this->upscalerResolver->setLogger(fn(string $level, string $msg) => $logger($level, $msg));
+        $this->productionVendor->setLogger(fn(string $level, string $msg) => $logger($level, $msg));
     }
 
     /**
@@ -80,7 +87,9 @@ class GameBuilder
         }
         mkdir($platformOutputDir, 0755, true);
 
-        $tempDir = sys_get_temp_dir() . '/phpolygon-build-' . $this->config->name . '-' . getmypid();
+        // One temp dir per build call: parallel builds (also from one process, or
+        // from containers whose PIDs collide on a shared temp dir) never share it.
+        $tempDir = sys_get_temp_dir() . '/phpolygon-build-' . $this->config->name . '-' . getmypid() . '-' . bin2hex(random_bytes(4));
 
         // Reuse a cross-target PHAR when one is already built (see $sharedPharPath
         // docblock). iOS never reuses - it links the staged tree, it has no PHAR.
@@ -89,8 +98,6 @@ class GameBuilder
             && $sharedPharPath !== null
             && is_file($sharedPharPath)
             && (int) filesize($sharedPharPath) > 0;
-        // Only the path that prepares vendor must restore it afterwards.
-        $vendorPrepared = false;
 
         try {
             if ($reusePhar) {
@@ -106,7 +113,7 @@ class GameBuilder
                 }
             } else {
                 // Phase 0: build.json beforeBuild hooks (asset pre-bakes and the like),
-                // while vendor still holds the full development install.
+                // in the project's own (development) install.
                 $this->hookRunner->runBeforeBuild([
                     'platform' => $platform,
                     'arch' => $arch,
@@ -115,15 +122,16 @@ class GameBuilder
                     'phpVersion' => $phpVersion,
                 ]);
 
-                // Phase 1: Prepare vendor (install --no-dev)
+                // Phase 1: Production dependencies (install --no-dev from the
+                // project's lock) into a working copy under the temp dir. The
+                // project's vendor/ and composer.lock are never touched.
                 $this->log('info', 'Installing production dependencies...');
-                $this->prepareVendor();
-                $vendorPrepared = true;
+                $vendorDir = $this->productionVendor->install($tempDir . '/composer');
 
                 // Phase 2: Stage sources
                 $stagingDir = $tempDir . '/staging';
                 $this->log('info', 'Staging sources...');
-                $this->pharBuilder->stage($stagingDir);
+                $this->pharBuilder->stage($stagingDir, $vendorDir);
                 $fileCount = $this->countFiles($stagingDir);
                 $this->log('success', "Staged {$fileCount} files");
 
@@ -156,7 +164,7 @@ class GameBuilder
                     $this->log('info', "Building iOS {$mode} ({$platform}) against {$libphpDir}...");
                     $appPath = $this->iosAppBuilder->build($stagingDir, $libphpDir, $platformOutputDir, $platform, $mode, $iosExportIpa);
                     $this->log('success', 'Output: ' . $appPath);
-                    // tempDir + vendor are cleaned up by the finally block below.
+                    // tempDir (staging + production vendor) is removed by the finally block below.
                     return [
                         'outputPath' => $appPath,
                         'pharSize'   => 0,
@@ -235,10 +243,6 @@ class GameBuilder
             } catch (\RuntimeException $e) {
                 $this->log('warning', $e->getMessage());
             }
-            // Only restore dev dependencies if this call actually prepared vendor.
-            if ($vendorPrepared) {
-                $this->restoreVendor();
-            }
         }
     }
 
@@ -273,27 +277,6 @@ class GameBuilder
             "Set PHPOLYGON_IOS_BUILDROOT or platforms.ios.buildroot in build.json, " .
             "and build libphp.a with: SPC_TARGET={$slice} bin/spc build <exts> --build-embed"
         );
-    }
-
-    private function prepareVendor(): void
-    {
-        $cmd = sprintf(
-            'cd %s && composer update --no-dev --no-interaction --ignore-platform-reqs 2>&1',
-            escapeshellarg($this->config->projectRoot)
-        );
-        exec($cmd, $output, $returnCode);
-        if ($returnCode !== 0) {
-            throw new \RuntimeException("composer update --no-dev failed:\n" . implode("\n", $output));
-        }
-    }
-
-    private function restoreVendor(): void
-    {
-        $cmd = sprintf(
-            'cd %s && composer update --no-interaction --ignore-platform-reqs 2>&1',
-            escapeshellarg($this->config->projectRoot)
-        );
-        exec($cmd);
     }
 
     /**

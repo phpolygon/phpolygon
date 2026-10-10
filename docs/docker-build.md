@@ -69,8 +69,9 @@ that it *runs*.
 A GitHub token is **required** (any valid token; the repos are public, so no
 special scopes):
 
-1. `phpolygon build` internally runs `composer update --no-dev`, which
-   re-resolves the `phpolygon/phpolygon` repo. It is declared with an SSH URL
+1. `phpolygon build` internally runs `composer install --no-dev` (in a working
+   copy of composer.json/composer.lock, never in the project), which downloads
+   the locked `phpolygon/phpolygon` repo. It is declared with an SSH URL
    (`git@github.com:...`); the container has no SSH key, and the anonymous GitHub
    API is rate-limited on shared Docker egress IPs. The token makes Composer use
    the authenticated HTTPS API.
