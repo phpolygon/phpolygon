@@ -641,26 +641,44 @@ class UIContext
             $value = $this->textFieldBuffer;
         }
 
+        // Sideways scroll: text wider than the field follows the caret and is
+        // cut at glyph boundaries (like textArea – no scissor needed).
+        $innerW = max(1.0, $fieldW - $s->padding * 2);
+        $scrollX = $this->textFieldScroll[$id] ?? 0.0;
+        $caretPx = 0.0;
+        if ($focused) {
+            $caretPx = $this->renderer->measureText(mb_substr($value, 0, $this->textFieldCursor), $s->fontSize)->width;
+            if ($caretPx < $scrollX) {
+                $scrollX = max(0.0, $caretPx - $innerW * 0.25);
+            } elseif ($caretPx > $scrollX + $innerW - self::TEXT_AREA_CARET_ROOM) {
+                $scrollX = $caretPx - $innerW + self::TEXT_AREA_CARET_ROOM;
+            }
+        } else {
+            $scrollX = 0.0;
+        }
+        $this->textFieldScroll[$id] = $scrollX;
+
         // Draw field background
         $borderCol = $focused ? $s->accentColor : $s->borderColor;
         $this->renderer->drawRoundedRect($fieldX, $fieldY, $fieldW, $fieldH, $s->borderRadius, $s->backgroundColor);
         $this->renderer->drawRectOutline($fieldX, $fieldY, $fieldW, $fieldH, $borderCol, $focused ? 2.0 : $s->borderWidth);
         // Draw text content
-        $this->renderer->drawText(
-            $value,
-            $fieldX + $s->padding,
-            $fieldY + $s->padding,
-            $s->fontSize,
-            $s->textColor,
-        );
+        if ($value !== '') {
+            [$slice, $sliceX] = $this->visibleSlice($value, $scrollX, $innerW, $s->fontSize);
+            $this->renderer->drawText(
+                $slice,
+                $fieldX + $s->padding + $sliceX,
+                $fieldY + $s->padding,
+                $s->fontSize,
+                $s->textColor,
+            );
+        }
 
         // Blinking cursor when focused
         if ($focused) {
             $blinkOn = fmod(\PHPolygon\Runtime\Clock::now() / 1_000_000_000, 1.0) < 0.5;
             if ($blinkOn) {
-                $textBeforeCursor = mb_substr($value, 0, $this->textFieldCursor);
-                $metrics = $this->renderer->measureText($textBeforeCursor, $s->fontSize);
-                $cursorX = $fieldX + $s->padding + $metrics->width;
+                $cursorX = $fieldX + $s->padding + $caretPx - $scrollX;
                 $cursorY1 = $fieldY + $s->padding;
                 $cursorY2 = $cursorY1 + $s->fontSize;
                 $this->renderer->drawLine(
@@ -681,17 +699,37 @@ class UIContext
      * and edits across several lines: Enter inserts a newline, backspace can
      * merge lines, and the caret tracks its line + column. $rows sets the
      * visible height. Call from the render phase (reads keys once per frame).
+     *
+     * Text longer or wider than the field scrolls instead of spilling out:
+     * only the visible window of rows is drawn, and lines are cut at glyph
+     * boundaries on both edges (no scissor needed, so every renderer clips the
+     * same way). The window follows the caret whenever the caret or the text
+     * changes; the mouse wheel scrolls rows (Shift + wheel or a horizontal
+     * wheel scrolls sideways) and stays where it was put until the next edit.
+     * A click places the caret at the clicked row and column.
+     *
+     * $underlay is called after the field background and before the text, with
+     * the frame's {@see TextAreaView} – for highlight bands under single lines.
+     * The same view is available afterwards from {@see textAreaView()}.
+     *
+     * @param (\Closure(TextAreaView): void)|null $underlay
      */
-    public function textArea(string $id, string $value, int $rows = 8): string
+    public function textArea(string $id, string $value, int $rows = 8, ?\Closure $underlay = null): string
     {
         $s = $this->style;
         $lineH = $s->fontSize * 1.35;
+        $rows = max(1, $rows);
 
         $fieldX = $this->cursorX + $s->padding;
         $fieldY = $this->cursorY;
         $fieldW = $this->regionWidth - $s->padding * 2;
         $fieldH = $rows * $lineH + $s->padding * 2;
         $fieldRect = new Rect($fieldX, $fieldY, $fieldW, $fieldH);
+        $textX = $fieldX + $s->padding;
+        $textY = $fieldY + $s->padding;
+        $innerW = max(1.0, $fieldW - $s->padding * 2);
+
+        $scroll = $this->textAreaScroll[$id] ?? ['row' => 0, 'x' => 0.0, 'caret' => -1, 'buffer' => null];
 
         $hovered = $this->isHovered($fieldRect);
         if ($hovered) {
@@ -701,8 +739,17 @@ class UIContext
         $focused = $this->focusedTextField === $id;
         if ($hovered && $this->input->isMouseButtonReleased(0)) {
             $this->setTextFieldFocus($id);
-            $this->textFieldBuffer = $value;
-            $this->textFieldCursor = mb_strlen($value);
+            if (!$focused) {
+                $this->textFieldBuffer = $value;
+            }
+            $this->textFieldCursor = $this->caretAtPoint(
+                $focused ? $this->textFieldBuffer : $value,
+                $this->designMouse(),
+                $textX - $scroll['x'],
+                $textY,
+                $lineH,
+                $scroll['row'],
+            );
             $focused = true;
         } elseif (!$hovered && $this->input->isMouseButtonReleased(0) && $focused) {
             $this->setTextFieldFocus('');
@@ -756,34 +803,142 @@ class UIContext
             $value = $buf;
         }
 
+        $lines = explode("\n", $value);
+        $lineCount = count($lines);
+        $maxRow = max(0, $lineCount - $rows);
+        $contentW = 0.0;
+        foreach ($lines as $line) {
+            if ($line !== '') {
+                $contentW = max($contentW, $this->renderer->measureText($line, $s->fontSize)->width);
+            }
+        }
+        $maxX = max(0.0, $contentW - $innerW + self::TEXT_AREA_CARET_ROOM);
+
+        // Wheel: rows; Shift + wheel or a horizontal wheel: sideways.
+        if ($hovered) {
+            $wheelY = $this->input->getScrollY();
+            $wheelX = $this->input->getScrollX();
+            if ($this->input->isKeyDown(340) || $this->input->isKeyDown(344)) {
+                $wheelX += $wheelY;
+                $wheelY = 0.0;
+            }
+            if (abs($wheelY) > 0.001) {
+                $scroll['row'] -= (int) round($wheelY * TextAreaView::WHEEL_ROWS);
+            }
+            if (abs($wheelX) > 0.001) {
+                $scroll['x'] -= $wheelX * $s->fontSize * 4.0;
+            }
+        }
+
+        // Follow the caret whenever it or the text moved – not every frame, or
+        // the wheel could never look away from it.
+        $caretRow = 0;
+        $caretPx = 0.0;
+        if ($focused) {
+            $before = explode("\n", mb_substr($value, 0, $this->textFieldCursor));
+            $caretRow = count($before) - 1;
+            $caretPx = $this->renderer->measureText($before[$caretRow], $s->fontSize)->width;
+            if ($scroll['caret'] !== $this->textFieldCursor || $scroll['buffer'] !== $value) {
+                if ($caretRow < $scroll['row']) {
+                    $scroll['row'] = $caretRow;
+                } elseif ($caretRow >= $scroll['row'] + $rows) {
+                    $scroll['row'] = $caretRow - $rows + 1;
+                }
+                if ($caretPx < $scroll['x']) {
+                    $scroll['x'] = max(0.0, $caretPx - $innerW * 0.25);
+                } elseif ($caretPx > $scroll['x'] + $innerW - self::TEXT_AREA_CARET_ROOM) {
+                    $scroll['x'] = $caretPx - $innerW + self::TEXT_AREA_CARET_ROOM;
+                }
+            }
+            $scroll['caret'] = $this->textFieldCursor;
+            $scroll['buffer'] = $value;
+        } else {
+            $scroll['caret'] = -1;
+            $scroll['buffer'] = null;
+        }
+
+        // A requested row (revealTextAreaRow) wins over everything else.
+        if (isset($this->textAreaReveal[$id])) {
+            $want = $this->textAreaReveal[$id];
+            unset($this->textAreaReveal[$id]);
+            if ($want < $scroll['row'] || $want >= $scroll['row'] + $rows) {
+                $scroll['row'] = $want - intdiv($rows, 2);
+            }
+        }
+
+        $scroll['row'] = max(0, min($scroll['row'], $maxRow));
+        $scroll['x'] = max(0.0, min($scroll['x'], $maxX));
+        $this->textAreaScroll[$id] = $scroll;
+
+        $view = new TextAreaView(
+            id: $id,
+            x: $fieldX,
+            y: $fieldY,
+            width: $fieldW,
+            height: $fieldH,
+            textX: $textX,
+            textY: $textY,
+            innerWidth: $innerW,
+            lineHeight: $lineH,
+            firstRow: $scroll['row'],
+            visibleRows: $rows,
+            lineCount: $lineCount,
+            scrollX: $scroll['x'],
+            contentWidth: $contentW,
+            focused: $focused,
+        );
+        $this->textAreaViews[$id] = $view;
+
         // Background
         $borderCol = $focused ? $s->accentColor : $s->borderColor;
         $this->renderer->drawRoundedRect($fieldX, $fieldY, $fieldW, $fieldH, $s->borderRadius, $s->backgroundColor);
         $this->renderer->drawRectOutline($fieldX, $fieldY, $fieldW, $fieldH, $borderCol, $focused ? 2.0 : $s->borderWidth);
 
-        // Lines
-        $lines = explode("\n", $value);
-        foreach ($lines as $i => $line) {
+        if ($underlay !== null) {
+            $underlay($view);
+        }
+
+        // Lines: only the visible window, each cut to the visible width.
+        $last = min($lineCount, $scroll['row'] + $rows);
+        for ($i = $scroll['row']; $i < $last; $i++) {
+            $line = $lines[$i];
+            if ($line === '') {
+                continue;
+            }
+            [$slice, $sliceX] = $this->visibleSlice($line, $scroll['x'], $innerW, $s->fontSize);
+            if ($slice === '') {
+                continue;
+            }
             $this->renderer->drawText(
-                $line,
-                $fieldX + $s->padding,
-                $fieldY + $s->padding + $i * $lineH,
+                $slice,
+                $textX + $sliceX,
+                $view->rowY($i),
                 $s->fontSize,
                 $s->textColor,
             );
         }
 
-        // Caret (line + column)
-        if ($focused) {
+        // Scroll indicators – only when something is hidden.
+        $thumbColor = $s->textColor->withAlpha(0.35);
+        if ($maxRow > 0) {
+            $trackH = $fieldH - 4.0;
+            $thumbH = max(12.0, $trackH * $rows / $lineCount);
+            $thumbY = $fieldY + 2.0 + ($trackH - $thumbH) * ($scroll['row'] / $maxRow);
+            $this->renderer->drawRoundedRect($fieldX + $fieldW - 5.0, $thumbY, 3.0, $thumbH, 1.5, $thumbColor);
+        }
+        if ($maxX > 0.0) {
+            $trackW = $fieldW - 4.0;
+            $thumbW = max(16.0, $trackW * $innerW / ($contentW + self::TEXT_AREA_CARET_ROOM));
+            $thumbX = $fieldX + 2.0 + ($trackW - $thumbW) * ($scroll['x'] / $maxX);
+            $this->renderer->drawRoundedRect($thumbX, $fieldY + $fieldH - 5.0, $thumbW, 3.0, 1.5, $thumbColor);
+        }
+
+        // Caret (line + column), only while it is inside the window.
+        if ($focused && $view->isRowVisible($caretRow)) {
             $blinkOn = fmod(\PHPolygon\Runtime\Clock::now() / 1_000_000_000, 1.0) < 0.5;
-            if ($blinkOn) {
-                $before = mb_substr($value, 0, $this->textFieldCursor);
-                $beforeLines = explode("\n", $before);
-                $row = count($beforeLines) - 1;
-                $colText = $beforeLines[$row];
-                $metrics = $this->renderer->measureText($colText, $s->fontSize);
-                $caretX = $fieldX + $s->padding + $metrics->width;
-                $caretY = $fieldY + $s->padding + $row * $lineH;
+            $caretX = $textX + $caretPx - $scroll['x'];
+            if ($blinkOn && $caretX >= $textX - 0.5 && $caretX <= $textX + $innerW + 0.5) {
+                $caretY = $view->rowY($caretRow);
                 $this->renderer->drawLine(
                     new Vec2($caretX, $caretY),
                     new Vec2($caretX, $caretY + $s->fontSize),
@@ -795,6 +950,120 @@ class UIContext
 
         $this->advance($fieldH + $s->padding);
         return $value;
+    }
+
+    /** Room kept right of the caret when the view scrolls sideways (px). */
+    private const float TEXT_AREA_CARET_ROOM = 4.0;
+
+    /**
+     * Per text area: first visible row, horizontal scroll (px) and the caret /
+     * text the window last followed.
+     *
+     * @var array<string, array{row: int, x: float, caret: int, buffer: ?string}>
+     */
+    private array $textAreaScroll = [];
+
+    /** @var array<string, float> horizontal scroll (px) per single-line text field */
+    private array $textFieldScroll = [];
+
+    /** @var array<string, int> rows to bring into view on the next draw */
+    private array $textAreaReveal = [];
+
+    /** @var array<string, TextAreaView> geometry of the last draw per text area */
+    private array $textAreaViews = [];
+
+    /**
+     * Geometry of the text area $id as last drawn (null before its first draw).
+     * Use it to line up a gutter, markers or bands with the visible rows.
+     */
+    public function textAreaView(string $id): ?TextAreaView
+    {
+        return $this->textAreaViews[$id] ?? null;
+    }
+
+    /**
+     * Scroll text area $id so that $row (0-based) is visible on its next draw,
+     * roughly centred if it has to move. For views that point at a line from
+     * outside the field (a debugger's current line, an error location).
+     */
+    public function revealTextAreaRow(string $id, int $row): void
+    {
+        $this->textAreaReveal[$id] = max(0, $row);
+    }
+
+    /**
+     * The part of $line that fits into [scrollX, scrollX + width], cut at
+     * glyph boundaries, and its x offset relative to the text origin.
+     *
+     * @return array{0: string, 1: float}
+     */
+    private function visibleSlice(string $line, float $scrollX, float $width, float $size): array
+    {
+        $full = $this->renderer->measureText($line, $size)->width;
+        if ($scrollX <= 0.0 && $full <= $width) {
+            return [$line, 0.0];
+        }
+
+        $len = mb_strlen($line);
+        $prefix = fn(int $n): float => $n <= 0 ? 0.0 : $this->renderer->measureText(mb_substr($line, 0, $n), $size)->width;
+
+        // First glyph that starts at or right of the scroll offset.
+        $lo = 0;
+        $hi = $len;
+        while ($lo < $hi) {
+            $mid = intdiv($lo + $hi, 2);
+            if ($prefix($mid) < $scrollX - 0.001) {
+                $lo = $mid + 1;
+            } else {
+                $hi = $mid;
+            }
+        }
+        $start = $lo;
+        $startPx = $prefix($start);
+
+        // Last glyph that still ends inside the visible width.
+        $lo = $start;
+        $hi = $len;
+        while ($lo < $hi) {
+            $mid = intdiv($lo + $hi + 1, 2);
+            if ($prefix($mid) - $scrollX <= $width + 0.001) {
+                $lo = $mid;
+            } else {
+                $hi = $mid - 1;
+            }
+        }
+
+        return [mb_substr($line, $start, $lo - $start), $startPx - $scrollX];
+    }
+
+    /** Caret index under $point in a text area whose row $firstRow starts at ($originX, $originY). */
+    private function caretAtPoint(string $buf, Vec2 $point, float $originX, float $originY, float $lineH, int $firstRow): int
+    {
+        $lines = explode("\n", $buf);
+        $row = $firstRow + (int) floor(($point->y - $originY) / $lineH);
+        $row = max(0, min($row, count($lines) - 1));
+        $line = $lines[$row];
+        $size = $this->style->fontSize;
+        $x = $point->x - $originX;
+
+        $col = 0;
+        $len = mb_strlen($line);
+        $prev = 0.0;
+        // Nearest glyph boundary: linear is fine for one clicked line.
+        for ($n = 1; $n <= $len; $n++) {
+            $w = $this->renderer->measureText(mb_substr($line, 0, $n), $size)->width;
+            if ($x < ($prev + $w) / 2.0) {
+                break;
+            }
+            $col = $n;
+            $prev = $w;
+        }
+
+        $offset = 0;
+        for ($i = 0; $i < $row; $i++) {
+            $offset += mb_strlen($lines[$i]) + 1;
+        }
+        return $offset + $col;
     }
 
     /**
@@ -842,13 +1111,22 @@ class UIContext
     /**
      * Programmatically focus a text field / area (e.g. so a freshly-opened
      * editor accepts typing without a click first). Seeds the edit buffer with
-     * $value and puts the caret at the end.
+     * $value and puts the caret at $caret (clamped), or at the end when null –
+     * pass {@see focusedTextFieldCaret()} from before to hand focus back to a
+     * field exactly where the caret was.
      */
-    public function focusTextField(string $id, string $value = ''): void
+    public function focusTextField(string $id, string $value = '', ?int $caret = null): void
     {
         $this->setTextFieldFocus($id);
         $this->textFieldBuffer = $value;
-        $this->textFieldCursor = mb_strlen($value);
+        $length = mb_strlen($value);
+        $this->textFieldCursor = $caret === null ? $length : max(0, min($caret, $length));
+    }
+
+    /** Caret index (characters) in the focused text field; 0 when none has focus. */
+    public function focusedTextFieldCaret(): int
+    {
+        return $this->focusedTextField === '' ? 0 : $this->textFieldCursor;
     }
 
     /**
@@ -1151,6 +1429,17 @@ class UIContext
     }
 
     /**
+     * Id of the text field / area that has input focus, or '' when none does.
+     * Lets a caller route keys by focus – e.g. Enter inserts a newline in one
+     * field, submits a single-line field, and does something else entirely
+     * with nothing focused.
+     */
+    public function focusedTextFieldId(): string
+    {
+        return $this->focusedTextField;
+    }
+
+    /**
      * Get the current cursor Y position (useful for custom layouts).
      */
     public function getCursorY(): float
@@ -1253,6 +1542,12 @@ class UIContext
         if (!$this->interactive) {
             return false;
         }
+        return $rect->contains($this->designMouse());
+    }
+
+    /** The mouse position in the layout's design space (see isHovered). */
+    private function designMouse(): Vec2
+    {
         $mouse = $this->input->getMousePosition();
         // Adjust mouse position for viewport offset (letterboxing) and content scale
         $mx = ($mouse->x - $this->viewportOffsetX) / $this->contentScale;
@@ -1262,11 +1557,10 @@ class UIContext
         }
         // Content-region translate (draws moved by a renderer transform): bring
         // the cursor into that same space. Zero unless set by the consumer.
-        $adjustedMouse = new Vec2(
+        return new Vec2(
             $mx - $this->contentOffsetX,
             ($mouse->y - $this->viewportOffsetY) / $this->contentScale - $this->contentOffsetY,
         );
-        return $rect->contains($adjustedMouse);
     }
 
     /**
