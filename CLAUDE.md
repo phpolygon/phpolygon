@@ -800,6 +800,24 @@ $ui->end();
 - `UIContext` must be called from `render()`, not `update()` (input state uses
   `mousePrev` snapshotted by `endFrame()`, which runs between update and render).
 
+### UIContext — text areas (code editing)
+
+`textArea($id, $value, $rows, $underlay, $indentRules)` edits through
+`UI\TextEdit\TextEditModel` (pure: buffer, caret, selection, undo; positions are
+code points). Tab / Shift+Tab (also over a line selection), Enter auto-indent
+(`IndentRules`: width, tabs, openers / closers; `IndentRules::braces()` /
+`offside()` per language), smart Home, Ctrl+Home/End, Shift selection, drag,
+double-click word, Ctrl+A/C/X/V, Ctrl+Z / Ctrl+Y / Ctrl+Shift+Z (typing runs are
+one undo step; Enter, paste, cut, indent each one), Ctrl word jumps; macOS:
+Command for shortcuts, Option for words. Modifiers come from `KeyModifiers`
+(key state, AltGr = Ctrl+Alt is never a shortcut). Shortcut letters go through a
+`KeyboardLayoutInterface` (`VioKeyboardLayout` = php-vio `vio_key_name`, so Ctrl+Z
+follows the keycap on QWERTZ). The clipboard is a `ClipboardInterface`:
+`VioClipboard` (system clipboard, php-vio >= 2.33) when the input is `VioInput`,
+else `MemoryClipboard` - tests never touch the user's clipboard. The selection is
+drawn after the underlay and before the text; `TextAreaView` reports `caret` and
+`selectionStart/End`.
+
 ### UIContext — dropdown overlays
 
 Dropdown option lists are rendered as deferred overlays via `flushOverlays()`.

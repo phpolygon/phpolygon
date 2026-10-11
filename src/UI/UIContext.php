@@ -8,7 +8,17 @@ use PHPolygon\Math\Rect;
 use PHPolygon\Math\Vec2;
 use PHPolygon\Rendering\Color;
 use PHPolygon\Rendering\Renderer2DInterface;
+use PHPolygon\Runtime\ClipboardInterface;
 use PHPolygon\Runtime\InputInterface;
+use PHPolygon\Runtime\KeyboardLayoutInterface;
+use PHPolygon\Runtime\KeyModifiers;
+use PHPolygon\Runtime\MemoryClipboard;
+use PHPolygon\Runtime\UsKeyboardLayout;
+use PHPolygon\Runtime\VioClipboard;
+use PHPolygon\Runtime\VioInput;
+use PHPolygon\Runtime\VioKeyboardLayout;
+use PHPolygon\UI\TextEdit\IndentRules;
+use PHPolygon\UI\TextEdit\TextEditModel;
 
 /**
  * Immediate-mode UI context.
@@ -123,14 +133,74 @@ class UIContext
      */
     private bool $interactive = true;
 
+    /** Clipboard for copy / cut / paste in text areas. */
+    private ClipboardInterface $clipboard;
+
+    /** Maps shortcut letters to keys (Ctrl+Z follows the keycap, not the US position). */
+    private KeyboardLayoutInterface $keyboardLayout;
+
+    /** macOS key bindings (Command shortcuts, Option word jumps); null = the platform's. */
+    private ?bool $macKeys = null;
+
+    /**
+     * Editing state (text, caret, selection, undo) per text area. Kept while
+     * focus is elsewhere, so returning to a field with the same text keeps
+     * its undo history.
+     *
+     * @var array<string, TextEditModel>
+     */
+    private array $editModels = [];
+
+    /** Text area whose mouse-press selection is being dragged ('' = none). */
+    private string $textAreaDrag = '';
+
+    /** @var array{id: string, at: int, x: float, y: float} last press in a text area (double-click detection) */
+    private array $lastTextAreaPress = ['id' => '', 'at' => 0, 'x' => 0.0, 'y' => 0.0];
+
+    /** Two presses closer than this (ns) and {@see DOUBLE_CLICK_DISTANCE} px apart select a word. */
+    private const int DOUBLE_CLICK_NS = 400_000_000;
+    private const float DOUBLE_CLICK_DISTANCE = 4.0;
+
+    /**
+     * The clipboard and keyboard layout default to the system ones when the
+     * input is php-vio's ({@see VioInput}), else to an in-process clipboard
+     * and the US layout - so tests and headless runs never touch the user's
+     * clipboard.
+     */
     public function __construct(
         Renderer2DInterface $renderer,
         InputInterface $input,
         ?UIStyle $style = null,
+        ?ClipboardInterface $clipboard = null,
+        ?KeyboardLayoutInterface $keyboardLayout = null,
     ) {
         $this->renderer = $renderer;
         $this->input = $input;
         $this->style = $style ?? UIStyle::dark();
+        $system = $input instanceof VioInput;
+        $this->clipboard = $clipboard ?? ($system ? new VioClipboard() : new MemoryClipboard());
+        $this->keyboardLayout = $keyboardLayout ?? ($system ? new VioKeyboardLayout() : new UsKeyboardLayout());
+    }
+
+    public function getClipboard(): ClipboardInterface
+    {
+        return $this->clipboard;
+    }
+
+    public function setClipboard(ClipboardInterface $clipboard): void
+    {
+        $this->clipboard = $clipboard;
+    }
+
+    public function setKeyboardLayout(KeyboardLayoutInterface $layout): void
+    {
+        $this->keyboardLayout = $layout;
+    }
+
+    /** Force macOS (true) or PC (false) key bindings in text areas; null = the running platform's. */
+    public function useMacKeys(?bool $mac): void
+    {
+        $this->macKeys = $mac;
     }
 
     public function getInput(): InputInterface
@@ -712,9 +782,19 @@ class UIContext
      * the frame's {@see TextAreaView} – for highlight bands under single lines.
      * The same view is available afterwards from {@see textAreaView()}.
      *
+     * Editing ({@see TextEditModel}): Tab / Shift+Tab indent and outdent the
+     * caret's line or every selected line, Enter keeps the indentation (one
+     * level more after an opener of $indentRules, the default rules when
+     * null), smart Home / End, Ctrl+Home / End, Shift extends a selection
+     * (also Shift+click), drag selects, a double-click selects a word, Ctrl+A
+     * / C / X / V with the clipboard ({@see setClipboard()}), Ctrl+Z / Ctrl+Y
+     * (Ctrl+Shift+Z) undo and redo, Ctrl+arrows / Ctrl+Backspace / Ctrl+Delete
+     * work word-wise. On macOS Command takes Control's place and Option jumps
+     * words. Shortcut letters follow the keyboard layout.
+     *
      * @param (\Closure(TextAreaView): void)|null $underlay
      */
-    public function textArea(string $id, string $value, int $rows = 8, ?\Closure $underlay = null): string
+    public function textArea(string $id, string $value, int $rows = 8, ?\Closure $underlay = null, ?IndentRules $indentRules = null): string
     {
         $s = $this->style;
         $lineH = $s->fontSize * 1.35;
@@ -737,70 +817,66 @@ class UIContext
         }
 
         $focused = $this->focusedTextField === $id;
-        if ($hovered && $this->input->isMouseButtonReleased(0)) {
-            $this->setTextFieldFocus($id);
+        $edit = null;
+        $mods = KeyModifiers::fromInput($this->input, $this->macKeys);
+        $caretAt = function (TextEditModel $model) use ($textX, $textY, $lineH, $scroll): int {
+            return $this->caretAtPoint($model->text(), $this->designMouse(), $textX - $scroll['x'], $textY, $lineH, $scroll['row']);
+        };
+
+        if ($hovered && $this->input->isMouseButtonPressed(0)) {
+            // Press: focus, place the caret (Shift extends), start a drag;
+            // a second press on the same spot selects the word.
             if (!$focused) {
+                $this->setTextFieldFocus($id);
                 $this->textFieldBuffer = $value;
+                $this->textFieldCursor = mb_strlen($value);
             }
-            $this->textFieldCursor = $this->caretAtPoint(
-                $focused ? $this->textFieldBuffer : $value,
-                $this->designMouse(),
-                $textX - $scroll['x'],
-                $textY,
-                $lineH,
-                $scroll['row'],
-            );
+            $edit = $this->editModel($id, $indentRules);
+            $index = $caretAt($edit);
+            $mouse = $this->designMouse();
+            $now = \PHPolygon\Runtime\Clock::now();
+            $last = $this->lastTextAreaPress;
+            $double = $focused && $last['id'] === $id && $now - $last['at'] < self::DOUBLE_CLICK_NS
+                && abs($mouse->x - $last['x']) <= self::DOUBLE_CLICK_DISTANCE
+                && abs($mouse->y - $last['y']) <= self::DOUBLE_CLICK_DISTANCE;
+            if ($double) {
+                $edit->selectWordAt($index);
+                $this->textAreaDrag = '';
+                $this->lastTextAreaPress = ['id' => '', 'at' => 0, 'x' => 0.0, 'y' => 0.0];
+            } else {
+                $edit->setCaret($index, extend: $focused && $mods->shift);
+                $this->textAreaDrag = $id;
+                $this->lastTextAreaPress = ['id' => $id, 'at' => $now, 'x' => $mouse->x, 'y' => $mouse->y];
+            }
             $focused = true;
-        } elseif (!$hovered && $this->input->isMouseButtonReleased(0) && $focused) {
-            $this->setTextFieldFocus('');
-            $focused = false;
+        } elseif ($focused && $this->textAreaDrag === $id && $this->input->isMouseButtonDown(0)
+            && !$this->input->isMouseButtonPressed(0)) {
+            // Drag: the caret follows the mouse, also outside the field
+            // (above / below it the view scrolls along with the caret).
+            $edit = $this->editModel($id, $indentRules);
+            $edit->setCaret($caretAt($edit), extend: true);
+        } elseif ($this->input->isMouseButtonReleased(0)) {
+            if ($this->textAreaDrag === $id) {
+                $this->textAreaDrag = ''; // end of a drag - wherever the mouse is now
+            } elseif ($hovered && !$focused) {
+                // A release without the press (e.g. focus handed over mid-click).
+                $this->setTextFieldFocus($id);
+                $this->textFieldBuffer = $value;
+                $edit = $this->editModel($id, $indentRules);
+                $edit->setCaret($caretAt($edit));
+                $focused = true;
+            } elseif (!$hovered && $focused) {
+                $this->setTextFieldFocus('');
+                $focused = false;
+            }
         }
 
         if ($focused) {
-            $buf = $this->textFieldBuffer;
-            $cur = $this->textFieldCursor;
-
-            foreach ($this->input->getCharsTyped() as $char) {
-                $buf = mb_substr($buf, 0, $cur) . $char . mb_substr($buf, $cur);
-                $cur++;
-            }
-            // Enter / keypad enter → newline
-            if ($this->input->isKeyTyped(257) || $this->input->isKeyTyped(335)) {
-                $buf = mb_substr($buf, 0, $cur) . "\n" . mb_substr($buf, $cur);
-                $cur++;
-            }
-            // Backspace (259)
-            if ($this->input->isKeyTyped(259) && $cur > 0) {
-                $buf = mb_substr($buf, 0, $cur - 1) . mb_substr($buf, $cur);
-                $cur--;
-            }
-            // On-screen-keyboard backspaces (iOS): delivered as a per-frame count.
-            for ($bs = $this->input->getBackspaceCount(); $bs > 0 && $cur > 0; $bs--) {
-                $buf = mb_substr($buf, 0, $cur - 1) . mb_substr($buf, $cur);
-                $cur--;
-            }
-            // Delete (261)
-            if ($this->input->isKeyTyped(261) && $cur < mb_strlen($buf)) {
-                $buf = mb_substr($buf, 0, $cur) . mb_substr($buf, $cur + 1);
-            }
-            // Left / Right (263 / 262)
-            if ($this->input->isKeyTyped(263) && $cur > 0) {
-                $cur--;
-            }
-            if ($this->input->isKeyTyped(262) && $cur < mb_strlen($buf)) {
-                $cur++;
-            }
-            // Up / Down (265 / 264) — keep the column on the neighbouring line.
-            if ($this->input->isKeyTyped(265)) {
-                $cur = $this->moveCaretVertically($buf, $cur, -1);
-            }
-            if ($this->input->isKeyTyped(264)) {
-                $cur = $this->moveCaretVertically($buf, $cur, 1);
-            }
-
-            $this->textFieldBuffer = $buf;
-            $this->textFieldCursor = $cur;
-            $value = $buf;
+            $edit ??= $this->editModel($id, $indentRules);
+            $this->applyTextAreaKeys($edit, $mods, $rows);
+            $this->textFieldBuffer = $edit->text();
+            $this->textFieldCursor = $edit->caret();
+            $value = $edit->text();
         }
 
         $lines = explode("\n", $value);
@@ -886,6 +962,9 @@ class UIContext
             scrollX: $scroll['x'],
             contentWidth: $contentW,
             focused: $focused,
+            caret: $edit?->caret() ?? -1,
+            selectionStart: $edit?->selectionRange()[0] ?? -1,
+            selectionEnd: $edit?->selectionRange()[1] ?? -1,
         );
         $this->textAreaViews[$id] = $view;
 
@@ -896,6 +975,12 @@ class UIContext
 
         if ($underlay !== null) {
             $underlay($view);
+        }
+
+        // Selection: one band per visible selected row, above the underlay's
+        // bands and below the text.
+        if ($edit !== null && $edit->hasSelection()) {
+            $this->drawTextAreaSelection($edit, $view, $lines);
         }
 
         // Lines: only the visible window, each cut to the visible width.
@@ -954,6 +1039,152 @@ class UIContext
 
     /** Room kept right of the caret when the view scrolls sideways (px). */
     private const float TEXT_AREA_CARET_ROOM = 4.0;
+
+    /**
+     * The editing model of text area $id, in step with the focused-field
+     * buffer: focusTextField() with other text starts it afresh (and its
+     * history), with the same text only the caret moves.
+     */
+    private function editModel(string $id, ?IndentRules $rules): TextEditModel
+    {
+        $model = $this->editModels[$id] ?? null;
+        if ($model === null) {
+            $model = new TextEditModel($this->textFieldBuffer, $this->textFieldCursor, $rules ?? new IndentRules());
+            $this->editModels[$id] = $model;
+        } elseif ($model->text() !== $this->textFieldBuffer) {
+            $model->setText($this->textFieldBuffer, $this->textFieldCursor);
+        } elseif ($model->caret() !== $this->textFieldCursor) {
+            $model->setCaret($this->textFieldCursor);
+        }
+        if ($rules !== null && $model->rules() !== $rules) {
+            $model->setRules($rules);
+        }
+        return $model;
+    }
+
+    /** Keyboard and clipboard for the focused text area. */
+    private function applyTextAreaKeys(TextEditModel $edit, KeyModifiers $mods, int $rows): void
+    {
+        $in = $this->input;
+        $shift = $mods->shift;
+        $word = $mods->wordJump();
+
+        if ($mods->shortcut()) {
+            // Typed letters with the shortcut modifier are commands, not text.
+            $key = fn (string $letter): bool => ($k = $this->keyboardLayout->keyFor($letter)) >= 0 && $in->isKeyTyped($k);
+            if ($key('a')) {
+                $edit->selectAll();
+            }
+            if ($key('c') && $edit->hasSelection()) {
+                $this->clipboard->setText($edit->selectedText());
+            }
+            if ($key('x') && $edit->hasSelection()) {
+                $this->clipboard->setText($edit->cut());
+            }
+            if ($key('v')) {
+                $edit->paste($this->clipboard->getText());
+            }
+            if ($key('z')) {
+                $shift ? $edit->redo() : $edit->undo();
+            }
+            if ($key('y')) {
+                $edit->redo();
+            }
+        } else {
+            foreach ($in->getCharsTyped() as $char) {
+                $edit->insert($char);
+            }
+        }
+
+        // Enter / keypad Enter (Ctrl+Enter is left to the caller, e.g. "run").
+        if (!$mods->primary() && ($in->isKeyTyped(257) || $in->isKeyTyped(335))) {
+            $edit->newline();
+        }
+        // Tab / Shift+Tab (Alt+Tab and Ctrl+Tab belong to the system / the caller).
+        if (!$mods->alt && !$mods->primary() && $in->isKeyTyped(258)) {
+            $shift ? $edit->outdent() : $edit->indent();
+        }
+        if ($in->isKeyTyped(259)) {
+            $edit->backspace(word: $word);
+        }
+        // On-screen-keyboard backspaces (iOS): delivered as a per-frame count.
+        for ($bs = $in->getBackspaceCount(); $bs > 0; $bs--) {
+            $edit->backspace();
+        }
+        if ($in->isKeyTyped(261)) {
+            $edit->delete(word: $word);
+        }
+
+        $lineJump = $mods->mac && $mods->super;    // Command + arrows on macOS
+        $docJump = $mods->mac ? $mods->super : $mods->control;
+        if ($in->isKeyTyped(263)) {
+            $lineJump ? $edit->home($shift) : $edit->moveLeft($shift, $word);
+        }
+        if ($in->isKeyTyped(262)) {
+            $lineJump ? $edit->end($shift) : $edit->moveRight($shift, $word);
+        }
+        if ($in->isKeyTyped(265)) {
+            $lineJump ? $edit->documentStart($shift) : $edit->moveUp($shift);
+        }
+        if ($in->isKeyTyped(264)) {
+            $lineJump ? $edit->documentEnd($shift) : $edit->moveDown($shift);
+        }
+        if ($in->isKeyTyped(268)) {
+            $docJump ? $edit->documentStart($shift) : $edit->home($shift);
+        }
+        if ($in->isKeyTyped(269)) {
+            $docJump ? $edit->documentEnd($shift) : $edit->end($shift);
+        }
+        // Page Up / Page Down: one view height.
+        if ($in->isKeyTyped(266)) {
+            for ($i = 0; $i < $rows; $i++) {
+                $edit->moveUp($shift);
+            }
+        }
+        if ($in->isKeyTyped(267)) {
+            for ($i = 0; $i < $rows; $i++) {
+                $edit->moveDown($shift);
+            }
+        }
+    }
+
+    /**
+     * Selection bands of a focused text area, clipped to its visible rows and
+     * inner width. A selected line break shows as a short tail past the line.
+     *
+     * @param list<string> $lines
+     */
+    private function drawTextAreaSelection(TextEditModel $edit, TextAreaView $view, array $lines): void
+    {
+        $s = $this->style;
+        [$start, $end] = $edit->selectionRange();
+        [$firstLine, $firstCol] = $edit->lineAndColumn($start);
+        [$lastLine, $lastCol] = $edit->lineAndColumn($end);
+        $color = $s->accentColor->withAlpha(0.32);
+        $tail = $s->fontSize * 0.3;
+        $left = $view->textX;
+        $right = $view->textX + $view->innerWidth;
+        $padY = ($view->lineHeight - $s->fontSize) / 2.0;
+
+        $from = max($firstLine, $view->firstRow);
+        $to = min($lastLine, $view->firstRow + $view->visibleRows - 1);
+        for ($row = $from; $row <= $to; $row++) {
+            $line = $lines[$row] ?? '';
+            $c0 = $row === $firstLine ? $firstCol : 0;
+            $c1 = $row === $lastLine ? $lastCol : mb_strlen($line);
+            $x0 = $c0 > 0 ? $this->renderer->measureText(mb_substr($line, 0, $c0), $s->fontSize)->width : 0.0;
+            $x1 = $c1 > 0 ? $this->renderer->measureText(mb_substr($line, 0, $c1), $s->fontSize)->width : 0.0;
+            if ($row < $lastLine) {
+                $x1 += $tail; // the line break is selected too
+            }
+            $sx0 = max($left, $view->textX + $x0 - $view->scrollX);
+            $sx1 = min($right, $view->textX + $x1 - $view->scrollX);
+            if ($sx1 - $sx0 < 0.5) {
+                continue;
+            }
+            $this->renderer->drawRect($sx0, $view->rowY($row) - $padY, $sx1 - $sx0, $view->lineHeight, $color);
+        }
+    }
 
     /**
      * Per text area: first visible row, horizontal scroll (px) and the caret /
@@ -1064,30 +1295,6 @@ class UIContext
             $offset += mb_strlen($lines[$i]) + 1;
         }
         return $offset + $col;
-    }
-
-    /**
-     * Move a caret index up/down one line, keeping the column where possible.
-     * $dir = -1 for up, +1 for down.
-     */
-    private function moveCaretVertically(string $buf, int $cursor, int $dir): int
-    {
-        $before = mb_substr($buf, 0, $cursor);
-        $beforeLines = explode("\n", $before);
-        $row = count($beforeLines) - 1;
-        $col = mb_strlen($beforeLines[$row]);
-
-        $allLines = explode("\n", $buf);
-        $targetRow = $row + $dir;
-        if ($targetRow < 0 || $targetRow >= count($allLines)) {
-            return $cursor;
-        }
-
-        $offset = 0;
-        for ($i = 0; $i < $targetRow; $i++) {
-            $offset += mb_strlen($allLines[$i]) + 1; // +1 for the newline
-        }
-        return $offset + min($col, mb_strlen($allLines[$targetRow]));
     }
 
     /**

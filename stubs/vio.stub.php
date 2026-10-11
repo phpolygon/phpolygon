@@ -259,6 +259,15 @@ function vio_on_char(VioContext $ctx, callable $callback): void {}
 /** On-screen-keyboard backspaces since the last call (iOS; 0 on desktop). */
 function vio_ime_backspaces(VioContext $ctx): int {}
 
+/** The clipboard as UTF-8 text ('' when empty); the system clipboard where the platform has one (php-vio >= 2.33). */
+function vio_clipboard_get(): string {}
+
+/** Write UTF-8 text to the clipboard (php-vio >= 2.33). */
+function vio_clipboard_set(string $text): bool {}
+
+/** The lower-case character a printable key types in the current layout, null when none / unknown (php-vio >= 2.33). */
+function vio_key_name(int $key): ?string {}
+
 /** Show the on-screen keyboard (iOS; no-op on desktop). */
 function vio_keyboard_show(VioContext $ctx): void {}
 

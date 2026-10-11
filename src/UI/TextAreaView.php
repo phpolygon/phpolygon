@@ -38,7 +38,17 @@ final readonly class TextAreaView
         public float $scrollX,
         public float $contentWidth,
         public bool $focused,
+        /** Caret index (code points) while focused, -1 otherwise. */
+        public int $caret = -1,
+        /** Selected range [selectionStart, selectionEnd) while focused; both equal the caret without a selection. */
+        public int $selectionStart = -1,
+        public int $selectionEnd = -1,
     ) {
+    }
+
+    public function hasSelection(): bool
+    {
+        return $this->selectionEnd > $this->selectionStart;
     }
 
     /** Top edge (screen y) of $row – outside the field when the row is scrolled away. */
