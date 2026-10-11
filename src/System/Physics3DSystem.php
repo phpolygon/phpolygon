@@ -28,6 +28,35 @@ class Physics3DSystem extends AbstractSystem
     /** Maximum mesh-collider resolution iterations per character per frame */
     private const MESH_ITERATIONS = 4;
 
+    /**
+     * Longest single integration step (seconds). A tick longer than this is
+     * split into equal substeps of at most this length, so gravity, friction and
+     * the discrete overlap tests see the same step size on a slow machine as on
+     * a fast one. Ticks at or below it (any frame rate ≥ 30 Hz) run exactly one
+     * step, unchanged.
+     */
+    public const float MAX_SUBSTEP = 1.0 / 30.0;
+
+    /**
+     * Upper bound on substeps per tick. A tick longer than
+     * MAX_SUBSTEPS × MAX_SUBSTEP (a multi-second stall: loading, a debugger
+     * pause, a suspended window) simulates only that much — the rest of the
+     * stall is dropped instead of flinging characters, and the physics cost of
+     * one hitch stays bounded. Systems that are not physics keep the full dt.
+     */
+    public const int MAX_SUBSTEPS = 8;
+
+    /**
+     * How far below its previous feet a support surface may lie and still count
+     * as "was standing on / above it" for the swept landing test. Absorbs the
+     * resting contact and float noise; small enough that a character walking
+     * under a low ledge is never pulled onto it.
+     */
+    private const float SWEEP_SKIN = 0.05;
+
+    /** Surfaces steeper than this (|normal.y| below it) are walls, not floors. */
+    private const float SWEEP_MIN_NORMAL_Y = 0.5;
+
     public function __construct(?Vec3 $gravity = null, float $groundPlaneY = 0.0)
     {
         $this->gravity = $gravity ?? new Vec3(0.0, -9.81, 0.0);
@@ -70,12 +99,39 @@ class Physics3DSystem extends AbstractSystem
             PerfProfiler::end();
         }
 
+        // Colliders do not move between substeps (nothing else runs in between),
+        // so they are collected once and only the character integration repeats.
         PerfProfiler::begin('physics.resolve');
         try {
-            $this->resolveCharacters($world, $dt, $staticColliders, $meshColliders, $boxData['boxTopY']);
+            [$steps, $stepDt] = self::substeps($dt);
+            for ($i = 0; $i < $steps; $i++) {
+                $this->resolveCharacters($world, $stepDt, $staticColliders, $meshColliders, $boxData['boxTopY']);
+            }
         } finally {
             PerfProfiler::end();
         }
+    }
+
+    /**
+     * Split one tick into equal integration steps of at most MAX_SUBSTEP,
+     * capped at MAX_SUBSTEPS (the remainder of an overlong tick is dropped).
+     * A non-positive dt still runs one step so state-only work (coupling,
+     * scripted animation) keeps being applied.
+     *
+     * @return array{int, float} [step count, dt per step]
+     */
+    public static function substeps(float $dt): array
+    {
+        if ($dt <= self::MAX_SUBSTEP) {
+            return [1, $dt];
+        }
+        // The epsilon keeps an exact multiple (e.g. 2 × MAX_SUBSTEP) from
+        // rounding up to an extra step.
+        $steps = (int) ceil($dt / self::MAX_SUBSTEP - 1e-9);
+        if ($steps > self::MAX_SUBSTEPS) {
+            return [self::MAX_SUBSTEPS, self::MAX_SUBSTEP];
+        }
+        return [$steps, $dt / $steps];
     }
 
     /**
@@ -118,7 +174,40 @@ class Physics3DSystem extends AbstractSystem
             );
 
             // Reset grounded flag — will be set by collision response below
+            $wasGrounded = $controller->isGrounded;
             $controller->isGrounded = false;
+
+            // Swept landing: the overlap tests below only see where the capsule
+            // ENDS. A step that carries the feet past a floor thinner than the
+            // drop (a long tick, a fast fall) would end beneath or deep inside
+            // it and be resolved the wrong way — through it. Catch any support
+            // surface crossed on the way down and stand the character on it.
+            //
+            // A character that was grounded and is not rising also probes
+            // SWEEP_SKIN below its feet. Resting exactly on a box top is no
+            // overlap, so without the probe it read as airborne every other
+            // tick (gravity → sink → push back up → grounded → no gravity → …):
+            // isGrounded flickered and a jump pressed on the wrong tick was lost.
+            $probe = $wasGrounded && $controller->velocity->y <= 0.0;
+            if ($newPos->y < $transform->position->y || $probe) {
+                $prevFeetY = $transform->position->y - $halfHeight;
+                $support = $this->sweptSupportY(
+                    $newPos,
+                    $prevFeetY,
+                    $newPos->y - $halfHeight - ($probe ? self::SWEEP_SKIN : 0.0),
+                    $radius,
+                    $entity->id,
+                    $staticColliders,
+                    $meshColliders,
+                );
+                if ($support !== null) {
+                    $newPos = new Vec3($newPos->x, $support + $halfHeight, $newPos->z);
+                    $controller->velocity = new Vec3($controller->velocity->x, 0.0, $controller->velocity->z);
+                    $controller->isGrounded = true;
+                    $charMin = new Vec3($newPos->x - $radius, $newPos->y - $halfHeight, $newPos->z - $radius);
+                    $charMax = new Vec3($newPos->x + $radius, $newPos->y + $halfHeight, $newPos->z + $radius);
+                }
+            }
 
             // Resolve AABB collisions against box colliders with step-climbing
             foreach ($staticColliders as $collider) {
@@ -242,6 +331,94 @@ class Physics3DSystem extends AbstractSystem
             $transform->position = $newPos;
             $transform->worldMatrix = $transform->getLocalMatrix();
         }
+    }
+
+    /**
+     * Highest floor surface the character's feet crossed this step, or null.
+     *
+     * A surface counts when it lies between $lowerY (the new feet height, or
+     * SWEEP_SKIN below it for a grounded probe) and the previous feet height
+     * (plus {@see SWEEP_SKIN} for the resting contact) under the
+     * character: box colliders whose footprint overlaps the capsule's, and
+     * near-horizontal mesh triangles under the capsule's centre column. Winding
+     * is ignored (|normal.y|) — a walker coming down onto a horizontal face is
+     * landing on it whichever way the face was authored.
+     *
+     * @param list<array{entityId: int, min: Vec3, max: Vec3}> $staticColliders
+     * @param list<array{entityId: int, bvh: BVH}> $meshColliders
+     */
+    private function sweptSupportY(
+        Vec3 $pos,
+        float $prevFeetY,
+        float $lowerY,
+        float $radius,
+        int $selfId,
+        array $staticColliders,
+        array $meshColliders,
+    ): ?float {
+        $upper = $prevFeetY + self::SWEEP_SKIN;
+        $best = null;
+
+        foreach ($staticColliders as $collider) {
+            if ($collider['entityId'] === $selfId) {
+                continue;
+            }
+            $top = $collider['max']->y;
+            if ($top > $upper || $top < $lowerY || ($best !== null && $top <= $best)) {
+                continue;
+            }
+            if ($pos->x + $radius <= $collider['min']->x || $pos->x - $radius >= $collider['max']->x
+                || $pos->z + $radius <= $collider['min']->z || $pos->z - $radius >= $collider['max']->z
+            ) {
+                continue;
+            }
+            $best = $top;
+        }
+
+        if ($meshColliders !== []) {
+            $queryMin = new Vec3($pos->x - $radius, $lowerY, $pos->z - $radius);
+            $queryMax = new Vec3($pos->x + $radius, $upper, $pos->z + $radius);
+            foreach ($meshColliders as $mc) {
+                if ($mc['entityId'] === $selfId) {
+                    continue;
+                }
+                foreach ($mc['bvh']->query($queryMin, $queryMax) as $triangle) {
+                    if (abs($triangle->normal->y) < self::SWEEP_MIN_NORMAL_Y) {
+                        continue;
+                    }
+                    $y = self::triangleHeightAt($triangle, $pos->x, $pos->z);
+                    if ($y === null || $y > $upper || $y < $lowerY || ($best !== null && $y <= $best)) {
+                        continue;
+                    }
+                    $best = $y;
+                }
+            }
+        }
+
+        return $best;
+    }
+
+    /**
+     * Height of a triangle's plane over (x, z), or null when the point lies
+     * outside the triangle's XZ footprint.
+     */
+    private static function triangleHeightAt(Triangle $t, float $x, float $z): ?float
+    {
+        $a = $t->v0;
+        $b = $t->v1;
+        $c = $t->v2;
+        $den = ($b->z - $c->z) * ($a->x - $c->x) + ($c->x - $b->x) * ($a->z - $c->z);
+        if (abs($den) < 1e-12) {
+            return null;
+        }
+        $w1 = (($b->z - $c->z) * ($x - $c->x) + ($c->x - $b->x) * ($z - $c->z)) / $den;
+        $w2 = (($c->z - $a->z) * ($x - $c->x) + ($a->x - $c->x) * ($z - $c->z)) / $den;
+        $w3 = 1.0 - $w1 - $w2;
+        $eps = 1e-6;
+        if ($w1 < -$eps || $w2 < -$eps || $w3 < -$eps) {
+            return null;
+        }
+        return $w1 * $a->y + $w2 * $b->y + $w3 * $c->y;
     }
 
     /**
