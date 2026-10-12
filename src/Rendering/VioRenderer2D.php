@@ -45,6 +45,8 @@ class VioRenderer2D implements Renderer2DInterface
     public function clearFontCache(): void
     {
         $this->fontCache = [];
+        // Keyed by font object id - a freed font's id can be reused.
+        $this->alignHeightCache = [];
     }
 
     /**
@@ -132,6 +134,20 @@ class VioRenderer2D implements Renderer2DInterface
      * bounding worst-case memory usage.
      */
     private int $measureCacheCap = 4096;
+
+    /**
+     * Probe string for the vertical alignment of a font: a capital (cap
+     * height) plus a descender. See {@see alignHeight()}.
+     */
+    private const string ALIGN_PROBE = 'Hg';
+
+    /**
+     * Ink height of {@see ALIGN_PROBE} per font object (spl_object_id), the
+     * content-independent height TOP / MIDDLE / BOTTOM alignment works with.
+     *
+     * @var array<int, float>
+     */
+    private array $alignHeightCache = [];
 
     /**
      * State stack for saveState()/restoreState().
@@ -389,16 +405,17 @@ class VioRenderer2D implements Renderer2DInterface
             return;
         }
 
-        $tm = $this->measureTextWithChain($chain, $text);
-        $tw = $tm->width;
-        $th = $tm->height;
-        $ascender = $th * 0.65;
         $align = $this->textAlign;
+        // The vertical anchor comes from the FONT, never from the string: the
+        // measured height is the ink extent of exactly these glyphs, so a lone
+        // '_' (3 px of ink) or '-' would get its own baseline and land at the
+        // wrong height - '_' at the top of the line, looking like '-'.
+        $th = $this->alignHeight($chain, $text);
+        $ascender = $th * 0.65;
 
-        if ($align & TextAlign::CENTER) {
-            $x -= $tw / 2.0;
-        } elseif ($align & TextAlign::RIGHT) {
-            $x -= $tw;
+        if ($align & (TextAlign::CENTER | TextAlign::RIGHT)) {
+            $tw = $this->measureTextWithChain($chain, $text)->width;
+            $x -= ($align & TextAlign::CENTER) ? $tw / 2.0 : $tw;
         }
 
         if ($align & TextAlign::TOP) {
@@ -419,7 +436,8 @@ class VioRenderer2D implements Renderer2DInterface
             return;
         }
         $tm = $this->measureTextWithChain($chain, $text);
-        $th = $tm->height;
+        // Font-level height, not the ink of this string - see drawText().
+        $th = $this->alignHeight($chain, $text);
         $ascender = $th * 0.65;
         $x = $cx - $tm->width / 2.0;
         $y = $cy + $ascender - $th / 2.0;
@@ -989,6 +1007,30 @@ class VioRenderer2D implements Renderer2DInterface
     private static function textNeedsFallback(string $text): bool
     {
         return \strpbrk($text, self::FALLBACK_BYTE_MASK) !== false;
+    }
+
+    /**
+     * The height TOP / MIDDLE / BOTTOM alignment anchors on: the ink height of
+     * {@see ALIGN_PROBE} in the chain's primary font. Constant per font and
+     * size, so every string drawn at the same y shares one baseline - single
+     * glyphs ('_', '-', '.') included. Typical UI strings (capitals plus
+     * descenders) measure about the same, so their placement barely moves
+     * against the old per-string anchor.
+     *
+     * A primary font without the probe glyphs falls back to the string's own
+     * height (the previous behaviour).
+     *
+     * @param list<\VioFont> $chain
+     */
+    private function alignHeight(array $chain, string $text): float
+    {
+        $id = \spl_object_id($chain[0]);
+        if (!isset($this->alignHeightCache[$id])) {
+            $this->alignHeightCache[$id] = (float) $this->measureCached($chain[0], self::ALIGN_PROBE)['height'];
+        }
+        $height = $this->alignHeightCache[$id];
+
+        return $height > 0.0 ? $height : $this->measureTextWithChain($chain, $text)->height;
     }
 
     /**
