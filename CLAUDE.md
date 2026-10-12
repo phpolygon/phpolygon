@@ -976,6 +976,47 @@ one that does takes `phpolygon/multiplayer`.
 
 ---
 
+## Audio DSP — offline signal processing
+
+`PHPolygon\Audio\Dsp` and `PHPolygon\Audio\Codec` are plain-PHP tools for audio a
+game renders **ahead of time** (build hooks, prebake scripts): read and write WAV,
+encode FLAC, resample, measure loudness, reshape recorded voices. Nothing here runs
+per frame or touches php-vio – playback stays with `AudioManager`. Every class works
+on `list<float>` mono (or two lists for stereo) at a sample rate that defaults to
+`Pcm::SAMPLE_RATE` (44.1 kHz) and is a parameter everywhere. All of it is
+deterministic: same input, same bytes.
+
+| Class | What it is |
+|---|---|
+| `Dsp\Pcm` | Shared conventions: `SAMPLE_RATE`, `BITS_PER_SAMPLE`, `toInt16()` (rounded, ±32767), `packSample()` (truncated), `lpCoeff()`, `hz()` (MIDI → Hz), `db()` |
+| `Dsp\Fft` | In-place radix-2 FFT with cached twiddles |
+| `Dsp\Resampler` | Band-limited Kaiser-sinc `convert()` (rate change) and `stretch()` (length and pitch by a factor) |
+| `Dsp\Loudness` | ITU-R BS.1770 integrated loudness (LUFS), stereo and mono |
+| `Codec\WavReader` | RIFF/WAVE → mono floats at a target rate: 16/24-bit PCM, 32-bit float, any channel count, `WAVE_FORMAT_EXTENSIBLE` |
+| `Codec\WavWriter` | 16-bit PCM RIFF header, stereo interleave |
+| `Codec\FlacWriter` | Lossless FLAC (fixed predictors, Rice coding, stereo decorrelation), stereo and mono, STREAMINFO MD5; php-vio decodes it |
+| `Dsp\Voice\PitchDetector` / `PitchTrack` | YIN f0 tracker, ≈ 10 ms hop, voiced/unvoiced per frame |
+| `Dsp\Voice\VoiceShaper` | TD-PSOLA pitch + resample formant shift + WSOLA tempo, RBJ tilt shelves, envelope-following breath noise |
+| `Dsp\Voice\VoiceReference` / `VoiceMatcher` | A voice's measurable fingerprint (f0 stats, LPC formants, 1/6-octave LTAS; JSON round trip) and the matcher that steers a recording toward it (pitch, range, formants, 13-band EQ) |
+| `Dsp\Voice\Crusher` | Sample-and-hold, bit reduction and faded dropouts ("broken machine") |
+| `Dsp\Voice\Vocoder` + `VocoderCarrier` | Channel vocoder; the carrier is pluggable (`SawChordCarrier` default) so a game can let speech play its own synthesiser |
+| `Dsp\Voice\VoiceProfile` | Value object: pitch, formant, tempo, tilt, breath, vocoder, crush; `withOverrides()`, `fingerprint()` |
+| `Dsp\Voice\VoiceChain` | match → shape → crush → vocode → −16 LUFS (peak ≤ −1 dBFS) |
+
+Rules:
+- **Presets belong to the game.** The engine ships the parameter object, not named
+  voices; a game keeps its own factory of profiles.
+- **Cache keys:** `VoiceChain::CHAIN_VERSION` is bumped whenever the chain's output
+  for the same input, profile and carrier changes; `VoiceProfile::fingerprint()`
+  hashes the fields in declared order, so fields are never reordered. A game that
+  prebakes audio also hashes everything else that shapes the sound (its carrier,
+  the engine version or the DSP sources).
+- **Output stability is a contract.** A refactor here must leave rendered samples
+  bit-identical (or bump `CHAIN_VERSION`); tests pin behaviour, not bytes, so compare
+  renders before and after.
+
+---
+
 ## Splash screen
 
 The engine displays a branded splash screen before `onInit` runs. It shows
