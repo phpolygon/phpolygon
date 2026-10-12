@@ -1,10 +1,12 @@
 <?php
 
 /**
- * The part of php-steamworks the relay-network transport uses. Only for static
- * analysis - the extension is optional and every call is guarded at runtime.
+ * The part of php-steamworks the engine uses. Only for static analysis - the
+ * extension is optional and every call is guarded at runtime.
  *
  * @see \PHPolygon\Net\SteamTransport
+ * @see \PHPolygon\Platform\SteamSession
+ * @see \PHPolygon\Platform\SteamLanguage
  */
 
 declare(strict_types=1);
@@ -42,3 +44,13 @@ function steam_net_create_poll_group(): int|false {}
 function steam_net_destroy_poll_group(int $group): bool {}
 
 function steam_net_set_connection_poll_group(int $connection, int $group): bool {}
+
+function steam_init(): bool {}
+
+function steam_shutdown(): void {}
+
+function steam_run_callbacks(): void {}
+
+function steam_apps_get_language(): string|false {}
+
+function steam_utils_get_steam_ui_language(): string|false {}

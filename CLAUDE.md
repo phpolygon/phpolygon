@@ -976,6 +976,34 @@ one that does takes `phpolygon/multiplayer`.
 
 ---
 
+## Start language — Steam, then the system
+
+A game's first start should speak the player's language without asking. The
+engine resolves it; the game only passes the locales it ships and a fallback.
+No ext-intl needed.
+
+```php
+SteamSession::start();                                  // no-op without php-steamworks / Steam
+$start = (new LanguageResolver($shippedCodes, 'en'))->resolve($savedChoiceOrNull);
+$engine->locale->setLocale($start->locale);
+// Persist only a choice the player made in the options – never $start when
+// !$start->wasChosen(), or a later Steam/OS language change is never followed.
+```
+
+| Class | What it is |
+|---|---|
+| `Locale\LocaleMatcher` | `normalize()` any tag (`de_DE.UTF-8@euro` → `de-DE`, C/POSIX → null) and `match()`/`matchFirst()` it against a catalogue: exact → regional rules → language → any region of that language. es outside Spain → `es-419`, bare es → `es-ES`; pt outside Brazil → `pt-PT`; zh by script (Hans: CN/SG, Hant: TW/HK/MO; other script last); `no`/`nb`/`nn` interchangeable. Returns the catalogue's own spelling. Catalogue codes that are not tags take part through `$aliases` (`['latam' => 'es-419']`; also on `LanguageResolver`). |
+| `Platform\SteamSession` | Idempotent `start()` (memoised, warning-free, false without extension/client/app id; `SteamAPI_InitFlat` returns at once there), `runCallbacks()` per frame, `shutdown()` (also registered at exit). |
+| `Platform\SteamLanguage` | `API_CODES` (all 31 Steam API language codes → tags, `latam` → `es-419`, `brazilian` → `pt-BR`, `schinese` → `zh-CN` …), `detect()` = per-game language, then client UI language. Empty before `steam_init()`. |
+| `Platform\SystemLanguage` | Windows: CRT user locale (`German_Germany.1252`, LC_CTYPE restored) then env; Unix: `LANGUAGE`/`LC_ALL`/`LC_MESSAGES`/`LANG` (C wins = nothing); macOS: env then `defaults read -g AppleLanguages` (child process, 1 s cap). |
+| `Platform\LanguageResolver` + `ResolvedLanguage` | saved > Steam > system > fallback, lazily; throwing sources count as silent. `source` says which won, `wasChosen()` whether to persist. |
+
+Never: hardcode a game's locale list here, persist a detected language as the
+player's choice, or call `steam_*` language functions unguarded (they warn
+before `steam_init()`).
+
+---
+
 ## Audio DSP — offline signal processing
 
 `PHPolygon\Audio\Dsp` and `PHPolygon\Audio\Codec` are plain-PHP tools for audio a
