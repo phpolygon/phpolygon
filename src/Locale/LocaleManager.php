@@ -113,6 +113,16 @@ class LocaleManager
     }
 
     /**
+     * Every translation of one locale, flattened to dot-notation keys.
+     *
+     * @return array<string, string>
+     */
+    public function all(string $locale): array
+    {
+        return $this->translations[$locale] ?? [];
+    }
+
+    /**
      * Add translations programmatically.
      *
      * @param array<string, string> $translations

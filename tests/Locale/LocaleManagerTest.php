@@ -54,6 +54,15 @@ class LocaleManagerTest extends TestCase
         $this->assertEquals('Hello', $this->locale->get('greeting'));
     }
 
+    public function testAllReturnsOneLocaleOnly(): void
+    {
+        $this->locale->add('en', ['menu.start' => 'Start']);
+        $this->locale->add('de', ['menu.start' => 'Starten', 'dialog.intro' => 'Hallo']);
+
+        $this->assertSame(['menu.start' => 'Starten', 'dialog.intro' => 'Hallo'], $this->locale->all('de'));
+        $this->assertSame([], $this->locale->all('fr'));
+    }
+
     public function testGetReturnsKeyWhenMissing(): void
     {
         $this->assertEquals('missing.key', $this->locale->get('missing.key'));
