@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace PHPolygon\Build;
 
+use PHPolygon\Audio\Speech\SpeechConfig;
+
 class BuildConfig
 {
     public string $name = 'Game';
@@ -91,6 +93,12 @@ class BuildConfig
      * ships next to the executable, see {@see UpscalerConfig}.
      */
     public UpscalerConfig $upscalers;
+
+    /**
+     * build.json `speech`: spoken lines generated from the translation files,
+     * see {@see SpeechConfig}; null = the game has no generated speech.
+     */
+    public ?SpeechConfig $speech = null;
 
     public string $projectRoot;
 
@@ -239,6 +247,7 @@ class BuildConfig
         }
 
         $this->upscalers = UpscalerConfig::fromBuildJson($data['upscalers'] ?? null, $this->phpIni);
+        $this->speech = SpeechConfig::fromBuildJson($data['speech'] ?? null);
     }
 
     /**
@@ -326,6 +335,7 @@ class BuildConfig
             'buildTypes' => $this->buildTypes,
             'hooks.beforeBuild' => $this->hooksBeforeBuild,
             'upscalers' => $this->upscalers->toArray(),
+            'speech' => $this->speech?->toArray(),
         ];
     }
 }

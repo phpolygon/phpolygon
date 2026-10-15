@@ -47,6 +47,11 @@ if ($autoloader === null) {
 
 require $autoloader;
 
+use PHPolygon\Audio\Speech\ChatterboxSynthesizer;
+use PHPolygon\Audio\Speech\SpeechConfig;
+use PHPolygon\Audio\Speech\SpeechLine;
+use PHPolygon\Audio\Speech\SpeechStatus;
+use PHPolygon\Audio\Speech\SpeechSync;
 use PHPolygon\Build\BuildConfig;
 use PHPolygon\Build\GameBuilder;
 use PHPolygon\Build\StaticPhpResolver;
@@ -173,6 +178,21 @@ if ($command === 'build:transpile') {
     exit(0);
 }
 
+if ($command === 'speech:status') {
+    speechStatus($args);
+    exit(0);
+}
+
+if ($command === 'speech:sync') {
+    speechSync($args);
+    exit(0);
+}
+
+if ($command === 'speech:setup') {
+    speechSetup($args);
+    exit(0);
+}
+
 if ($command !== 'build') {
     fwrite(STDERR, "Unknown command: {$command}\n");
     printUsage();
@@ -215,6 +235,10 @@ if (ini_get('phar.readonly')) {
     fwrite(STDERR, "\033[31mError:\033[0m phar.readonly is enabled. Run with:\n");
     fwrite(STDERR, "  php -d phar.readonly=0 vendor/bin/phpolygon build\n");
     exit(1);
+}
+
+if ($config->speech !== null) {
+    speechBeforeBuild($config->speech, $projectRoot);
 }
 
 $builder = new GameBuilder($config);
@@ -474,6 +498,9 @@ Commands:
   build              Build game for distribution (auto-transpiles UI layouts)
   build:transpile    Transpile resources/ui/*.ui.json into PHP builder classes
                      (--check verifies they are in sync instead of writing)
+  speech:status      Spoken lines of build.json "speech" per locale: current, missing, stale
+  speech:sync        Generate missing/stale spoken lines (--locale=de,en --key=dialog.* --check)
+  speech:setup       Set up the speech synthesizer: Python environment, or --docker [--gpu] image
   editor             Launch the PHPolygon scene editor
   perf:report        Diff two benchmark JSON results in benchmarks/results/
   prototype:scaffold Copy the WebGL/JSX prototyping playground into this project
@@ -521,6 +548,10 @@ Examples:
   phpolygon build --dry-run                      Show config without building
   phpolygon build:transpile                      Regenerate UI PHP from *.ui.json
   phpolygon build:transpile --check              Fail if UI PHP is out of sync
+  phpolygon speech:setup                         Python environment for speech synthesis
+  phpolygon speech:setup --docker --gpu          Speech synthesis as a CUDA Docker image
+  phpolygon speech:sync --locale=de,en           Generate missing spoken lines for de and en
+  phpolygon speech:sync --check                  Fail if spoken lines are missing or stale
   phpolygon editor                       Launch the scene editor
   phpolygon prototype:export             Export the WebGL/JSX prototyping bundle to .phpolygon/prototype
   phpolygon prototype:export --out web   Export the bundle to ./web
@@ -1215,4 +1246,186 @@ function runNode(array $args): string
         exit($exit);
     }
     return $stdout;
+}
+
+// --- Speech synthesis (build.json "speech") ---
+
+/**
+ * @param list<string> $args
+ * @return list<string> values of --name=a,b (repeatable)
+ */
+function speechOption(array $args, string $name): array
+{
+    $values = [];
+    foreach ($args as $arg) {
+        if (str_starts_with($arg, "--{$name}=")) {
+            foreach (explode(',', substr($arg, strlen($name) + 3)) as $value) {
+                if (trim($value) !== '') {
+                    $values[] = trim($value);
+                }
+            }
+        }
+    }
+    return $values;
+}
+
+/**
+ * @return array{SpeechConfig, string}
+ */
+function speechConfig(): array
+{
+    $projectRoot = getcwd() ?: dirname(__DIR__);
+    try {
+        $speech = BuildConfig::load($projectRoot)->speech;
+    } catch (\InvalidArgumentException $e) {
+        fwrite(STDERR, "\033[31mError:\033[0m {$e->getMessage()}\n");
+        exit(1);
+    }
+    if ($speech === null) {
+        fwrite(STDERR, "\033[31mError:\033[0m No \"speech\" section in build.json.\n");
+        fwrite(STDERR, "  Add:  \"speech\": { \"keys\": [\"dialog.*\"], \"voices\": { \"narrator\": { \"reference\": \"resources/voice-ref/narrator.wav\" } } }\n");
+        exit(1);
+    }
+    return [$speech, $projectRoot];
+}
+
+/**
+ * @param list<SpeechLine> $lines
+ */
+function speechSummary(array $lines): void
+{
+    $byLocale = [];
+    foreach ($lines as $line) {
+        $byLocale[$line->locale][$line->status->value] = ($byLocale[$line->locale][$line->status->value] ?? 0) + 1;
+    }
+    ksort($byLocale);
+    $columns = array_map(static fn (SpeechStatus $s): string => $s->value, SpeechStatus::cases());
+    printf("  %-8s %s\n", 'locale', implode('', array_map(static fn (string $c): string => sprintf('%12s', $c), $columns)));
+    foreach ($byLocale as $locale => $counts) {
+        printf("  %-8s %s\n", $locale, implode('', array_map(static fn (string $c): string => sprintf('%12s', (string) ($counts[$c] ?? '-')), $columns)));
+    }
+    foreach ($lines as $line) {
+        if ($line->status === SpeechStatus::NoVoice || $line->status === SpeechStatus::Unspeakable) {
+            echo "  \033[33m!\033[0m {$line->locale} {$line->key}: {$line->status->value}\n";
+        }
+    }
+}
+
+/**
+ * @param list<string> $args
+ */
+function speechStatus(array $args): void
+{
+    [$speech, $projectRoot] = speechConfig();
+    $sync = new SpeechSync($speech, $projectRoot, ChatterboxSynthesizer::fromConfig($speech, $projectRoot));
+    $lines = $sync->plan(speechOption($args, 'locale'), speechOption($args, 'key'));
+    if ($lines === []) {
+        echo "No spoken lines: no key in {$speech->localesDir} matches " . implode(', ', $speech->keys) . "\n";
+        return;
+    }
+    speechSummary($lines);
+}
+
+/**
+ * Generate (or with --check only verify) the spoken lines.
+ *
+ * @param list<string> $args
+ */
+function speechSync(array $args): void
+{
+    [$speech, $projectRoot] = speechConfig();
+    $ok = runSpeechSync($speech, $projectRoot, in_array('--check', $args, true), speechOption($args, 'locale'), speechOption($args, 'key'));
+    if (!$ok) {
+        exit(1);
+    }
+}
+
+/**
+ * @param list<string> $locales
+ * @param list<string> $keys
+ */
+function runSpeechSync(SpeechConfig $speech, string $projectRoot, bool $check, array $locales = [], array $keys = []): bool
+{
+    $synthesizer = ChatterboxSynthesizer::fromConfig($speech, $projectRoot);
+    $sync = new SpeechSync($speech, $projectRoot, $synthesizer);
+    try {
+        $lines = $sync->plan($locales, $keys);
+    } catch (\RuntimeException $e) {
+        fwrite(STDERR, "\033[31mError:\033[0m {$e->getMessage()}\n");
+        return false;
+    }
+    $pending = array_values(array_filter($lines, static fn (SpeechLine $l): bool => $l->status->needsSynthesis()));
+
+    if ($check || $pending === []) {
+        if ($pending === []) {
+            $current = count(array_filter($lines, static fn (SpeechLine $l): bool => $l->status === SpeechStatus::Current));
+            $skipped = count($lines) - $current;
+            echo "\033[32m✓\033[0m Spoken lines up to date: {$current} in {$speech->outputDir}" . ($skipped > 0 ? ", {$skipped} not speakable (speech:status)" : '') . "\n";
+            return true;
+        }
+        fwrite(STDERR, "\033[31mSpoken lines missing or stale:\033[0m " . count($pending) . " of " . count($lines) . "\n");
+        speechSummary($lines);
+        fwrite(STDERR, "  Run: vendor/bin/phpolygon speech:sync\n");
+        return false;
+    }
+
+    echo "→ Generating " . count($pending) . " spoken line(s) with {$synthesizer->id()}...\n";
+    $started = microtime(true);
+    try {
+        $result = $sync->sync($pending, static function (SpeechLine $line, ?string $error, int $done, int $total): void {
+            $mark = $error === null ? "\033[32m✓\033[0m" : "\033[31m✗\033[0m {$error}";
+            echo sprintf("  [%d/%d] %s %s %s\n", $done, $total, $line->locale, $line->key, $mark);
+        });
+    } catch (\RuntimeException $e) {
+        fwrite(STDERR, "\033[31mError:\033[0m {$e->getMessage()}\n");
+        return false;
+    }
+    echo sprintf("%s Generated %d line(s) in %.0fs%s\n",
+        $result->failed === [] ? "\033[32m✓\033[0m" : "\033[33m!\033[0m",
+        count($result->generated),
+        microtime(true) - $started,
+        $result->failed === [] ? '' : ', ' . count($result->failed) . ' failed',
+    );
+    return $result->failed === [];
+}
+
+/**
+ * @param list<string> $args
+ */
+function speechSetup(array $args): void
+{
+    $projectRoot = getcwd() ?: dirname(__DIR__);
+    $docker = in_array('--docker', $args, true);
+    $synthesizer = new ChatterboxSynthesizer($projectRoot, gpu: in_array('--gpu', $args, true));
+    try {
+        $synthesizer->setup($docker ? SpeechConfig::RUNNER_DOCKER : SpeechConfig::RUNNER_NATIVE, static function (string $message): void {
+            echo "→ {$message}\n";
+        });
+    } catch (\RuntimeException $e) {
+        fwrite(STDERR, "\033[31mError:\033[0m {$e->getMessage()}\n");
+        exit(1);
+    }
+    echo "\033[32m✓\033[0m Speech synthesis ready: " . ($docker ? $synthesizer->image() : $synthesizer->environmentDir()) . "\n";
+}
+
+/**
+ * Before the targets: build.json `speech.build` (or PHPOLYGON_SPEECH) decides
+ * whether the build generates missing lines, only checks them, or skips speech.
+ */
+function speechBeforeBuild(SpeechConfig $speech, string $projectRoot): void
+{
+    $mode = getenv('PHPOLYGON_SPEECH');
+    $mode = is_string($mode) && $mode !== '' ? $mode : $speech->build;
+    if ($mode === SpeechConfig::BUILD_OFF) {
+        return;
+    }
+    if (!in_array($mode, [SpeechConfig::BUILD_GENERATE, SpeechConfig::BUILD_CHECK], true)) {
+        fwrite(STDERR, "\033[31mError:\033[0m PHPOLYGON_SPEECH must be generate, check or off\n");
+        exit(1);
+    }
+    echo "\n";
+    if (!runSpeechSync($speech, $projectRoot, $mode === SpeechConfig::BUILD_CHECK)) {
+        fwrite(STDERR, "\033[31mBuild stopped:\033[0m spoken lines incomplete (PHPOLYGON_SPEECH=off builds without them)\n");
+        exit(1);
+    }
 }
