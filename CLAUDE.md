@@ -1062,6 +1062,32 @@ before `steam_init()`).
 
 ---
 
+## Audio channels — volume, master, ducking
+
+`AudioManager` computes each voice as
+`voice × channel × master × duck(channel) × duck(master)`; mute on the channel
+or Master forces 0. Master is folded in here exactly once (never forwarded to
+the backend's output gain), and every voice keeps its own volume, so a channel,
+master, mute or duck change recomputes it without losing it.
+
+Ducking is a separate gain stage – the player's channel volume
+(`getChannelVolume()`) is never overwritten:
+
+```php
+$audio->setChannelDuck(AudioChannel::Music, -12.0, 0.3, 'speech'); // dB, fade s, reason
+$audio->setChannelDuck(AudioChannel::Music, -20.0, 0.5, 'focus');  // strongest wins
+$audio->releaseChannelDuck(AudioChannel::Music, 'speech', 0.6);    // ramps to the next one
+$audio->clearChannelDucks();                                       // all channels
+$audio->getChannelDuck(AudioChannel::Music);   // current dB incl. ramp
+```
+
+- Several reasons per channel; the most negative one is effective. Positive
+  values clamp to 0 dB, `DUCK_FLOOR_DB` (-80) or below silences.
+- Ramps are linear in dB and advance in `AudioManager::update($dt)`, which the
+  engine calls every update tick. Code driving an `AudioManager` outside the
+  engine loop (tools, tests) calls it itself; fade 0 applies immediately.
+- Ducking Master lowers every channel.
+
 ## Audio DSP — offline signal processing
 
 `PHPolygon\Audio\Dsp` and `PHPolygon\Audio\Codec` are plain-PHP tools for audio a

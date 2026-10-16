@@ -959,6 +959,7 @@ class Engine
                     if ($this->onUpdate !== null) {
                         ($this->onUpdate)($this, $dt);
                     }
+                    $this->audio->update($dt);
                     $this->tickEditorSync($dt);
                     PerfProfiler::end();
                 },
@@ -1043,6 +1044,7 @@ class Engine
                     if ($this->onUpdate !== null) {
                         ($this->onUpdate)($this, $dt);
                     }
+                    $this->audio->update($dt);
                     $this->tickEditorSync($dt);
                     PerfProfiler::end();
                 },

@@ -31,6 +31,22 @@ class AudioManager
 
     private const PRUNE_MIN_THRESHOLD = 64;
 
+    /** Ducks at or below this level silence the channel completely. */
+    public const float DUCK_FLOOR_DB = -80.0;
+
+    /**
+     * Requested attenuation per channel and reason.
+     *
+     * @var array<string, array<string, float>> channel => [source => dB (<= 0)]
+     */
+    private array $duckSources = [];
+
+    /** @var array<string, float> channel => current (ramped) duck in dB */
+    private array $duckDb = [];
+
+    /** @var array<string, array{from: float, to: float, duration: float, elapsed: float}> */
+    private array $duckRamps = [];
+
     /** @var array<string, AudioClip> id => clip */
     private array $clips = [];
 
@@ -262,6 +278,134 @@ class AudioManager
         return $this->channelMuted[$channel->value];
     }
 
+    // ---- Ducking ---------------------------------------------------------
+
+    /**
+     * Lower a channel by $db for one reason ($source), e.g. music under
+     * speech. Several reasons can duck the same channel at once - the
+     * strongest (most negative) one wins. Ducking is a separate gain stage:
+     * the player's channel volume ({@see getChannelVolume()}) is never
+     * touched. Ducking Master lowers every channel.
+     *
+     * The change ramps linearly in dB over $fadeSeconds (0 = immediately),
+     * driven by {@see update()}. Positive values are treated as 0 dB;
+     * {@see DUCK_FLOOR_DB} or lower silences the channel.
+     */
+    public function setChannelDuck(
+        AudioChannel $channel,
+        float $db,
+        float $fadeSeconds = 0.0,
+        string $source = 'default',
+    ): void {
+        if (is_nan($db)) {
+            return;
+        }
+        $this->duckSources[$channel->value][$source] = max(self::DUCK_FLOOR_DB, min(0.0, $db));
+        $this->retargetDuck($channel, $fadeSeconds);
+    }
+
+    /** Remove one reason; the channel ramps to the strongest remaining duck (or 0 dB). */
+    public function releaseChannelDuck(AudioChannel $channel, string $source = 'default', float $fadeSeconds = 0.0): void
+    {
+        if (!isset($this->duckSources[$channel->value][$source])) {
+            return;
+        }
+        unset($this->duckSources[$channel->value][$source]);
+        $this->retargetDuck($channel, $fadeSeconds);
+    }
+
+    /** Remove every reason on $channel, or on all channels when null. */
+    public function clearChannelDucks(?AudioChannel $channel = null, float $fadeSeconds = 0.0): void
+    {
+        $channels = $channel !== null ? [$channel] : AudioChannel::cases();
+        foreach ($channels as $ch) {
+            if (($this->duckSources[$ch->value] ?? []) === [] && !isset($this->duckRamps[$ch->value])
+                && ($this->duckDb[$ch->value] ?? 0.0) === 0.0) {
+                continue;
+            }
+            $this->duckSources[$ch->value] = [];
+            $this->retargetDuck($ch, $fadeSeconds);
+        }
+    }
+
+    /** True when $source (or, with null, any reason) ducks the channel. */
+    public function hasChannelDuck(AudioChannel $channel, ?string $source = null): bool
+    {
+        $sources = $this->duckSources[$channel->value] ?? [];
+        return $source === null ? $sources !== [] : isset($sources[$source]);
+    }
+
+    /** The channel's duck right now, in dB (0 = none), including a running ramp. */
+    public function getChannelDuck(AudioChannel $channel): float
+    {
+        return $this->duckDb[$channel->value] ?? 0.0;
+    }
+
+    /** The duck the channel is heading for: the strongest active reason, 0 when none. */
+    public function getChannelDuckTarget(AudioChannel $channel): float
+    {
+        $sources = $this->duckSources[$channel->value] ?? [];
+        return $sources === [] ? 0.0 : min($sources);
+    }
+
+    /** Linear gain of the channel's current duck (1.0 = none). */
+    public function getChannelDuckGain(AudioChannel $channel): float
+    {
+        return self::dbToGain($this->getChannelDuck($channel));
+    }
+
+    /**
+     * Advance duck ramps. The engine calls this once per update tick; call it
+     * yourself only when driving an AudioManager outside the engine loop.
+     */
+    public function update(float $dt): void
+    {
+        if ($this->duckRamps === []) {
+            return;
+        }
+        foreach ($this->duckRamps as $channelValue => $ramp) {
+            $ramp['elapsed'] += max(0.0, $dt);
+            $t = $ramp['duration'] > 0.0 ? min(1.0, $ramp['elapsed'] / $ramp['duration']) : 1.0;
+            $this->duckDb[$channelValue] = $ramp['from'] + ($ramp['to'] - $ramp['from']) * $t;
+            if ($t >= 1.0) {
+                $this->duckDb[$channelValue] = $ramp['to'];
+                unset($this->duckRamps[$channelValue]);
+            } else {
+                $this->duckRamps[$channelValue] = $ramp;
+            }
+            $this->updateActivePlaybacks(AudioChannel::from($channelValue));
+        }
+    }
+
+    private function retargetDuck(AudioChannel $channel, float $fadeSeconds): void
+    {
+        $current = $this->getChannelDuck($channel);
+        $target = $this->getChannelDuckTarget($channel);
+
+        if ($fadeSeconds <= 0.0 || $current === $target) {
+            unset($this->duckRamps[$channel->value]);
+            if ($current !== $target || !isset($this->duckDb[$channel->value])) {
+                $this->duckDb[$channel->value] = $target;
+                $this->updateActivePlaybacks($channel);
+            }
+            return;
+        }
+        $this->duckRamps[$channel->value] = [
+            'from' => $current,
+            'to' => $target,
+            'duration' => $fadeSeconds,
+            'elapsed' => 0.0,
+        ];
+    }
+
+    private static function dbToGain(float $db): float
+    {
+        if ($db <= self::DUCK_FLOOR_DB) {
+            return 0.0;
+        }
+        return $db >= 0.0 ? 1.0 : 10.0 ** ($db / 20.0);
+    }
+
     /**
      * Check whether a playback is still playing.
      */
@@ -301,7 +445,13 @@ class AudioManager
             ? 1.0
             : $this->channelVolumes[$channel->value];
 
-        return $baseVolume * $channelVol * $masterVol;
+        // Ducking is its own gain stage on top of the player's volumes.
+        $duck = self::dbToGain($this->duckDb[AudioChannel::Master->value] ?? 0.0);
+        if ($channel !== AudioChannel::Master) {
+            $duck *= self::dbToGain($this->duckDb[$channel->value] ?? 0.0);
+        }
+
+        return $baseVolume * $channelVol * $masterVol * $duck;
     }
 
     private function updateActivePlaybacks(AudioChannel $channel): void
