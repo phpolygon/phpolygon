@@ -223,6 +223,53 @@ class AtmosphericEnvironmentalSystemTest extends TestCase
         $this->assertEqualsWithDelta(1.0, $world->getComponent($weatherId, Weather::class)->stateTimer, 1e-9);
     }
 
+    /**
+     * Runs $seconds of simulation at $fps and returns the environment. The
+     * atmosphere's nudges used to be applied once per update, so a 120 fps
+     * player saw clouds clear four times as fast as a 30 fps player.
+     *
+     * @return array{Atmosphere, Weather}
+     */
+    private function simulateAt(float $fps, float $seconds, float $airPressure, float $timeScale = 1.0): array
+    {
+        $world = new World();
+        $world->addSystem(new AtmosphericEnvironmentalSystem());
+        $atmo = new Atmosphere(airPressure: $airPressure);
+        $weather = new Weather(cloudCoverage: 0.6, humidity: 0.5, timeScale: $timeScale);
+        $this->spawnEnvironment($world, $atmo, $weather);
+        $this->spawn($world, new DayNightCycle(timeOfDay: 0.5, paused: true));
+
+        $steps = (int) round($seconds * $fps);
+        for ($i = 0; $i < $steps; $i++) {
+            $world->update(1.0 / $fps);
+        }
+        return [$atmo, $weather];
+    }
+
+    public function testHighPressureClearsCloudsAtTheSamePaceAtAnyFrameRate(): void
+    {
+        [$atmoSlow, $slow] = $this->simulateAt(30.0, 2.0, 1045.0);
+        [$atmoFast, $fast] = $this->simulateAt(120.0, 2.0, 1045.0);
+
+        $this->assertLessThan(0.6, $slow->cloudCoverage, 'high pressure clears the sky');
+        $this->assertEqualsWithDelta($slow->cloudCoverage, $fast->cloudCoverage, 0.01);
+        $this->assertEqualsWithDelta($atmoSlow->cloudBaseAltitude, $atmoFast->cloudBaseAltitude, 0.5);
+        $this->assertEqualsWithDelta($atmoSlow->cumulusFraction, $atmoFast->cumulusFraction, 0.01);
+    }
+
+    public function testAtmosphereRunsOnTheWeatherClock(): void
+    {
+        [$frozen] = $this->simulateAt(60.0, 5.0, 990.0, timeScale: 0.0);
+        $this->assertSame(0.0, $frozen->simulationTime);
+        $this->assertSame(990.0, $frozen->airPressure, 'a stopped weather clock holds the pressure');
+
+        [$sixth] = $this->simulateAt(60.0, 6.0, 990.0, timeScale: 1.0 / 6.0);
+        [$full] = $this->simulateAt(60.0, 1.0, 990.0);
+        $this->assertEqualsWithDelta(1.0, $sixth->simulationTime, 1e-6);
+        $this->assertEqualsWithDelta($full->airPressure, $sixth->airPressure, 1e-2,
+            'six seconds at a sixth of the pace move the pressure as far as one second at full pace');
+    }
+
     public function testEmptyWorldIsNoOp(): void
     {
         $world = new World();

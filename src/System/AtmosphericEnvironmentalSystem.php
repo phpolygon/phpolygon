@@ -47,6 +47,13 @@ class AtmosphericEnvironmentalSystem extends EnvironmentalSystem
     private const PRESSURE_STORM = 980.0;
     private const VISIBILITY_MAX = 30000.0;
 
+    /**
+     * The nudges and blend factors below were tuned as amounts per update at
+     * 60 updates per second. They are applied as rates over elapsed time, so
+     * the atmosphere evolves at the same pace at any frame rate.
+     */
+    private const TUNED_STEPS_PER_SECOND = 60.0;
+
     public function update(World $world, float $dt): void
     {
         // Season→Weather→DayNight coupling (EnvironmentalSystem)
@@ -61,14 +68,34 @@ class AtmosphericEnvironmentalSystem extends EnvironmentalSystem
             return;
         }
 
-        $atmo->simulationTime += $dt;
+        // The atmosphere is part of the weather and runs on the weather's
+        // clock (Weather::$timeScale), so a scene that slows its weather to a
+        // longer day slows pressure, fog and thermals with it.
+        $weatherDt = max(0.0, $dt) * max(0.0, $weather->timeScale);
 
-        $this->simulatePressure($atmo, $season, $dt);
-        $this->couplePressureToWeather($atmo, $weather);
-        $this->simulateDewPoint($atmo, $weather);
-        $this->simulateThermals($atmo, $weather, $dayNight, $dt);
-        $this->updateCloudTypes($atmo, $weather);
+        $atmo->simulationTime += $weatherDt;
+
+        $this->simulatePressure($atmo, $season, $weatherDt);
+        $this->couplePressureToWeather($atmo, $weather, $weatherDt);
+        $this->simulateDewPoint($atmo, $weather, $weatherDt);
+        $this->simulateThermals($atmo, $weather, $dayNight, $weatherDt);
+        $this->updateCloudTypes($atmo, $weather, max(0.0, $dt));
         $this->calculateVisibility($atmo, $weather);
+    }
+
+    /** An amount tuned per 60 Hz update, accumulated over $seconds. */
+    private static function perTunedStep(float $amount, float $seconds): float
+    {
+        return $amount * self::TUNED_STEPS_PER_SECOND * $seconds;
+    }
+
+    /**
+     * Blend factor for "move $fraction of the way per 60 Hz update" over
+     * $seconds – the same approach curve at any frame rate.
+     */
+    private static function approachFactor(float $fraction, float $seconds): float
+    {
+        return 1.0 - (1.0 - $fraction) ** (self::TUNED_STEPS_PER_SECOND * $seconds);
     }
 
     // ── Air pressure ───────────────────────────────────────────────────────
@@ -95,13 +122,16 @@ class AtmosphericEnvironmentalSystem extends EnvironmentalSystem
         $target = max(945.0, min(1050.0, self::ISA_PRESSURE + $seasonalBase + $slowWave + $fastWave));
 
         $atmo->pressurePrev = $atmo->airPressure;
-        $atmo->airPressure += ($target - $atmo->airPressure) * 0.05 * $dt;
-        $atmo->pressureTrend = ($atmo->airPressure - $atmo->pressurePrev) / max($dt, 0.001);
+        $atmo->airPressure += ($target - $atmo->airPressure) * min(1.0, 0.05 * $dt);
+        // hPa per weather second; 0 while the weather clock stands still.
+        $atmo->pressureTrend = $dt > 0.0
+            ? ($atmo->airPressure - $atmo->pressurePrev) / max($dt, 0.001)
+            : 0.0;
     }
 
     // ── Pressure → Weather coupling ────────────────────────────────────────
 
-    private function couplePressureToWeather(Atmosphere $atmo, Weather $weather): void
+    private function couplePressureToWeather(Atmosphere $atmo, Weather $weather, float $dt): void
     {
         $p = $atmo->airPressure;
 
@@ -109,31 +139,34 @@ class AtmosphericEnvironmentalSystem extends EnvironmentalSystem
             $lowFactor = max(0.0, min(1.0,
                 (self::PRESSURE_LOW - $p) / (self::PRESSURE_LOW - self::PRESSURE_STORM)
             ));
-            $weather->humidity = min($weather->humidity + $lowFactor * 0.002, 0.5 + $lowFactor * 0.5);
+            $weather->humidity = min(
+                $weather->humidity + self::perTunedStep($lowFactor * 0.002, $dt),
+                0.5 + $lowFactor * 0.5,
+            );
 
             if ($atmo->pressureTrend < -0.005) {
                 $fallBoost = min(1.0, abs($atmo->pressureTrend) / 0.02);
-                $weather->cloudCoverage = min(1.0, $weather->cloudCoverage + $fallBoost * 0.003);
+                $weather->cloudCoverage = min(1.0, $weather->cloudCoverage + self::perTunedStep($fallBoost * 0.003, $dt));
             }
         } elseif ($p > self::PRESSURE_HIGH) {
             $highFactor = max(0.0, min(1.0,
                 ($p - self::PRESSURE_HIGH) / (1050.0 - self::PRESSURE_HIGH)
             ));
-            $weather->humidity      = max($weather->humidity - $highFactor * 0.001, 0.1);
-            $weather->cloudCoverage = max($weather->cloudCoverage - $highFactor * 0.002, 0.0);
+            $weather->humidity      = max($weather->humidity - self::perTunedStep($highFactor * 0.001, $dt), 0.1);
+            $weather->cloudCoverage = max($weather->cloudCoverage - self::perTunedStep($highFactor * 0.002, $dt), 0.0);
         }
     }
 
     // ── Dew point ──────────────────────────────────────────────────────────
 
-    private function simulateDewPoint(Atmosphere $atmo, Weather $weather): void
+    private function simulateDewPoint(Atmosphere $atmo, Weather $weather, float $dt): void
     {
         $rh = $weather->humidity * 100.0;
         $atmo->dewPoint = $weather->temperature - ((100.0 - $rh) / 5.0);
 
         $spread = $weather->temperature - $atmo->dewPoint;
         if ($spread >= 0.0 && $spread < 3.0) {
-            $weather->fogDensity = min(1.0, $weather->fogDensity + (1.0 - $spread / 3.0) * 0.005);
+            $weather->fogDensity = min(1.0, $weather->fogDensity + self::perTunedStep((1.0 - $spread / 3.0) * 0.005, $dt));
         }
     }
 
@@ -155,13 +188,13 @@ class AtmosphericEnvironmentalSystem extends EnvironmentalSystem
         $moistAvail = max(0.0, min(1.0, ($weather->humidity - 0.2) / 0.6));
 
         $thermalTarget = $sunHeight * $warmGround * $moistAvail;
-        $atmo->thermalIntensity += ($thermalTarget - $atmo->thermalIntensity) * 0.3 * $dt;
+        $atmo->thermalIntensity += ($thermalTarget - $atmo->thermalIntensity) * min(1.0, 0.3 * $dt);
         $atmo->thermalIntensity  = max(0.0, min(1.0, $atmo->thermalIntensity));
 
         if ($atmo->thermalIntensity > 0.3) {
             $lift = ($atmo->thermalIntensity - 0.3) / 0.7;
-            $weather->cloudCoverage = min(1.0, $weather->cloudCoverage + $lift * 0.001);
-            $weather->humidity      = min(1.0, $weather->humidity + $lift * 0.0005);
+            $weather->cloudCoverage = min(1.0, $weather->cloudCoverage + self::perTunedStep($lift * 0.001, $dt));
+            $weather->humidity      = min(1.0, $weather->humidity + self::perTunedStep($lift * 0.0005, $dt));
         }
     }
 
@@ -172,7 +205,7 @@ class AtmosphericEnvironmentalSystem extends EnvironmentalSystem
      * from the current atmospheric state and writes them to the Atmosphere component
      * for CloudSystem to consume.
      */
-    private function updateCloudTypes(Atmosphere $atmo, Weather $weather): void
+    private function updateCloudTypes(Atmosphere $atmo, Weather $weather, float $dt): void
     {
         $p = $atmo->airPressure;
 
@@ -193,7 +226,9 @@ class AtmosphericEnvironmentalSystem extends EnvironmentalSystem
             - $cbTarget - $stratusTarget
         ));
 
-        $lerpRate = 0.2;
+        // Presentation smoothing toward the targets (real time, frame-rate
+        // independent): the targets themselves move at the weather's pace.
+        $lerpRate = self::approachFactor(0.2, $dt);
         $atmo->cumulonimbusFraction = $atmo->cumulonimbusFraction + ($cbTarget - $atmo->cumulonimbusFraction) * $lerpRate;
         $atmo->stratusFraction      = $atmo->stratusFraction      + ($stratusTarget - $atmo->stratusFraction)  * $lerpRate;
         $atmo->cumulusFraction      = $atmo->cumulusFraction      + ($cumulusTarget - $atmo->cumulusFraction)  * $lerpRate;
@@ -202,7 +237,7 @@ class AtmosphericEnvironmentalSystem extends EnvironmentalSystem
         $baseTarget = 45.0
             + $atmo->thermalIntensity * 15.0
             - max(0.0, (self::PRESSURE_LOW - $p) / 30.0) * 10.0;
-        $atmo->cloudBaseAltitude += ($baseTarget - $atmo->cloudBaseAltitude) * 0.1;
+        $atmo->cloudBaseAltitude += ($baseTarget - $atmo->cloudBaseAltitude) * self::approachFactor(0.1, $dt);
     }
 
     // ── Atmospheric visibility ─────────────────────────────────────────────
