@@ -85,6 +85,18 @@ final class ChatterboxSynthesizerTest extends TestCase
         self::assertSame(['phpolygon-speech:chatterbox-' . ChatterboxSynthesizer::VERSION . '-cuda', '--jobs', '/work/resources/voice/.work/jobs.jsonl', '--device', 'cuda'], array_slice($command, -5));
     }
 
+    public function testOptionsWithoutBuildJsonHonourTheEnvironment(): void
+    {
+        self::assertStringEndsWith('-cuda', ChatterboxSynthesizer::fromOptions('/game', gpu: true)->image());
+
+        putenv('PHPOLYGON_SPEECH_GPU=0');
+        self::assertStringEndsNotWith('-cuda', ChatterboxSynthesizer::fromOptions('/game', gpu: true)->image());
+
+        putenv('PHPOLYGON_SPEECH_RUNNER=bogus');
+        $this->expectExceptionMessage('unknown speech runner "bogus"');
+        ChatterboxSynthesizer::fromOptions('/game')->resolveRunner();
+    }
+
     public function testEnvironmentOverridesTheConfig(): void
     {
         $config = SpeechConfig::fromBuildJson(['keys' => ['a'], 'voices' => ['n' => ['reference' => 'n.wav']], 'runner' => 'native']);

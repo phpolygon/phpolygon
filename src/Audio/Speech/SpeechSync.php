@@ -92,7 +92,7 @@ final class SpeechSync
                 $id,
                 $line->text,
                 $line->language,
-                $this->projectRoot . '/' . $line->voice->reference,
+                $line->voice->reference !== null ? $this->projectRoot . '/' . $line->voice->reference : null,
                 $workDir . '/' . $id . '.wav',
                 $line->voice->seed,
                 $line->voice->exaggeration,
@@ -192,6 +192,9 @@ final class SpeechSync
 
     private function referenceHash(SpeechVoice $voice): string
     {
+        if ($voice->reference === null) {
+            return 'builtin';
+        }
         $path = $this->projectRoot . '/' . $voice->reference;
         if (!isset($this->referenceHashes[$path])) {
             $hash = is_file($path) ? hash_file('sha256', $path) : false;

@@ -1,11 +1,13 @@
 """Chatterbox Multilingual worker for `phpolygon speech:sync`.
 
 Reads a JSONL job file ({id, text, language, reference, out, seed, exaggeration,
-cfg_weight}), loads the model once and writes one WAV per job. Prints one JSON
+cfg_weight}), loads the model once and writes one WAV per job. A job whose
+reference is null speaks with the model's built-in voice. Prints one JSON
 line per finished job to stdout ({"id", "ok"} or {"id", "error"}); everything
 else goes to stderr.
 """
 import argparse
+import copy
 import json
 import sys
 import time
@@ -37,12 +39,19 @@ def main() -> int:
         device = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
     print(f"chatterbox: {len(jobs)} line(s) on {device}", file=sys.stderr, flush=True)
     model = ChatterboxMultilingualTTS.from_pretrained(device=device)
+    builtin = copy.deepcopy(model.conds)  # the built-in voice (conds.pt)
 
     reference = None
     for job in jobs:
         start = time.time()
         try:
-            if job["reference"] != reference:
+            if job["reference"] is None:
+                if builtin is None:
+                    raise RuntimeError("this checkpoint has no built-in voice (conds.pt); give the voice a reference WAV")
+                if reference is not False:
+                    model.conds = copy.deepcopy(builtin)
+                    reference = False
+            elif job["reference"] != reference:
                 model.prepare_conditionals(job["reference"], exaggeration=job["exaggeration"])
                 reference = job["reference"]
             torch.manual_seed(job["seed"])

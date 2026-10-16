@@ -72,8 +72,8 @@ final class SpeechSyncTest extends TestCase
         self::assertDirectoryDoesNotExist($this->dir . '/voice/.work');
 
         self::assertSame(['de|robot.wav|7|0.6', 'de|narrator.wav|0|0.5'], [
-            "{$synthesizer->jobs[1]->language}|" . basename($synthesizer->jobs[1]->reference) . "|{$synthesizer->jobs[1]->seed}|{$synthesizer->jobs[1]->exaggeration}",
-            "{$synthesizer->jobs[0]->language}|" . basename($synthesizer->jobs[0]->reference) . "|{$synthesizer->jobs[0]->seed}|{$synthesizer->jobs[0]->exaggeration}",
+            "{$synthesizer->jobs[1]->language}|" . basename((string) $synthesizer->jobs[1]->reference) . "|{$synthesizer->jobs[1]->seed}|{$synthesizer->jobs[1]->exaggeration}",
+            "{$synthesizer->jobs[0]->language}|" . basename((string) $synthesizer->jobs[0]->reference) . "|{$synthesizer->jobs[0]->seed}|{$synthesizer->jobs[0]->exaggeration}",
         ]);
 
         $again = $this->sync(new FakeSynthesizer())->plan();
@@ -134,6 +134,27 @@ final class SpeechSyncTest extends TestCase
         $this->expectException(\RuntimeException::class);
         $this->expectExceptionMessage("speech voice 'robot': reference ref/robot.wav not found");
         $this->sync(new FakeSynthesizer())->plan();
+    }
+
+    public function testBuiltinVoiceNeedsNoReferenceFile(): void
+    {
+        $config = SpeechConfig::fromBuildJson([
+            'locales' => 'lang',
+            'output' => 'voice',
+            'keys' => ['dialog.intro'],
+            'voices' => ['guide' => ['reference' => null, 'seed' => 3]],
+        ]);
+        self::assertNotNull($config);
+        $synthesizer = new FakeSynthesizer();
+        $sync = new SpeechSync($config, $this->dir, $synthesizer);
+
+        $result = $sync->sync($sync->plan(['de']));
+
+        self::assertCount(1, $result->generated);
+        self::assertNull($synthesizer->jobs[0]->reference);
+        self::assertSame(3, $synthesizer->jobs[0]->seed);
+        $again = (new SpeechSync($config, $this->dir, new FakeSynthesizer()))->plan(['de']);
+        self::assertSame(SpeechStatus::Current, $again[0]->status);
     }
 
     public function testSpeakableText(): void

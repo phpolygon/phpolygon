@@ -7,7 +7,8 @@ namespace PHPolygon\Audio\Speech;
 /**
  * Chatterbox Multilingual (Resemble AI, MIT) through `tools/speech/chatterbox_worker.py`.
  * The worker runs in a Python environment of its own (`speech:setup`) or in Docker;
- * it loads the model once per run and clones every voice from its reference WAV.
+ * it loads the model once per run and clones every voice from its reference WAV, or
+ * speaks with the model's built-in voice when a job has no reference.
  *
  * Environment overrides: PHPOLYGON_SPEECH_RUNNER (auto|native|docker),
  * PHPOLYGON_SPEECH_GPU (1/0), PHPOLYGON_SPEECH_PYTHON (interpreter of a ready environment).
@@ -38,12 +39,21 @@ final class ChatterboxSynthesizer implements SpeechSynthesizerInterface
 
     public static function fromConfig(SpeechConfig $config, string $projectRoot): self
     {
-        $runner = getenv('PHPOLYGON_SPEECH_RUNNER');
-        $gpu = getenv('PHPOLYGON_SPEECH_GPU');
+        return self::fromOptions($projectRoot, $config->runner, $config->gpu);
+    }
+
+    /**
+     * For tools that run the synthesizer without build.json `speech`: the given
+     * runner and GPU choice, overridden by PHPOLYGON_SPEECH_RUNNER / PHPOLYGON_SPEECH_GPU.
+     */
+    public static function fromOptions(string $projectRoot, string $runner = SpeechConfig::RUNNER_AUTO, bool $gpu = false): self
+    {
+        $envRunner = getenv('PHPOLYGON_SPEECH_RUNNER');
+        $envGpu = getenv('PHPOLYGON_SPEECH_GPU');
         return new self(
             $projectRoot,
-            is_string($runner) && $runner !== '' ? $runner : $config->runner,
-            is_string($gpu) && $gpu !== '' ? $gpu === '1' : $config->gpu,
+            is_string($envRunner) && $envRunner !== '' ? $envRunner : $runner,
+            is_string($envGpu) && $envGpu !== '' ? $envGpu === '1' : $gpu,
         );
     }
 
@@ -84,7 +94,7 @@ final class ChatterboxSynthesizer implements SpeechSynthesizerInterface
                 'id' => $job->id,
                 'text' => $job->text,
                 'language' => $job->language,
-                'reference' => $this->workerPath($job->reference, $runner),
+                'reference' => $job->reference !== null ? $this->workerPath($job->reference, $runner) : null,
                 'out' => $this->workerPath($job->wavPath, $runner),
                 'seed' => $job->seed,
                 'exaggeration' => $job->exaggeration,

@@ -16,6 +16,7 @@ use PHPolygon\Audio\Dsp\Voice\VoiceProfile;
  *   "keys": ["dialog.*"],
  *   "voices": {
  *     "narrator": { "reference": "resources/voice-ref/narrator.wav" },
+ *     "guide": { "reference": null, "profile": { "pitch": 0.8 } },
  *     "robot": { "reference": "resources/voice-ref/robot.wav", "keys": ["dialog.robot.*"],
  *                "seed": 7, "exaggeration": 0.6, "profile": { "crush": 0.2 } }
  *   },
@@ -30,7 +31,9 @@ use PHPolygon\Audio\Dsp\Voice\VoiceProfile;
  *            of Git and list it in `resources.external`
  *   keys     fnmatch patterns of the spoken keys; the text of each locale is spoken
  *   only     locales to generate; empty = every translation file
- *   voices   the first voice whose `keys` match a line speaks it, else a voice without `keys`
+ *   voices   the first voice whose `keys` match a line speaks it, else a voice without `keys`;
+ *            `reference` is the WAV the voice is cloned from, null or absent = the
+ *            synthesizer's built-in voice
  *   build    what `phpolygon build` does: generate missing lines, only check, or nothing
  *   runner   auto (native Python environment, else Docker), native or docker
  *   gpu      Docker: `--gpus all` with the CUDA image
@@ -86,7 +89,7 @@ final readonly class SpeechConfig
 
         $voicesData = $data['voices'] ?? null;
         if (!is_array($voicesData) || $voicesData === [] || array_is_list($voicesData)) {
-            throw new \InvalidArgumentException('build.json speech.voices must be an object of named voices, each with a "reference" WAV');
+            throw new \InvalidArgumentException('build.json speech.voices must be an object of named voices, e.g. {"narrator": {"reference": "resources/voice-ref/narrator.wav"}}');
         }
         $voices = [];
         foreach ($voicesData as $name => $voice) {
@@ -155,7 +158,7 @@ final readonly class SpeechConfig
     private static function parseVoice(string $name, mixed $voice): SpeechVoice
     {
         if (!is_array($voice) || array_is_list($voice)) {
-            throw new \InvalidArgumentException("build.json speech.voices.{$name} must be an object with a \"reference\" WAV");
+            throw new \InvalidArgumentException("build.json speech.voices.{$name} must be an object (\"reference\": a WAV to clone, or null for the built-in voice)");
         }
         $known = ['reference', 'keys', 'seed', 'exaggeration', 'cfgWeight', 'profile'];
         foreach (array_keys($voice) as $key) {
@@ -184,7 +187,7 @@ final readonly class SpeechConfig
 
         return new SpeechVoice(
             $name,
-            self::path($voice['reference'] ?? null, "voices.{$name}.reference"),
+            isset($voice['reference']) ? self::path($voice['reference'], "voices.{$name}.reference") : null,
             self::stringList($voice['keys'] ?? null, "voices.{$name}.keys"),
             $seed,
             self::number($voice['exaggeration'] ?? 0.5, "voices.{$name}.exaggeration", 0.0, 2.0),

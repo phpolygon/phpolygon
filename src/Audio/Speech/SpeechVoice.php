@@ -13,13 +13,13 @@ use PHPolygon\Audio\Dsp\Voice\VoiceProfile;
 final readonly class SpeechVoice
 {
     /**
-     * @param string $reference project-relative WAV the voice is cloned from
+     * @param string|null $reference project-relative WAV the voice is cloned from; null = the synthesizer's built-in voice
      * @param list<string> $keys fnmatch patterns of the line keys this voice speaks; [] = every line no other voice claims
      * @param VoiceProfile|null $profile post-processing through {@see \PHPolygon\Audio\Dsp\Voice\VoiceChain}; null = loudness only
      */
     public function __construct(
         public string $name,
-        public string $reference,
+        public ?string $reference,
         public array $keys = [],
         public int $seed = 0,
         public float $exaggeration = 0.5,
@@ -35,6 +35,12 @@ final readonly class SpeechVoice
             }
         }
         return false;
+    }
+
+    /** The voice speaks with the synthesizer's built-in voice instead of a clone. */
+    public function isBuiltin(): bool
+    {
+        return $this->reference === null;
     }
 
     /** Everything about the voice that changes its sound, as part of a line's cache key. */

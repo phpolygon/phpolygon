@@ -45,6 +45,20 @@ final class SpeechConfigTest extends TestCase
         self::assertSame(0.3, $profile->crush);
     }
 
+    public function testVoiceWithoutReferenceUsesTheBuiltinVoice(): void
+    {
+        $config = SpeechConfig::fromBuildJson([
+            'keys' => ['dialog.*'],
+            'voices' => ['guide' => ['reference' => null], 'host' => ['profile' => ['pitch' => 0.8]], 'clone' => ['reference' => 'ref/clone.wav', 'keys' => ['dialog.clone.*']]],
+        ]);
+
+        self::assertNotNull($config);
+        self::assertTrue($config->voices[0]->isBuiltin());
+        self::assertTrue($config->voices[1]->isBuiltin());
+        self::assertFalse($config->voices[2]->isBuiltin());
+        self::assertNotSame($config->voices[0]->fingerprint('builtin'), $config->voices[1]->fingerprint('builtin'));
+    }
+
     public function testWithoutFallbackVoiceUnclaimedKeysHaveNone(): void
     {
         $config = SpeechConfig::fromBuildJson([
@@ -63,7 +77,7 @@ final class SpeechConfigTest extends TestCase
         yield 'unknown key' => [['keys' => ['a'], 'voices' => $voices, 'voice' => 1], 'speech.voice is unknown'];
         yield 'no keys' => [['voices' => $voices], 'speech.keys must list'];
         yield 'no voices' => [['keys' => ['a']], 'speech.voices must be an object'];
-        yield 'no reference' => [['keys' => ['a'], 'voices' => ['n' => ['seed' => 1]]], 'voices.n.reference must be'];
+        yield 'bad reference' => [['keys' => ['a'], 'voices' => ['n' => ['reference' => '']]], 'voices.n.reference must be'];
         yield 'bad build' => [['keys' => ['a'], 'voices' => $voices, 'build' => 'always'], 'speech.build must be one of'];
         yield 'bad runner' => [['keys' => ['a'], 'voices' => $voices, 'runner' => 'podman'], 'speech.runner must be one of'];
         yield 'bad seed' => [['keys' => ['a'], 'voices' => ['n' => ['reference' => 'r.wav', 'seed' => 1.5]]], 'voices.n.seed must be an integer'];

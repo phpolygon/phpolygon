@@ -1056,6 +1056,7 @@ inputs, not Git content: list `output` in `.gitignore` and in `resources.externa
   "keys": ["dialog.*"],
   "voices": {
     "narrator": { "reference": "resources/voice-ref/narrator.wav" },
+    "guide": { "reference": null, "profile": { "pitch": 0.8 } },
     "robot": { "reference": "resources/voice-ref/robot.wav", "keys": ["dialog.robot.*"], "seed": 7, "profile": { "crush": 0.2 } }
   },
   "build": "generate", "runner": "auto", "gpu": false
@@ -1071,13 +1072,13 @@ vendor/bin/phpolygon speech:sync [--locale=de,en] [--key=dialog.*] [--check]
 
 | Class | What it is |
 |---|---|
-| `SpeechConfig` / `SpeechVoice` | build.json `speech`; the first voice whose `keys` match speaks a line, else a voice without `keys` |
+| `SpeechConfig` / `SpeechVoice` | build.json `speech`; the first voice whose `keys` match speaks a line, else a voice without `keys`. `reference` null or absent = the synthesizer's built-in voice (Chatterbox ships exactly one, `conds.pt`); voices on it differ only by seed, exaggeration, cfg weight and `profile` |
 | `SpeechSync` | `plan()` compares every line with `speech.lock.json`, `sync()` generates missing/stale lines and saves the manifest after each one (an interrupted run keeps its progress) |
 | `SpeechSynthesizerInterface` | `id()` (part of the cache key), `language()` (locale → model language or null), `synthesize()` reporting each job as it finishes |
-| `ChatterboxSynthesizer` | Chatterbox Multilingual 0.1.7 (MIT) via `tools/speech/chatterbox_worker.py`: native env or Docker (`phpolygon-speech:chatterbox-*`, models in volume `phpolygon-speech-models`, `--gpus all` with `gpu`). 22 of the 31 Steam languages; not bg, cs, hu, id, ro, th, uk, vi, zh-TW |
+| `ChatterboxSynthesizer` | Chatterbox Multilingual 0.1.7 (MIT) via `tools/speech/chatterbox_worker.py` (a job without reference restores the built-in voice). `fromOptions($root, $runner, $gpu)` serves tools without build.json `speech`, with the same env overrides as `fromConfig()`. Native env or Docker (`phpolygon-speech:chatterbox-*`, models in volume `phpolygon-speech-models`, `--gpus all` with `gpu`). 22 of the 31 Steam languages; not bg, cs, hu, id, ro, th, uk, vi, zh-TW |
 | `SpeechFiles` | `path()` / `find()` – the game locates a line the way the generator wrote it |
 
-- **Cache key** = `SpeechSync::VERSION`, `VoiceChain::CHAIN_VERSION`, synthesizer id, language, text, reference WAV hash, seed, exaggeration, cfg weight, profile fingerprint. Bump `VERSION` when the written files change for the same synthesizer output.
+- **Cache key** = `SpeechSync::VERSION`, `VoiceChain::CHAIN_VERSION`, synthesizer id, language, text, reference WAV hash (`builtin` for the built-in voice), seed, exaggeration, cfg weight, profile fingerprint. Bump `VERSION` when the written files change for the same synthesizer output.
 - **Not spoken:** texts with `:placeholders` or plural forms (`a|b`) – only known at runtime – and locales the synthesizer cannot speak. `speech:status` lists them; they never fail a build.
 - **Build:** `phpolygon build` runs the sync before the targets: `build: generate` (default) generates what is missing, `check` fails on missing/stale lines, `off` skips. `PHPOLYGON_SPEECH=generate|check|off` overrides; `PHPOLYGON_SPEECH_RUNNER`, `PHPOLYGON_SPEECH_GPU`, `PHPOLYGON_SPEECH_PYTHON` override the runner. Inside the cross-build container (no Python, no Docker) generate on the host first; the bind-mounted files then pass.
 - The worker is a batch process (JSONL in, one JSON result line per job out), not a server. Seeds are fixed, but CPU, MPS and CUDA still sound slightly different.
