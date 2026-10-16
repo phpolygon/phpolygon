@@ -1095,6 +1095,39 @@ $audio->getChannelDuck(AudioChannel::Music);   // current dB incl. ramp
   engine loop (tools, tests) calls it itself; fade 0 applies immediately.
 - Ducking Master lowers every channel.
 
+## Stem player — layered music against run-time marks
+
+`StemPlayer` plays pre-rendered stems (ids → file paths) that come and go as
+the game reaches marks (a cutscene's beats, a fight's phases). The arrangement
+is a `StemSchedule` – pure arithmetic, shared by the live player and an offline
+mix (`gainAt()`), so a game and its rendered video use one arrangement:
+
+```php
+$player = new StemPlayer($audio, AudioChannel::Music, new GainFollower(0.3, 0.6, -8.0), $log);
+$player->addStem('calm', $pathOrNull);            // null / failed load or play = silent stem, reported once
+$player->preload();
+$s = $player->schedule();
+$s->start('calm', $t, fadeIn: 1.0, gain: 0.3);    // a stem starts once
+$s->crossfade('calm', 'tense', $t, 1.0, gain: 0.3, fadeIn: 1.5);
+$s->fadeOut('tense', $t, 2.0);
+$s->cut($t);                                      // StemSchedule::CUT_SECONDS (60 ms); only stems started before $t
+$player->duck(-8.0); $player->duck(0.0);          // all stems, or duck($db, 'stem') per stem
+$player->update($now);                            // every frame, monotonic seconds; steps capped at MAX_STEP
+$handoffs = $player->release(2.0);                // list<StemHandoff>: playback, volume, fade, channel
+$menuPlayer->adopt($handoffs[0]);                 // the new owner fades it out on its clock
+```
+
+- Gain at t = `gain × fade-in × Π fade-outs` – a cut also shortens a running
+  fade; once any fade-out reaches 0 the stem stops for good.
+- Volumes go through `setPlaybackVolume()`, so channel/Master volume, mute and
+  `setChannelDuck()` stack on top. The player's own duck is a `GainFollower`
+  on the player's clock (amplitude-linear, separate down/up times) – for code
+  that runs where `AudioManager::update()` does not tick yet, or per stem.
+  Never duck the same reason in both places.
+- `release()` stops silent stems and stops driving the rest; `reset()` starts
+  a new run (loaded clips stay). Marks, gains and the composition belong to
+  the game.
+
 ## Audio DSP — offline signal processing
 
 `PHPolygon\Audio\Dsp` and `PHPolygon\Audio\Codec` are plain-PHP tools for audio a
