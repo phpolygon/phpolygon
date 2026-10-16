@@ -45,7 +45,7 @@ use VioTexture;
  * vio_set_uniform, and vio_draw. Supports Blinn-Phong lighting, fog,
  * shadow mapping, texture sampling, GPU instancing, and transparency.
  */
-class VioRenderer3D implements Renderer3DInterface
+class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
 {
     private int $width;
     private int $height;
@@ -125,7 +125,14 @@ class VioRenderer3D implements Renderer3DInterface
     private ?Mat4 $currentProjectionMatrix = null;
     private ?Vec3 $cameraPosition = null;
 
+    /** Shader animation time (u_time), seconds. */
     private float $globalTime = 0.0;
+
+    /**
+     * True once a caller drives u_time ({@see setAnimationTime()}); until then
+     * beginFrame() advances it by a fixed 1/60 s per frame.
+     */
+    private bool $animationClockDriven = false;
 
     // ── Flash-hunt diagnostics (PHPOLYGON_FLASH_DEBUG=1) ──────────────
     private ?bool $flashDbg = null;
@@ -1829,6 +1836,12 @@ class VioRenderer3D implements Renderer3DInterface
         $this->bloomTargetsHdr = $hdr;
     }
 
+    public function setAnimationTime(float $seconds): void
+    {
+        $this->globalTime = $seconds;
+        $this->animationClockDriven = true;
+    }
+
     public function beginFrame(): void
     {
         $size = vio_framebuffer_size($this->ctx);
@@ -1841,7 +1854,9 @@ class VioRenderer3D implements Renderer3DInterface
         $this->backbufferHeight = $this->height;
 
         $this->shaderOverride = null;
-        $this->globalTime += 1.0 / 60.0;
+        if (!$this->animationClockDriven) {
+            $this->globalTime += 1.0 / 60.0;
+        }
         $now = microtime(true);
         if ($this->lastFrameStart > 0.0) {
             $this->frameTimeMs = max(0.1, min(250.0, ($now - $this->lastFrameStart) * 1000.0));

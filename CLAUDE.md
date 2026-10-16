@@ -125,6 +125,13 @@ All commands are plain PHP value objects (no methods, only constructor propertie
 Commands are appended to `RenderCommandList` during the scene tick. The
 `Renderer3DSystem` flushes the list once per frame.
 
+**Shader animation time (`u_time`)** follows the simulated time, not the frame
+count: the engine sums every update step and passes it to renderers that
+implement `AnimationClockInterface` (Vio, OpenGL, Null) before `beginFrame()`.
+Never advance animation time by a constant per rendered frame - water and
+vertex animation would run 2.4x too fast at 144 fps. Screenshot tests pin it with
+`Engine::setAnimationTime()`; an undriven renderer falls back to 1/60 s per frame.
+
 ### Shader management
 
 Games control shaders via the `Shader` facade or `$engine->shaders`:

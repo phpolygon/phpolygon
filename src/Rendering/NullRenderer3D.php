@@ -9,11 +9,23 @@ namespace PHPolygon\Rendering;
  * Used for headless mode: testing, validation, CI pipelines.
  * Stores the last command list for test assertions.
  */
-class NullRenderer3D implements Renderer3DInterface
+class NullRenderer3D implements Renderer3DInterface, AnimationClockInterface
 {
     private int $width;
     private int $height;
     private ?RenderCommandList $lastCommandList = null;
+    private ?float $animationTime = null;
+
+    public function setAnimationTime(float $seconds): void
+    {
+        $this->animationTime = $seconds;
+    }
+
+    /** The last animation time the caller set (null = never driven). */
+    public function getAnimationTime(): ?float
+    {
+        return $this->animationTime;
+    }
 
     public function __construct(int $width = 1280, int $height = 720)
     {

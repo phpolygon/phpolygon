@@ -12,6 +12,7 @@ use PHPolygon\ECS\World;
 use PHPolygon\Event\EventDispatcher;
 use PHPolygon\Geometry\MeshCache;
 use PHPolygon\Locale\LocaleManager;
+use PHPolygon\Rendering\AnimationClockInterface;
 use PHPolygon\Rendering\Camera2D;
 use PHPolygon\Rendering\Color;
 use PHPolygon\Rendering\GraphicsSettings;
@@ -128,6 +129,13 @@ class Engine
      * when the render rate exceeds the update rate (144 fps render / 60 Hz sim).
      */
     public float $renderInterpolation = 1.0;
+
+    /**
+     * Simulated seconds since the loop started (the sum of every update step).
+     * Drives the 3D renderer's shader animation time ({@see AnimationClockInterface})
+     * so water and vertex animation run at the same speed at any frame rate.
+     */
+    private float $animationTime = 0.0;
 
     /** @var callable|null */
     private $onUpdate = null;
@@ -954,6 +962,7 @@ class Engine
                 },
                 update: function (float $dt) {
                     PerfProfiler::begin('engine.update');
+                    $this->animationTime += $dt;
                     $this->world->updateMainThread($dt);
 
                     if ($this->onUpdate !== null) {
@@ -986,6 +995,9 @@ class Engine
                         }
                     }
 
+                    if ($this->renderer3D instanceof AnimationClockInterface) {
+                        $this->renderer3D->setAnimationTime($this->animationTime);
+                    }
                     if ($this->renderer3D !== null) {
                         $this->renderer3D->beginFrame();
                     }
@@ -1039,6 +1051,7 @@ class Engine
             $this->gameLoop->run(
                 update: function (float $dt) {
                     PerfProfiler::begin('engine.update');
+                    $this->animationTime += $dt;
                     $this->world->update($dt);
 
                     if ($this->onUpdate !== null) {
@@ -1071,6 +1084,9 @@ class Engine
                         }
                     }
 
+                    if ($this->renderer3D instanceof AnimationClockInterface) {
+                        $this->renderer3D->setAnimationTime($this->animationTime);
+                    }
                     if ($this->renderer3D !== null) {
                         $this->renderer3D->beginFrame();
                     }
@@ -1124,6 +1140,22 @@ class Engine
     public function stop(): void
     {
         $this->running = false;
+    }
+
+    /** Simulated seconds that drive the shader animation time (`u_time`). */
+    public function animationTime(): float
+    {
+        return $this->animationTime;
+    }
+
+    /**
+     * Rewind or pin the shader animation clock – screenshot tests call this
+     * every frame to render identical water and vertex animation regardless
+     * of how much wall time passed. The clock keeps counting from there.
+     */
+    public function setAnimationTime(float $seconds): void
+    {
+        $this->animationTime = $seconds;
     }
 
     /**

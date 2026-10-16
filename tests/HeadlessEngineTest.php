@@ -154,6 +154,54 @@ class HeadlessEngineTest extends TestCase
         $this->assertGreaterThanOrEqual(1, $renderCount, 'onRender must run for a non-zero window');
     }
 
+    /**
+     * Shader animation time (water, wave/sway vertex animation) follows the
+     * simulated time. The renderers used to add a fixed 1/60 s per rendered
+     * frame, so the water ran 2.4× too fast at 144 fps and half speed at 30.
+     */
+    public function testRendererAnimationTimeFollowsSimulatedTime(): void
+    {
+        $engine = new Engine(new EngineConfig(headless: true, is3D: true));
+        $renderer = $engine->renderer3D;
+        $this->assertInstanceOf(NullRenderer3D::class, $renderer);
+
+        $simulated = 0.0;
+        $updates = 0;
+        $engine->onUpdate(function (Engine $e, float $dt) use (&$simulated, &$updates) {
+            $simulated += $dt;
+            if (++$updates >= 5) {
+                $e->stop();
+            }
+        });
+
+        $engine->run();
+
+        // The frame that ran the last update renders afterwards with its time.
+        $this->assertNotNull($renderer->getAnimationTime());
+        $this->assertEqualsWithDelta($simulated, $renderer->getAnimationTime(), 1e-9);
+    }
+
+    /** A screenshot test pins the animation clock so every capture animates alike. */
+    public function testAnimationTimeCanBePinned(): void
+    {
+        $engine = new Engine(new EngineConfig(headless: true, is3D: true));
+        $renderer = $engine->renderer3D;
+        $this->assertInstanceOf(NullRenderer3D::class, $renderer);
+
+        $updates = 0;
+        $engine->onUpdate(function (Engine $e) use (&$updates) {
+            $e->setAnimationTime(12.5);
+            if (++$updates >= 3) {
+                $e->stop();
+            }
+        });
+
+        $engine->run();
+
+        $this->assertSame(12.5, $engine->animationTime());
+        $this->assertSame(12.5, $renderer->getAnimationTime());
+    }
+
     public function testHeadlessEngineCanLoadScenes(): void
     {
         $engine = new Engine(new EngineConfig(headless: true));

@@ -38,7 +38,7 @@ use PHPolygon\Rendering\Quality\AntiAliasing;
  * GPU instancing (glVertexAttribDivisor, core since GL 3.3) degrades to a
  * per-instance CPU draw loop on older contexts.
  */
-class OpenGLRenderer3D implements Renderer3DInterface
+class OpenGLRenderer3D implements Renderer3DInterface, AnimationClockInterface
 {
     private const GL_ERROR_NAMES = [
         0x0500 => 'GL_INVALID_ENUM',
@@ -115,6 +115,12 @@ class OpenGLRenderer3D implements Renderer3DInterface
 
     /** Global time for shader animations (seconds since start) */
     private float $globalTime = 0.0;
+
+    /**
+     * True once a caller drives u_time ({@see setAnimationTime()}); until then
+     * render() advances it by a fixed 0.016 s per frame.
+     */
+    private bool $animationClockDriven = false;
     private int $dummyCubemap = 0;
     private int $dummyDepthTex = 0;
     private int $dummyCloudTex = 0;
@@ -189,6 +195,12 @@ class OpenGLRenderer3D implements Renderer3DInterface
 
         $this->initShaders();
         $this->initSkybox();
+    }
+
+    public function setAnimationTime(float $seconds): void
+    {
+        $this->globalTime = $seconds;
+        $this->animationClockDriven = true;
     }
 
     public function beginFrame(): void
@@ -414,7 +426,9 @@ class OpenGLRenderer3D implements Renderer3DInterface
         $this->setUniformVec3('u_season_tint', [1.0, 1.0, 1.0]); // no tint by default
 
         // Time + wave animation defaults
-        $this->globalTime += 0.016; // ~60fps increment
+        if (!$this->animationClockDriven) {
+            $this->globalTime += 0.016; // undriven fallback: ~60fps increment
+        }
         $this->setUniformFloat('u_time', $this->globalTime);
         $this->setUniformInt('u_vertex_anim', 0);
         $this->setUniformFloat('u_wave_amplitude', 0.0);
