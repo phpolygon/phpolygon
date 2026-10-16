@@ -139,7 +139,9 @@ class VioTextureManager extends TextureManager
      * Upload a KTX2 container with the current tier's mip offset. Null when the
      * runtime cannot take it (older php-vio, unsupported format or backend), so
      * the caller falls back to the source image; a warning from php-vio is
-     * swallowed here because the fallback is the intended answer.
+     * swallowed here because the fallback is the intended answer. A container
+     * with zlib supercompression is inflated first ({@see Ktx2Container::inflate()}),
+     * since php-vio only takes plain ones.
      */
     private function loadKtx2(string $path): ?VioTexture
     {
@@ -148,6 +150,10 @@ class VioTextureManager extends TextureManager
         }
         $bytes = @file_get_contents($path);
         if ($bytes === false || $bytes === '') {
+            return null;
+        }
+        $bytes = Ktx2Container::inflate($bytes);
+        if ($bytes === null) {
             return null;
         }
         $tex = @vio_texture_ktx2($this->ctx, $bytes, [

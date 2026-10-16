@@ -303,6 +303,14 @@ checks the position.
 **3D textures:** `resolveTexture()` binds the `VioTextureManager` upload (`vioTexture()`: mip chain,
 anisotropy, KTX2 container) — never decode the file a second time for 3D.
 
+**KTX2 files:** a `.ktx2` beside an image path wins (`VioTextureManager::ktx2Sibling()`).
+`PHPolygon\Rendering\Ktx2Container` writes them for pre-bakes (`bc7()`, `build()`, `ddsPayload()`)
+and, with `zlibLevel` 1-9, compresses each mip level with zlib (KTX2 supercompression scheme 3).
+php-vio only takes plain containers, so `loadKtx2()` runs `Ktx2Container::inflate()` first
+(plain = untouched; Basis/Zstd = refused, the image path loads instead). Zstd is not offered: the
+shipped runtimes have zlib (the gzip PHAR needs it), not zstd. Measured on 329 BC7 hologram
+textures: 144.5 MB -> 18.0 MB, inflating all of them +0.3 s (~1 ms per texture).
+
 ### Shaders
 - Authoring language: **GLSL** (human- and AI-readable plaintext)
 - 2D: used directly by NanoVG / OpenGL at runtime

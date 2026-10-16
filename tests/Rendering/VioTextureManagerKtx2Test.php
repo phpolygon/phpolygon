@@ -8,6 +8,7 @@ use PHPUnit\Framework\Attributes\Group;
 use PHPUnit\Framework\Attributes\RequiresPhpExtension;
 use PHPUnit\Framework\TestCase;
 use PHPolygon\Rendering\GraphicsSettings;
+use PHPolygon\Rendering\Ktx2Container;
 use PHPolygon\Rendering\Quality\TextureQuality;
 use PHPolygon\Rendering\VioTextureManager;
 
@@ -75,6 +76,29 @@ final class VioTextureManagerKtx2Test extends TestCase
         $half->applySettings(new GraphicsSettings(textureQuality: TextureQuality::Half));
         $tex = $half->load('wall.png');
         self::assertSame([2, 2], [$tex->width, $tex->height], 'TextureQuality::Half skips one mip level of the KTX2');
+
+        vio_destroy($ctx);
+    }
+
+    public function testZlibSupercompressedKtx2IsInflatedBeforeUpload(): void
+    {
+        if (!function_exists('vio_texture_ktx2')) {
+            $this->markTestSkipped('php-vio without vio_texture_ktx2 (< 2.18)');
+        }
+        $ctx = @vio_create('auto', ['width' => 16, 'height' => 16, 'headless' => true, 'vsync' => false]);
+        if ($ctx === false) {
+            $this->markTestSkipped('vio_create(headless) unavailable');
+        }
+
+        file_put_contents($this->dir . '/wall.png', $this->png2x2());
+        file_put_contents($this->dir . '/wall.ktx2', Ktx2Container::build(37, 1, 4, 4, [
+            str_repeat("\xFF\x00\x00\xFF", 16),
+            str_repeat("\x00\xFF\x00\xFF", 4),
+            "\x00\x00\xFF\xFF",
+        ], zlibLevel: 6));
+
+        $tex = (new VioTextureManager($ctx, $this->dir))->load('wall.png');
+        self::assertSame([4, 4], [$tex->width, $tex->height], 'the zlib KTX2 (4x4) is uploaded, not the 2x2 PNG');
 
         vio_destroy($ctx);
     }
