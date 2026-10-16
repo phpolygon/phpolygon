@@ -173,6 +173,16 @@ class DayNightSystem extends AbstractSystem
             $this->cachedCycle = $entity->get(DayNightCycle::class);
             break;
         }
+        // The season tilts the sun's arc through the cycle (the coupling
+        // EnvironmentalSystem performs as well), so a scene with a Season but
+        // without that system still gets a seasonal sun, and every reader of
+        // DayNightCycle::getSunElevation() sees the elevation the sky draws.
+        if ($this->cachedCycle !== null) {
+            foreach ($world->query(Season::class) as $seasonEntity) {
+                $this->cachedCycle->axialTilt = $seasonEntity->get(Season::class)->axialTilt;
+                break;
+            }
+        }
         if ($this->cachedCycle !== null && !$this->cachedCycle->paused && $dt > 0) {
             $prevDay = floor($this->cachedCycle->timeOfDay);
             $this->cachedCycle->timeOfDay += ($dt * $this->cachedCycle->speed) / $this->cachedCycle->dayDuration;
@@ -201,17 +211,15 @@ class DayNightSystem extends AbstractSystem
         $cycle = $this->cachedCycle;
         if ($cycle === null) return;
 
-        // Seasonal sun: add the Season's axial tilt (±15° summer/winter) to the
-        // sun elevation so the whole arc shifts — higher in 'summer', lower in
-        // 'winter'. Used everywhere below (direction, day/night blend, moon
-        // visibility, horizon fade) so the sun visibly follows the season
-        // instead of staying put while the foliage recolours.
-        $seasonTilt = 0.0;
-        foreach ($world->query(Season::class) as $seasonEntity) {
-            $seasonTilt = $seasonEntity->get(Season::class)->axialTilt;
-            break;
-        }
-        $sunElev = $cycle->getSunElevation() + $seasonTilt;
+        // Seasonal sun: the cycle carries the Season's axial tilt (±15°
+        // summer/winter, synced in update()), so getSunElevation() already
+        // shifts the whole arc – higher in 'summer', lower in 'winter'. It is
+        // the one elevation used everywhere below (direction, day/night blend,
+        // moon visibility, horizon fade) AND by every other system that reads
+        // the cycle. Adding the season tilt here a second time drew the sun
+        // twice the tilt too high, so the sky still showed day while systems
+        // reading getSunElevation() (lamps, stars) had already switched to night.
+        $sunElev = $cycle->getSunElevation();
 
         // Cloud coverage drives how many clouds the sky shows; storminess
         // (rain/snow/thunder) drives how DARK they are. Both dim the scene:

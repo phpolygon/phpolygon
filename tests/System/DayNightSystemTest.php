@@ -18,6 +18,7 @@ use PHPolygon\Rendering\Command\SetAmbientLight;
 use PHPolygon\Rendering\Command\SetSky;
 use PHPolygon\Rendering\RenderCommandList;
 use PHPolygon\System\DayNightSystem;
+use PHPolygon\System\EnvironmentalSystem;
 
 /**
  * Covers the seasonal-sun + weather coupling in {@see DayNightSystem}.
@@ -139,6 +140,58 @@ final class DayNightSystemTest extends TestCase
             $tilted['light']->direction->y,
             1e-4,
         );
+    }
+
+    /**
+     * The season tilts the sun once. With EnvironmentalSystem coupling the
+     * Season into the cycle, the sky used to add the tilt a second time: in
+     * summer the drawn sun stood 15° higher than DayNightCycle::getSunElevation(),
+     * which every other system (lamps, stars) reads.
+     */
+    public function testSeasonTiltsTheDrawnSunOnlyOnce(): void
+    {
+        foreach ([[0.25, 15.0], [0.75, -15.0]] as [$yearProgress, $tilt]) {
+            $world = new World();
+            $cycle = new DayNightCycle(timeOfDay: 0.3, paused: true);
+            $world->createEntity()->attach($cycle);
+            $world->createEntity()->attach(new Season(yearProgress: $yearProgress, speed: 0.0));
+            $light = new DirectionalLight();
+            $lightEntity = $world->createEntity();
+            $lightEntity->attach($light);
+            $lightEntity->attach(new Transform3D());
+
+            $environment = new EnvironmentalSystem();
+            $system = new DayNightSystem(new RenderCommandList());
+            $environment->update($world, 0.016);
+            $system->update($world, 0.016);
+            $system->render($world);
+
+            $this->assertEqualsWithDelta($tilt, $cycle->axialTilt, 1e-6);
+            $untilted = new DayNightCycle(timeOfDay: 0.3);
+            $drawn = rad2deg(asin(-$light->direction->normalize()->y));
+            $this->assertEqualsWithDelta($cycle->getSunElevation(), $drawn, 0.05, 'sky and cycle agree on the sun');
+            $this->assertEqualsWithDelta(
+                $untilted->getSunElevation() + $tilt,
+                $drawn,
+                6.0,  // getSunElevation() also stretches the day a little; twice the tilt is 15° off
+                'the season shifts the sun by its tilt, not twice',
+            );
+        }
+    }
+
+    /** A Season without EnvironmentalSystem still tilts the sun through the cycle. */
+    public function testSeasonTiltReachesTheCycleWithoutEnvironmentalSystem(): void
+    {
+        $world = new World();
+        $cycle = new DayNightCycle(timeOfDay: 0.3, paused: true);
+        $world->createEntity()->attach($cycle);
+        $season = new Season(yearProgress: 0.25, speed: 0.0);
+        $season->axialTilt = 15.0;
+        $world->createEntity()->attach($season);
+
+        (new DayNightSystem(new RenderCommandList()))->update($world, 0.016);
+
+        $this->assertSame(15.0, $cycle->axialTilt);
     }
 
     /** Like run() but with a Season whose axialTilt is pre-set to $tilt. */
