@@ -194,6 +194,43 @@ class BuildConfigTest extends TestCase
         $this->assertSame('\App\Game::start();', $config->run);
     }
 
+    public function testMeshAssetsDefaultToJson(): void
+    {
+        $config = BuildConfig::load($this->tempDir);
+
+        $this->assertSame(BuildConfig::MESH_ASSETS_JSON, $config->meshAssets);
+        $this->assertSame(6, $config->meshZlibLevel);
+    }
+
+    public function testMeshAssetsBinaryWithZlibLevel(): void
+    {
+        file_put_contents($this->tempDir . '/build.json', json_encode([
+            'assets' => ['meshes' => 'binary', 'meshZlib' => 0],
+        ]));
+
+        $config = BuildConfig::load($this->tempDir);
+
+        $this->assertSame(BuildConfig::MESH_ASSETS_BINARY, $config->meshAssets);
+        $this->assertSame(0, $config->meshZlibLevel);
+        $this->assertSame('binary', $config->toArray()['assets.meshes']);
+    }
+
+    public function testUnknownMeshAssetFormatIsRejected(): void
+    {
+        file_put_contents($this->tempDir . '/build.json', json_encode(['assets' => ['meshes' => 'gltf']]));
+
+        $this->expectException(\InvalidArgumentException::class);
+        BuildConfig::load($this->tempDir);
+    }
+
+    public function testMeshZlibOutOfRangeIsRejected(): void
+    {
+        file_put_contents($this->tempDir . '/build.json', json_encode(['assets' => ['meshZlib' => 12]]));
+
+        $this->expectException(\InvalidArgumentException::class);
+        BuildConfig::load($this->tempDir);
+    }
+
     private function removeDir(string $dir): void
     {
         if (!is_dir($dir)) return;

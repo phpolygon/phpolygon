@@ -99,6 +99,66 @@ class MeshCacheIOTest extends TestCase
         $this->assertNull(MeshCacheIO::decode(''));
     }
 
+    public function testCompactRoundTripKeepsTangentsAndUses16BitIndices(): void
+    {
+        $original = SphereMesh::generate(1.0, 12, 16)->withComputedTangents();
+        $encoded = MeshCacheIO::encodeCompact($original, 'src', 0);
+        $decoded = MeshCacheIO::decode($encoded);
+
+        $this->assertNotNull($decoded);
+        $this->assertSame($original->indices, $decoded->indices);
+        $this->assertFloatsEqual($original->vertices, $decoded->vertices);
+        $this->assertFloatsEqual($original->normals, $decoded->normals);
+        $this->assertFloatsEqual($original->uvs, $decoded->uvs);
+        $this->assertNotNull($decoded->tangents);
+        $this->assertFloatsEqual($original->tangents ?? [], $decoded->tangents);
+
+        $flags = unpack('v', $encoded, 6);
+        $this->assertNotFalse($flags);
+        $this->assertSame(MeshCacheIO::FLAG_INDEX16, $flags[1]);
+        // 32-byte header + float32 streams + 2 bytes per index
+        $floats = count($original->vertices) + count($original->normals) + count($original->uvs) + count($original->tangents ?? []);
+        $this->assertSame(32 + $floats * 4 + count($original->indices) * 2, strlen($encoded));
+    }
+
+    public function testCompactFallsBackTo32BitIndicesAbove65535(): void
+    {
+        $mesh = new MeshData([0.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0], [0, 70000, 2]);
+        $encoded = MeshCacheIO::encodeCompact($mesh, 'src', 0);
+
+        $flags = unpack('v', $encoded, 6);
+        $this->assertNotFalse($flags);
+        $this->assertIsInt($flags[1]);
+        $this->assertSame(0, $flags[1] & MeshCacheIO::FLAG_INDEX16);
+        $decoded = MeshCacheIO::decode($encoded);
+        $this->assertNotNull($decoded);
+        $this->assertSame([0, 70000, 2], $decoded->indices);
+        $this->assertNull($decoded->tangents);
+    }
+
+    public function testCompactZlibIsSmallerAndRoundTrips(): void
+    {
+        $original = SphereMesh::generate(1.0, 24, 32);
+        $raw = MeshCacheIO::encodeCompact($original, 'src', 0);
+        $zlib = MeshCacheIO::encodeCompact($original, 'src', 6);
+
+        $this->assertLessThan(strlen($raw), strlen($zlib));
+        $decoded = MeshCacheIO::decode($zlib);
+        $this->assertNotNull($decoded);
+        $this->assertSame($original->indices, $decoded->indices);
+        $this->assertFloatsEqual($original->vertices, $decoded->vertices);
+        $this->assertSame(MeshCacheIO::versionHash('src'), MeshCacheIO::readVersionHash($zlib));
+    }
+
+    public function testCompactRejectsCorruptPayload(): void
+    {
+        $zlib = MeshCacheIO::encodeCompact(BoxMesh::generate(1.0, 1.0, 1.0), 'src', 6);
+        $this->assertNull(MeshCacheIO::decode(substr($zlib, 0, 40)));
+
+        $raw = MeshCacheIO::encodeCompact(BoxMesh::generate(1.0, 1.0, 1.0), 'src', 0);
+        $this->assertNull(MeshCacheIO::decode(substr($raw, 0, 40)));
+    }
+
     public function testDecodeTruncatedData(): void
     {
         $encoded = MeshCacheIO::encode(BoxMesh::generate(1.0, 1.0, 1.0), 'v1');

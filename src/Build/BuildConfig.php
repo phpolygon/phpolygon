@@ -59,6 +59,21 @@ class BuildConfig
      */
     public string $pharCompression = self::PHAR_COMPRESSION_GZIP;
 
+    public const MESH_ASSETS_JSON = 'json';
+    public const MESH_ASSETS_BINARY = 'binary';
+
+    /**
+     * build.json `assets.meshes`: how `*.mesh.json` assets ship. `json` (default)
+     * ships them as authored; `binary` compiles every staged `*.mesh.json` into a
+     * `*.mesh.bin` ({@see \PHPolygon\Geometry\MeshAssetLoader}) and drops the JSON
+     * from the build - the project tree keeps its sources. The game must load
+     * meshes through {@see \PHPolygon\Geometry\MeshAssetLoader}.
+     */
+    public string $meshAssets = self::MESH_ASSETS_JSON;
+
+    /** build.json `assets.meshZlib`: zlib level 0-9 of compiled meshes (0 = none). */
+    public int $meshZlibLevel = 6;
+
     /** @var array<string> Additional PHP files to require in stub */
     public array $additionalRequires = [];
 
@@ -219,6 +234,26 @@ class BuildConfig
             }
         }
 
+        $assets = isset($data['assets']) && is_array($data['assets']) ? $data['assets'] : [];
+        if (isset($assets['meshes'])) {
+            if (!in_array($assets['meshes'], [self::MESH_ASSETS_JSON, self::MESH_ASSETS_BINARY], true)) {
+                throw new \InvalidArgumentException(sprintf(
+                    'build.json assets.meshes must be "%s" or "%s", got %s',
+                    self::MESH_ASSETS_JSON,
+                    self::MESH_ASSETS_BINARY,
+                    json_encode($assets['meshes']),
+                ));
+            }
+            $this->meshAssets = $assets['meshes'];
+        }
+        if (isset($assets['meshZlib'])) {
+            $level = $assets['meshZlib'];
+            if (!is_int($level) || $level < 0 || $level > 9) {
+                throw new \InvalidArgumentException('build.json assets.meshZlib must be an integer 0-9, got ' . json_encode($level));
+            }
+            $this->meshZlibLevel = $level;
+        }
+
         $resources = isset($data['resources']) && is_array($data['resources']) ? $data['resources'] : [];
         if (isset($resources['external']) && is_array($resources['external'])) {
             /** @var array<string> $external */
@@ -331,6 +366,8 @@ class BuildConfig
             'phar.additionalRequires' => $this->additionalRequires,
             'phar.compression' => $this->pharCompression,
             'resources.external' => $this->externalResources,
+            'assets.meshes' => $this->meshAssets,
+            'assets.meshZlib' => $this->meshZlibLevel,
             'platforms' => $this->platforms,
             'buildTypes' => $this->buildTypes,
             'hooks.beforeBuild' => $this->hooksBeforeBuild,

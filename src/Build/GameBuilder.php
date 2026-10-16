@@ -156,6 +156,22 @@ class GameBuilder
                     $this->log('info', 'Transpiled ' . count($written) . ' UI layout(s) to PHP');
                 }
 
+                // Phase 2d: build.json assets.meshes = binary - the staged
+                // *.mesh.json become compact *.mesh.bin; the sources stay in the project.
+                if ($this->config->meshAssets === BuildConfig::MESH_ASSETS_BINARY) {
+                    $stats = \PHPolygon\Geometry\MeshAssetLoader::compileDirectory(
+                        $stagingDir . '/assets',
+                        $this->config->meshZlibLevel,
+                        removeSources: true,
+                    );
+                    $this->log('info', sprintf(
+                        'Compiled %d mesh asset(s): %.1f MB JSON -> %.1f MB binary',
+                        $stats['files'],
+                        $stats['sourceBytes'] / 1024 / 1024,
+                        $stats['compiledBytes'] / 1024 / 1024,
+                    ));
+                }
+
                 // iOS branch: no phar / micro.sfx / combine. Link the staged tree
                 // against an embed libphp.a in a UIKit/Metal wrapper via Xcode.
                 if ($isIos) {

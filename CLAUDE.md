@@ -406,6 +406,28 @@ Benefits of this approach over file-based assets:
 - Claude Code can generate and iterate geometry directly
 - `DrawMeshInstanced` makes large worlds cheap to render
 
+### Mesh assets (`*.mesh.json` / `*.mesh.bin`)
+
+Meshes authored in the editor or imported live as `<id>.mesh.json` (the versioned,
+editable source; layouts: `raw` arrays, top-level arrays from `MeshSerializer`, or a
+`nodes` graph). `PHPolygon\Geometry\MeshAssetLoader` loads them:
+`registerAll($dir, $onError)` registers every asset lazily by id, `loadFile()` reads one.
+
+- A build with `build.json` `"assets": {"meshes": "binary"}` compiles every staged
+  `*.mesh.json` into `<id>.mesh.bin` and drops the JSON from the build (project tree
+  untouched). `"meshZlib": 0-9` (default 6) sets the zlib level.
+- `.mesh.bin` = `MeshCacheIO` format 2: 32-byte header (`PHMC`, format, flags, crc32 of
+  the source JSON, counts), float32 vertices/normals/uvs/tangents, uint16 indices when
+  all fit (`FLAG_INDEX16`) else uint32, payload optionally zlib (`FLAG_ZLIB`). Format 1
+  (`encode()`, uint32, no flags) stays for the mesh cache and the prototype exporter.
+- `loadFile('<id>.mesh.json')` prefers the `.mesh.bin` beside it while it is current:
+  the JSON is gone, or its crc32 matches. A stale binary is ignored in development.
+  Inside a PHAR the binary wins unchecked (a JSON there is an older build's extracted
+  leftover); `MeshAssetLoader::$verifySources` overrides either way.
+- Measured on 792 assets / 1.49 M vertices: 222 MB JSON -> 52.5 MB raw / 15.7 MB zlib;
+  loading all of them 5.2 s (JSON) -> 0.31 s (raw) / 0.48 s (zlib). 791 of 792 use
+  uint16 indices.
+
 ### Editor
 - The editor is a **NativePHP desktop application** (Electron wrapper + Vue SPA).
 - It has **direct filesystem access** to project directories — no HTTP server, no IPC.
