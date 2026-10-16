@@ -887,6 +887,43 @@ immediate-mode UI where multiple widgets check the same button per frame.
 Scroll values are cached via `snapshotScroll()` before `vio_begin()` resets them.
 The Engine calls this automatically. `getScrollX()`/`getScrollY()` return cached values.
 
+### InputMap — rebindable actions
+
+The bindings given to `addAction()` are the action's **defaults**. Rebinding is
+built in; the engine never persists it – the game stores the exported array
+in its own settings file.
+
+```php
+$map->addAction('replay', InputBinding::key(71))      // G
+    ->reserve(87, 65, 83, 68)                          // keys the game reads directly
+    ->setRebindable('interact', false)                 // locked: its keys count as reserved
+    ->setBindableFilter(fn (InputBinding $b) => $b->type === InputBindingType::Key)
+    ->setConflictPolicy(RebindConflictPolicy::Reject); // or Swap
+$r = $map->rebind('replay', 84);          // RebindResult: status + otherAction
+$map->checkRebind('replay', 84);          // same answer, nothing applied
+$map->resetBinding('replay'); $map->resetAllBindings();
+$settings['keys'] = $map->exportOverrides();          // only non-default actions
+$dropped = $map->importOverrides($settings['keys']);  // re-validated on load
+```
+
+- `InputMap::poll()` / `InputMapSystem` take any `InputInterface` (also
+  `VioInput`) and read only `isKeyDown()` – they never consume press edges.
+- Axis bindings, reserved keys and keys of locked actions are refused
+  (`RebindStatus::Reserved`). A conflict with another action is `Conflict`
+  (with `otherAction`) or, with policy `Swap`, the other action gets the old key.
+- `resetBinding()` cascades: an action that took the reset action's default
+  is reset as well (defaults are assumed conflict-free).
+- `importOverrides()` accepts bare ints as key codes, drops invalid entries and
+  resolves clashes by dropping the later action back to its defaults.
+- `KeyLabel` names keys for the UI: printable keys through the current layout
+  (`vio_key_name`), named keys/mouse buttons via `input.key.<slug>`
+  translations (`KeyLabel::slug()`), English fallback.
+- `KeyCapture` is the "press a key" prompt: polls `isKeyDown()` only, so it
+  never consumes a press edge (`isKeyPressed()` would). Keys held at `start()`
+  count only after a release; Escape is excluded by default so the game can
+  read it as cancel. Gate gameplay while capturing or call `clearKeyEdges()`
+  after a capture, otherwise the captured key also reaches gameplay.
+
 ### VioRenderer2D — fallback font chain
 
 Register fallback fonts for locales that need them (e.g. CJK):
