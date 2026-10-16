@@ -22,7 +22,10 @@ use PHPolygon\Audio\Dsp\Voice\VoiceProfile;
  *   },
  *   "build": "generate",
  *   "runner": "auto",
- *   "gpu": false
+ *   "gpu": false,
+ *   "workers": ["cuda", "cuda", "cpu"],
+ *   "device": "auto",
+ *   "cpuThreads": null
  * }
  * ```
  *
@@ -36,7 +39,16 @@ use PHPolygon\Audio\Dsp\Voice\VoiceProfile;
  *            synthesizer's built-in voice
  *   build    what `phpolygon build` does: generate missing lines, only check, or nothing
  *   runner   auto (native Python environment, else Docker), native or docker
- *   gpu      Docker: `--gpus all` with the CUDA image
+ *   gpu      CUDA: the default device (for `device: auto`), the CUDA torch on Windows,
+ *            Docker `--gpus all` with the CUDA image
+ *   workers  parallel worker processes, one model each: an int (that many on `device`)
+ *            or one device per worker, e.g. ["cuda", "cuda", "cpu"]; ~3.3 GiB VRAM per
+ *            CUDA worker, ~4.5 GB RAM per CPU worker, ~2 GB RAM per GPU worker
+ *            A worker may run on another machine over SSH:
+ *            "ssh://user@host[:port]?device=mps&workers=2" (see SpeechRemote)
+ *   device   default device of the workers: auto, cuda, cpu, mps
+ *   cpuThreads  torch threads per CPU worker; null = CPU workers share half the
+ *            logical cores next to GPU workers, else all of them
  */
 final readonly class SpeechConfig
 {
@@ -48,10 +60,19 @@ final readonly class SpeechConfig
     public const string RUNNER_NATIVE = 'native';
     public const string RUNNER_DOCKER = 'docker';
 
+    public const string DEVICE_AUTO = 'auto';
+
+    /** @var list<string> */
+    public const array DEVICES = [self::DEVICE_AUTO, 'cuda', 'cpu', 'mps'];
+
+    /** A worker on the default `device` (the int shorthand of `workers`). */
+    public const string WORKER_DEFAULT = 'default';
+
     /**
      * @param list<string> $keys
      * @param list<SpeechVoice> $voices
      * @param list<string> $only
+     * @param list<string> $workers one device (or WORKER_DEFAULT) per worker
      */
     public function __construct(
         public string $localesDir,
@@ -62,7 +83,49 @@ final readonly class SpeechConfig
         public string $build = self::BUILD_GENERATE,
         public string $runner = self::RUNNER_AUTO,
         public bool $gpu = false,
+        public array $workers = [self::WORKER_DEFAULT],
+        public string $device = self::DEVICE_AUTO,
+        public ?int $cpuThreads = null,
     ) {}
+
+    /**
+     * Workers from build.json, an option or PHPOLYGON_SPEECH_WORKERS: an int ≥ 1
+     * (that many on the default device), a list of devices, or a string "2" /
+     * "cuda,cuda,cpu".
+     *
+     * @return list<string> one device or WORKER_DEFAULT per worker
+     * @throws \InvalidArgumentException
+     */
+    public static function parseWorkers(mixed $value, string $source): array
+    {
+        if (is_string($value)) {
+            $value = trim($value);
+            $value = ctype_digit($value) ? (int) $value : array_map('trim', explode(',', $value));
+        }
+        if (is_int($value)) {
+            if ($value < 1) {
+                throw new \InvalidArgumentException("{$source} must be at least 1");
+            }
+            return array_fill(0, $value, self::WORKER_DEFAULT);
+        }
+        $devices = [self::WORKER_DEFAULT, ...self::DEVICES];
+        if (!is_array($value) || $value === [] || !array_is_list($value)) {
+            throw new \InvalidArgumentException("{$source} must be a worker count or a list of devices like [\"cuda\", \"cuda\", \"cpu\"]");
+        }
+        $list = [];
+        foreach ($value as $device) {
+            if (is_string($device) && SpeechRemote::isRemote($device)) {
+                [$remote, $count] = SpeechRemote::parse($device, $source);
+                array_push($list, ...array_fill(0, $count, $remote->url()));
+                continue;
+            }
+            if (!is_string($device) || !in_array($device, $devices, true)) {
+                throw new \InvalidArgumentException("{$source}: unknown device " . json_encode($device) . ' (' . implode(', ', self::DEVICES) . ')');
+            }
+            $list[] = $device;
+        }
+        return $list;
+    }
 
     /**
      * @throws \InvalidArgumentException on anything malformed
@@ -75,7 +138,7 @@ final readonly class SpeechConfig
         if (!is_array($data) || array_is_list($data)) {
             throw new \InvalidArgumentException('build.json speech must be an object like {"locales": "resources/lang", "keys": ["dialog.*"], "voices": {...}}');
         }
-        $known = ['locales', 'output', 'keys', 'only', 'voices', 'build', 'runner', 'gpu'];
+        $known = ['locales', 'output', 'keys', 'only', 'voices', 'build', 'runner', 'gpu', 'workers', 'device', 'cpuThreads'];
         foreach (array_keys($data) as $key) {
             if (!in_array($key, $known, true)) {
                 throw new \InvalidArgumentException("build.json speech.{$key} is unknown (supported: " . implode(', ', $known) . ')');
@@ -102,6 +165,16 @@ final readonly class SpeechConfig
         if (!is_bool($gpu)) {
             throw new \InvalidArgumentException('build.json speech.gpu must be true or false');
         }
+        $workers = $data['workers'] ?? 1;
+        if (is_string($workers)) {
+            throw new \InvalidArgumentException('build.json speech.workers must be a worker count or a list of devices like ["cuda", "cuda", "cpu"]');
+        }
+        $workers = self::parseWorkers($workers, 'build.json speech.workers');
+        $device = self::choice($data['device'] ?? self::DEVICE_AUTO, 'device', self::DEVICES);
+        $cpuThreads = $data['cpuThreads'] ?? null;
+        if ($cpuThreads !== null && (!is_int($cpuThreads) || $cpuThreads < 1)) {
+            throw new \InvalidArgumentException('build.json speech.cpuThreads must be a positive integer or null');
+        }
 
         return new self(
             self::path($data['locales'] ?? 'resources/lang', 'locales'),
@@ -112,6 +185,9 @@ final readonly class SpeechConfig
             $build,
             $runner,
             $gpu,
+            $workers,
+            $device,
+            $cpuThreads,
         );
     }
 
@@ -152,6 +228,9 @@ final readonly class SpeechConfig
             'build' => $this->build,
             'runner' => $this->runner,
             'gpu' => $this->gpu,
+            'workers' => $this->workers,
+            'device' => $this->device,
+            'cpuThreads' => $this->cpuThreads,
         ];
     }
 

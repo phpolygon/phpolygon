@@ -82,7 +82,35 @@ final class SpeechConfigTest extends TestCase
         yield 'bad runner' => [['keys' => ['a'], 'voices' => $voices, 'runner' => 'podman'], 'speech.runner must be one of'];
         yield 'bad seed' => [['keys' => ['a'], 'voices' => ['n' => ['reference' => 'r.wav', 'seed' => 1.5]]], 'voices.n.seed must be an integer'];
         yield 'exaggeration range' => [['keys' => ['a'], 'voices' => ['n' => ['reference' => 'r.wav', 'exaggeration' => 3]]], 'voices.n.exaggeration must be a number between'];
+        yield 'zero workers' => [['keys' => ['a'], 'voices' => $voices, 'workers' => 0], 'speech.workers must be at least 1'];
+        yield 'workers as string' => [['keys' => ['a'], 'voices' => $voices, 'workers' => 'cuda,cpu'], 'speech.workers must be a worker count or a list'];
+        yield 'bad worker device' => [['keys' => ['a'], 'voices' => $voices, 'workers' => ['cuda', 'tpu']], 'unknown device "tpu"'];
+        yield 'bad remote worker' => [['keys' => ['a'], 'voices' => $voices, 'workers' => ['ssh://mac?workers=0']], 'workers in ssh://mac?workers=0 must be a positive integer'];
+        yield 'bad device' => [['keys' => ['a'], 'voices' => $voices, 'device' => 'gpu'], 'speech.device must be one of'];
+        yield 'bad cpuThreads' => [['keys' => ['a'], 'voices' => $voices, 'cpuThreads' => 0], 'speech.cpuThreads must be a positive integer'];
         yield 'profile field' => [['keys' => ['a'], 'voices' => ['n' => ['reference' => 'r.wav', 'profile' => ['shout' => 1]]]], "unknown voice profile field 'shout'"];
+    }
+
+    public function testWorkers(): void
+    {
+        $voices = ['n' => ['reference' => null]];
+        $default = SpeechConfig::fromBuildJson(['keys' => ['a'], 'voices' => $voices]);
+        self::assertNotNull($default);
+        self::assertSame([SpeechConfig::WORKER_DEFAULT], $default->workers);
+        self::assertSame(SpeechConfig::DEVICE_AUTO, $default->device);
+        self::assertNull($default->cpuThreads);
+
+        $config = SpeechConfig::fromBuildJson([
+            'keys' => ['a'], 'voices' => $voices,
+            'workers' => ['cuda', 'ssh://me@mac:22?device=mps&workers=2', 'cpu'], 'cpuThreads' => 4,
+        ]);
+        self::assertNotNull($config);
+        self::assertSame(['cuda', 'ssh://me@mac:22?device=mps', 'ssh://me@mac:22?device=mps', 'cpu'], $config->workers);
+        self::assertSame(4, $config->toArray()['cpuThreads']);
+
+        self::assertSame(['default', 'default', 'default'], SpeechConfig::parseWorkers(3, 'x'));
+        self::assertSame(['default', 'default'], SpeechConfig::parseWorkers('2', 'x'));
+        self::assertSame(['cuda', 'cuda', 'cpu'], SpeechConfig::parseWorkers(' cuda, cuda ,cpu ', 'x'));
     }
 
     #[DataProvider('invalid')]

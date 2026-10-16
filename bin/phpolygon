@@ -48,6 +48,7 @@ if ($autoloader === null) {
 require $autoloader;
 
 use PHPolygon\Audio\Speech\ChatterboxSynthesizer;
+use PHPolygon\Audio\Speech\SpeechRemote;
 use PHPolygon\Audio\Speech\SpeechConfig;
 use PHPolygon\Audio\Speech\SpeechLine;
 use PHPolygon\Audio\Speech\SpeechStatus;
@@ -500,7 +501,8 @@ Commands:
                      (--check verifies they are in sync instead of writing)
   speech:status      Spoken lines of build.json "speech" per locale: current, missing, stale
   speech:sync        Generate missing/stale spoken lines (--locale=de,en --key=dialog.* --check)
-  speech:setup       Set up the speech synthesizer: Python environment, or --docker [--gpu] image
+  speech:setup       Set up the speech synthesizer: Python environment, --docker [--gpu] image,
+                     or --remote=ssh://user@host (environment on a worker host over SSH)
   editor             Launch the PHPolygon scene editor
   perf:report        Diff two benchmark JSON results in benchmarks/results/
   prototype:scaffold Copy the WebGL/JSX prototyping playground into this project
@@ -550,6 +552,7 @@ Examples:
   phpolygon build:transpile --check              Fail if UI PHP is out of sync
   phpolygon speech:setup                         Python environment for speech synthesis
   phpolygon speech:setup --docker --gpu          Speech synthesis as a CUDA Docker image
+  phpolygon speech:setup --remote=ssh://me@mac   Python environment on a remote worker host
   phpolygon speech:sync --locale=de,en           Generate missing spoken lines for de and en
   phpolygon speech:sync --check                  Fail if spoken lines are missing or stale
   phpolygon editor                       Launch the scene editor
@@ -1397,7 +1400,23 @@ function speechSetup(array $args): void
     $projectRoot = getcwd() ?: dirname(__DIR__);
     $docker = in_array('--docker', $args, true);
     $synthesizer = new ChatterboxSynthesizer($projectRoot, gpu: in_array('--gpu', $args, true));
+    $remote = null;
+    foreach ($args as $arg) {
+        if (str_starts_with($arg, '--remote=')) {
+            $remote = substr($arg, strlen('--remote='));
+        }
+    }
     try {
+        if ($remote !== null) {
+            [$host] = SpeechRemote::parse($remote, '--remote');
+            $synthesizer->setupRemote($host, static function (string $message): void {
+                echo "→ {$message}
+";
+            });
+            echo "[32m✓[0m Speech synthesis ready on {$host->target()}: ~/.phpolygon/speech/chatterbox-" . ChatterboxSynthesizer::VERSION . "
+";
+            return;
+        }
         $synthesizer->setup($docker ? SpeechConfig::RUNNER_DOCKER : SpeechConfig::RUNNER_NATIVE, static function (string $message): void {
             echo "→ {$message}\n";
         });
