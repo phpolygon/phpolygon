@@ -68,6 +68,41 @@ final class FileTree
     }
 
     /**
+     * Copy the tree $src into $dst minus every entry $skip returns true for (it
+     * gets the '/'-separated path relative to $src); a skipped folder is not
+     * entered. $dst is created when anything is copied.
+     *
+     * @param callable(string): bool $skip
+     * @throws \RuntimeException when an entry cannot be copied
+     */
+    public static function copyFiltered(string $src, string $dst, callable $skip): void
+    {
+        error_clear_last();
+        $skipped = null;
+        foreach (self::walk($src) as $relative => $item) {
+            if ($skipped !== null && str_starts_with($relative, $skipped . '/')) {
+                continue;
+            }
+            $skipped = null;
+            if ($skip($relative)) {
+                if ($item->isDir()) {
+                    $skipped = $relative;
+                }
+                continue;
+            }
+            $target = $dst . '/' . $relative;
+            if ($item->isDir()) {
+                self::makeDirectory($target);
+                continue;
+            }
+            self::makeDirectory(dirname($target));
+            if (!@copy($item->getPathname(), $target)) {
+                throw new \RuntimeException("Cannot copy {$item->getPathname()} to {$target}" . self::lastError());
+            }
+        }
+    }
+
+    /**
      * Remove $path and everything below it. A file or a link is unlinked; a linked
      * directory's target is never touched. A missing path is left alone.
      *

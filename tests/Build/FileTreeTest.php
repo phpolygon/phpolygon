@@ -37,6 +37,22 @@ final class FileTreeTest extends TestCase
         self::assertGreaterThan(array_search('assets/meshes/part_000.mesh.json', $childrenFirst, true), array_search('assets/meshes', $childrenFirst, true));
     }
 
+    public function testCopyFilteredSkipsMatchesAndNeverEntersASkippedFolder(): void
+    {
+        $src = $this->makeTree('src', 3);
+        $asked = [];
+
+        FileTree::copyFiltered($src, $this->dir . '/dst', static function (string $relative) use (&$asked): bool {
+            $asked[] = $relative;
+            return $relative === 'assets/meshes' || $relative === '.hidden';
+        });
+
+        self::assertDirectoryExists($this->dir . '/dst/assets/empty');
+        self::assertDirectoryDoesNotExist($this->dir . '/dst/assets/meshes');
+        self::assertFileDoesNotExist($this->dir . '/dst/.hidden');
+        self::assertNotContains('assets/meshes/part_000.mesh.json', $asked, 'a skipped folder is not entered');
+    }
+
     public function testCopyRecreatesTheTreeInAMissingDestination(): void
     {
         $src = $this->makeTree('src', 20);

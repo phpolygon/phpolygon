@@ -77,7 +77,13 @@ class BuildConfig
     /** @var array<string> Additional PHP files to require in stub */
     public array $additionalRequires = [];
 
-    /** @var array<string> Resource dirs that stay external (not in PHAR) */
+    /**
+     * build.json `resources.external`: project-relative paths (directories or
+     * files, under any root folder such as `assets/` or `resources/`) that ship
+     * next to the executable instead of inside the PHAR.
+     *
+     * @var array<string>
+     */
     public array $externalResources = [];
 
     /**
@@ -90,6 +96,16 @@ class BuildConfig
      * @var list<array{path: string, groups: list<string>, remove: list<string>, keep: list<string>}>
      */
     public array $trimPython = [];
+
+    /**
+     * build.json `resources.exclude`: project-relative glob patterns (see
+     * {@see PathGlob}) that never ship - neither in the PHAR nor among the
+     * external resources. For raw sources and tool inputs that live next to
+     * the shipped files (recording sources, reference takes, ...).
+     *
+     * @var list<string>
+     */
+    public array $resourcesExclude = [];
 
     /** @var array<string, array<string, mixed>> Platform-specific config */
     public array $platforms = [];
@@ -113,6 +129,14 @@ class BuildConfig
      * @var list<array{run: list<string>, requires: list<string>, runtimeVariant: ?string}>
      */
     public array $hooksBeforeBuild = [];
+
+    /**
+     * build.json `hooks.afterPackage`: commands run per target once its bundle
+     * is assembled, see {@see BuildHookRunner::runAfterPackage()}.
+     *
+     * @var list<array{run: list<string>, requires: list<string>, runtimeVariant: ?string}>
+     */
+    public array $hooksAfterPackage = [];
 
     /**
      * build.json `upscalers`: native upscaler runtimes (FSR 3, DLSS) the build
@@ -266,15 +290,24 @@ class BuildConfig
         }
 
         $resources = isset($data['resources']) && is_array($data['resources']) ? $data['resources'] : [];
-        if (isset($resources['external']) && is_array($resources['external'])) {
-            /** @var array<string> $external */
-            $external = $resources['external'];
+        if (isset($resources['external'])) {
+            $external = PathGlob::validate($resources['external'], 'resources.external');
+            foreach ($external as $path) {
+                if (strpbrk($path, '*?[') !== false) {
+                    throw new \InvalidArgumentException(
+                        "build.json resources.external: \"{$path}\" must be a plain path; glob patterns belong in resources.exclude"
+                    );
+                }
+            }
             $this->externalResources = $external;
         }
         if (isset($resources['trimPython']) && is_array($resources['trimPython'])) {
             foreach ($resources['trimPython'] as $entry) {
                 $this->trimPython[] = self::parsePythonTrim($entry);
             }
+        }
+        if (isset($resources['exclude'])) {
+            $this->resourcesExclude = PathGlob::validate($resources['exclude'], 'resources.exclude');
         }
         if (isset($data['platforms']) && is_array($data['platforms'])) {
             /** @var array<string, array<string, mixed>> $platforms */
@@ -293,6 +326,14 @@ class BuildConfig
                 $parsed = self::parseHook($hook);
                 if ($parsed !== null) {
                     $this->hooksBeforeBuild[] = $parsed;
+                }
+            }
+        }
+        if (isset($hooks['afterPackage']) && is_array($hooks['afterPackage'])) {
+            foreach ($hooks['afterPackage'] as $hook) {
+                $parsed = self::parseHook($hook);
+                if ($parsed !== null) {
+                    $this->hooksAfterPackage[] = $parsed;
                 }
             }
         }
@@ -416,9 +457,11 @@ class BuildConfig
             'resources.trimPython' => $this->trimPython,
             'assets.meshes' => $this->meshAssets,
             'assets.meshZlib' => $this->meshZlibLevel,
+            'resources.exclude' => $this->resourcesExclude,
             'platforms' => $this->platforms,
             'buildTypes' => $this->buildTypes,
             'hooks.beforeBuild' => $this->hooksBeforeBuild,
+            'hooks.afterPackage' => $this->hooksAfterPackage,
             'upscalers' => $this->upscalers->toArray(),
             'speech' => $this->speech?->toArray(),
         ];

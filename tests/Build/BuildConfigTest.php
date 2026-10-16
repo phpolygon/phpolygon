@@ -156,6 +156,48 @@ class BuildConfigTest extends TestCase
         $this->assertSame(['resources/audio', 'resources/video'], $config->externalResources);
     }
 
+    public function testBuildJsonResourcesExclude(): void
+    {
+        file_put_contents($this->tempDir . '/build.json', json_encode([
+            'resources' => [
+                'external' => ['assets/audio'],
+                'exclude' => ['assets/audio/voice-src', 'assets/**/*.wav'],
+            ],
+        ]));
+
+        $config = BuildConfig::load($this->tempDir);
+
+        $this->assertSame(['assets/audio/voice-src', 'assets/**/*.wav'], $config->resourcesExclude);
+        $this->assertSame($config->resourcesExclude, $config->toArray()['resources.exclude']);
+    }
+
+    public function testResourcesExcludeDefaultsToEmpty(): void
+    {
+        $this->assertSame([], BuildConfig::load($this->tempDir)->resourcesExclude);
+    }
+
+    public function testResourcesExcludeRejectsPathsOutsideTheProject(): void
+    {
+        file_put_contents($this->tempDir . '/build.json', json_encode([
+            'resources' => ['exclude' => ['../other/assets']],
+        ]));
+
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('resources.exclude');
+        BuildConfig::load($this->tempDir);
+    }
+
+    public function testResourcesExternalRejectsGlobs(): void
+    {
+        file_put_contents($this->tempDir . '/build.json', json_encode([
+            'resources' => ['external' => ['assets/*']],
+        ]));
+
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('resources.exclude');
+        BuildConfig::load($this->tempDir);
+    }
+
     public function testBuildJsonBuildTypes(): void
     {
         file_put_contents($this->tempDir . '/build.json', json_encode([
