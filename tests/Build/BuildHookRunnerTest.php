@@ -65,6 +65,30 @@ final class BuildHookRunnerTest extends TestCase
         self::assertContains('hook: prepared', $lines, 'hook output is relayed');
     }
 
+    public function testAfterPackageHooksSeeTheBundleOfTheirTarget(): void
+    {
+        file_put_contents($this->dir . '/place.php', '<?php file_put_contents("placed.json", json_encode([getenv("PHPOLYGON_BUILD_PLATFORM"), getenv("PHPOLYGON_BUILD_ARCH"), getenv("PHPOLYGON_BUILD_OUTPUT"), getenv("PHPOLYGON_BUILD_RESOURCES")]));');
+        file_put_contents($this->dir . '/build.json', json_encode([
+            'hooks' => [
+                'beforeBuild' => [['@php', 'not-run.php']],
+                'afterPackage' => [['@php', 'place.php']],
+            ],
+        ]));
+        $config = BuildConfig::load($this->dir);
+        self::assertSame([['run' => ['@php', 'place.php'], 'requires' => [], 'runtimeVariant' => null]], $config->hooksAfterPackage);
+
+        (new BuildHookRunner($config, $this->neverResolve()))->runAfterPackage(
+            ['platform' => 'macos', 'arch' => 'arm64', 'variant' => 'steam', 'type' => 'full', 'phpVersion' => '8.5'],
+            '/out/Game.app',
+            '/out/Game.app/Contents/Resources',
+        );
+
+        self::assertSame(
+            ['macos', 'arm64', '/out/Game.app', '/out/Game.app/Contents/Resources'],
+            json_decode((string) file_get_contents($this->dir . '/placed.json'), true),
+        );
+    }
+
     public function testOutputOnBothStreamsIsRelayedInOrder(): void
     {
         file_put_contents($this->dir . '/talk.php', '<?php echo "first\n"; fwrite(STDERR, "second\n"); echo "third\n"; fwrite(STDERR, "fourth\n");');

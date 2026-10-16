@@ -292,13 +292,10 @@ PLIST;
     {
         foreach ($this->config->externalResources as $resourcePath) {
             $src = $this->config->projectRoot . '/' . $resourcePath;
-            if (!is_dir($src)) {
-                continue;
-            }
             $dst = $appDir . '/' . $resourcePath;
-            if (!is_dir($dst)) {
+            if (file_exists($src) && !file_exists($dst)) {
                 $this->log("staging external resource: {$resourcePath}");
-                FileTree::copy($src, $dst);
+                PlatformPackager::copyExternalPath($this->config, $resourcePath, $dst);
             }
         }
 

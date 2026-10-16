@@ -338,7 +338,7 @@ class PharBuilderTest extends TestCase
         $guard = strpos($gzipStub, "if (!extension_loaded('zlib'))");
         $this->assertIsInt($guard);
         $this->assertLessThan(strpos($gzipStub, 'vendor/autoload.php'), $guard, 'checked before the first read from the archive');
-        $this->assertLessThan(strpos($gzipStub, '$pharAssets'), $guard, 'checked before the asset extraction');
+        $this->assertLessThan(strpos($gzipStub, 'BundleExtractor::sync('), $guard, 'checked before the asset extraction');
         $this->assertStringNotContainsString('@@ZLIB_GUARD@@', $gzipStub);
 
         file_put_contents($this->projectDir . '/build.json', json_encode([
@@ -400,7 +400,229 @@ class PharBuilderTest extends TestCase
 
         $stub = $builder->generateStub();
 
-        $this->assertStringContainsString('.app/Contents/MacOS', $stub);
+        $this->assertStringContainsString('.app/Contents/(MacOS|Resources)', $stub);
+    }
+
+    /**
+     * External paths ship loose next to the executable; under assets/ they used
+     * to land in the PHAR as well (only resources/ was filtered).
+     */
+    public function testStageLeavesExternalPathsUnderAnyRootOutOfThePhar(): void
+    {
+        @mkdir($this->projectDir . '/assets/audio/music', 0755, true);
+        file_put_contents($this->projectDir . '/assets/audio/music/theme.flac', 'flac');
+        file_put_contents($this->projectDir . '/assets/manual.pdf', 'pdf');
+        file_put_contents($this->projectDir . '/build.json', json_encode([
+            'resources' => ['external' => ['assets/audio', 'assets/manual.pdf', 'resources/shaders']],
+        ]));
+
+        $stagingDir = $this->tempDir . '/staging';
+        (new PharBuilder(BuildConfig::load($this->projectDir)))->stage($stagingDir);
+
+        $this->assertDirectoryDoesNotExist($stagingDir . '/assets/audio');
+        $this->assertFileDoesNotExist($stagingDir . '/assets/manual.pdf');
+        $this->assertDirectoryDoesNotExist($stagingDir . '/resources/shaders');
+        $this->assertFileExists($stagingDir . '/assets/sprites/hero.png');
+    }
+
+    public function testStageAppliesResourcesExcludeUnderEveryRoot(): void
+    {
+        @mkdir($this->projectDir . '/assets/audio/voice-src/de', 0755, true);
+        file_put_contents($this->projectDir . '/assets/audio/voice-src/de/line1.wav', 'wav');
+        file_put_contents($this->projectDir . '/assets/sprites/hero.psd', 'psd');
+        file_put_contents($this->projectDir . '/resources/shaders/notes.txt', 'notes');
+        file_put_contents($this->projectDir . '/build.json', json_encode([
+            'resources' => ['exclude' => ['assets/audio/voice-src', '**/*.psd', 'resources/shaders/*.txt']],
+        ]));
+
+        $stagingDir = $this->tempDir . '/staging';
+        (new PharBuilder(BuildConfig::load($this->projectDir)))->stage($stagingDir);
+
+        $this->assertDirectoryDoesNotExist($stagingDir . '/assets/audio/voice-src');
+        $this->assertFileDoesNotExist($stagingDir . '/assets/sprites/hero.psd');
+        $this->assertFileDoesNotExist($stagingDir . '/resources/shaders/notes.txt');
+        $this->assertFileExists($stagingDir . '/assets/sprites/hero.png');
+        $this->assertFileExists($stagingDir . '/resources/shaders/basic.glsl');
+    }
+
+    /**
+     * Files a build step adds after staging (the compiled meshes of
+     * assets.meshes = binary) are held to resources.exclude as well.
+     */
+    public function testPruneExcludedDropsFilesCreatedAfterStaging(): void
+    {
+        file_put_contents($this->projectDir . '/build.json', json_encode([
+            'resources' => ['exclude' => ['assets/meshes/debug', 'assets/**/*.preview.mesh.bin']],
+        ]));
+        $stagingDir = $this->tempDir . '/staging';
+        $builder = new PharBuilder(BuildConfig::load($this->projectDir));
+        $builder->stage($stagingDir);
+        @mkdir($stagingDir . '/assets/meshes/debug', 0755, true);
+        file_put_contents($stagingDir . '/assets/meshes/crate.mesh.bin', 'bin');
+        file_put_contents($stagingDir . '/assets/meshes/crate.preview.mesh.bin', 'bin');
+        file_put_contents($stagingDir . '/assets/meshes/debug/axis.mesh.bin', 'bin');
+
+        $this->assertSame(2, $builder->pruneExcluded($stagingDir));
+
+        $this->assertFileExists($stagingDir . '/assets/meshes/crate.mesh.bin');
+        $this->assertFileDoesNotExist($stagingDir . '/assets/meshes/crate.preview.mesh.bin');
+        $this->assertFileDoesNotExist($stagingDir . '/assets/meshes/debug/axis.mesh.bin');
+        $this->assertFileExists($stagingDir . '/assets/sprites/hero.png');
+    }
+
+    public function testBareExternalNameStillMeansTheResourcesFolder(): void
+    {
+        file_put_contents($this->projectDir . '/build.json', json_encode([
+            'resources' => ['external' => ['shaders']],
+        ]));
+
+        $stagingDir = $this->tempDir . '/staging';
+        (new PharBuilder(BuildConfig::load($this->projectDir)))->stage($stagingDir);
+
+        $this->assertDirectoryDoesNotExist($stagingDir . '/resources/shaders');
+        $this->assertFileExists($stagingDir . '/assets/sprites/hero.png');
+    }
+
+    public function testBuildIdChangesOnlyWithTheExtractedFiles(): void
+    {
+        $stagingDir = $this->tempDir . '/staging';
+        $builder = new PharBuilder(BuildConfig::load($this->projectDir));
+        $builder->stage($stagingDir);
+        $first = PharBuilder::computeBuildId($stagingDir);
+
+        file_put_contents($stagingDir . '/src/Game.php', '<?php class Game { /* code only */ }');
+        $this->assertSame($first, PharBuilder::computeBuildId($stagingDir), 'a code change extracts nothing');
+
+        file_put_contents($stagingDir . '/assets/sprites/hero.png', 'new-image');
+        $this->assertNotSame($first, PharBuilder::computeBuildId($stagingDir));
+        $this->assertMatchesRegularExpression('/^[0-9a-f]{32}$/', $first);
+    }
+
+    public function testBuiltPharCarriesItsBuildIdInStubAndArchive(): void
+    {
+        $pharPath = $this->buildPhar();
+
+        $buildId = PharBuilder::readBuildId($pharPath);
+        $this->assertNotNull($buildId);
+        $stub = (string) file_get_contents($pharPath, false, null, 0, 20000);
+        $this->assertStringContainsString("\$__buildId = '{$buildId}';", $stub);
+    }
+
+    /**
+     * The built archive itself, run with this PHP: next to a writable install it
+     * extracts in place once, and a second start copies nothing.
+     */
+    public function testRunningTheArchiveExtractsOncePerBuild(): void
+    {
+        $install = $this->tempDir . '/install';
+        $phar = $this->runnablePhar($install . '/game.phar');
+
+        $first = $this->runPhar($phar);
+        $this->assertSame(str_replace('\\', '/', $install . '/assets'), $first['assets']);
+        $this->assertSame('fake-image', file_get_contents($install . '/assets/sprites/hero.png'));
+        $this->assertStringContainsString('Extracted ', (string) file_get_contents($install . '/game.log'));
+
+        file_put_contents($install . '/assets/sprites/hero.png', 'kept');
+        $this->runPhar($phar);
+        $this->assertSame('kept', file_get_contents($install . '/assets/sprites/hero.png'), 'same build: no copy');
+        $this->assertStringNotContainsString('Extracted ', (string) file_get_contents($install . '/game.log'));
+        $this->assertStringContainsString('Extracted ', (string) file_get_contents($install . '/game.log.1'), 'the previous start is kept');
+    }
+
+    /**
+     * Inside a macOS .app nothing is written to the bundle: the log goes to
+     * ~/Library/Logs/<name>, saves to Application Support, and files the build
+     * did not pre-extract to the user's cache.
+     */
+    public function testRunningTheArchiveInsideAnAppBundleNeverWritesToIt(): void
+    {
+        $resources = $this->tempDir . '/Test.app/Contents/Resources';
+        $phar = $this->runnablePhar($resources . '/game.phar');
+        $home = $this->tempDir . '/home';
+        mkdir($home, 0755, true);
+        $before = $this->listTree($this->tempDir . '/Test.app');
+
+        $paths = $this->runPhar($phar, ['HOME' => $home, 'LOCALAPPDATA' => $home . '/AppData/Local', 'XDG_CACHE_HOME' => '']);
+
+        $this->assertSame($before, $this->listTree($this->tempDir . '/Test.app'), 'the bundle is unchanged');
+        $this->assertFileExists($home . '/Library/Logs/Fixture/game.log');
+        $this->assertStringStartsWith(str_replace('\\', '/', $home), $paths['assets']);
+        $this->assertSame('fake-image', file_get_contents($paths['assets'] . '/sprites/hero.png'));
+        $this->assertSame(str_replace('\\', '/', $home) . '/Library/Application Support/com.test.fixture/saves', str_replace('\\', '/', $paths['saves']));
+    }
+
+    public function testMacLauncherLogsFirstAndRunsTheSharedArchive(): void
+    {
+        file_put_contents($this->projectDir . '/build.json', json_encode(['name' => 'My Game']));
+        $launcher = (new PharBuilder(BuildConfig::load($this->projectDir)))->generateMacLauncher('my-game.phar');
+
+        $this->assertStringContainsString("dirname(\$__bin, 2) . '/Resources/' . 'my-game.phar'", $launcher);
+        $this->assertStringContainsString("'/Library/Logs/' . 'My Game'", $launcher);
+        $this->assertLessThan(strpos($launcher, 'require $__phar'), strpos($launcher, "boot.log"), 'logged before the archive loads');
+
+        $file = $this->tempDir . '/launcher.php';
+        file_put_contents($file, $launcher);
+        exec(escapeshellarg(PHP_BINARY) . ' -l ' . escapeshellarg($file) . ' 2>&1', $output, $exit);
+        $this->assertSame(0, $exit, implode("\n", $output));
+    }
+
+    /**
+     * A PHAR of the fixture project that can run: its autoloader is the engine's,
+     * and the run code prints the paths the stub chose.
+     */
+    private function runnablePhar(string $target): string
+    {
+        $engineAutoload = var_export(str_replace('\\', '/', dirname(__DIR__, 2) . '/vendor/autoload.php'), true);
+        file_put_contents($this->projectDir . '/vendor/autoload.php', "<?php require {$engineAutoload};");
+        file_put_contents($this->projectDir . '/build.json', json_encode([
+            'name' => 'Fixture',
+            'identifier' => 'com.test.fixture',
+            'run' => 'echo "\nPATHS:" . json_encode(["assets" => str_replace("\\\\", "/", PHPOLYGON_PATH_ASSETS), "saves" => PHPOLYGON_PATH_SAVES, "logs" => PHPOLYGON_PATH_LOGS]);',
+        ]));
+        $phar = $this->buildPhar();
+        @mkdir(dirname($target), 0755, true);
+        rename($phar, $target);
+
+        return $target;
+    }
+
+    /**
+     * @param array<string, string> $env
+     * @return array{assets: string, saves: string, logs: string}
+     */
+    private function runPhar(string $phar, array $env = []): array
+    {
+        $process = proc_open(
+            [PHP_BINARY, $phar],
+            [1 => ['pipe', 'w'], 2 => ['pipe', 'w']],
+            $pipes,
+            dirname($phar),
+            $env === [] ? null : [...getenv(), ...$env],
+        );
+        $this->assertIsResource($process);
+        $out = (string) stream_get_contents($pipes[1]) . (string) stream_get_contents($pipes[2]);
+        proc_close($process);
+
+        $this->assertMatchesRegularExpression('/PATHS:(\{.*\})/', $out, $out);
+        preg_match('/PATHS:(\{.*\})/', $out, $m);
+        /** @var array{assets: string, saves: string, logs: string} $paths */
+        $paths = json_decode($m[1], true);
+
+        return $paths;
+    }
+
+    /** @return list<string> */
+    private function listTree(string $dir): array
+    {
+        $entries = [];
+        $it = new \RecursiveIteratorIterator(new \RecursiveDirectoryIterator($dir, \FilesystemIterator::SKIP_DOTS), \RecursiveIteratorIterator::SELF_FIRST);
+        foreach ($it as $item) {
+            /** @var \SplFileInfo $item */
+            $entries[] = substr($item->getPathname(), strlen($dir)) . ':' . ($item->isDir() ? 'd' : $item->getSize() . '@' . $item->getMTime());
+        }
+        sort($entries);
+
+        return $entries;
     }
 
     private function removeDir(string $dir): void

@@ -35,7 +35,16 @@ class PharBuilder
         'phpolygon/phpolygon/src/Geometry/Generated/*.json',
     ];
 
+    /**
+     * File in the PHAR root that holds the build id: a hash of everything the
+     * stub extracts (assets/, resources/). The stub carries the same id and
+     * extracts only when the id on disk differs ({@see BundleExtractor}).
+     */
+    public const BUILD_ID_FILE = '.phpolygon-build-id';
+
     private BuildConfig $config;
+
+    private ?PathGlob $excludeGlob = null;
 
     public function __construct(BuildConfig $config)
     {
@@ -95,27 +104,9 @@ class PharBuilder
             }
         }
 
-        // Stage resource directories (exclude external ones)
-        $resourcesDir = $projectRoot . '/resources';
-        if (is_dir($resourcesDir)) {
-            $external = array_map(function ($path) {
-                return basename($path);
-            }, $this->config->externalResources);
-
-            $entries = scandir($resourcesDir);
-            if ($entries !== false) {
-                foreach ($entries as $item) {
-                    if ($item === '.' || $item === '..') continue;
-                    $itemPath = $resourcesDir . '/' . $item;
-                    if (is_dir($itemPath) && !in_array($item, $external) && !in_array('resources/' . $item, $this->config->externalResources)) {
-                        FileTree::copy($itemPath, $stagingDir . '/resources/' . $item);
-                    } elseif (is_file($itemPath)) {
-                        @mkdir($stagingDir . '/resources', 0755, true);
-                        copy($itemPath, $stagingDir . '/resources/' . $item);
-                    }
-                }
-            }
-        }
+        // Stage resources/ and assets/: everything except the external paths
+        // (they ship loose next to the executable) and resources.exclude.
+        $this->stageProjectTree('resources', $stagingDir);
 
         // Stage mesh cache if present
         $meshCacheDir = $projectRoot . '/.phpolygon/mesh-cache';
@@ -123,11 +114,82 @@ class PharBuilder
             FileTree::copy($meshCacheDir, $stagingDir . '/resources/meshes');
         }
 
-        // Stage assets/ directory
-        $assetsDir = $projectRoot . '/assets';
-        if (is_dir($assetsDir)) {
-            FileTree::copy($assetsDir, $stagingDir . '/assets');
+        $this->stageProjectTree('assets', $stagingDir);
+    }
+
+    /**
+     * Whether a project-relative path stays out of the PHAR: it is, or lies
+     * below, a build.json `resources.external` path, or it matches
+     * `resources.exclude`. A bare external name ("shaders") also means
+     * resources/<name>, as it always did.
+     */
+    public function isLeftOutOfPhar(string $projectPath): bool
+    {
+        $projectPath = trim(str_replace('\\', '/', $projectPath), '/');
+        foreach ($this->config->externalResources as $external) {
+            $candidates = [$external];
+            if (!str_contains($external, '/')) {
+                $candidates[] = 'resources/' . $external;
+            }
+            foreach ($candidates as $candidate) {
+                if ($projectPath === $candidate || str_starts_with($projectPath, $candidate . '/')) {
+                    return true;
+                }
+            }
         }
+        return $this->excludeGlob()->matches($projectPath);
+    }
+
+    /**
+     * Drop every staged file under assets/ and resources/ that
+     * {@see isLeftOutOfPhar()}: for files a build step created after staging,
+     * such as the compiled `*.mesh.bin` of `assets.meshes = binary`, so
+     * `resources.exclude` (e.g. a `*.mesh.bin` glob or a debug folder) holds
+     * for them too.
+     *
+     * @return int number of files removed
+     */
+    public function pruneExcluded(string $stagingDir): int
+    {
+        $removed = 0;
+        foreach (['assets', 'resources'] as $root) {
+            $dir = $stagingDir . '/' . $root;
+            if (!is_dir($dir)) {
+                continue;
+            }
+            $doomed = [];
+            foreach (FileTree::walk($dir) as $relative => $item) {
+                if (!$item->isDir() && $this->isLeftOutOfPhar($root . '/' . $relative)) {
+                    $doomed[] = $item->getPathname();
+                }
+            }
+            foreach ($doomed as $path) {
+                if (!@unlink($path)) {
+                    throw new \RuntimeException("Cannot remove {$path}");
+                }
+                $removed++;
+            }
+        }
+        return $removed;
+    }
+
+    private function excludeGlob(): PathGlob
+    {
+        return $this->excludeGlob ??= new PathGlob($this->config->resourcesExclude);
+    }
+
+    /** Copy the project folder $root into the staging tree, minus {@see isLeftOutOfPhar()}. */
+    private function stageProjectTree(string $root, string $stagingDir): void
+    {
+        $src = $this->config->projectRoot . '/' . $root;
+        if (!is_dir($src) || $this->isLeftOutOfPhar($root)) {
+            return;
+        }
+        FileTree::copyFiltered(
+            $src,
+            $stagingDir . '/' . $root,
+            fn (string $relative): bool => $this->isLeftOutOfPhar($root . '/' . $relative),
+        );
     }
 
     /**
@@ -147,10 +209,16 @@ class PharBuilder
             );
         }
 
-        $phar = new Phar($pharPath, 0, basename($pharPath));
+        $buildId = self::computeBuildId($stagingDir);
+        file_put_contents($stagingDir . '/' . self::BUILD_ID_FILE, $buildId);
+
+        // No alias: the stub addresses the archive as phar://__FILE__, and an alias
+        // would keep the build process from opening a second copy of the same
+        // archive (a reused --phar next to the one just built) to pre-extract it.
+        $phar = new Phar($pharPath);
         $phar->startBuffering();
         $phar->buildFromDirectory($stagingDir);
-        $phar->setStub($this->generateStub());
+        $phar->setStub($this->generateStub($buildId));
         if ($compress) {
             // Every entry, gzip per file: the archive shrinks to a fraction (meshes
             // as JSON, BC7 texture data), while the stub's start-up extraction costs
@@ -162,11 +230,88 @@ class PharBuilder
     }
 
     /**
+     * Hash of everything the stub extracts (staged assets/ and resources/):
+     * paths, sizes and contents. Two builds with the same files get the same id,
+     * so an update that only changes code extracts nothing on the next start.
+     */
+    public static function computeBuildId(string $stagingDir): string
+    {
+        $context = hash_init('sha256');
+        foreach (['assets', 'resources'] as $root) {
+            $dir = $stagingDir . '/' . $root;
+            if (!is_dir($dir)) {
+                continue;
+            }
+            $entries = [];
+            foreach (FileTree::walk($dir) as $relative => $item) {
+                if (!$item->isDir()) {
+                    $entries[$relative] = $item->getPathname();
+                }
+            }
+            ksort($entries, SORT_STRING);
+            foreach ($entries as $relative => $path) {
+                hash_update($context, $root . '/' . $relative . "\0" . filesize($path) . "\0" . hash_file('xxh128', $path) . "\n");
+            }
+        }
+
+        return substr(hash_final($context), 0, 32);
+    }
+
+    /** The build id a built PHAR carries ({@see BUILD_ID_FILE}); null for an older PHAR without one. */
+    public static function readBuildId(string $pharPath): ?string
+    {
+        $id = @file_get_contents('phar://' . str_replace('\\', '/', $pharPath) . '/' . self::BUILD_ID_FILE);
+
+        return is_string($id) && preg_match('/^[0-9a-f]{8,64}$/', $id) === 1 ? $id : null;
+    }
+
+    /**
+     * The PHP payload appended to the macOS runtime when the PHAR ships as its
+     * own file in Contents/Resources (one PHAR for the arm64 and the x86_64
+     * binary of a universal bundle). It writes ~/Library/Logs/<name>/boot.log
+     * (the previous start kept as boot.log.1) before anything else - a start that dies before
+     * the game's own log is then still visible - and runs the PHAR.
+     */
+    public function generateMacLauncher(string $pharFile): string
+    {
+        $name = var_export($this->config->name, true);
+        $phar = var_export($pharFile, true);
+
+        return <<<PHP
+<?php
+\$__bin = PHP_BINARY ?: __FILE__;
+\$__phar = dirname(\$__bin, 2) . '/Resources/' . {$phar};
+\$__home = (string) getenv('HOME');
+\$__logDir = \$__home !== '' ? \$__home . '/Library/Logs/' . {$name} : sys_get_temp_dir();
+if (!is_dir(\$__logDir)) { @mkdir(\$__logDir, 0755, true); }
+\$__log = static function (string \$msg) use (\$__logDir): void {
+    @file_put_contents(\$__logDir . '/boot.log', '[' . gmdate('Y-m-d H:i:s') . '] ' . \$msg . "\\n", FILE_APPEND);
+};
+if (is_file(\$__logDir . '/boot.log')) { @rename(\$__logDir . '/boot.log', \$__logDir . '/boot.log.1'); }
+\$__log('launcher: ' . \$__bin . ' (' . php_uname('m') . ', PHP ' . PHP_VERSION . ')');
+\$__log('archive: ' . \$__phar);
+if (!is_file(\$__phar)) {
+    \$__log('FATAL: archive missing');
+    if (defined('STDERR')) { fwrite(STDERR, "Game archive missing: {\$__phar}\\n"); }
+    exit(1);
+}
+if (!extension_loaded('phar')) {
+    \$__log('FATAL: the PHP runtime has no phar extension');
+    exit(1);
+}
+require \$__phar;
+
+PHP;
+    }
+
+    /**
      * Generate the PHAR stub.
      * Handles micro SAPI detection, macOS .app bundles, PHPolygon path setup,
      * resource extraction, and engine bootstrap.
+     *
+     * @param string $buildId id of the files the stub extracts, see {@see computeBuildId()}
      */
-    public function generateStub(): string
+    public function generateStub(string $buildId = 'dev'): string
     {
         $additionalRequires = '';
         foreach ($this->config->additionalRequires as $require) {
@@ -190,21 +335,54 @@ class PharBuilder
                 . "\n}"
             : '';
 
-        return str_replace('/*@@ZLIB_GUARD@@*/', $zlibGuard, <<<'STUB_START'
+        $placeholders = [
+            '/*@@ZLIB_GUARD@@*/' => $zlibGuard,
+            "'@@BUILD_ID@@'" => var_export($buildId, true),
+            "'@@NAME@@'" => var_export($this->config->name, true),
+            "'@@IDENTIFIER@@'" => var_export($this->config->identifier, true),
+        ];
+
+        return strtr(<<<'STUB_START'
 <?php
-// In micro SAPI, PHP_BINARY is empty but __FILE__ points to the binary
-$binaryPath = PHP_BINARY ?: __FILE__;
+// __FILE__ is the archive: in micro SAPI the binary itself, on macOS
+// Contents/Resources/<game>.phar (which the launcher in the binary runs), and
+// with a plain `php game.phar` the .phar file.
+$binaryPath = __FILE__;
 $binaryDir = dirname($binaryPath);
-if (str_contains($binaryDir, '.app/Contents/MacOS')) {
+$__inAppBundle = preg_match('#\.app/Contents/(MacOS|Resources)$#', str_replace('\\', '/', $binaryDir)) === 1;
+if ($__inAppBundle && str_ends_with($binaryDir, 'MacOS')) {
     $resourceBase = dirname($binaryDir) . '/Resources';
 } else {
     $resourceBase = $binaryDir;
 }
+$__buildId = '@@BUILD_ID@@';
+$__home = (string) (getenv('HOME') ?: '');
 
 $pharBase = 'phar://' . __FILE__;
 
+// A signed .app bundle stays untouched: logs, saves and extracted files go to
+// the user's Library. Everywhere else they stay next to the executable.
+if ($__inAppBundle && $__home !== '') {
+    $__logDir = $__home . '/Library/Logs/' . '@@NAME@@';
+    $__dataDir = $__home . '/Library/Application Support/' . '@@IDENTIFIER@@';
+} else {
+    $__logDir = $resourceBase;
+    $__dataDir = $resourceBase;
+}
+// Create directories only where they are missing: mkdir() on an existing one
+// fails with a warning.
+$__ensureDir = static function (string $dir): void {
+    if (!is_dir($dir)) {
+        @mkdir($dir, 0755, true);
+    }
+};
+$__ensureDir($__logDir);
+
 // Engine log
-$engineLogPath = $resourceBase . '/game.log';
+$engineLogPath = $__logDir . '/game.log';
+if (is_file($engineLogPath)) {
+    @rename($engineLogPath, $__logDir . '/game.log.1'); // keep the previous start
+}
 file_put_contents($engineLogPath, '[' . date('Y-m-d H:i:s') . "] PHPolygon starting...\n");
 $__engineLog = function(string $msg) use ($engineLogPath) {
     file_put_contents($engineLogPath, '[' . date('Y-m-d H:i:s') . '] ' . $msg . "\n", FILE_APPEND);
@@ -237,10 +415,9 @@ register_shutdown_function(function() use ($__engineLog) {
 /*@@ZLIB_GUARD@@*/
 define('DS', DIRECTORY_SEPARATOR);
 define('PHPOLYGON_PATH_ROOT', $resourceBase);
-define('PHPOLYGON_PATH_ASSETS', $resourceBase . DS . 'assets');
-define('PHPOLYGON_PATH_RESOURCES', $resourceBase . DS . 'resources');
-define('PHPOLYGON_PATH_SAVES', $resourceBase . DS . 'saves');
-define('PHPOLYGON_PATH_MODS', $resourceBase . DS . 'mods');
+define('PHPOLYGON_PATH_LOGS', $__logDir);
+define('PHPOLYGON_PATH_SAVES', $__dataDir . DS . 'saves');
+define('PHPOLYGON_PATH_MODS', $__dataDir . DS . 'mods');
 
 // CLI flags: --dev enables EngineConfig::$devMode (logging + F3 overlay).
 // --dev-monitor (or --dev=monitor) implies --dev and switches the F3
@@ -257,68 +434,56 @@ unset($__arg);
 
 $__engineLog("Resource base: " . $resourceBase);
 $__engineLog("PHAR base: " . $pharBase);
+$__engineLog("Build: " . $__buildId);
 
-// Create directories only where they are missing: mkdir() on an existing one
-// fails with a warning, and the extraction below would do that per file.
-$__ensureDir = static function (string $dir): void {
-    if (!is_dir($dir)) {
-        @mkdir($dir, 0755, true);
-    }
-};
-foreach ([PHPOLYGON_PATH_ASSETS, PHPOLYGON_PATH_RESOURCES, PHPOLYGON_PATH_SAVES, PHPOLYGON_PATH_MODS] as $__dir) {
+foreach ([PHPOLYGON_PATH_SAVES, PHPOLYGON_PATH_MODS] as $__dir) {
     $__ensureDir($__dir);
-}
-
-// Extract assets from PHAR (always overwrite to ensure updates)
-$pharAssets = $pharBase . '/assets';
-if (is_dir($pharAssets)) {
-    $assetIterator = new RecursiveIteratorIterator(
-        new RecursiveDirectoryIterator($pharAssets, FilesystemIterator::SKIP_DOTS),
-        RecursiveIteratorIterator::SELF_FIRST
-    );
-    $pharAssetsLen = strlen($pharAssets);
-    foreach ($assetIterator as $assetItem) {
-        $relPath = substr($assetItem->getPathname(), $pharAssetsLen + 1);
-        $targetPath = PHPOLYGON_PATH_ASSETS . DS . $relPath;
-        if ($assetItem->isDir()) {
-            $__ensureDir($targetPath);
-        } else {
-            $__ensureDir(dirname($targetPath));
-            copy($assetItem->getPathname(), $targetPath);
-        }
-    }
-}
-
-// Extract resources from PHAR
-$pharResources = $pharBase . '/resources';
-if (is_dir($pharResources)) {
-    $resIterator = new RecursiveIteratorIterator(
-        new RecursiveDirectoryIterator($pharResources, FilesystemIterator::SKIP_DOTS),
-        RecursiveIteratorIterator::SELF_FIRST
-    );
-    $pharResLen = strlen($pharResources);
-    foreach ($resIterator as $resItem) {
-        $relPath = substr($resItem->getPathname(), $pharResLen + 1);
-        $targetPath = PHPOLYGON_PATH_RESOURCES . DS . $relPath;
-        if ($resItem->isDir()) {
-            $__ensureDir($targetPath);
-        } else {
-            $__ensureDir(dirname($targetPath));
-            copy($resItem->getPathname(), $targetPath);
-        }
-    }
 }
 
 $__engineLog("Loading autoloader...");
 require $pharBase . '/vendor/autoload.php';
 $__engineLog("Autoloader ready.");
 
+// Files the archive carries for native loaders (textures, audio, fonts), which
+// cannot read phar:// paths. They are copied once per build, not per start: next
+// to the executable when that is writable, else - and always inside a signed
+// .app, whose build already ships them pre-extracted - into the user's cache.
+$__extractDirs = [];
+foreach (['assets', 'resources'] as $__part) {
+    $__installDir = $resourceBase . DS . $__part;
+    $__targetDir = $__installDir;
+    if (is_dir($pharBase . '/' . $__part)) {
+        $__writable = !$__inAppBundle && (is_dir($__installDir) ? is_writable($__installDir) : is_writable($resourceBase));
+        if (!$__writable && !\PHPolygon\Runtime\BundleExtractor::isCurrent($__installDir, $__buildId)) {
+            $__targetDir = \PHPolygon\Runtime\BundleExtractor::userCacheDir('@@IDENTIFIER@@') . DS . $__part;
+        }
+        try {
+            \PHPolygon\Runtime\BundleExtractor::sync(
+                $pharBase . '/' . $__part,
+                $__targetDir,
+                $__buildId,
+                $__targetDir === $__installDir ? null : $__installDir,
+                $__engineLog,
+            );
+        } catch (\Throwable $__e) {
+            $__engineLog('ERROR: extracting ' . $__part . ': ' . $__e->getMessage());
+        }
+    } elseif (!$__inAppBundle) {
+        $__ensureDir($__installDir);
+    }
+    $__extractDirs[$__part] = $__targetDir;
+}
+define('PHPOLYGON_PATH_ASSETS', $__extractDirs['assets']);
+define('PHPOLYGON_PATH_RESOURCES', $__extractDirs['resources']);
+unset($__part, $__installDir, $__targetDir, $__writable, $__extractDirs, $__dir);
+$__engineLog("Assets: " . PHPOLYGON_PATH_ASSETS);
+
 // Log every class autoload to catch segfaults during class loading
 spl_autoload_register(function(string $class) use ($__engineLog) {
     $__engineLog("Autoloading: $class");
 }, prepend: true);
 
-STUB_START)
+STUB_START, $placeholders)
         . $additionalRequires
         . "\n\$__engineLog('Running game...');"
         . "\n\$__engineLog('Loaded extensions: ' . implode(', ', get_loaded_extensions()));"

@@ -37,6 +37,9 @@ namespace PHPolygon\Build;
  * The environment carries PHPOLYGON_BUILD_PLATFORM, PHPOLYGON_BUILD_ARCH,
  * PHPOLYGON_BUILD_VARIANT and PHPOLYGON_BUILD_TYPE. A failing hook fails the
  * build; PHPOLYGON_SKIP_HOOKS=1 skips all hooks.
+ *
+ * `hooks.afterPackage` has the same form and runs per target once its bundle
+ * is assembled ({@see runAfterPackage()}).
  */
 final class BuildHookRunner
 {
@@ -113,7 +116,36 @@ final class BuildHookRunner
      */
     public function runBeforeBuild(array $context): void
     {
-        if ($this->config->hooksBeforeBuild === []) {
+        $this->run($this->config->hooksBeforeBuild, $context, [], 'Build hook');
+    }
+
+    /**
+     * Run every afterPackage hook in order, for one target whose bundle is
+     * assembled: PHPOLYGON_BUILD_OUTPUT names the bundle (the .app, or the flat
+     * directory), PHPOLYGON_BUILD_RESOURCES the directory the external resources
+     * went to (Contents/Resources, or the flat directory). The place to add or
+     * check per-target files (e.g. platform runtimes) before signing and upload.
+     * Every target runs them, also one that reuses a shared PHAR.
+     *
+     * @param array{platform: string, arch: string, variant: string, type: string, phpVersion: string} $context
+     * @throws \RuntimeException when a hook cannot start or exits non-zero
+     */
+    public function runAfterPackage(array $context, string $outputPath, string $resourcesDir): void
+    {
+        $this->run($this->config->hooksAfterPackage, $context, [
+            'PHPOLYGON_BUILD_OUTPUT' => $outputPath,
+            'PHPOLYGON_BUILD_RESOURCES' => $resourcesDir,
+        ], 'Package hook');
+    }
+
+    /**
+     * @param list<array{run: list<string>, requires: list<string>, runtimeVariant: ?string}> $hooks
+     * @param array{platform: string, arch: string, variant: string, type: string, phpVersion: string} $context
+     * @param array<string, string> $extraEnvironment
+     */
+    private function run(array $hooks, array $context, array $extraEnvironment, string $label): void
+    {
+        if ($hooks === []) {
             return;
         }
         if (getenv('PHPOLYGON_SKIP_HOOKS') === '1') {
@@ -121,14 +153,14 @@ final class BuildHookRunner
             return;
         }
 
-        $environment = [
+        $environment = $extraEnvironment + [
             'PHPOLYGON_BUILD_PLATFORM' => $context['platform'],
             'PHPOLYGON_BUILD_ARCH' => $context['arch'],
             'PHPOLYGON_BUILD_VARIANT' => $context['variant'],
             'PHPOLYGON_BUILD_TYPE' => $context['type'],
         ] + getenv();
 
-        foreach ($this->config->hooksBeforeBuild as $index => $hook) {
+        foreach ($hooks as $index => $hook) {
             $command = $hook['run'];
             $hookEnvironment = $environment;
             if ($command[0] === '@php') {
@@ -138,10 +170,10 @@ final class BuildHookRunner
                     $hookEnvironment = self::withLibraryDirectory($hookEnvironment, dirname($command[0]));
                 }
             }
-            ($this->logger)('info', 'Build hook: ' . implode(' ', $hook['run']));
+            ($this->logger)('info', $label . ': ' . implode(' ', $hook['run']));
             $exit = $this->execute($command, $hookEnvironment);
             if ($exit !== 0) {
-                throw new \RuntimeException(sprintf('Build hook #%d (%s) failed with exit code %d', $index + 1, implode(' ', $hook['run']), $exit));
+                throw new \RuntimeException(sprintf('%s #%d (%s) failed with exit code %d', $label, $index + 1, implode(' ', $hook['run']), $exit));
             }
         }
     }

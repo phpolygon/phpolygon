@@ -170,6 +170,11 @@ class GameBuilder
                         $stats['sourceBytes'] / 1024 / 1024,
                         $stats['compiledBytes'] / 1024 / 1024,
                     ));
+                    // resources.exclude also holds for what the compile produced.
+                    $pruned = $this->pharBuilder->pruneExcluded($stagingDir);
+                    if ($pruned > 0) {
+                        $this->log('info', "Dropped {$pruned} compiled file(s) matching resources.exclude");
+                    }
                 }
 
                 // iOS branch: no phar / micro.sfx / combine. Link the staged tree
@@ -224,10 +229,19 @@ class GameBuilder
                 : $this->upscalerResolver->resolve($this->config->upscalers, $platform);
             array_push($runtimeLibs, ...$upscalers->files);
 
-            // Phase 5: Combine executable
+            // Phase 5: Combine executable. macOS carries only a launcher; the PHAR
+            // ships once in Contents/Resources, shared by the arm64 and x86_64
+            // binaries of a universal bundle.
             $combinedPath = $tempDir . '/' . $this->config->name;
+            $payloadPath = $pharPath;
+            $separatePhar = null;
+            if ($platform === 'macos') {
+                $payloadPath = $tempDir . '/launcher.php';
+                file_put_contents($payloadPath, $this->pharBuilder->generateMacLauncher($this->platformPackager->macPharFile()));
+                $separatePhar = $pharPath;
+            }
             $this->log('info', 'Combining executable...');
-            $this->combineExecutable($sfxPath, $pharPath, $combinedPath, [...$this->config->phpIni, ...$upscalers->ini]);
+            $this->combineExecutable($sfxPath, $payloadPath, $combinedPath, [...$this->config->phpIni, ...$upscalers->ini]);
             $binarySize = filesize($combinedPath);
             $this->log('success', sprintf('Binary: %.2f MB', $binarySize / 1024 / 1024));
 
@@ -240,8 +254,16 @@ class GameBuilder
                 $variant,
                 $runtimeLibs,
                 $upscalers->notices($platform === 'windows' ? "\r\n" : "\n"),
+                $separatePhar,
             );
             $this->log('success', 'Output: ' . $outputPath);
+
+            // Phase 6b: build.json afterPackage hooks, per target (also on --phar reuse).
+            $this->hookRunner->runAfterPackage(
+                ['platform' => $platform, 'arch' => $arch, 'variant' => $variant, 'type' => $buildType, 'phpVersion' => $phpVersion],
+                $outputPath,
+                $platform === 'macos' ? $outputPath . '/Contents/Resources' : $outputPath,
+            );
 
             // Phase 7: Report
             $bundleSize = $this->getDirectorySize($outputPath);

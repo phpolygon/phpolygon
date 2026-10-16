@@ -2156,8 +2156,21 @@ class Engine
         self::log('ERROR: ' . $message);
     }
 
+    /** Where {@see log()} writes game.log - for bug reports and crash dialogs. */
+    public static function logFilePath(): string
+    {
+        return self::resolveLogPath();
+    }
+
     private static function resolveLogPath(): string
     {
+        // A built game's log directory: next to the executable, or ~/Library/Logs/<name>
+        // for a macOS .app, whose signed bundle is never written to (set by the PHAR stub).
+        if (defined('PHPOLYGON_PATH_LOGS')) {
+            /** @var string $logs */
+            $logs = PHPOLYGON_PATH_LOGS;
+            return $logs . DIRECTORY_SEPARATOR . 'game.log';
+        }
         // Use PHPOLYGON_PATH_ROOT if available (set by PHAR stub and game bootstrap)
         if (defined('PHPOLYGON_PATH_ROOT')) {
             /** @var string $root */

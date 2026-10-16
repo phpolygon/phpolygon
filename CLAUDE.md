@@ -705,9 +705,15 @@ classic per-target build.
    `PHPOLYGON_COMPOSER` overrides the Composer command. The temp dir is unique
    per build call.
 2. **Stage** — copy src/, the production vendor/, assets/, resources/ into temp dir, resolve
-   symlinks, exclude tests/docs/editor via glob patterns
+   symlinks, exclude tests/docs/editor via glob patterns; `resources.external`
+   and `resources.exclude` paths stay out (see Configuration). Then 2b build-type
+   constants, 2c UI transpile, 2d `assets.meshes = binary` (staged `*.mesh.json`
+   → `*.mesh.bin`; `PharBuilder::pruneExcluded()` afterwards holds the compiled
+   files to `resources.exclude` too)
 3. **PHAR** — create game.phar with a custom stub that handles micro SAPI
-   detection, macOS .app bundle paths, resource extraction, and engine bootstrap
+   detection, macOS .app bundle paths, resource extraction, and engine bootstrap.
+   The PHAR carries a build id (`.phpolygon-build-id`, hash of the staged
+   assets/ + resources/), the stub the same id
 
 > Phases 1–3 are PHAR-producing and identical across desktop targets of the same
 > variant/build-type. With `--phar PATH`, they run once for the first target and
@@ -715,6 +721,7 @@ classic per-target build.
 4. **micro.sfx** — resolve static PHP binary (explicit path → cache
    `~/.phpolygon/build-cache/` → download from GitHub Release)
 5. **Combine** — concatenate micro.sfx + game.phar into single executable
+   (macOS: micro.sfx + a small launcher, see "macOS bundle layout")
 6. **Package** — platform-specific: macOS `.app` bundle with Info.plist,
    Linux/Windows flat directory
 7. **Report** — PHAR size, binary size, bundle size
@@ -732,7 +739,10 @@ classic per-target build.
   "run": "\\App\\Game::start();",
   "php": { "extensions": ["glfw", "mbstring", "zip", "phar"] },
   "phar": { "exclude": ["**/tests", "**/docs"] },
-  "resources": { "external": ["resources/audio"] },
+  "resources": {
+    "external": ["assets/audio", "resources/video"],
+    "exclude": ["assets/audio/raw-takes", "assets/**/*.wav"]
+  },
   "platforms": {
     "macos": { "icon": "icon.icns", "minimumVersion": "12.0" }
   }
@@ -741,13 +751,30 @@ classic per-target build.
 
 `phar.exclude` adds per-segment patterns to `BuildConfig::DEFAULT_PHAR_EXCLUDE`
 (tests, docs, examples, benchmarks, `*.log`, …) — it never replaces them. The
-patterns filter the staged `vendor/` only; `src/`, `assets/` and `resources/`
-ship in full. On top, `PharBuilder::VENDOR_CLEANUP` drops whole vendor paths:
+patterns filter the staged `vendor/` only; `src/` ships in full, `assets/` and
+`resources/` minus `resources.external` / `resources.exclude` (below). On top, `PharBuilder::VENDOR_CLEANUP` drops whole vendor paths:
 Composer's `vendor/composer/tmp-*` download leftovers, development files in
 every package root (dotfiles, `*.md`, `composer.lock`, phpunit/phpstan/psalm
 configs — a path-repo checkout carries all of them) and the engine's tooling
 directories and `Generated/*.json` sidecars. A package root's LICENSE/COPYING/
 NOTICE file always ships.
+
+`resources.external` lists project-relative paths (folders or single files,
+under any root: `assets/…`, `resources/…`, `runtimes`, …) that ship loose next
+to the executable (macOS: `Contents/Resources/`) and **never** in the PHAR. A
+bare name without `/` (`"shaders"`) still means `resources/shaders`. Globs are
+rejected here (they belong in `exclude`). Native loaders that cannot read
+`phar://` (audio, big textures) need their folders external.
+
+`resources.exclude` lists project-relative glob patterns (`PathGlob`: `*`/`?`
+inside one segment, `**` across segments, `[...]` classes; a match on a folder
+covers everything below it) that ship **nowhere** - neither in the PHAR nor among
+the external files. For raw sources and tool inputs that sit inside a shipped
+folder (recording sources, reference takes, `.psd`). It applies to every way a
+file ships: PHAR staging, the compiled meshes of phase 2d, the external copy
+(and with it what `resources.trimPython` later trims - trimming only removes),
+the iOS bundle. Both lists are validated when build.json loads: relative paths
+only, no `..`, no absolute/drive paths.
 
 `phar.compression` (`"gzip"` default, or `"none"`) decides how the PHAR stores
 its entries. gzip compresses every entry (`Phar::compressFiles(Phar::GZ)`); asset-heavy
@@ -759,13 +786,70 @@ does the runtime: the stub refuses to start without `ext-zlib` and says so in
 carry zlib (static-php-cli pulls it in for phar/openssl, and for zip/curl on
 Windows). Any other runtime must too, or the game sets `"compression": "none"`.
 
+### Start-up extraction (stub + `Runtime\BundleExtractor`)
+
+Native loaders cannot read `phar://`, so the stub copies the PHAR's `assets/` and
+`resources/` to disk - **once per build id**, not per start. A marker
+(`.phpolygon-extracted.json`: build id + file list) is removed first and written
+last via temp+rename; every file lands as `*.part-<pid>` and is renamed into
+place, so an aborted start just extracts again. Target:
+
+- writable install dir (Windows/Linux, Steam library): in place next to the
+  executable; nothing is ever deleted there (a stale name may be a store file);
+- signed macOS `.app` or a read-only install: the build pre-extracts into the
+  bundle (`PlatformPackager::preExtract`), so the marker already matches and
+  nothing is written; otherwise the user cache (`BundleExtractor::userCacheDir`:
+  `~/Library/Caches/<identifier>`, `%LOCALAPPDATA%\<identifier>`,
+  `$XDG_CACHE_HOME/<identifier>`), with the install's loose (external) entries
+  symlinked in, so `PHPOLYGON_PATH_ASSETS` still sees one tree.
+
+`PHPOLYGON_PATH_ASSETS` / `_RESOURCES` are defined after the extraction and point
+at wherever the files are. Inside a `.app` the stub never writes to the bundle:
+`PHPOLYGON_PATH_LOGS` = `~/Library/Logs/<name>` (game.log; `Engine::log()` and
+`Engine::logFilePath()` follow it), `PHPOLYGON_PATH_SAVES` / `_MODS` =
+`~/Library/Application Support/<identifier>/{saves,mods}`. `PHPOLYGON_PATH_ROOT`
+stays `Contents/Resources` (external resources live there). Outside a bundle all
+of these stay next to the executable. The stub locates itself via `__FILE__`
+(binary in micro SAPI, the `.phar` otherwise), so a built PHAR also runs with
+`php game.phar` - the tests do exactly that.
+
+### macOS bundle layout
+
+```
+<Name>.app/Contents/MacOS/<Name>            micro.sfx (signed) + php.ini block + launcher
+<Name>.app/Contents/Resources/<name>.phar   the one PHAR (PlatformPackager::macPharFile())
+<Name>.app/Contents/Resources/assets|resources|<external>   pre-extracted + external, with marker
+```
+
+The launcher (`PharBuilder::generateMacLauncher()`) writes
+`~/Library/Logs/<name>/boot.log` before it requires the PHAR, so a start that
+dies early is still visible. Because the binaries carry only the launcher, the
+universal bundle (`docker/steam-upload.sh steam_make_universal`) shares one PHAR
+between `<Name>-arm64` and `<Name>-x86_64`. Its shell launcher
+(`docker/macos-launcher.sh`, or the game's own via build.json
+`platforms.macos.launcher`) picks arm64 via `sysctl hw.optional.arm64` +
+`arch -arm64` (Rosetta-safe), forwards SIGTERM/INT/HUP and logs to
+`~/Library/Logs/<name>/launch.log` (binary, stderr, exit status - 137 = SIGKILL,
+e.g. a rejected signature; previous start as `.1`). Log files rotate once per
+start: `game.log` → `game.log.1`, `boot.log` → `boot.log.1`. The upload stages
+all depots on the container's own filesystem (`STEAM_STAGE`, default
+`/tmp/phpolygon-steam-content`: chmod on a Windows bind mount may not stick),
+sets and verifies the executable bits, and aborts when a binary or `.dylib`
+lacks its arm64/x86_64 slice. Signing (`docker/build-all.sh`): the bare micro.sfx is
+ad-hoc signed before the launcher is appended, with JIT/library entitlements
+(`allow-jit`, `allow-unsigned-executable-memory`, `disable-library-validation`);
+`MAC_HARDENED=1` adds the hardened-runtime flag. **Unverified on hardware** -
+run a build once on an Apple Silicon Mac.
+
 ### Build classes
 
 | Class | Purpose |
 |---|---|
 | `BuildConfig` | Loads build.json + composer.json, provides all settings |
 | `ProductionVendor` | `composer install --no-dev` into a working copy of composer.json/lock; the project's vendor/ and lock stay untouched |
-| `PharBuilder` | Stages sources, builds PHAR with custom stub |
+| `PharBuilder` | Stages sources (minus external/excluded paths), builds PHAR with custom stub + build id, macOS launcher |
+| `PathGlob` | build.json path patterns (`resources.external` / `resources.exclude`): validation + matching |
+| `Runtime\BundleExtractor` | Stub-side: extract PHAR assets/resources once per build id (marker, atomic, cache fallback with links) |
 | `StaticPhpResolver` | Finds/downloads/caches micro.sfx binary + Windows runtime libs (vulkan-1, d3dcompiler_47, DXC `dxcompiler.dll`/`dxil.dll` from the latest DirectXShaderCompiler release for Shader Model 6, Steam API) |
 | `PlatformPackager` | Creates .app bundle, Linux dir, Windows .exe |
 | `GameBuilder` | Orchestrates the 7-phase pipeline |
@@ -787,6 +871,8 @@ The combined executable ignores php.ini files, and startup-only settings (OPcach
 ### Build hooks
 
 `build.json` `hooks.beforeBuild` lists commands a build runs in the project root before it stages the game (asset pre-bakes, generated data). They run once per build that creates a PHAR; `--phar` reuse targets skip them. A failing hook fails the build; `PHPOLYGON_SKIP_HOOKS=1` skips them.
+
+`hooks.afterPackage` (same form) runs **per target**, also on `--phar` reuse, once the bundle is assembled: `PHPOLYGON_BUILD_OUTPUT` = the `.app` or flat dir, `PHPOLYGON_BUILD_RESOURCES` = where external resources went (`Contents/Resources` or the flat dir), plus the `PHPOLYGON_BUILD_*` target vars. The place for per-target files (platform runtimes) and checks before upload.
 
 ```json
 "hooks": { "beforeBuild": [
@@ -819,8 +905,9 @@ $remove, $keep, $dryRun)`, or declaratively for external resources in the packag
 - Measured (3.14.8, Windows): 61.6 MB -> 36.0 MB `default`, 23.9 MB with `network`+`sqlite`+`docs`;
   Linux/macOS -20.7 / -19.5 MB `default`. Trimmed interpreter passes `-I -S -B` imports of json, re,
   hashlib, random, decimal, unittest, threading, ...
-- A step that replaces the runtimes after packaging (e.g. per-target placement) bypasses
-  `trimPython` - such a game calls `trim()` itself where it unpacks the runtime.
+- A step that replaces the runtimes after packaging (e.g. per-target placement in a
+  `hooks.afterPackage` hook, which runs after the trim) bypasses `trimPython` and
+  `resources.exclude` - such a game calls `trim()` itself where it unpacks the runtime.
 
 ### Native upscaler runtimes
 
