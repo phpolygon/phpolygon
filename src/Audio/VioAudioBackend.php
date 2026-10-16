@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace PHPolygon\Audio;
 
+use PHPolygon\Audio\Codec\AudioFormats;
 use VioSound;
 
 /**
@@ -27,11 +28,19 @@ class VioAudioBackend implements AudioBackendInterface
 
     private int $nextPlaybackId = 1;
     private float $masterVolume = 1.0;
+    private ?AudioFormats $formats = null;
 
     public function load(string $id, string $path): AudioClip
     {
-        $this->clipPaths[$id] = $path;
+        // A clip shipped in several formats (e.g. line.opus next to line.flac)
+        // plays from the smallest one this php-vio decodes.
+        $this->clipPaths[$id] = $this->formats()->resolve($path) ?? $path;
         return new AudioClip($id, $path);
+    }
+
+    private function formats(): AudioFormats
+    {
+        return $this->formats ??= AudioFormats::detect();
     }
 
     public function play(string $clipId, float $volume = 1.0, bool $loop = false): int

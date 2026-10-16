@@ -1275,8 +1275,9 @@ $menuPlayer->adopt($handoffs[0]);                 // the new owner fades it out 
 
 `PHPolygon\Audio\Dsp` and `PHPolygon\Audio\Codec` are plain-PHP tools for audio a
 game renders **ahead of time** (build hooks, prebake scripts): read and write WAV,
-encode FLAC, resample, measure loudness, reshape recorded voices. Nothing here runs
-per frame or touches php-vio – playback stays with `AudioManager`. Every class works
+encode FLAC, Opus and Vorbis, resample, measure loudness, reshape recorded voices. Nothing
+here runs per frame – playback stays with `AudioManager`; only the Opus/Vorbis writers
+call php-vio (its encoder), everything else is plain PHP. Every class works
 on `list<float>` mono (or two lists for stereo) at a sample rate that defaults to
 `Pcm::SAMPLE_RATE` (44.1 kHz) and is a parameter everywhere. All of it is
 deterministic: same input, same bytes.
@@ -1292,6 +1293,10 @@ deterministic: same input, same bytes.
 | `Codec\WavReader` | RIFF/WAVE → mono floats at a target rate: 16/24-bit PCM, 32-bit float, any channel count, `WAVE_FORMAT_EXTENSIBLE` |
 | `Codec\WavWriter` | 16-bit PCM RIFF header, stereo interleave |
 | `Codec\FlacWriter` | Lossless FLAC (fixed predictors, Rice coding, stereo decorrelation), stereo and mono, STREAMINFO MD5; php-vio decodes it |
+| `Codec\OpusWriter` + `OpusSettings` | Ogg Opus through php-vio's libopus (`vio_audio_encode`); input off the encode rate (8/12/16/24/48 kHz) is resampled with `Resampler` first – slow for long material, so render at the encode rate. Sample-exact length (pre-skip, end trim), decodes at 48 kHz |
+| `Codec\VorbisWriter` + `VorbisSettings` | Ogg Vorbis through php-vio's libvorbis: quality −0.1…1.0 (0.5 = `oggenc -q5`) or ABR, any rate, gapless |
+| `Codec\AudioFormats` | What this process decodes/encodes (`detect()`: php-vio's `vio_audio_formats()`, else WAV/FLAC/MP3 decode + WAV/FLAC encode), `choose(preferred, player)` → first format encodable here and decodable by the player, else FLAC; `resolve(path)` → the smallest decodable sibling (`line.opus` before `line.flac`); `extension()`/`forPath()` |
+| `Codec\AudioEncoder` | Preference list + settings → picks via `choose()` and writes Opus/Vorbis/FLAC/WAV; `extension()`, `isFallback()`, `fingerprint()` for cache keys |
 | `Dsp\Voice\PitchDetector` / `PitchTrack` | YIN f0 tracker, ≈ 10 ms hop, voiced/unvoiced per frame |
 | `Dsp\Voice\VoiceShaper` | TD-PSOLA pitch + resample formant shift + WSOLA tempo, RBJ tilt shelves, envelope-following breath noise |
 | `Dsp\Voice\VoiceReference` / `VoiceMatcher` | A voice's measurable fingerprint (f0 stats, LPC formants, 1/6-octave LTAS; JSON round trip) and the matcher that steers a recording toward it (pitch, range, formants, 13-band EQ) |
@@ -1299,6 +1304,13 @@ deterministic: same input, same bytes.
 | `Dsp\Voice\Vocoder` + `VocoderCarrier` | Channel vocoder; the carrier is pluggable (`SawChordCarrier` default) so a game can let speech play its own synthesiser |
 | `Dsp\Voice\VoiceProfile` | Value object: pitch, formant, tempo, tilt, breath, vocoder, crush; `withOverrides()`, `fingerprint()` |
 | `Dsp\Voice\VoiceChain` | match → shape → crush → vocode → −16 LUFS (peak ≤ −1 dBFS) |
+
+Compressed formats (Opus/Vorbis):
+- php-vio decodes and encodes them from the release that has `vio_audio_formats()`; `AudioFormats::detect()` is the feature test. Older php-vio or php-glfw audio: WAV/FLAC/MP3 only.
+- A build step picks with `new AudioEncoder(preferred, settings)`; when the process cannot encode the codec, or the `player` formats it is given cannot decode it, it writes FLAC. A hook that runs on the shipped runtime needs no `player`.
+- `VioAudioBackend::load()` resolves the path through `AudioFormats::resolve()`, so a game may ship `x.opus` next to an `x.flac` fallback and keep asking for either name.
+- Recommended starting points (a game's choice, not engine presets): speech Opus 24 kHz mono 24–48 kbit/s `voip`; music Vorbis q0.5 or Opus 48 kHz 96–128 kbit/s. Both loop gaplessly.
+- Ogg files and `phar://` paths are decoded from memory by php-vio, so compressed audio also plays from inside the PHAR.
 
 Rules:
 - **Presets belong to the game.** The engine ships the parameter object, not named

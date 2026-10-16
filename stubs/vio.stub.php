@@ -457,6 +457,32 @@ function vio_audio_volume(VioSound $sound, float $volume): void {}
 
 function vio_audio_playing(VioSound $sound): bool {}
 
+/** Encoded bytes (any format vio_audio_load reads) → sound. */
+function vio_audio_load_data(string $data): VioSound|false {}
+
+/**
+ * @return array{decode: list<string>, encode: list<string>, versions: array<string, string>}
+ */
+function vio_audio_formats(): array {}
+
+/**
+ * @param array<string, mixed> $options Keys: data (bool – $source holds bytes)
+ * @return array{format: string, channels: int, sample_rate: int, input_sample_rate: int, frames: int, duration: float}|false
+ */
+function vio_audio_info(string $source, array $options = []): array|false {}
+
+/**
+ * @param array<string, mixed> $options Keys: data (bool), format ('s16'|'f32')
+ * @return array{format: string, channels: int, sample_rate: int, input_sample_rate: int, frames: int, duration: float, pcm: string}|false
+ */
+function vio_audio_decode(string $source, array $options = []): array|false {}
+
+/**
+ * Interleaved signed 16-bit LE PCM → Ogg Opus / Ogg Vorbis bytes.
+ * @param array<string, int|float|string|bool> $options
+ */
+function vio_audio_encode(string $pcm, int $sampleRate, int $channels, string $codec = 'opus', array $options = []): string|false {}
+
 // ----------------------------------------------------------------
 // Framebuffer readback
 // ----------------------------------------------------------------
