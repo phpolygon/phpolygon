@@ -147,4 +147,90 @@ class CollisionMath
 
         return $penetrationDir->mul($penetrationDepth);
     }
+
+    /**
+     * Does the segment from → to cross the triangle? Möller–Trumbore, double-sided
+     * (winding does not matter), with the hit parameter clamped to [0, 1] so a
+     * triangle beyond either end point does not count. A segment lying in the
+     * triangle's plane is treated as a miss.
+     */
+    public static function segmentIntersectsTriangle(Vec3 $from, Vec3 $to, Triangle $tri): bool
+    {
+        $dx = $to->x - $from->x;
+        $dy = $to->y - $from->y;
+        $dz = $to->z - $from->z;
+
+        $e1x = $tri->v1->x - $tri->v0->x;
+        $e1y = $tri->v1->y - $tri->v0->y;
+        $e1z = $tri->v1->z - $tri->v0->z;
+        $e2x = $tri->v2->x - $tri->v0->x;
+        $e2y = $tri->v2->y - $tri->v0->y;
+        $e2z = $tri->v2->z - $tri->v0->z;
+
+        // p = d × e2
+        $px = $dy * $e2z - $dz * $e2y;
+        $py = $dz * $e2x - $dx * $e2z;
+        $pz = $dx * $e2y - $dy * $e2x;
+        $det = $e1x * $px + $e1y * $py + $e1z * $pz;
+        if (abs($det) < 1e-9) {
+            return false; // parallel to the triangle's plane
+        }
+        $inv = 1.0 / $det;
+
+        $sx = $from->x - $tri->v0->x;
+        $sy = $from->y - $tri->v0->y;
+        $sz = $from->z - $tri->v0->z;
+        $u = ($sx * $px + $sy * $py + $sz * $pz) * $inv;
+        if ($u < 0.0 || $u > 1.0) {
+            return false;
+        }
+
+        // q = s × e1
+        $qx = $sy * $e1z - $sz * $e1y;
+        $qy = $sz * $e1x - $sx * $e1z;
+        $qz = $sx * $e1y - $sy * $e1x;
+        $v = ($dx * $qx + $dy * $qy + $dz * $qz) * $inv;
+        if ($v < 0.0 || $u + $v > 1.0) {
+            return false;
+        }
+
+        $t = ($e2x * $qx + $e2y * $qy + $e2z * $qz) * $inv;
+
+        return $t >= 0.0 && $t <= 1.0;
+    }
+
+    /**
+     * Does the segment from → to touch the axis-aligned box [min, max]? Slab test
+     * over the segment parameter [0, 1]; a segment that starts or ends inside the
+     * box counts as touching.
+     */
+    public static function segmentIntersectsAabb(Vec3 $from, Vec3 $to, Vec3 $min, Vec3 $max): bool
+    {
+        $t0 = 0.0;
+        $t1 = 1.0;
+        foreach ([
+            [$from->x, $to->x - $from->x, $min->x, $max->x],
+            [$from->y, $to->y - $from->y, $min->y, $max->y],
+            [$from->z, $to->z - $from->z, $min->z, $max->z],
+        ] as [$o, $d, $lo, $hi]) {
+            if (abs($d) < 1e-9) {
+                if ($o < $lo || $o > $hi) {
+                    return false;
+                }
+                continue;
+            }
+            $a = ($lo - $o) / $d;
+            $b = ($hi - $o) / $d;
+            if ($a > $b) {
+                [$a, $b] = [$b, $a];
+            }
+            $t0 = max($t0, $a);
+            $t1 = min($t1, $b);
+            if ($t0 > $t1) {
+                return false;
+            }
+        }
+
+        return true;
+    }
 }

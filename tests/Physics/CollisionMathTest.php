@@ -123,4 +123,32 @@ class CollisionMathTest extends TestCase
             $tri,
         ));
     }
+
+    public function testSegmentIntersectsTriangle(): void
+    {
+        // Vertical wall in the plane x = 1.
+        $tri = new Triangle(new Vec3(1, -5, -5), new Vec3(1, 5, -5), new Vec3(1, 0, 5));
+        $origin = new Vec3(0, 0, 0);
+
+        $this->assertTrue(CollisionMath::segmentIntersectsTriangle($origin, new Vec3(2, 0, 0), $tri));
+        $this->assertTrue(CollisionMath::segmentIntersectsTriangle(new Vec3(2, 0, 0), $origin, $tri), 'back face');
+        $this->assertTrue(CollisionMath::segmentIntersectsTriangle($origin, new Vec3(1, 0, 0), $tri), 'ends on the face');
+        $this->assertFalse(CollisionMath::segmentIntersectsTriangle($origin, new Vec3(0.9, 0, 0), $tri), 'ends before');
+        $this->assertFalse(CollisionMath::segmentIntersectsTriangle(new Vec3(1.1, 0, 0), new Vec3(3, 0, 0), $tri), 'starts behind');
+        $this->assertFalse(CollisionMath::segmentIntersectsTriangle($origin, new Vec3(0, 0, 3), $tri), 'parallel');
+        $this->assertFalse(CollisionMath::segmentIntersectsTriangle(new Vec3(0, 9, 0), new Vec3(2, 9, 0), $tri), 'beside');
+    }
+
+    public function testSegmentIntersectsAabb(): void
+    {
+        $min = new Vec3(1, 0, -1);
+        $max = new Vec3(2, 3, 1);
+
+        $this->assertTrue(CollisionMath::segmentIntersectsAabb(new Vec3(0, 1, 0), new Vec3(3, 1, 0), $min, $max));
+        $this->assertTrue(CollisionMath::segmentIntersectsAabb(new Vec3(1.5, 1, 0), new Vec3(5, 1, 0), $min, $max), 'starts inside');
+        $this->assertTrue(CollisionMath::segmentIntersectsAabb(new Vec3(1.5, 5, 0), new Vec3(1.5, -5, 0), $min, $max), 'axis-parallel through');
+        $this->assertFalse(CollisionMath::segmentIntersectsAabb(new Vec3(0, 1, 0), new Vec3(0.8, 1, 0), $min, $max), 'ends before');
+        $this->assertFalse(CollisionMath::segmentIntersectsAabb(new Vec3(0, 4, 0), new Vec3(3, 4, 0), $min, $max), 'passes above');
+        $this->assertFalse(CollisionMath::segmentIntersectsAabb(new Vec3(0, 1, 5), new Vec3(5, 1, 0), $min, $max), 'diagonal miss');
+    }
 }

@@ -346,6 +346,27 @@ components on the same entity.
 | `Physics3DSystem` | Capsule vs AABB collision, gravity integration (Phase 7+) |
 | `OutlineSystem` | Emits `DrawOutline` for every enabled `Outline`; register BEFORE `Renderer3DSystem` |
 
+### Physics queries — rays and line of sight
+
+`Raycaster3D` answers two kinds of question:
+
+- `raycast()` / `raycastAll()` — nearest / all hits with point, normal and
+  distance. Box colliders only; recomputes each box's world AABB from its
+  `Transform3D` on every call, so it works without a `Physics3DSystem`.
+- `segmentBlocked(World, Vec3 $from, Vec3 $to): bool` — occlusion only ("is
+  anything solid between these points?"), meant for per-frame use (line of
+  sight, camera/anchor checks). Tests mesh colliders and boxes (rotated ones
+  exactly, via their triangles) against the data `Physics3DSystem` already
+  caches on them (`MeshCollider3D::$bvh`, `BoxCollider3D::$cachedWorldAabb` /
+  `$bvh` / `$cachedRotated`) — it never transforms or rebuilds anything.
+  Triggers never block, a box containing `$from` does not block, touching a
+  surface counts, heightmaps are ignored, and a collider the physics system has
+  not processed yet is invisible to it.
+
+The segment primitives behind it are public: `CollisionMath::segmentIntersectsTriangle()`
+(double-sided Möller–Trumbore on [0, 1]) and `CollisionMath::segmentIntersectsAabb()`
+(slab test). Do not reimplement either in a game.
+
 ### Procedural geometry — code-driven worlds
 
 **PHPolygon does not use external 3D model files.** All geometry is generated

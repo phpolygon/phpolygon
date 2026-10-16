@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace PHPolygon\Physics;
 
 use PHPolygon\Component\BoxCollider3D;
+use PHPolygon\Component\MeshCollider3D;
 use PHPolygon\Component\Transform3D;
 use PHPolygon\ECS\World;
 use PHPolygon\Math\Ray;
@@ -14,9 +15,85 @@ use PHPolygon\Math\Vec3;
  * Casts rays against 3D entities with BoxCollider3D components.
  *
  * Returns the nearest hit or all hits sorted by distance.
+ *
+ * {@see segmentBlocked()} is a separate, cheaper occlusion query: it answers
+ * "is anything solid between these two points?" from the collision data that
+ * {@see \PHPolygon\System\Physics3DSystem} already caches on the colliders.
  */
 class Raycaster3D
 {
+    /**
+     * Is the segment from → to blocked by a solid collider?
+     *
+     * Checks every non-trigger {@see MeshCollider3D} (its world-space BVH) and
+     * {@see BoxCollider3D} (its cached world AABB, or its world BVH when the box
+     * is rotated). It only READS what {@see \PHPolygon\System\Physics3DSystem}
+     * stores on the colliders while it ticks — nothing is transformed or rebuilt
+     * here, so the query is cheap enough to run every frame. The flip side: a
+     * collider the physics system has not processed yet (no cached BVH/AABB, e.g.
+     * spawned this frame, or a world without a Physics3DSystem) does not block.
+     *
+     * Rules:
+     * - Triggers never block.
+     * - A box that already contains `$from` does not block (a large volume around
+     *   the viewer would otherwise hide everything). Tested against the box's
+     *   world AABB, which for a rotated box is its conservative bound.
+     * - Touching counts: a segment ending exactly on a surface is blocked.
+     * - Heightmap colliders are not considered.
+     */
+    public function segmentBlocked(World $world, Vec3 $from, Vec3 $to): bool
+    {
+        $min = new Vec3(min($from->x, $to->x), min($from->y, $to->y), min($from->z, $to->z));
+        $max = new Vec3(max($from->x, $to->x), max($from->y, $to->y), max($from->z, $to->z));
+
+        /** @var array<int, MeshCollider3D> $meshPool */
+        $meshPool = $world->componentPool(MeshCollider3D::class);
+        foreach ($meshPool as $collider) {
+            if ($collider->isTrigger || $collider->bvh === null) {
+                continue;
+            }
+            foreach ($collider->bvh->query($min, $max) as $triangle) {
+                if (CollisionMath::segmentIntersectsTriangle($from, $to, $triangle)) {
+                    return true;
+                }
+            }
+        }
+
+        /** @var array<int, BoxCollider3D> $boxPool */
+        $boxPool = $world->componentPool(BoxCollider3D::class);
+        foreach ($boxPool as $box) {
+            $aabb = $box->cachedWorldAabb;
+            if ($box->isTrigger || $aabb === null) {
+                continue;
+            }
+            $bMin = $aabb['min'];
+            $bMax = $aabb['max'];
+            if ($max->x < $bMin->x || $min->x > $bMax->x
+                || $max->y < $bMin->y || $min->y > $bMax->y
+                || $max->z < $bMin->z || $min->z > $bMax->z) {
+                continue;
+            }
+            if ($from->x >= $bMin->x && $from->x <= $bMax->x
+                && $from->y >= $bMin->y && $from->y <= $bMax->y
+                && $from->z >= $bMin->z && $from->z <= $bMax->z) {
+                continue;
+            }
+            if ($box->cachedRotated && $box->bvh !== null) {
+                foreach ($box->bvh->query($min, $max) as $triangle) {
+                    if (CollisionMath::segmentIntersectsTriangle($from, $to, $triangle)) {
+                        return true;
+                    }
+                }
+                continue;
+            }
+            if (CollisionMath::segmentIntersectsAabb($from, $to, $bMin, $bMax)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     /**
      * Cast a ray and return the nearest hit.
      */
