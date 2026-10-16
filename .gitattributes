@@ -1,0 +1,18 @@
+# Kept out of `composer install --prefer-dist` archives (git archive): games
+# depend on src/, bin/, resources/, assets/, stubs/, tools/, scripts/ and
+# docker/, never on the engine's own examples, benchmarks, website or tests.
+/.github export-ignore
+/.githooks export-ignore
+/.docker export-ignore
+/.claude export-ignore
+/benchmarks export-ignore
+/docs export-ignore
+/examples export-ignore
+/tests export-ignore
+/website export-ignore
+/phpbench.json export-ignore
+/phpunit.xml export-ignore
+/logo.png export-ignore
+
+# Shell scripts run in Linux containers and on macOS: never CRLF.
+*.sh text eol=lf
