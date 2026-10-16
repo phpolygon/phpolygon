@@ -54,5 +54,20 @@ final class SetSky
         public readonly float $starBrightness = 0.0,
         /** Game-world time accumulator for cloud drift animation. */
         public readonly float $time = 0.0,
+        /**
+         * Distance (world units) the cloud field has drifted along
+         * $cloudWindDirection. The producer integrates speed × dt, so a change
+         * of $cloudWindSpeed only changes how fast the field moves from now on.
+         * Null = legacy fallback $time × $cloudWindSpeed, which is only correct
+         * for a constant wind speed: with a varying speed the product jumps by
+         * $time × Δspeed and the clouds race faster the longer the game runs.
+         */
+        public readonly ?float $cloudOffset = null,
     ) {}
+
+    /** Cloud drift distance the renderer applies (see $cloudOffset). */
+    public function cloudDrift(): float
+    {
+        return $this->cloudOffset ?? $this->time * $this->cloudWindSpeed;
+    }
 }

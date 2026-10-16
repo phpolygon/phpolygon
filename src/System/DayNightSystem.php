@@ -138,6 +138,15 @@ class DayNightSystem extends AbstractSystem
     /** Accumulated real time for cloud drift animation. */
     private float $skyTime = 0.0;
 
+    /**
+     * Distance (world units) the cloud field has drifted: the integral of the
+     * cloud wind speed over real time. The sky used to draw time × speed, so
+     * every gust that changed the speed shifted the whole field by
+     * time × Δspeed – after a few minutes of play the clouds raced back and
+     * forth at hundreds of units per second.
+     */
+    private float $cloudOffset = 0.0;
+
     /** @var list<int> entities whose MeshRenderer draws the sun or moon disc */
     private array $celestialIds = [];
 
@@ -154,7 +163,12 @@ class DayNightSystem extends AbstractSystem
         // cloud field, or the cloud-shadow patches (and the sky) jump a
         // visible step in one frame — reads as a brightness flash on the
         // terrain. Clouds simply advance slower during a hitch instead.
-        $this->skyTime += min($dt, 0.05);
+        // The clouds drift in real time: their speed is a wind speed, not a
+        // fraction of the day, so a longer DayNightCycle::dayDuration must not
+        // slow them down (nor a shorter one speed them up).
+        $skyStep = min(max($dt, 0.0), 0.05);
+        $this->skyTime += $skyStep;
+        $this->cloudOffset += self::cloudWindSpeed($world) * $skyStep;
         foreach ($world->query(DayNightCycle::class) as $entity) {
             $this->cachedCycle = $entity->get(DayNightCycle::class);
             break;
@@ -168,6 +182,15 @@ class DayNightSystem extends AbstractSystem
             }
             $this->cachedCycle->timeOfDay -= floor($this->cachedCycle->timeOfDay);
         }
+    }
+
+    /** Cloud drift speed in world units per real second (1.5 without a Wind entity). */
+    public static function cloudWindSpeed(World $world): float
+    {
+        foreach ($world->query(Wind::class) as $entity) {
+            return 1.0 + $entity->get(Wind::class)->intensity * 6.0;
+        }
+        return 1.5;
     }
 
     /**
@@ -491,11 +514,7 @@ class DayNightSystem extends AbstractSystem
         }
 
         // Cloud wind: default drift direction; speed scales with Wind intensity.
-        $windSpeed = 1.5;
-        foreach ($world->query(Wind::class) as $entity) {
-            $windSpeed = 1.0 + $entity->get(Wind::class)->intensity * 6.0;
-            break;
-        }
+        $windSpeed = self::cloudWindSpeed($world);
 
         // Clouds grow fuller + shift toward the horizon near dusk/dawn.
         $cloudDensity = 0.55 + $fogDensity * 0.25 + $cloudCover * 0.25;
@@ -526,6 +545,7 @@ class DayNightSystem extends AbstractSystem
             cloudDarkness: $cloudDarkness,
             starBrightness: $cycle->isDaytime() ? 0.0 : 0.9 * $moonBright,
             time: $this->skyTime,
+            cloudOffset: $this->cloudOffset,
         ));
 
         // --- Sun sphere material ---

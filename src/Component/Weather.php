@@ -70,6 +70,7 @@ class Weather extends AbstractComponent
     #[Hidden]
     public WeatherState $state;
 
+    /** Weather time in seconds (real seconds × $timeScale) – drives the humidity drift. */
     #[Hidden]
     public float $stateTimer = 0.0;
 
@@ -77,17 +78,47 @@ class Weather extends AbstractComponent
     #[Property]
     public float $transitionDuration;
 
+    /**
+     * Day length (real seconds) the WeatherSystem rates are tuned for – the
+     * DayNightCycle default. At this day length the humidity drift swings
+     * with periods of ~5 and ~15 minutes, i.e. the weather turns a few times
+     * per day.
+     */
+    public const float TUNED_DAY_SECONDS = 600.0;
+
+    /**
+     * How fast the weather evolves (humidity drift, cloud build-up and
+     * break-up, rain / snow / storm / fog / sandstorm ramps). 1 = the engine
+     * tuning for a {@see self::TUNED_DAY_SECONDS} day. A scene with a longer
+     * day passes {@see self::timeScaleForDay()} so the weather keeps pace
+     * with its clock instead of turning every few minutes. Lightning flashes
+     * stay in real time.
+     */
+    #[Property]
+    public float $timeScale = 1.0;
+
     public function __construct(
         float $cloudCoverage = 0.3,
         float $humidity = 0.5,
         float $temperature = 22.0,
         float $transitionDuration = 30.0,
+        float $timeScale = 1.0,
     ) {
         $this->cloudCoverage = $cloudCoverage;
         $this->humidity = $humidity;
         $this->temperature = $temperature;
         $this->transitionDuration = $transitionDuration;
+        $this->timeScale = max(0.0, $timeScale);
         $this->state = WeatherState::Clear;
+    }
+
+    /**
+     * Time scale that keeps the weather at the same pace relative to the day
+     * for a day of $daySeconds real seconds (e.g. 3600 → 1/6).
+     */
+    public static function timeScaleForDay(float $daySeconds): float
+    {
+        return self::TUNED_DAY_SECONDS / max(1.0, $daySeconds);
     }
 
     /** Whether precipitation is active (rain or snow) */

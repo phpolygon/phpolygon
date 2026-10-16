@@ -204,6 +204,115 @@ class WeatherSystemTest extends TestCase
         $this->assertGreaterThan(0.0, $world->getComponent($id, Weather::class)->sandstormIntensity, 'Strong dry wind raises a sandstorm');
     }
 
+    public function testTimeScaleSlowsTheWeatherClock(): void
+    {
+        $world = new World();
+        $world->addSystem(new WeatherSystem());
+        $id = $this->spawn($world, new Weather(timeScale: 0.25));
+
+        $world->update(2.0);
+
+        $this->assertEqualsWithDelta(0.5, $world->getComponent($id, Weather::class)->stateTimer, 1e-9);
+    }
+
+    public function testTimeScaleForDayKeepsWeatherAtThePaceOfTheDay(): void
+    {
+        $this->assertEqualsWithDelta(1.0, Weather::timeScaleForDay(Weather::TUNED_DAY_SECONDS), 1e-12);
+        $this->assertEqualsWithDelta(1.0 / 6.0, Weather::timeScaleForDay(3600.0), 1e-12);
+    }
+
+    /**
+     * A scaled weather replays the unscaled one, stretched in real time: the
+     * state after 6·T seconds at scale 1/6 equals the state after T at scale 1.
+     */
+    public function testScaledWeatherIsTheSameWeatherStretched(): void
+    {
+        $run = function (float $scale, float $seconds): Weather {
+            $world = new World();
+            $world->addSystem(new WeatherSystem());
+            $weather = new Weather(cloudCoverage: 0.2, humidity: 0.5, timeScale: $scale);
+            $this->spawn($world, $weather);
+            $season = new Season();
+            $season->baseHumidity = 0.7;
+            $season->baseTemperature = 18.0;
+            $this->spawn($world, $season);
+            $step = 0.25 / $scale;
+            for ($t = 0.0; $t < $seconds - 1e-9; $t += $step) {
+                $world->update($step);
+            }
+            return $weather;
+        };
+
+        $fast = $run(1.0, 300.0);
+        $slow = $run(1.0 / 6.0, 1800.0);
+
+        $this->assertEqualsWithDelta($fast->stateTimer, $slow->stateTimer, 1e-6);
+        $this->assertEqualsWithDelta($fast->humidity, $slow->humidity, 1e-6);
+        $this->assertEqualsWithDelta($fast->cloudCoverage, $slow->cloudCoverage, 1e-6);
+        $this->assertEqualsWithDelta($fast->rainIntensity, $slow->rainIntensity, 1e-6);
+    }
+
+    /**
+     * Pins the pace: with the 600-second tuning day the weather may turn a few
+     * times per day, never more. At scale 1/6 a 3600-second day therefore
+     * shows the same number of turns as a 600-second day at scale 1.
+     */
+    public function testWeatherTurnsOnlyAFewTimesPerDay(): void
+    {
+        $turnsPerDay = function (float $daySeconds): int {
+            $world = new World();
+            $world->addSystem(new WeatherSystem());
+            $weather = new Weather(
+                cloudCoverage: 0.3,
+                humidity: 0.55,
+                temperature: 18.0,
+                timeScale: Weather::timeScaleForDay($daySeconds),
+            );
+            $this->spawn($world, $weather);
+            $season = new Season();
+            $season->baseHumidity = 0.65;
+            $season->baseTemperature = 18.0;
+            $this->spawn($world, $season);
+
+            $turns = 0;
+            $last = $weather->state;
+            $step = $daySeconds / 2400.0;
+            for ($i = 0; $i < 2400; $i++) {
+                $world->update($step);
+                if ($weather->state !== $last) {
+                    $turns++;
+                    $last = $weather->state;
+                }
+            }
+            return $turns;
+        };
+
+        $tuned = $turnsPerDay(Weather::TUNED_DAY_SECONDS);
+        $hourDay = $turnsPerDay(3600.0);
+
+        $this->assertGreaterThan(0, $tuned, 'the weather does change within a day');
+        $this->assertLessThanOrEqual(8, $tuned, 'but only a few times per day');
+        $this->assertSame($tuned, $hourDay, 'a longer day stretches the weather by the same factor');
+    }
+
+    public function testLightningStaysInRealTimeWhenWeatherIsFrozen(): void
+    {
+        $world = new World();
+        $world->addSystem(new WeatherSystem());
+        $weather = new Weather(cloudCoverage: 0.95, humidity: 0.9, temperature: 28.0, timeScale: 0.0);
+        $weather->stormIntensity = 1.0;
+        $id = $this->spawn($world, $weather);
+
+        $flashed = false;
+        for ($i = 0; $i < 40 && !$flashed; $i++) {
+            $world->update(0.1);
+            $flashed = $world->getComponent($id, Weather::class)->lightningFlash > 0.5;
+        }
+
+        $this->assertTrue($flashed, 'a full storm flashes within ~3 real seconds even at timeScale 0');
+        $this->assertSame(0.0, $world->getComponent($id, Weather::class)->stateTimer);
+    }
+
     public function testEmptyWorldIsNoOp(): void
     {
         $world = new World();

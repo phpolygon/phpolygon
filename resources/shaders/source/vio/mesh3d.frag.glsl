@@ -251,9 +251,8 @@ float fbm3(vec2 p) {
 uniform float u_cloud_cover;
 uniform float u_cloud_altitude;
 uniform float u_cloud_density;
-uniform float u_cloud_wind_speed;
 uniform vec2  u_cloud_wind_dir;
-uniform float u_cloud_time;   // = sky pass's u_time, so shadows track the clouds
+uniform float u_cloud_offset; // = sky pass's u_cloud_offset, so shadows track the clouds
 
 float cloudHash13(vec3 p) {
     p = fract(p * 0.1031);
@@ -284,7 +283,7 @@ float cloudDensityAt(vec3 p) {
     if (h < 0.0 || h > 1.0) return 0.0;
     float vGrad = smoothstep(0.0, 0.18, h) * smoothstep(1.0, 0.55, h);
     vec3 wp = p * 0.0026;
-    wp.xz += u_cloud_wind_dir * (u_cloud_time * u_cloud_wind_speed * 0.0026);
+    wp.xz += u_cloud_wind_dir * (u_cloud_offset * 0.0026);
     float n = cloudFbm3(wp);
     float cov = 1.0 - u_cloud_cover * 0.9;
     return smoothstep(cov, cov + 0.22, n) * vGrad * u_cloud_density;

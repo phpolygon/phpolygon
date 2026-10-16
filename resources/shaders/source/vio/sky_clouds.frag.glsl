@@ -14,10 +14,9 @@ uniform float u_sun_intensity;
 uniform float u_cloud_cover;
 uniform float u_cloud_altitude;  // slab base Y
 uniform float u_cloud_density;
-uniform float u_cloud_wind_speed;
+uniform float u_cloud_offset;    // drift distance along the wind (world units), integrated on the CPU
 uniform vec2  u_cloud_wind_dir;
 uniform float u_cloud_darkness;  // 0 = white cumulus, 1 = dark rain/thunder/snow
-uniform float u_time;
 // HDR scene path: clouds alpha-blend over the linear sky, so linearise the
 // cloud colour so it composites against the tonemapped resolve correctly.
 uniform int u_linear_output;
@@ -81,7 +80,7 @@ float cloudDensity(vec3 p) {
     float vGrad = smoothstep(0.0, 0.18, h) * smoothstep(1.0, 0.55, h);
 
     vec3 wp = p * 0.0026;
-    wp.xz += u_cloud_wind_dir * (u_time * u_cloud_wind_speed * 0.0026);
+    wp.xz += u_cloud_wind_dir * (u_cloud_offset * 0.0026);
     float n = fbm3(wp);
 
     float cov = 1.0 - u_cloud_cover * 0.9;        // more cover → lower threshold

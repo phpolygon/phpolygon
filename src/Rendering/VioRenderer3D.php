@@ -4494,10 +4494,9 @@ class VioRenderer3D implements Renderer3DInterface
             vio_set_uniform($this->ctx, 'u_cloud_cover', $sky->cloudCover);
             vio_set_uniform($this->ctx, 'u_cloud_altitude', $sky->cloudAltitude);
             vio_set_uniform($this->ctx, 'u_cloud_density', $sky->cloudDensity);
-            vio_set_uniform($this->ctx, 'u_cloud_wind_speed', $sky->cloudWindSpeed);
+            vio_set_uniform($this->ctx, 'u_cloud_offset', $sky->cloudDrift());
             vio_set_uniform($this->ctx, 'u_cloud_wind_dir', [$wx, $wz]);
             vio_set_uniform($this->ctx, 'u_cloud_darkness', $sky->cloudDarkness);
-            vio_set_uniform($this->ctx, 'u_time', $sky->time);
             vio_draw($this->ctx, $quad);
         }
 
@@ -5565,11 +5564,10 @@ class VioRenderer3D implements Renderer3DInterface
             vio_set_uniform($this->ctx, 'u_cloud_cover', $sky->cloudCover);
             vio_set_uniform($this->ctx, 'u_cloud_altitude', $sky->cloudAltitude);
             vio_set_uniform($this->ctx, 'u_cloud_density', $sky->cloudDensity);
-            vio_set_uniform($this->ctx, 'u_cloud_wind_speed', $sky->cloudWindSpeed);
             vio_set_uniform($this->ctx, 'u_cloud_wind_dir',
                 [$wl > 1e-6 ? $wd->x / $wl : 1.0, $wl > 1e-6 ? $wd->z / $wl : 0.0]);
-            // Same time base as the sky cloud pass so shadow patches track the clouds.
-            vio_set_uniform($this->ctx, 'u_cloud_time', $sky->time);
+            // Same drift as the sky cloud pass so shadow patches track the clouds.
+            vio_set_uniform($this->ctx, 'u_cloud_offset', $sky->cloudDrift());
         } else {
             vio_set_uniform($this->ctx, 'u_cloud_cover', 0.0);
         }

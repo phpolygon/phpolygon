@@ -10,7 +10,10 @@ use PHPolygon\Component\DirectionalLight;
 use PHPolygon\Component\Season;
 use PHPolygon\Component\Transform3D;
 use PHPolygon\Component\Weather;
+use PHPolygon\Component\Wind;
 use PHPolygon\ECS\World;
+use PHPolygon\Math\Vec3;
+use PHPolygon\Rendering\Color;
 use PHPolygon\Rendering\Command\SetAmbientLight;
 use PHPolygon\Rendering\Command\SetSky;
 use PHPolygon\Rendering\RenderCommandList;
@@ -213,6 +216,66 @@ final class DayNightSystemTest extends TestCase
             $storm['ambient']->intensity,
             'a full storm should dim the ambient light',
         );
+    }
+
+    /** Runs $frames updates of $dt and returns the SetSky of a final render. */
+    private function skyAfter(World $world, DayNightSystem $system, RenderCommandList $list, int $frames, float $dt): SetSky
+    {
+        for ($i = 0; $i < $frames; $i++) {
+            $system->update($world, $dt);
+        }
+        $list->clear();
+        $system->render($world);
+        return $list->ofType(SetSky::class)[0];
+    }
+
+    /**
+     * The cloud field moves by speed × dt per frame. It used to be drawn at
+     * time × speed, so after an hour a small gust moved it by thousands of
+     * units in one frame.
+     */
+    public function testCloudDriftIsIntegratedSoGustsDoNotJumpTheField(): void
+    {
+        $world = new World();
+        $world->createEntity()->attach(new DayNightCycle(timeOfDay: 0.5, dayDuration: 3600.0));
+        $wind = new Wind();
+        $wind->intensity = 0.5;                        // 1 + 0.5·6 = 4 units/s
+        $world->createEntity()->attach($wind);
+        $list = new RenderCommandList();
+        $system = new DayNightSystem($list);
+
+        $hour = $this->skyAfter($world, $system, $list, 72000, 0.05);   // one real hour
+        $this->assertEqualsWithDelta(4.0 * 3600.0, $hour->cloudDrift(), 1e-3);
+
+        $wind->intensity = 0.6;                        // a gust: 4.6 units/s
+        $next = $this->skyAfter($world, $system, $list, 1, 0.05);
+        $this->assertEqualsWithDelta(4.6 * 0.05, $next->cloudDrift() - $hour->cloudDrift(), 1e-6,
+            'one frame moves the clouds by the new speed × dt, not by time × Δspeed');
+    }
+
+    public function testCloudDriftRunsInRealTimeRegardlessOfDayLength(): void
+    {
+        $drift = function (float $dayDuration): float {
+            $world = new World();
+            $world->createEntity()->attach(new DayNightCycle(timeOfDay: 0.5, dayDuration: $dayDuration));
+            $list = new RenderCommandList();
+            $system = new DayNightSystem($list);
+            return $this->skyAfter($world, $system, $list, 600, 0.05)->cloudDrift();  // 30 s
+        };
+
+        // No Wind entity → 1.5 units per real second, whatever the day length.
+        $this->assertEqualsWithDelta(45.0, $drift(600.0), 1e-6);
+        $this->assertEqualsWithDelta(45.0, $drift(3600.0), 1e-6);
+    }
+
+    public function testSetSkyFallsBackToTimeTimesSpeed(): void
+    {
+        $base = [new Vec3(0.0, 1.0, 0.0), new Color(1, 1, 1), 1.0, new Color(0, 0, 1), new Color(1, 1, 1), new Color(0, 0, 0)];
+        $legacy = new SetSky(...$base, cloudWindSpeed: 2.0, time: 10.0);
+        $this->assertEqualsWithDelta(20.0, $legacy->cloudDrift(), 1e-9);
+
+        $integrated = new SetSky(...$base, cloudWindSpeed: 2.0, time: 10.0, cloudOffset: 7.5);
+        $this->assertEqualsWithDelta(7.5, $integrated->cloudDrift(), 1e-9);
     }
 
     public function testAmbientFallsLessThanDirectSun(): void

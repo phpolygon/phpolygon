@@ -38,6 +38,12 @@ class WeatherSystem extends AbstractSystem
             break;
         }
 
+        // Weather evolves on its own clock: real time × timeScale, so a scene
+        // with a longer day can slow it to the pace of its day (see
+        // Weather::timeScaleForDay()). Lightning below stays in real time.
+        $realDt = $dt;
+        $dt *= max(0.0, $weather->timeScale);
+
         $weather->stateTimer += $dt;
 
         // --- Temperature from season + time-of-day ---
@@ -101,9 +107,9 @@ class WeatherSystem extends AbstractSystem
         if ($weather->stormIntensity < 0.01) $weather->stormIntensity = 0.0;
 
         // --- Lightning (during storms) ---
-        $weather->lightningFlash *= max(0.0, 1.0 - 8.0 * $dt); // Rapid decay
+        $weather->lightningFlash *= max(0.0, 1.0 - 8.0 * $realDt); // Rapid decay
         if ($weather->stormIntensity > 0.3) {
-            $weather->lightningTimer += $dt;
+            $weather->lightningTimer += $realDt;
             // Random interval: 3–10 seconds, shorter in intense storms
             $interval = 3.0 + (1.0 - $weather->stormIntensity) * 7.0;
             if ($weather->lightningTimer >= $interval) {
