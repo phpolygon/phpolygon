@@ -23,6 +23,8 @@
 #   TYPE           a build type from build.json, or "all-types"   (default: full)
 #   VARIANT        build variant (e.g. base, steam)    (default: steam)
 #   SIGN_MAC       1 | 0  ad-hoc sign macOS bundles     (default: 1)
+#   MAC_HARDENED   1 | 0  sign the macOS runtime with the hardened runtime flag
+#                  (default: 0; the JIT/library entitlements are always embedded)
 #   PHP_VERSION    micro.sfx PHP runtime version        (default: 8.5)
 #   SPC_REPO       static-php-cli releases repo         (default: hmennen90/static-php-cli)
 #   NONINTERACTIVE 1 to force env-driven mode even with a TTY
@@ -51,6 +53,25 @@ PLATFORMS="${PLATFORMS:-all}"
 TYPE="${TYPE:-full}"
 VARIANT="${VARIANT:-steam}"
 SIGN_MAC="${SIGN_MAC:-1}"
+MAC_HARDENED="${MAC_HARDENED:-0}"
+# Entitlements embedded into the signed macOS runtime: JIT (OPcache tracing JIT
+# maps executable memory - MAP_JIT on arm64, writable+executable pages on x86_64)
+# and loading third-party-signed dylibs next to the binary.
+MAC_ENTITLEMENTS="/tmp/phpolygon-entitlements.plist"
+cat > "$MAC_ENTITLEMENTS" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>com.apple.security.cs.allow-jit</key>
+    <true/>
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <true/>
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+</dict>
+</plist>
+PLIST
 UPLOAD="${UPLOAD:-}"   # space-separated Steam upload target names, or empty
 PHP_VERSION="${PHP_VERSION:-8.5}"
 # Release is keyed by MAJOR.MINOR (tag runtime-php8.5). Normalize a full patch
@@ -317,10 +338,19 @@ prefetch_runtime() {
     else
         echo "  cached: $key/micro.sfx"
     fi
-    # Sign the bare runtime BEFORE the PHAR is appended (see header / signing note).
+    # Sign the bare runtime BEFORE the launcher is appended (see header / signing
+    # note). The entitlements let OPcache's JIT map executable memory, and let the
+    # runtime load libraries signed by someone else (libsteam_api.dylib) - both
+    # only matter under the hardened runtime (MAC_HARDENED=1), but cost nothing
+    # without it.
     if [[ "$target" == macos-* ]] && [ "$SIGN_MAC" = "1" ]; then
-        echo "  ad-hoc signing runtime $key/micro.sfx"
-        rcodesign sign "$sfx" >/dev/null 2>&1 || echo "  ! rcodesign failed on $sfx"
+        echo "  ad-hoc signing runtime $key/micro.sfx (hardened runtime: ${MAC_HARDENED})"
+        local -a sign_args=()
+        [ "$MAC_HARDENED" = "1" ] && sign_args+=(--code-signature-flags runtime)
+        if ! rcodesign sign --entitlements-xml-file "$MAC_ENTITLEMENTS" "${sign_args[@]}" "$sfx" >/dev/null 2>&1 \
+            && ! rcodesign sign --entitlements-xml-path "$MAC_ENTITLEMENTS" "${sign_args[@]}" "$sfx" >/dev/null 2>&1; then
+            echo "  ${C_R}! rcodesign failed on $sfx${C_0}"; return 1
+        fi
     fi
     if [ "$target" = "windows-x86_64" ] && [ ! -f "${dir}/vulkan-1.dll" ]; then
         fetch_zip_member "vulkan-1-dll-${VARIANT}-${PHP_VERSION}-${os}.zip" "${dir}/vulkan-1.dll" \
@@ -373,7 +403,7 @@ mac_sig_status() {
         local se me
         se="$(echo "$info" | grep -m1 macho_signature_end_offset | grep -oE '[0-9]+' | head -1)"
         me="$(echo "$info" | grep -m1 macho_end_offset | grep -oE '[0-9]+' | head -1)"
-        echo "signed(+$(( (${me:-0}-${se:-0})/1024/1024 ))MB phar)"
+        echo "signed(+$(( (${me:-0}-${se:-0})/1024 ))KB payload)"
     else echo "unsigned"; fi
 }
 human_size() { local b; b="$(du -sb "$1" 2>/dev/null | cut -f1)"; awk -v b="${b:-0}" 'BEGIN{printf "%.0fMB", b/1048576}'; }

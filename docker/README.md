@@ -33,7 +33,25 @@ order matters: the image signs the **bare `micro.sfx` runtime first**, then
 `phpolygon build` appends the PHAR. The final layout is `[signed Mach-O][PHAR]` -
 the signature covers the runtime, the PHAR is trailing data that phpmicro reads
 from the end. This is the only order that yields a binary that is both signed and
-runnable. The build verifies it and prints e.g. `PHAR trailing data: 36 MB`.
+runnable. The build verifies it and prints the trailing payload size.
+
+Since the shared-PHAR layout the trailing payload of a macOS binary is only a
+small launcher; the PHAR itself is `Contents/Resources/<name>.phar`, one file for
+the arm64 and the x86_64 binary of the universal bundle, with its assets already
+extracted next to it - the game never writes into the bundle (logs:
+`~/Library/Logs/<name>/`, saves: `~/Library/Application Support/<identifier>/`).
+The runtime is signed with JIT/library entitlements (`allow-jit`,
+`allow-unsigned-executable-memory`, `disable-library-validation`);
+`MAC_HARDENED=1` also sets the hardened-runtime flag. The universal bundle's shell
+launcher (`macos-launcher.sh`, installed in the image; a game overrides it with
+build.json `platforms.macos.launcher`) picks arm64 Rosetta-safe, forwards
+SIGTERM and writes `~/Library/Logs/<name>/launch.log` (chosen binary, stderr,
+exit status - 137 means the system killed it, e.g. over its signature). The
+upload copies all depots to `STEAM_STAGE` (container filesystem, default
+`/tmp/phpolygon-steam-content`), sets and verifies the executable bits there,
+and aborts when a binary or `.dylib` lacks its arm64/x86_64 slice. Rebuild the
+image after updating the engine (the launcher template is baked in).
+
 
 > Do **not** "improve" this into post-build bundle/binary signing. Signing the
 > final binary rewrites the Mach-O and truncates the appended PHAR (observed

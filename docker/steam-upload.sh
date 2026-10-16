@@ -69,27 +69,104 @@ steam_prompt_and_save() {
     echo "  ${C_G}saved${C_0} -> $STEAM_CONFIG"
 }
 
-# Build build/macos-universal-<suffix>/<App>.app from the arm64 + x86_64 bundles.
+# Upload content is staged on the container's own filesystem: on a Windows or
+# macOS host /app is a bind mount (9p/virtiofs) where chmod may not stick, and
+# the Steam depot takes the executable bits from what it reads here.
+STEAM_STAGE="${STEAM_STAGE:-/tmp/phpolygon-steam-content}"
+# The universal bundle's launcher: the game's own (build.json
+# platforms.macos.launcher) or the harness default.
+PHPOLYGON_MAC_LAUNCHER="${PHPOLYGON_MAC_LAUNCHER:-/usr/local/share/phpolygon/macos-launcher.sh}"
+
+# Copy the Windows + Linux packages into $STEAM_STAGE and build the universal
+# macOS bundle there; set and verify the executable bits.
+steam_stage_content() {
+    local suffix="$1" d
+    rm -rf "$STEAM_STAGE"; mkdir -p "$STEAM_STAGE"
+    for d in "windows-x86_64-${suffix}" "linux-x86_64-${suffix}"; do
+        cp -R "build/${d}" "${STEAM_STAGE}/${d}" || return 1
+    done
+    steam_make_universal "$suffix" || return 1
+
+    local lin="${STEAM_STAGE}/linux-x86_64-${suffix}/${APP_NAME}/${APP_NAME}"
+    local mac="${STEAM_STAGE}/macos-universal-${suffix}/${APP_NAME}.app/Contents/MacOS"
+    chmod 0755 "$lin" "$mac"/* || return 1
+    local f bad=0
+    for f in "$lin" "$mac"/*; do
+        [ -x "$f" ] || { echo "  ${C_R}not executable after chmod: $f${C_0}"; bad=1; }
+    done
+    [ "$bad" = "0" ] || return 1
+    echo "  staged upload content: $STEAM_STAGE (executable bits verified)"
+}
+
+# Build $STEAM_STAGE/macos-universal-<suffix>/<App>.app from the arm64 + x86_64 bundles.
 steam_make_universal() {
     local suffix="$1"
     local arm="build/macos-arm64-${suffix}/${APP_NAME}.app"
     local x86="build/macos-x86_64-${suffix}/${APP_NAME}.app"
-    local uni="build/macos-universal-${suffix}/${APP_NAME}.app"
+    local uni="${STEAM_STAGE}/macos-universal-${suffix}/${APP_NAME}.app"
     [ -d "$arm" ] || { echo "  ${C_R}missing $arm${C_0}"; return 1; }
     [ -d "$x86" ] || { echo "  ${C_R}missing $x86${C_0}"; return 1; }
 
-    rm -rf "build/macos-universal-${suffix}"
-    cp -R "build/macos-arm64-${suffix}" "build/macos-universal-${suffix}"
+    rm -rf "${STEAM_STAGE}/macos-universal-${suffix}"
+    mkdir -p "${STEAM_STAGE}/macos-universal-${suffix}"
+    # The arm64 bundle brings everything shared: Contents/Resources with the one
+    # PHAR (the binaries only carry a launcher), its pre-extracted assets and the
+    # external resources. Only the x86_64 binary is taken from the other bundle.
+    cp -R "$arm" "$uni" || return 1
     local mac="${uni}/Contents/MacOS"
     mv "${mac}/${APP_NAME}" "${mac}/${APP_NAME}-arm64"
     cp "${x86}/Contents/MacOS/${APP_NAME}" "${mac}/${APP_NAME}-x86_64"
-    cat > "${mac}/${APP_NAME}" <<LAUNCHER
-#!/bin/bash
-DIR="\$(dirname "\$0")"
-if [ "\$(uname -m)" = "arm64" ]; then exec "\$DIR/${APP_NAME}-arm64" "\$@"; else exec "\$DIR/${APP_NAME}-x86_64" "\$@"; fi
-LAUNCHER
-    chmod +x "${mac}/${APP_NAME}" "${mac}/${APP_NAME}-arm64" "${mac}/${APP_NAME}-x86_64"
-    echo "  universal bundle: build/macos-universal-${suffix}/${APP_NAME}.app"
+
+    local launcher; launcher="$(jq -r '.platforms.macos.launcher // empty' build.json 2>/dev/null)"
+    if [ -n "$launcher" ]; then
+        [ -f "$launcher" ] || { echo "  ${C_R}build.json platforms.macos.launcher not found: $launcher${C_0}"; return 1; }
+    else
+        launcher="$PHPOLYGON_MAC_LAUNCHER"
+        # An image older than the game's engine: take the template from vendor/.
+        [ -f "$launcher" ] || launcher="vendor/phpolygon/phpolygon/docker/macos-launcher.sh"
+        [ -f "$launcher" ] || { echo "  ${C_R}launcher template missing (rebuild the image)${C_0}"; return 1; }
+    fi
+    cp "$launcher" "${mac}/${APP_NAME}"
+    sed -i 's/\r$//' "${mac}/${APP_NAME}"   # a script checked out on Windows
+    bash -n "${mac}/${APP_NAME}" || { echo "  ${C_R}launcher has a syntax error: $launcher${C_0}"; return 1; }
+    echo "  launcher: $launcher"
+
+    chmod 0755 "${mac}/${APP_NAME}" "${mac}/${APP_NAME}-arm64" "${mac}/${APP_NAME}-x86_64"
+    macho_require_arch "${mac}/${APP_NAME}-arm64" arm64 || return 1
+    macho_require_arch "${mac}/${APP_NAME}-x86_64" x86_64 || return 1
+    local lib
+    while IFS= read -r -d '' lib; do
+        macho_require_arch "$lib" arm64 || return 1
+        macho_require_arch "$lib" x86_64 || return 1
+    done < <(find "$uni" -name '*.dylib' -print0)
+    echo "  universal bundle: ${uni}"
+}
+# CPU architectures of a Mach-O file (thin or fat), space-separated.
+_macho_cpu_name() { case "$1" in 0100000c) echo arm64 ;; 01000007) echo x86_64 ;; *) echo "cpu-$1" ;; esac; }
+macho_archs() {
+    local f="$1" magic n i cpu
+    magic="$(od -An -tx1 -N4 "$f" 2>/dev/null | tr -d ' \n')"
+    case "$magic" in
+        cafebabe)   # fat header, big-endian: nfat_arch, then 20-byte entries starting with cputype
+            n=$((16#$(od -An -tx1 -j4 -N4 "$f" | tr -d ' \n')))
+            for ((i = 0; i < n; i++)); do
+                _macho_cpu_name "$(od -An -tx1 -j$((8 + 20 * i)) -N4 "$f" | tr -d ' \n')"
+            done | tr '\n' ' ' ;;
+        cffaedfe)   # thin 64-bit, little-endian cputype
+            cpu="$(od -An -tx1 -j4 -N4 "$f" | tr -d ' \n')"
+            _macho_cpu_name "${cpu:6:2}${cpu:4:2}${cpu:2:2}${cpu:0:2}" ;;
+        *) echo "not-mach-o" ;;
+    esac
+}
+
+macho_require_arch() {
+    local f="$1" want="$2" have
+    have="$(macho_archs "$f")"
+    case " $have " in
+        *" $want "*) return 0 ;;
+    esac
+    echo "  ${C_R}${f}: no ${want} slice (has: ${have})${C_0}"
+    return 1
 }
 
 # Pre-deploy guard: verify every runtime file a Steam build needs is actually
@@ -98,9 +175,9 @@ LAUNCHER
 # so we ABORT the deploy instead of uploading a broken build.
 steam_verify_files() {
     local suffix="$1" miss=0
-    local win="build/windows-x86_64-${suffix}/${APP_NAME}"
-    local lin="build/linux-x86_64-${suffix}/${APP_NAME}"
-    local mac="build/macos-universal-${suffix}/${APP_NAME}.app"
+    local win="${STEAM_STAGE}/windows-x86_64-${suffix}/${APP_NAME}"
+    local lin="${STEAM_STAGE}/linux-x86_64-${suffix}/${APP_NAME}"
+    local mac="${STEAM_STAGE}/macos-universal-${suffix}/${APP_NAME}.app"
 
     _req()  { [ -e "$1" ] || { echo "  ${C_R}MISSING required file: $1${C_0}"; miss=1; }; }
     _reqf() { [ -n "$(find "$1" -name "$2" -print -quit 2>/dev/null)" ] \
@@ -140,7 +217,7 @@ steam_gen_vdf() {
 {
     "AppID" "${appid}"
     "Desc" "${APP_NAME} v${VERSION} (${target}) - Windows x64, Linux x64, macOS Universal"
-    "ContentRoot" "/app/build"
+    "ContentRoot" "${STEAM_STAGE}"
     "BuildOutput" "/app/steam/output"
     "SetLive" "${setlive}"
     "Depots"
@@ -197,7 +274,7 @@ steam_upload() {
     done
     [ "$miss" = "1" ] && { echo "  build the '${btype}' type for all desktop targets first."; return 1; }
 
-    steam_make_universal "$suffix" || return 1
+    steam_stage_content "$suffix" || return 1
     steam_verify_files "$suffix" || return 1
 
     mkdir -p /app/steam/output
