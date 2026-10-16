@@ -178,12 +178,12 @@ final class ChatterboxSynthesizerTest extends TestCase
     {
         putenv('PHPOLYGON_SPEECH_WORKERS=cuda,cpu');
         putenv('PHPOLYGON_SPEECH_CPU_THREADS=2');
-        $plan = ChatterboxSynthesizer::fromOptions('/game', workers: 4)->workerPlan();
+        $plan = ChatterboxSynthesizer::fromOptions('/game', workers: 4, freeMemory: static fn (): ?int => null)->workerPlan();
         self::assertSame([['device' => 'cuda', 'threads' => null, 'remote' => null], ['device' => 'cpu', 'threads' => 2, 'remote' => null]], $plan);
 
         putenv('PHPOLYGON_SPEECH_WORKERS=2');
         putenv('PHPOLYGON_SPEECH_DEVICE=mps');
-        self::assertSame(['mps', 'mps'], array_column(ChatterboxSynthesizer::fromOptions('/game', gpu: true)->workerPlan(), 'device'));
+        self::assertSame(['mps', 'mps'], array_column(ChatterboxSynthesizer::fromOptions('/game', gpu: true, freeMemory: static fn (): ?int => null)->workerPlan(), 'device'));
 
         putenv('PHPOLYGON_SPEECH_WORKERS=cuda,tpu');
         $this->expectExceptionMessage('PHPOLYGON_SPEECH_WORKERS: unknown device "tpu"');
@@ -198,7 +198,7 @@ final class ChatterboxSynthesizerTest extends TestCase
         ]);
         self::assertNotNull($config);
 
-        $plan = ChatterboxSynthesizer::fromConfig($config, '/game')->workerPlan();
+        $plan = ChatterboxSynthesizer::fromConfig($config, '/game', static fn (): ?int => null)->workerPlan();
         self::assertSame(['cuda', 'cpu'], array_column($plan, 'device'));
         self::assertSame([null, 5], array_column($plan, 'threads'));
     }

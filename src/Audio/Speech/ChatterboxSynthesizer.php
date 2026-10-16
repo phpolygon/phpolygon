@@ -91,9 +91,10 @@ final class ChatterboxSynthesizer implements SpeechSynthesizerInterface
         };
     }
 
-    public static function fromConfig(SpeechConfig $config, string $projectRoot): self
+    /** @param (callable(): ?int)|null $freeMemory free system RAM in bytes; null = measured */
+    public static function fromConfig(SpeechConfig $config, string $projectRoot, ?callable $freeMemory = null): self
     {
-        return self::fromOptions($projectRoot, $config->runner, $config->gpu, $config->workers, $config->device, $config->cpuThreads);
+        return self::fromOptions($projectRoot, $config->runner, $config->gpu, $config->workers, $config->device, $config->cpuThreads, $freeMemory);
     }
 
     /**
@@ -101,6 +102,7 @@ final class ChatterboxSynthesizer implements SpeechSynthesizerInterface
      * options, overridden by PHPOLYGON_SPEECH_RUNNER / _GPU / _WORKERS / _DEVICE / _CPU_THREADS.
      *
      * @param int|list<string> $workers
+     * @param (callable(): ?int)|null $freeMemory free system RAM in bytes; null = measured
      */
     public static function fromOptions(
         string $projectRoot,
@@ -109,6 +111,7 @@ final class ChatterboxSynthesizer implements SpeechSynthesizerInterface
         int|array $workers = 1,
         string $device = SpeechConfig::DEVICE_AUTO,
         ?int $cpuThreads = null,
+        ?callable $freeMemory = null,
     ): self {
         $env = static function (string $name): ?string {
             $value = getenv($name);
@@ -127,6 +130,7 @@ final class ChatterboxSynthesizer implements SpeechSynthesizerInterface
             workers: $envWorkers !== null ? SpeechConfig::parseWorkers($envWorkers, 'PHPOLYGON_SPEECH_WORKERS') : $workers,
             device: $env('PHPOLYGON_SPEECH_DEVICE') ?? $device,
             cpuThreads: $envThreads !== null ? (int) $envThreads : $cpuThreads,
+            freeMemory: $freeMemory,
         );
     }
 

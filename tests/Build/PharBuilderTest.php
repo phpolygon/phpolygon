@@ -518,7 +518,8 @@ class PharBuilderTest extends TestCase
         $phar = $this->runnablePhar($install . '/game.phar');
 
         $first = $this->runPhar($phar);
-        $this->assertSame(str_replace('\\', '/', $install . '/assets'), $first['assets']);
+        // realpath: on macOS the temp dir /var/folders is a symlink into /private/var
+        $this->assertSame(str_replace('\\', '/', (string) realpath($install . '/assets')), str_replace('\\', '/', (string) realpath($first['assets'])));
         $this->assertSame('fake-image', file_get_contents($install . '/assets/sprites/hero.png'));
         $this->assertStringContainsString('Extracted ', (string) file_get_contents($install . '/game.log'));
 
