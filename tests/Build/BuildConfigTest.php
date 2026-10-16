@@ -223,6 +223,31 @@ class BuildConfigTest extends TestCase
         BuildConfig::load($this->tempDir);
     }
 
+    public function testTrimPythonEntriesDefaultToTheSafeGroups(): void
+    {
+        file_put_contents($this->tempDir . '/build.json', json_encode(['resources' => ['trimPython' => [
+            ['path' => 'runtimes/*/python'],
+            ['path' => 'py', 'groups' => ['default', 'network'], 'remove' => ['{lib}/xml'], 'keep' => ['{lib}/idlelib/x.py']],
+        ]]]));
+
+        $config = BuildConfig::load($this->tempDir);
+
+        $this->assertSame([
+            ['path' => 'runtimes/*/python', 'groups' => ['default'], 'remove' => [], 'keep' => []],
+            ['path' => 'py', 'groups' => ['default', 'network'], 'remove' => ['{lib}/xml'], 'keep' => ['{lib}/idlelib/x.py']],
+        ], $config->trimPython);
+    }
+
+    public function testTrimPythonRejectsUnknownGroups(): void
+    {
+        file_put_contents($this->tempDir . '/build.json', json_encode(['resources' => ['trimPython' => [
+            ['path' => 'py', 'groups' => ['everything']],
+        ]]]));
+
+        $this->expectException(\InvalidArgumentException::class);
+        BuildConfig::load($this->tempDir);
+    }
+
     public function testMeshZlibOutOfRangeIsRejected(): void
     {
         file_put_contents($this->tempDir . '/build.json', json_encode(['assets' => ['meshZlib' => 12]]));

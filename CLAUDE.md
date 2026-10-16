@@ -796,6 +796,32 @@ The combined executable ignores php.ini files, and startup-only settings (OPcach
 
 `@php` resolves to `PHPOLYGON_HOOK_PHP`, else the PHP running the build when it has every `requires` function, else the game's static runtime (micro.sfx for the host, variant `runtimeVariant`) wrapped as a runner taking `[-d key=value]... script [args]` with the runtime's libraries (Windows DLLs, Steam API) copied next to it - so a hook can use the shipped game's extensions inside a build container whose PHP lacks them. Hooks see `PHPOLYGON_BUILD_PLATFORM/ARCH/VARIANT/TYPE`, and `PHPOLYGON_HOOK_PHP` names the interpreter of an `@php` hook: start further PHP processes with it, because `PHP_BINARY` is empty inside a micro runtime.
 
+### Embedded Python runtimes
+
+A game that runs player code in a shipped CPython (python-build-standalone, Windows `Lib/`+`DLLs/`
+or Unix `lib/python3.X/`) slims it with `PHPolygon\Build\PythonRuntimeTrimmer::trim($root, $groups,
+$remove, $keep, $dryRun)`, or declaratively for external resources in the package (project copy untouched):
+
+```json
+"resources": { "external": ["runtimes"],
+  "trimPython": [ { "path": "runtimes/*/python", "groups": ["default", "network"], "remove": [], "keep": [] } ] }
+```
+
+- `default` = `tooling` (pip, ensurepip, venv, Scripts, bin/pip|idle|pydoc|-config), `gui` (tkinter,
+  idlelib, turtle, Tcl/Tk, pythonw), `tests` (stdlib test dirs, `_test*`/`xx*` modules), `devel`
+  (include, libs, pkgconfig, config-*, man pages), `bytecode-variants` (`*.opt-1/2.pyc`; plain `.pyc`
+  stay, a `-B` run could not rebuild them). Nothing a script run imports.
+- Opt-in: `network` (OpenSSL, `_ssl`, `_hashlib` - `hashlib` keeps its built-in md5/sha*/blake2),
+  `sqlite`, `docs` (`pydoc_data`, i.e. `help()` topics).
+- Patterns: relative to the Python root, `*`/`?` within a segment, `**` across, `{lib}`/`{dynload}` for
+  the layout's stdlib/extension dirs, **case-sensitive** (Unix `lib/thread3*` vs Windows
+  `Lib/threading.py`); `keep` wins, also inside a directory a removal names.
+- Measured (3.14.8, Windows): 61.6 MB -> 36.0 MB `default`, 23.9 MB with `network`+`sqlite`+`docs`;
+  Linux/macOS -20.7 / -19.5 MB `default`. Trimmed interpreter passes `-I -S -B` imports of json, re,
+  hashlib, random, decimal, unittest, threading, ...
+- A step that replaces the runtimes after packaging (e.g. per-target placement) bypasses
+  `trimPython` - such a game calls `trim()` itself where it unpacks the runtime.
+
 ### Native upscaler runtimes
 
 `build.json` `upscalers` ships FSR 3 / DLSS runtimes next to the binary. Details: `docs/build-native-upscalers.md`.

@@ -160,6 +160,35 @@ class PlatformPackagerTest extends TestCase
         $this->assertFileExists($result . '/resources/audio/music.ogg');
     }
 
+    public function testExternalPythonRuntimeIsTrimmedInThePackageOnly(): void
+    {
+        $python = $this->tempDir . '/runtimes/windows-x86_64/python';
+        foreach (['Lib/os.py', 'Lib/threading.py', 'Lib/ensurepip/__init__.py', 'Lib/site-packages/pip/__init__.py', 'python.exe'] as $file) {
+            @mkdir(dirname($python . '/' . $file), 0755, true);
+            file_put_contents($python . '/' . $file, 'x');
+        }
+        file_put_contents($this->tempDir . '/build.json', json_encode([
+            'name' => 'PyGame',
+            'resources' => [
+                'external' => ['runtimes'],
+                'trimPython' => [['path' => 'runtimes/*/python']],
+            ],
+        ]));
+
+        $config = BuildConfig::load($this->tempDir);
+        $binaryPath = $this->tempDir . '/test-binary';
+        file_put_contents($binaryPath, 'fake');
+        $result = (new PlatformPackager($config))->package($binaryPath, $this->outputDir, 'windows');
+
+        $shipped = $result . '/runtimes/windows-x86_64/python';
+        $this->assertFileExists($shipped . '/python.exe');
+        $this->assertFileExists($shipped . '/Lib/threading.py');
+        $this->assertDirectoryDoesNotExist($shipped . '/Lib/ensurepip');
+        $this->assertDirectoryDoesNotExist($shipped . '/Lib/site-packages/pip');
+        // The project's runtime keeps its tooling.
+        $this->assertDirectoryExists($python . '/Lib/ensurepip');
+    }
+
     public function testThirdPartyNoticesLandNextToTheExe(): void
     {
         $config = BuildConfig::load($this->tempDir);

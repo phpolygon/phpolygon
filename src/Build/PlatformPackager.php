@@ -206,6 +206,14 @@ XML;
             FileTree::copy($src, $dst);
         }
 
+        // build.json resources.trimPython: slim embedded Python installs in the
+        // package only - the project's copies keep pip and friends.
+        foreach ($this->config->trimPython as $trim) {
+            foreach (glob($targetDir . '/' . $trim['path'], GLOB_ONLYDIR) ?: [] as $pythonRoot) {
+                PythonRuntimeTrimmer::trim($pythonRoot, $trim['groups'], $trim['remove'], $trim['keep']);
+            }
+        }
+
         // Copy engine branding assets (splash screen logo) so the engine
         // can find them at runtime via PHPOLYGON_PATH_RESOURCES/branding/.
         $engineBranding = __DIR__ . '/../../resources/branding';

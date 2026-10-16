@@ -80,6 +80,17 @@ class BuildConfig
     /** @var array<string> Resource dirs that stay external (not in PHAR) */
     public array $externalResources = [];
 
+    /**
+     * build.json `resources.trimPython`: embedded Python installs among the
+     * external resources to trim in the packaged game, see {@see PythonRuntimeTrimmer}.
+     * `path` is a glob relative to the package root (e.g. `runtimes/linux-x86_64/python`,
+     * wildcards allowed),
+     * `groups` defaults to `["default"]`.
+     *
+     * @var list<array{path: string, groups: list<string>, remove: list<string>, keep: list<string>}>
+     */
+    public array $trimPython = [];
+
     /** @var array<string, array<string, mixed>> Platform-specific config */
     public array $platforms = [];
 
@@ -260,6 +271,11 @@ class BuildConfig
             $external = $resources['external'];
             $this->externalResources = $external;
         }
+        if (isset($resources['trimPython']) && is_array($resources['trimPython'])) {
+            foreach ($resources['trimPython'] as $entry) {
+                $this->trimPython[] = self::parsePythonTrim($entry);
+            }
+        }
         if (isset($data['platforms']) && is_array($data['platforms'])) {
             /** @var array<string, array<string, mixed>> $platforms */
             $platforms = $data['platforms'];
@@ -283,6 +299,37 @@ class BuildConfig
 
         $this->upscalers = UpscalerConfig::fromBuildJson($data['upscalers'] ?? null, $this->phpIni);
         $this->speech = SpeechConfig::fromBuildJson($data['speech'] ?? null);
+    }
+
+    /**
+     * One `resources.trimPython` entry: `{"path": "...", "groups": [...], "remove": [...], "keep": [...]}`.
+     *
+     * @return array{path: string, groups: list<string>, remove: list<string>, keep: list<string>}
+     * @throws \InvalidArgumentException on a malformed entry or an unknown group
+     */
+    private static function parsePythonTrim(mixed $entry): array
+    {
+        if (!is_array($entry) || !is_string($entry['path'] ?? null) || $entry['path'] === '') {
+            throw new \InvalidArgumentException('build.json resources.trimPython entries need a "path": ' . json_encode($entry));
+        }
+        $lists = [];
+        foreach (['groups', 'remove', 'keep'] as $key) {
+            $values = $entry[$key] ?? ($key === 'groups' ? ['default'] : []);
+            if (!is_array($values)) {
+                throw new \InvalidArgumentException("build.json resources.trimPython {$key} must be a list of strings");
+            }
+            $list = [];
+            foreach ($values as $value) {
+                if (!is_string($value) || $value === '') {
+                    throw new \InvalidArgumentException("build.json resources.trimPython {$key} must be a list of strings");
+                }
+                $list[] = $value;
+            }
+            $lists[$key] = $list;
+        }
+        PythonRuntimeTrimmer::expandGroups($lists['groups']);
+
+        return ['path' => $entry['path'], 'groups' => $lists['groups'], 'remove' => $lists['remove'], 'keep' => $lists['keep']];
     }
 
     /**
@@ -366,6 +413,7 @@ class BuildConfig
             'phar.additionalRequires' => $this->additionalRequires,
             'phar.compression' => $this->pharCompression,
             'resources.external' => $this->externalResources,
+            'resources.trimPython' => $this->trimPython,
             'assets.meshes' => $this->meshAssets,
             'assets.meshZlib' => $this->meshZlibLevel,
             'platforms' => $this->platforms,
