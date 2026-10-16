@@ -19,6 +19,11 @@ namespace PHPolygon\Audio\Speech;
  * (~{@see self::CPU_WORKER_RAM} per CPU worker, ~{@see self::GPU_WORKER_RAM} per
  * GPU worker) and workers are dropped, CPU first, with a warning when it is short.
  *
+ * Every job carries seed, exaggeration and cfg weight; the fields of
+ * {@see SpeechParams} (sampling, max tokens, decoder steps, watermark, reference
+ * excerpt and windows) join the job line only when set, so the worker runs with
+ * the model's defaults otherwise ({@see self::parameterSchema()}).
+ *
  * Environment overrides: PHPOLYGON_SPEECH_RUNNER (auto|native|docker),
  * PHPOLYGON_SPEECH_GPU (1/0), PHPOLYGON_SPEECH_PYTHON (interpreter of a ready environment),
  * PHPOLYGON_SPEECH_DEVICE (auto|cuda|cpu|mps), PHPOLYGON_SPEECH_WORKERS (`2` or
@@ -202,6 +207,19 @@ final class ChatterboxSynthesizer implements SpeechSynthesizerInterface
         return $this->device === SpeechConfig::DEVICE_AUTO && $this->gpu ? 'cuda' : $this->device;
     }
 
+    /**
+     * Every parameter a voice can set, for editor UIs: name, type (float|int|bool),
+     * model default, min, max, step, group (voice|sampling|reference|decoder|output)
+     * and description. The same table validates build.json ({@see SpeechParams::FIELDS}).
+     * Chatterbox 0.1.7 has no speaking-rate control, so there is no `speed`.
+     *
+     * @return list<array{name: string, type: string, default: int|float|bool|null, min: int|float|null, max: int|float|null, step: int|float|null, group: string, description: string}>
+     */
+    public static function parameterSchema(): array
+    {
+        return SpeechParams::schema();
+    }
+
     public function id(): string
     {
         return 'chatterbox-multilingual/' . self::VERSION;
@@ -261,7 +279,7 @@ final class ChatterboxSynthesizer implements SpeechSynthesizerInterface
                 'seed' => $job->seed,
                 'exaggeration' => $job->exaggeration,
                 'cfg_weight' => $job->cfgWeight,
-            ];
+            ] + ($job->params?->toWorker() ?? []);
             if ($plan[$worker]['remote'] === null) {
                 $line['reference'] = $job->reference !== null ? $this->workerPath($job->reference, $runner) : null;
                 $line['out'] = $this->workerPath($job->wavPath, $runner);

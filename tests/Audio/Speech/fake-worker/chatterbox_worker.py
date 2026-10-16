@@ -3,7 +3,9 @@
 // PHP, not Python: a stand-in for tools/speech/chatterbox_worker.py in tests. The
 // synthesizer runs it with PHPOLYGON_SPEECH_PYTHON = PHP_BINARY, and as the "ssh"
 // client of remote workers. It speaks the worker protocol (JSON jobs on stdin, one
-// JSON result per job on stdout) and writes "worker|text|reference" as the WAV.
+// JSON result per job on stdout) and writes "worker|text|reference|p=<params>" as
+// the WAV (inline: "worker|text|reference|sent=0/1|p=<params>"); <params> = JSON
+// of the job's optional SpeechParams fields, in the order they arrived.
 //
 // Behaviour "name.delayMs.dieAfter.startExit":
 //   worker mode  --fake=<behaviour>, else env FAKE_SPEECH_<DEVICE> (e.g. FAKE_SPEECH_CPU)
@@ -65,6 +67,8 @@ while (($line = fgets(STDIN)) !== false) {
     }
     usleep($delay * 1000);
     $content = "{$name}|{$job['text']}|";
+    $base = ['id', 'text', 'language', 'reference', 'reference_wav', 'out', 'seed', 'exaggeration', 'cfg_weight'];
+    $params = '|p=' . json_encode((object) array_diff_key($job, array_flip($base)), JSON_PRESERVE_ZERO_FRACTION);
     if ($inline) {
         $reference = $job['reference'];
         if (isset($job['reference_wav'])) {
@@ -74,10 +78,10 @@ while (($line = fgets(STDIN)) !== false) {
             echo json_encode(['id' => $job['id'], 'error' => "reference {$reference} never sent"]), "\n";
             continue;
         }
-        $content .= ($reference !== null ? $refs[$reference] : 'builtin') . '|sent=' . (isset($job['reference_wav']) ? 1 : 0);
+        $content .= ($reference !== null ? $refs[$reference] : 'builtin') . '|sent=' . (isset($job['reference_wav']) ? 1 : 0) . $params;
         echo json_encode(['id' => $job['id'], 'ok' => true, 'wav' => base64_encode($content)]), "\n";
     } else {
-        file_put_contents($job['out'], $content . ($job['reference'] ?? 'builtin'));
+        file_put_contents($job['out'], $content . ($job['reference'] ?? 'builtin') . $params);
         echo json_encode(['id' => $job['id'], 'ok' => true]), "\n";
     }
 }

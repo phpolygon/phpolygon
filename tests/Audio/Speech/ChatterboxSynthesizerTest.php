@@ -7,6 +7,7 @@ namespace PHPolygon\Tests\Audio\Speech;
 use PHPolygon\Audio\Speech\ChatterboxSynthesizer;
 use PHPolygon\Audio\Speech\SpeechConfig;
 use PHPolygon\Audio\Speech\SpeechJob;
+use PHPolygon\Audio\Speech\SpeechParams;
 use PHPolygon\Platform\SteamLanguage;
 use PHPUnit\Framework\TestCase;
 
@@ -273,6 +274,30 @@ final class ChatterboxSynthesizerTest extends TestCase
         foreach (array_merge($byWorker['gpu'], $byWorker['cpu']) as $parts) {
             self::assertContains($parts[2], [$refA, $refB, 'builtin']);
         }
+    }
+
+    public function testJobLinesCarryOnlyTheSetParamsLocallyAndInline(): void
+    {
+        $this->useFakeWorkers();
+        putenv('FAKE_SPEECH_CPU=local.30');
+        $params = new SpeechParams(temperature: 0.6, maxNewTokens: 300, cfmSteps: 12, referenceStart: 1.5, watermark: false);
+        $ref = $this->file('ref.wav', 'VOICE');
+        $jobs = [];
+        for ($i = 0; $i < 6; $i++) {
+            $jobs[] = new SpeechJob("j{$i}", "line {$i}", 'en', $ref, "{$this->dir}/j{$i}.wav", 0, 0.5, 0.5, $i === 0 ? null : $params);
+        }
+
+        $results = $this->synthesize(['cpu', 'ssh://remote.30@mac'], $jobs);
+
+        self::assertSame([], array_filter($results));
+        $expected = 'p={"temperature":0.6,"max_new_tokens":300,"cfm_steps":12,"reference_start":1.5,"watermark":false}';
+        $seen = [];
+        foreach ($jobs as $job) {
+            $parts = explode('|', (string) file_get_contents($job->wavPath));
+            $seen[$parts[0]] = true;
+            self::assertSame($job->params === null ? 'p={}' : $expected, $parts[count($parts) - 1], $job->id);
+        }
+        self::assertSame(['local', 'remote'], self::sorted(array_keys($seen)));
     }
 
     public function testADroppedRemoteWorkerHandsItsLineBack(): void

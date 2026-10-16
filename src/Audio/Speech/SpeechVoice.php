@@ -16,6 +16,7 @@ final readonly class SpeechVoice
      * @param string|null $reference project-relative WAV the voice is cloned from; null = the synthesizer's built-in voice
      * @param list<string> $keys fnmatch patterns of the line keys this voice speaks; [] = every line no other voice claims
      * @param VoiceProfile|null $profile post-processing through {@see \PHPolygon\Audio\Dsp\Voice\VoiceChain}; null = loudness only
+     * @param SpeechParams|null $params sampling, decoder, watermark and reference excerpt; null = the model's defaults
      */
     public function __construct(
         public string $name,
@@ -25,6 +26,7 @@ final readonly class SpeechVoice
         public float $exaggeration = 0.5,
         public float $cfgWeight = 0.5,
         public ?VoiceProfile $profile = null,
+        public ?SpeechParams $params = null,
     ) {}
 
     public function claims(string $key): bool
@@ -43,15 +45,22 @@ final readonly class SpeechVoice
         return $this->reference === null;
     }
 
-    /** Everything about the voice that changes its sound, as part of a line's cache key. */
+    /**
+     * Everything about the voice that changes its sound, as part of a line's cache key.
+     * Params join only when one is set, so voices without them keep their keys.
+     */
     public function fingerprint(string $referenceHash): string
     {
-        return hash('sha256', (string) json_encode([
+        $parts = [
             $referenceHash,
             $this->seed,
             $this->exaggeration,
             $this->cfgWeight,
             $this->profile?->fingerprint(),
-        ], JSON_PRESERVE_ZERO_FRACTION));
+        ];
+        if ($this->params !== null && !$this->params->isDefault()) {
+            $parts[] = $this->params->toArray();
+        }
+        return hash('sha256', (string) json_encode($parts, JSON_PRESERVE_ZERO_FRACTION));
     }
 }

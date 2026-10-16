@@ -7,7 +7,7 @@ namespace PHPolygon\Audio\Speech;
 /**
  * One synthesis request: speak $text in $language with the voice cloned from
  * $reference (null = the model's built-in voice) and write a WAV to $wavPath.
- * Paths are absolute.
+ * Paths are absolute. $params = the voice's fine controls; null = model defaults.
  */
 final readonly class SpeechJob
 {
@@ -20,5 +20,6 @@ final readonly class SpeechJob
         public int $seed,
         public float $exaggeration,
         public float $cfgWeight,
+        public ?SpeechParams $params = null,
     ) {}
 }

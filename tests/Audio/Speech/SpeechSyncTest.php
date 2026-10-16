@@ -157,6 +157,28 @@ final class SpeechSyncTest extends TestCase
         self::assertSame(SpeechStatus::Current, $again[0]->status);
     }
 
+    public function testVoiceParamsReachTheJobAndTheCacheKey(): void
+    {
+        $config = static fn (array $params): SpeechConfig => SpeechConfig::fromBuildJson([
+            'locales' => 'lang',
+            'output' => 'voice',
+            'keys' => ['dialog.intro'],
+            'voices' => ['narrator' => ['reference' => 'ref/narrator.wav', 'params' => $params]],
+        ]) ?? throw new \LogicException('no config');
+        $synthesizer = new FakeSynthesizer();
+        $sync = new SpeechSync($config(['temperature' => 0.5, 'referenceLength' => 4]), $this->dir, $synthesizer);
+
+        $sync->sync($sync->plan(['de']));
+
+        self::assertSame(['temperature' => 0.5, 'reference_length' => 4.0], $synthesizer->jobs[0]->params?->toWorker());
+        $same = (new SpeechSync($config(['temperature' => 0.5, 'referenceLength' => 4]), $this->dir, new FakeSynthesizer()))->plan(['de']);
+        self::assertSame(SpeechStatus::Current, $same[0]->status);
+        $changed = (new SpeechSync($config(['temperature' => 0.5, 'referenceLength' => 5]), $this->dir, new FakeSynthesizer()))->plan(['de']);
+        self::assertSame(SpeechStatus::Stale, $changed[0]->status);
+        $none = (new SpeechSync($config([]), $this->dir, new FakeSynthesizer()))->plan(['de']);
+        self::assertSame(SpeechStatus::Stale, $none[0]->status);
+    }
+
     public function testSpeakableText(): void
     {
         self::assertTrue(SpeechSync::isSpeakable('Hinweis:Text um 10:30.'));

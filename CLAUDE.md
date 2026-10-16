@@ -1338,7 +1338,8 @@ inputs, not Git content: list `output` in `.gitignore` and in `resources.externa
   "voices": {
     "narrator": { "reference": "resources/voice-ref/narrator.wav" },
     "guide": { "reference": null, "profile": { "pitch": 0.8 } },
-    "robot": { "reference": "resources/voice-ref/robot.wav", "keys": ["dialog.robot.*"], "seed": 7, "profile": { "crush": 0.2 } }
+    "robot": { "reference": "resources/voice-ref/robot.wav", "keys": ["dialog.robot.*"], "seed": 7, "profile": { "crush": 0.2 },
+               "params": { "temperature": 0.6, "cfmSteps": 16, "referenceStart": 2.5, "referenceLength": 8 } }
   },
   "build": "generate", "runner": "auto", "gpu": false,
   "workers": ["cuda", "cuda", "cpu", "ssh://me@mac.local?device=mps"], "device": "auto", "cpuThreads": null
@@ -1355,22 +1356,42 @@ vendor/bin/phpolygon speech:sync [--locale=de,en] [--key=dialog.*] [--check]
 
 | Class | What it is |
 |---|---|
-| `SpeechConfig` / `SpeechVoice` | build.json `speech`; the first voice whose `keys` match speaks a line, else a voice without `keys`. `reference` null or absent = the synthesizer's built-in voice (Chatterbox ships exactly one, `conds.pt`); voices on it differ only by seed, exaggeration, cfg weight and `profile` |
+| `SpeechConfig` / `SpeechVoice` | build.json `speech`; the first voice whose `keys` match speaks a line, else a voice without `keys`. `reference` null or absent = the synthesizer's built-in voice (Chatterbox ships exactly one, `conds.pt`); voices on it differ only by seed, exaggeration, cfg weight, the sampling/decoder `params` and `profile` |
+| `SpeechParams` | a voice's fine controls (`speech.voices.<v>.params`, camelCase; unknown keys, wrong types and values out of range are errors). Every field null = the model's default. `FIELDS` is the one table of types, defaults, ranges, groups and worker keys: validation, build.json parsing and `schema()` read it. `toWorker()` = the set fields in snake_case |
 | `SpeechSync` | `plan()` compares every line with `speech.lock.json`, `sync()` generates missing/stale lines and saves the manifest after each one (an interrupted run keeps its progress) |
 | `SpeechSynthesizerInterface` | `id()` (part of the cache key), `language()` (locale → model language or null), `synthesize()` reporting each job as it finishes |
-| `ChatterboxSynthesizer` | Chatterbox Multilingual 0.1.7 (MIT) via `tools/speech/chatterbox_worker.py` (a job without reference restores the built-in voice). `fromOptions($root, $runner, $gpu, $workers, $device, $cpuThreads)` serves tools without build.json `speech`, with the same env overrides as `fromConfig()`. Native env or Docker (`phpolygon-speech:chatterbox-*`, models in volume `phpolygon-speech-models`, `--gpus all` with `gpu`; the CUDA image when `gpu` or a worker is on `cuda`). `workerPlan()` = the workers a run starts (device, CPU threads, remote). 22 of the 31 Steam languages; not bg, cs, hu, id, ro, th, uk, vi, zh-TW |
+| `ChatterboxSynthesizer` | Chatterbox Multilingual 0.1.7 (MIT) via `tools/speech/chatterbox_worker.py` (a job without reference restores the built-in voice). `fromOptions($root, $runner, $gpu, $workers, $device, $cpuThreads)` serves tools without build.json `speech`, with the same env overrides as `fromConfig()`. Native env or Docker (`phpolygon-speech:chatterbox-*`, models in volume `phpolygon-speech-models`, `--gpus all` with `gpu`; the CUDA image when `gpu` or a worker is on `cuda`). `workerPlan()` = the workers a run starts (device, CPU threads, remote). `parameterSchema()` = every parameter for editor UIs. 22 of the 31 Steam languages; not bg, cs, hu, id, ro, th, uk, vi, zh-TW |
 | `SpeechWorkerPool` | N worker processes at once, one job in flight each, from a shared queue: a worker keeps its reference voice while the queue has more of it (prepare_conditionals is expensive), else takes the largest reference nobody is on; near the end a worker is left idle when the others, at their measured pace, finish the queue first (a CPU worker never holds the tail). stdout of all workers via `stream_select`, `$onResult` per finished job, stderr line-wise as `[wN]` / `[wN user@host]` |
 | `SpeechRemote` | a worker host `ssh://user@host[:port][?device=mps&python=/path&workers=2]`: `ssh -o BatchMode=yes` runs the engine's own worker script (base64 in the command, so host and engine never differ) in `~/.phpolygon/speech/chatterbox-{version}` with `--inline --require {version}` and `PYTORCH_ENABLE_MPS_FALLBACK=1` |
 | `SpeechFiles` | `path()` / `find()` – the game locates a line the way the generator wrote it |
 
-- **Cache key** = `SpeechSync::VERSION`, `VoiceChain::CHAIN_VERSION`, synthesizer id, language, text, reference WAV hash (`builtin` for the built-in voice), seed, exaggeration, cfg weight, profile fingerprint. Bump `VERSION` when the written files change for the same synthesizer output.
+- **Voice parameters** (`ChatterboxSynthesizer::parameterSchema()` / `SpeechParams::schema()`: `{name, type float|int|bool, default, min, max, step, group, description}`):
+
+  | Group | Parameter (build.json → worker job) | Default | Range |
+  |---|---|---|---|
+  | voice | `seed` (on the voice) | 0 | 0 – 4294967295 |
+  | voice | `exaggeration` (on the voice) | 0.5 | 0 – 2 |
+  | voice | `cfgWeight` (on the voice) → `cfg_weight` | 0.5 | 0 – 1 |
+  | sampling | `temperature` | 0.8 | 0.05 – 2 |
+  | sampling | `topP` → `top_p` | 1.0 | 0.01 – 1 |
+  | sampling | `minP` → `min_p` | 0.05 | 0 – 1 |
+  | sampling | `repetitionPenalty` → `repetition_penalty` | 2.0 | 1 – 3 |
+  | sampling | `maxNewTokens` → `max_new_tokens` (25 tokens/s; longer lines are cut) | 1000 | 1 – 4096 |
+  | decoder | `cfmSteps` → `cfm_steps` (S3Gen flow-matching steps) | 10 | 1 – 50 |
+  | reference | `referenceStart` / `referenceLength` → `reference_start` / `reference_length` (excerpt of the WAV in seconds, cut before conditioning; the speaker embedding hears all of it) | 0 / whole file | 0 – 3600 / 0.5 – 3600 |
+  | reference | `promptSeconds` → `prompt_seconds` (T3 speech prompt, `ENC_COND_LEN`; capped at 150 tokens = 6 s) | 6 | 0.5 – 6 |
+  | reference | `voiceSeconds` → `voice_seconds` (S3Gen timbre reference, `DEC_COND_LEN`; trained on ≤ 10 s) | 10 | 0.5 – 10 |
+  | output | `watermark` | true | bool |
+
+  The reference group needs a `reference` WAV (an error on the built-in voice). Only set fields go into the job line (local and inline/remote alike). **No `speed`:** Chatterbox 0.1.7 has no speaking-rate control (an unimplemented TODO in the model) – use `profile.tempo`. The worker re-implements `ChatterboxMultilingualTTS.generate` of 0.1.7 step by step to reach the hidden knobs (`max_new_tokens` is hard-coded there, `n_cfm_timesteps` is not passed, the watermark is always applied); with no field set the output is bit-identical to `model.generate()` (same seed, verified on CPU). It is pinned to 0.1.7: on another installed version a job that sets one of these fields fails with a clear message, jobs without them run through `model.generate()`. Reference excerpt and windows are part of the worker's conditioning cache key; exaggeration is applied per job onto the cached conditionals, as the model itself does.
+- **Cache key** = `SpeechSync::VERSION`, `VoiceChain::CHAIN_VERSION`, synthesizer id, language, text, reference WAV hash (`builtin` for the built-in voice), seed, exaggeration, cfg weight, profile fingerprint, and the set `params` – only when one is set, so voices without params keep their cached lines. Bump `VERSION` when the written files change for the same synthesizer output.
 - **Not spoken:** texts with `:placeholders` or plural forms (`a|b`) – only known at runtime – and locales the synthesizer cannot speak. `speech:status` lists them; they never fail a build.
 - **Build:** `phpolygon build` runs the sync before the targets: `build: generate` (default) generates what is missing, `check` fails on missing/stale lines, `off` skips. `PHPOLYGON_SPEECH=generate|check|off` overrides; `PHPOLYGON_SPEECH_RUNNER`, `PHPOLYGON_SPEECH_GPU`, `PHPOLYGON_SPEECH_PYTHON`, `PHPOLYGON_SPEECH_WORKERS` (`2` or `cuda,cuda,cpu,ssh://…`), `PHPOLYGON_SPEECH_DEVICE` (auto|cuda|cpu|mps), `PHPOLYGON_SPEECH_CPU_THREADS` override the runner. Inside the cross-build container (no Python, no Docker) generate on the host first; the bind-mounted files then pass.
 - The worker is a batch process, not a server: `--jobs -` (what the engine uses) reads one JSON job per line from stdin and answers each with one JSON result line until EOF; `--jobs FILE` still runs a whole JSONL file. `--device auto|cuda|cpu|mps` (the native runner passes it too), `--threads N` for CPU workers. Off CUDA every `torch.load` maps to the CPU, so `--device cpu` works without a visible GPU. Seeds are fixed, but CPU, MPS and CUDA still sound slightly different.
 - **Parallel workers** (`workers`): Chatterbox generates token by token with batch 1, so one instance leaves a GPU mostly idle; several processes, each with its own model, fill it. An int = that many on `device` (`auto` with `gpu` = cuda), a list = one device per worker. Budget: ~3.3 GiB VRAM per CUDA worker (not checked – an 8 GiB card fits two), system RAM ~4.5 GB per CPU worker and ~2 GB per GPU worker – checked before the start, workers are dropped (CPU first, at least one stays) with a warning when the free RAM is short. `cpuThreads` null = CPU workers share half the logical cores next to GPU workers (those need CPU for their step loop), all cores without them; one worker alone keeps torch's default. No more workers start than there are lines.
 - **Docker with workers:** one container per worker (`docker run -i --rm`, own stdin, device and exit code; `--gpus all` except for `cpu` workers) – simpler and as correct as one container with several processes; every container loads its own model.
 - **Remote workers** (`ssh://…` in `workers`): SSH must log in without a prompt (key/agent). Reference WAVs travel inline (base64, once per reference and worker, cached on the host by SHA-1 in its temp dir), generated WAVs come back base64 in the result line and are written to the job's path – the rest of the pipeline sees no difference. A remote worker that drops (network, SSH end) puts its line back into the queue for the others (once per line, while another worker can take it); a local worker that dies fails its line (it may be the line that killed it). Remote errors carry `user@host`. `speech:setup --remote=ssh://user@host` installs the environment on the host (uv, else Python 3.10–3.12; PyPI torch = MPS on macOS, CUDA on Linux) and prints the versions; safe to repeat.
-- Chatterbox embeds an inaudible Perth watermark in every file. Steam's content survey asks about AI-generated content.
+- Chatterbox embeds an inaudible Perth watermark in every file (`params.watermark: false` skips it – only where your own licence and AI-disclosure policy allow it). Steam's content survey asks about AI-generated content.
 
 ---
 

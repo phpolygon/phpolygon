@@ -18,7 +18,8 @@ use PHPolygon\Audio\Dsp\Voice\VoiceProfile;
  *     "narrator": { "reference": "resources/voice-ref/narrator.wav" },
  *     "guide": { "reference": null, "profile": { "pitch": 0.8 } },
  *     "robot": { "reference": "resources/voice-ref/robot.wav", "keys": ["dialog.robot.*"],
- *                "seed": 7, "exaggeration": 0.6, "profile": { "crush": 0.2 } }
+ *                "seed": 7, "exaggeration": 0.6, "profile": { "crush": 0.2 },
+ *                "params": { "temperature": 0.6, "cfmSteps": 16, "referenceStart": 2.5 } }
  *   },
  *   "build": "generate",
  *   "runner": "auto",
@@ -36,7 +37,8 @@ use PHPolygon\Audio\Dsp\Voice\VoiceProfile;
  *   only     locales to generate; empty = every translation file
  *   voices   the first voice whose `keys` match a line speaks it, else a voice without `keys`;
  *            `reference` is the WAV the voice is cloned from, null or absent = the
- *            synthesizer's built-in voice
+ *            synthesizer's built-in voice; `params` = the fine controls of
+ *            {@see SpeechParams} (camelCase, unknown keys are an error)
  *   build    what `phpolygon build` does: generate missing lines, only check, or nothing
  *   runner   auto (native Python environment, else Docker), native or docker
  *   gpu      CUDA: the default device (for `device: auto`), the CUDA torch on Windows,
@@ -239,15 +241,26 @@ final readonly class SpeechConfig
         if (!is_array($voice) || array_is_list($voice)) {
             throw new \InvalidArgumentException("build.json speech.voices.{$name} must be an object (\"reference\": a WAV to clone, or null for the built-in voice)");
         }
-        $known = ['reference', 'keys', 'seed', 'exaggeration', 'cfgWeight', 'profile'];
+        $known = ['reference', 'keys', 'seed', 'exaggeration', 'cfgWeight', 'profile', 'params'];
         foreach (array_keys($voice) as $key) {
             if (!in_array($key, $known, true)) {
                 throw new \InvalidArgumentException("build.json speech.voices.{$name}.{$key} is unknown (supported: " . implode(', ', $known) . ')');
             }
         }
-        $seed = $voice['seed'] ?? 0;
+        $seed = $voice['seed'] ?? SpeechParams::FIELDS['seed']['default'];
         if (!is_int($seed)) {
             throw new \InvalidArgumentException("build.json speech.voices.{$name}.seed must be an integer");
+        }
+        SpeechParams::check('seed', $seed, "build.json speech.voices.{$name}.seed");
+        $params = null;
+        if (isset($voice['params'])) {
+            if (!is_array($voice['params']) || ($voice['params'] !== [] && array_is_list($voice['params']))) {
+                throw new \InvalidArgumentException("build.json speech.voices.{$name}.params must be an object of speech parameters");
+            }
+            $params = SpeechParams::fromArray($voice['params'], "build.json speech.voices.{$name}.params");
+            if (!isset($voice['reference']) && $params->usesReference()) {
+                throw new \InvalidArgumentException("build.json speech.voices.{$name}.params: " . implode(', ', SpeechParams::REFERENCE_FIELDS) . ' need a reference WAV; the built-in voice has none');
+            }
         }
         $profile = null;
         if (isset($voice['profile'])) {
@@ -269,9 +282,10 @@ final readonly class SpeechConfig
             isset($voice['reference']) ? self::path($voice['reference'], "voices.{$name}.reference") : null,
             self::stringList($voice['keys'] ?? null, "voices.{$name}.keys"),
             $seed,
-            self::number($voice['exaggeration'] ?? 0.5, "voices.{$name}.exaggeration", 0.0, 2.0),
-            self::number($voice['cfgWeight'] ?? 0.5, "voices.{$name}.cfgWeight", 0.0, 1.0),
+            self::number($voice['exaggeration'] ?? SpeechParams::FIELDS['exaggeration']['default'], 'exaggeration', "voices.{$name}.exaggeration"),
+            self::number($voice['cfgWeight'] ?? SpeechParams::FIELDS['cfgWeight']['default'], 'cfgWeight', "voices.{$name}.cfgWeight"),
             $profile,
+            $params,
         );
     }
 
@@ -311,11 +325,13 @@ final readonly class SpeechConfig
         return $value;
     }
 
-    private static function number(mixed $value, string $field, float $min, float $max): float
+    /** A float voice field, in the range of {@see SpeechParams::FIELDS}. */
+    private static function number(mixed $value, string $parameter, string $field): float
     {
-        if ((!is_int($value) && !is_float($value)) || $value < $min || $value > $max) {
-            throw new \InvalidArgumentException("build.json speech.{$field} must be a number between {$min} and {$max}");
+        if (!is_int($value) && !is_float($value)) {
+            $spec = SpeechParams::FIELDS[$parameter];
+            throw new \InvalidArgumentException("build.json speech.{$field} must be a number between {$spec['min']} and {$spec['max']}");
         }
-        return (float) $value;
+        return (float) SpeechParams::check($parameter, $value, "build.json speech.{$field}");
     }
 }

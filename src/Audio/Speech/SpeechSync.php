@@ -97,6 +97,7 @@ final class SpeechSync
                 $line->voice->seed,
                 $line->voice->exaggeration,
                 $line->voice->cfgWeight,
+                $line->voice->params,
             );
         }
         if ($jobs === []) {
