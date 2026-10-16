@@ -19,6 +19,7 @@ to stdout ({"id", "ok"} or {"id", "error"}); everything else goes to stderr.
 import argparse
 import base64
 import copy
+import dataclasses
 import json
 import os
 import sys
@@ -113,7 +114,7 @@ def main() -> int:
     threads = f", {torch.get_num_threads()} thread(s)" if device == "cpu" else ""
     print(f"chatterbox: {count} on {device}{threads}", file=sys.stderr, flush=True)
     model = load_model(ChatterboxMultilingualTTS, torch, device)
-    builtin = copy.deepcopy(model.conds)  # the built-in voice (conds.pt)
+    builtin = snapshot(torch, model.conds)  # the built-in voice (conds.pt)
 
     reference = None
     for job in jobs():
@@ -130,7 +131,7 @@ def main() -> int:
                 if builtin is None:
                     raise RuntimeError("this checkpoint has no built-in voice (conds.pt); give the voice a reference WAV")
                 if reference is not False:
-                    model.conds = copy.deepcopy(builtin)
+                    model.conds = snapshot(torch, builtin)
                     reference = False
             elif job["reference"] != reference:
                 reference = None  # until prepare_conditionals succeeds
@@ -155,6 +156,26 @@ def main() -> int:
             if scratch is not None and os.path.exists(scratch):
                 os.remove(scratch)
     return 0
+
+
+def snapshot(torch, value):
+    """
+    A copy of the model's conditionals that later jobs cannot change. copy.deepcopy
+    refuses tensors that are not graph leaves, which is what the built-in voice holds
+    after the move to MPS; detached clones copy on every device.
+    """
+    if torch.is_tensor(value):
+        return value.detach().clone()
+    if dataclasses.is_dataclass(value) and not isinstance(value, type):
+        copied = copy.copy(value)
+        for field in dataclasses.fields(value):
+            setattr(copied, field.name, snapshot(torch, getattr(value, field.name)))
+        return copied
+    if isinstance(value, dict):
+        return {key: snapshot(torch, item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return type(value)(snapshot(torch, item) for item in value)
+    return copy.deepcopy(value)
 
 
 def load_model(cls, torch, device: str):
