@@ -22,6 +22,9 @@ use PHPolygon\Rendering\MaterialRegistry;
  */
 class PrecipitationSystem extends AbstractSystem
 {
+    /** Horizontal rain drift in units per second of fall, per unit of wind. */
+    private const float RAIN_WIND_DRIFT = 0.5;
+
     private float $time = 0.0;
     /** Tracks active->inactive transitions so particles are hidden exactly once. */
     private bool $wasActive = false;
@@ -115,9 +118,15 @@ class PrecipitationSystem extends AbstractSystem
             if ($weather->rainIntensity > 0.05) {
                 // Rain: fast falling, slight wind drift
                 $speed = 12.0 + sin($seed * 3.1) * 3.0;
-                $y = 15.0 - fmod(($this->time * $speed + sin($seed) * 10.0), 20.0);
-                $x = $playerPos->x + $rx + $windX * ($this->time * 0.5);
-                $z = $playerPos->z + $rz + $windZ * ($this->time * 0.5);
+                $fall = fmod(($this->time * $speed + sin($seed) * 10.0), 20.0);
+                $y = 15.0 - $fall;
+                // The wind slants each drop over its own fall (seconds since
+                // it left the top of the column). Drifting by the total run
+                // time instead walked the whole rain field away from the
+                // player – after an hour of play it fell hundreds of units off.
+                $fallSeconds = max(0.0, $fall) / $speed;
+                $x = $playerPos->x + $rx + $windX * $fallSeconds * self::RAIN_WIND_DRIFT;
+                $z = $playerPos->z + $rz + $windZ * $fallSeconds * self::RAIN_WIND_DRIFT;
                 $transform->position = new Vec3($x, $playerPos->y + $y, $z);
                 $transform->scale = new Vec3(0.01, 0.15 + $weather->rainIntensity * 0.1, 0.01);
             } elseif ($weather->snowIntensity > 0.05) {

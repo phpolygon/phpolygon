@@ -88,9 +88,10 @@ class PrecipitationSystemTest extends TestCase
 
             $p = $this->spawnParticle($world, new Vec3(0, -100, 0));
 
-            // Accumulate enough time for the wind drift term to matter
+            // Sample mid-fall (the drift grows over each drop's fall and is
+            // zero the instant a drop restarts at the top).
             for ($i = 0; $i < 20; $i++) {
-                $world->update(0.5);
+                $world->update(0.53);
             }
 
             return $world->getComponent($p, Transform3D::class)->position->x;
@@ -100,6 +101,40 @@ class PrecipitationSystemTest extends TestCase
         $strongWindX = $build(2.0);
 
         $this->assertNotEqualsWithDelta($noWindX, $strongWindX, 1e-3, 'Strong wind drifts rain in X');
+    }
+
+    /**
+     * The wind slants each drop over its fall; it must not carry the whole
+     * rain field away with the run time (an hour of rain used to put the drops
+     * ~900 units downwind of the player).
+     */
+    public function testRainStaysAroundThePlayerAfterAnHourInTheWind(): void
+    {
+        $world = new World();
+        $world->addSystem(new PrecipitationSystem());
+        $weather = new Weather();
+        $weather->rainIntensity = 0.8;
+        $world->attachComponent($world->createEntity()->id, $weather);
+        $this->spawnPlayer($world, new Vec3(0.0, 0.0, 0.0));
+        $wind = new Wind();
+        $wind->intensity = 1.0;
+        $wind->direction = new Vec3(1.0, 0.0, 0.0);
+        $world->attachComponent($world->createEntity()->id, $wind);
+        $drops = [];
+        for ($i = 0; $i < 8; $i++) {
+            $drops[] = $this->spawnParticle($world, new Vec3(0, -100, 0));
+        }
+
+        for ($i = 0; $i < 3600; $i++) {
+            $world->update(1.0);
+        }
+
+        foreach ($drops as $id) {
+            $p = $world->getComponent($id, Transform3D::class)->position;
+            // Scatter radius 15 plus at most ~1 s of fall × 0.5 × wind.
+            $this->assertLessThan(17.0, abs($p->x), 'rain falls around the player, not downwind of him');
+            $this->assertLessThan(17.0, abs($p->z));
+        }
     }
 
     public function testSnowAppliesFlatFlakeScale(): void
