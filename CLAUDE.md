@@ -1111,6 +1111,7 @@ deterministic: same input, same bytes.
 | `Dsp\Fft` | In-place radix-2 FFT with cached twiddles |
 | `Dsp\Resampler` | Band-limited Kaiser-sinc `convert()` (rate change) and `stretch()` (length and pitch by a factor) |
 | `Dsp\Loudness` | ITU-R BS.1770 integrated loudness (LUFS), stereo and mono |
+| `Dsp\Limiter` | Offline look-ahead peak limiter: `new Limiter(ceilingDb, lookaheadMs, releaseMs, sampleRate, truePeak)`, `processMono()` / `processStereo()` / `process(list<list<float>>)` (linked channels), `gains()` for the curve. Linear ramps: a full gain swing takes `lookaheadMs` down (complete when the peak arrives) and `releaseMs` back up. No sample ends above the ceiling; a buffer that never exceeds it comes back bit-identical. `truePeak` adds a 4× Catmull-Rom inter-sample estimate (an approximation, ~0.1 %) |
 | `Codec\WavReader` | RIFF/WAVE → mono floats at a target rate: 16/24-bit PCM, 32-bit float, any channel count, `WAVE_FORMAT_EXTENSIBLE` |
 | `Codec\WavWriter` | 16-bit PCM RIFF header, stereo interleave |
 | `Codec\FlacWriter` | Lossless FLAC (fixed predictors, Rice coding, stereo decorrelation), stereo and mono, STREAMINFO MD5; php-vio decodes it |
