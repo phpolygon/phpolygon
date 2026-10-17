@@ -7,11 +7,14 @@
 // the WAV (inline: "worker|text|reference|sent=0/1|p=<params>"); <params> = JSON
 // of the job's optional SpeechParams fields, in the order they arrived.
 //
-// Behaviour "name.delayMs.dieAfter.startExit":
+// Behaviour "name.delayMs.dieAfter.startExit.dieExit.deaths":
 //   worker mode  --fake=<behaviour>, else env FAKE_SPEECH_<DEVICE> (e.g. FAKE_SPEECH_CPU)
 //   ssh mode     the user of user@host before "--"; the remote command must ask for --inline
-//   dieAfter N   exit 7 on receiving the Nth job, without reporting it
+//   dieAfter N   exit dieExit (default 7) on receiving the Nth job, without reporting it
 //   startExit N  exit N before reading any job
+//   deaths N     only the first N starts die (dieAfter / startExit); later starts are
+//                healthy. Counted per name in the directory of env FAKE_SPEECH_STATE
+//                (0 or no state directory = every start dies)
 
 declare(strict_types=1);
 
@@ -46,6 +49,18 @@ $name = $parts[0] !== '' ? $parts[0] : 'fake';
 $delay = (int) ($parts[1] ?? 0);
 $dieAfter = (int) ($parts[2] ?? 0);
 $startExit = (int) ($parts[3] ?? 0);
+$dieExit = (int) ($parts[4] ?? 0) ?: 7;
+$deaths = (int) ($parts[5] ?? 0);
+$state = (string) getenv('FAKE_SPEECH_STATE');
+if ($deaths > 0 && $state !== '') {
+    $counter = "{$state}/{$name}.starts";
+    $starts = (int) @file_get_contents($counter) + 1;
+    file_put_contents($counter, (string) $starts);
+    if ($starts > $deaths) {
+        $dieAfter = 0;
+        $startExit = 0;
+    }
+}
 
 fwrite(STDERR, "fake {$name} ready\n");
 if ($startExit !== 0) {
@@ -63,7 +78,7 @@ while (($line = fgets(STDIN)) !== false) {
     $n++;
     if ($dieAfter > 0 && $n >= $dieAfter) {
         fwrite(STDERR, "fake {$name} dies\n");
-        exit(7);
+        exit($dieExit);
     }
     usleep($delay * 1000);
     $content = "{$name}|{$job['text']}|";

@@ -27,7 +27,8 @@ namespace PHPolygon\Audio\Speech;
  * Environment overrides: PHPOLYGON_SPEECH_RUNNER (auto|native|docker),
  * PHPOLYGON_SPEECH_GPU (1/0), PHPOLYGON_SPEECH_PYTHON (interpreter of a ready environment),
  * PHPOLYGON_SPEECH_DEVICE (auto|cuda|cpu|mps), PHPOLYGON_SPEECH_WORKERS (`2` or
- * `cuda,cuda,cpu`), PHPOLYGON_SPEECH_CPU_THREADS (torch threads per CPU worker).
+ * `cuda,cuda,cpu`), PHPOLYGON_SPEECH_CPU_THREADS (torch threads per CPU worker),
+ * PHPOLYGON_SPEECH_REMOTE_RETRIES (reconnects of a dropped remote worker; 0 = none).
  */
 final class ChatterboxSynthesizer implements SpeechSynthesizerInterface
 {
@@ -68,6 +69,8 @@ final class ChatterboxSynthesizer implements SpeechSynthesizerInterface
      * @param ?int $logicalCores logical CPU cores; null = detected
      * @param (callable(string): void)|null $log warnings and worker output; default STDERR
      * @param list<string> $ssh the SSH client of remote workers
+     * @param int $remoteRetries reconnects of a dropped remote worker in a row without a finished line; 0 = none
+     * @param list<float> $remoteBackoff seconds before reconnect attempt 1, 2, …; the last value repeats
      */
     public function __construct(
         private readonly string $projectRoot,
@@ -81,7 +84,12 @@ final class ChatterboxSynthesizer implements SpeechSynthesizerInterface
         private readonly ?int $logicalCores = null,
         ?callable $log = null,
         private readonly array $ssh = ['ssh'],
+        private readonly int $remoteRetries = SpeechConfig::REMOTE_RETRIES,
+        private readonly array $remoteBackoff = SpeechWorkerPool::BACKOFF,
     ) {
+        if ($remoteRetries < 0) {
+            throw new \InvalidArgumentException('speech remoteRetries must not be negative');
+        }
         $this->toolsDir = $toolsDir ?? dirname(__DIR__, 3) . '/tools/speech';
         $this->workers = SpeechConfig::parseWorkers($workers, 'speech workers');
         if (!in_array($device, SpeechConfig::DEVICES, true)) {
@@ -99,12 +107,13 @@ final class ChatterboxSynthesizer implements SpeechSynthesizerInterface
     /** @param (callable(): ?int)|null $freeMemory free system RAM in bytes; null = measured */
     public static function fromConfig(SpeechConfig $config, string $projectRoot, ?callable $freeMemory = null): self
     {
-        return self::fromOptions($projectRoot, $config->runner, $config->gpu, $config->workers, $config->device, $config->cpuThreads, $freeMemory);
+        return self::fromOptions($projectRoot, $config->runner, $config->gpu, $config->workers, $config->device, $config->cpuThreads, $freeMemory, $config->remoteRetries);
     }
 
     /**
      * For tools that run the synthesizer without build.json `speech`: the given
-     * options, overridden by PHPOLYGON_SPEECH_RUNNER / _GPU / _WORKERS / _DEVICE / _CPU_THREADS.
+     * options, overridden by PHPOLYGON_SPEECH_RUNNER / _GPU / _WORKERS / _DEVICE / _CPU_THREADS
+     * / _REMOTE_RETRIES.
      *
      * @param int|list<string> $workers
      * @param (callable(): ?int)|null $freeMemory free system RAM in bytes; null = measured
@@ -117,6 +126,7 @@ final class ChatterboxSynthesizer implements SpeechSynthesizerInterface
         string $device = SpeechConfig::DEVICE_AUTO,
         ?int $cpuThreads = null,
         ?callable $freeMemory = null,
+        int $remoteRetries = SpeechConfig::REMOTE_RETRIES,
     ): self {
         $env = static function (string $name): ?string {
             $value = getenv($name);
@@ -128,6 +138,10 @@ final class ChatterboxSynthesizer implements SpeechSynthesizerInterface
         if ($envThreads !== null && (!ctype_digit($envThreads) || (int) $envThreads < 1)) {
             throw new \InvalidArgumentException("PHPOLYGON_SPEECH_CPU_THREADS must be a positive integer, got \"{$envThreads}\"");
         }
+        $envRetries = $env('PHPOLYGON_SPEECH_REMOTE_RETRIES');
+        if ($envRetries !== null && !ctype_digit($envRetries)) {
+            throw new \InvalidArgumentException("PHPOLYGON_SPEECH_REMOTE_RETRIES must be a non-negative integer, got \"{$envRetries}\"");
+        }
         return new self(
             $projectRoot,
             $env('PHPOLYGON_SPEECH_RUNNER') ?? $runner,
@@ -136,7 +150,14 @@ final class ChatterboxSynthesizer implements SpeechSynthesizerInterface
             device: $env('PHPOLYGON_SPEECH_DEVICE') ?? $device,
             cpuThreads: $envThreads !== null ? (int) $envThreads : $cpuThreads,
             freeMemory: $freeMemory,
+            remoteRetries: $envRetries !== null ? (int) $envRetries : $remoteRetries,
         );
+    }
+
+    /** Reconnects of a dropped remote worker in a row without a finished line. */
+    public function remoteRetries(): int
+    {
+        return $this->remoteRetries;
     }
 
     /**
@@ -299,7 +320,12 @@ final class ChatterboxSynthesizer implements SpeechSynthesizerInterface
             return json_encode($line, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR);
         };
 
-        (new SpeechWorkerPool($specs, $this->projectRoot, $this->log))->run($jobs, $encode, $onResult);
+        // A reconnected remote worker is a new process: it gets its references inline again.
+        $onRestart = static function (int $worker) use (&$sent): void {
+            unset($sent[$worker]);
+        };
+        (new SpeechWorkerPool($specs, $this->projectRoot, $this->log, $this->remoteRetries, $this->remoteBackoff))
+            ->run($jobs, $encode, $onResult, $onRestart);
     }
 
     /**

@@ -88,6 +88,7 @@ final class SpeechConfigTest extends TestCase
         yield 'bad remote worker' => [['keys' => ['a'], 'voices' => $voices, 'workers' => ['ssh://mac?workers=0']], 'workers in ssh://mac?workers=0 must be a positive integer'];
         yield 'bad device' => [['keys' => ['a'], 'voices' => $voices, 'device' => 'gpu'], 'speech.device must be one of'];
         yield 'bad cpuThreads' => [['keys' => ['a'], 'voices' => $voices, 'cpuThreads' => 0], 'speech.cpuThreads must be a positive integer'];
+        yield 'bad remoteRetries' => [['keys' => ['a'], 'voices' => $voices, 'remoteRetries' => -1], 'speech.remoteRetries must be a non-negative integer'];
         yield 'profile field' => [['keys' => ['a'], 'voices' => ['n' => ['reference' => 'r.wav', 'profile' => ['shout' => 1]]]], "unknown voice profile field 'shout'"];
     }
 
@@ -99,6 +100,10 @@ final class SpeechConfigTest extends TestCase
         self::assertSame([SpeechConfig::WORKER_DEFAULT], $default->workers);
         self::assertSame(SpeechConfig::DEVICE_AUTO, $default->device);
         self::assertNull($default->cpuThreads);
+        self::assertSame(SpeechConfig::REMOTE_RETRIES, $default->remoteRetries);
+        $noRetries = SpeechConfig::fromBuildJson(['keys' => ['a'], 'voices' => $voices, 'remoteRetries' => 0]);
+        self::assertNotNull($noRetries);
+        self::assertSame(0, $noRetries->toArray()['remoteRetries']);
 
         $config = SpeechConfig::fromBuildJson([
             'keys' => ['a'], 'voices' => $voices,

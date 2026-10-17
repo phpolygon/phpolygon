@@ -23,6 +23,8 @@ final class ChatterboxSynthesizerTest extends TestCase
         putenv('PHPOLYGON_SPEECH_CPU_THREADS');
         putenv('FAKE_SPEECH_CUDA');
         putenv('FAKE_SPEECH_CPU');
+        putenv('FAKE_SPEECH_STATE');
+        putenv('PHPOLYGON_SPEECH_REMOTE_RETRIES');
         if ($this->dir !== '' && is_dir($this->dir)) {
             foreach (glob($this->dir . '/*') ?: [] as $file) {
                 unlink($file);
@@ -220,7 +222,7 @@ final class ChatterboxSynthesizerTest extends TestCase
         self::assertSame('me@mac.local', $remote->target());
 
         $command = $synthesizer->remoteCommand($remote);
-        self::assertSame(['ssh', '-o', 'BatchMode=yes'], array_slice($command, 0, 3));
+        self::assertSame(['ssh', '-o', 'BatchMode=yes', '-o', 'ServerAliveInterval=15', '-o', 'ServerAliveCountMax=8'], array_slice($command, 0, 7));
         self::assertSame(['-p', '2222', 'me@mac.local', '--'], array_slice($command, -5, 4));
         $shell = $command[count($command) - 1];
         self::assertStringStartsWith('PY="$HOME"/\'.phpolygon/speech/chatterbox-' . ChatterboxSynthesizer::VERSION . '/bin/python\';', $shell);
@@ -309,19 +311,135 @@ final class ChatterboxSynthesizerTest extends TestCase
             $jobs[] = new SpeechJob("j{$i}", "line {$i}", 'en', null, "{$this->dir}/j{$i}.wav", 0, 0.5, 0.5);
         }
 
-        $results = $this->synthesize(['ssh://remote.30.2@mac', 'cpu'], $jobs);
+        $results = $this->synthesize(['ssh://remote.30.2@mac', 'cpu'], $jobs, retries: 0);
 
         self::assertCount(6, $results);
         self::assertSame([], array_filter($results));
-        self::assertNotEmpty(array_filter($this->log, static fn (string $l): bool => str_contains($l, 'remote.30.2@mac ended')));
+        self::assertNotEmpty($this->logged('remote.30.2@mac ended'));
+        // remoteRetries 0: the dropped worker stays gone.
+        self::assertSame([], $this->logged('reconnecting'));
+        self::assertSame(1, $this->linesBy('remote', $jobs));
+    }
+
+    public function testADroppedRemoteWorkerReconnectsAndSpeaksTheRest(): void
+    {
+        $this->useFakeWorkers();
+        $ref = $this->file('ref.wav', 'VOICE');
+        $jobs = [];
+        for ($i = 0; $i < 5; $i++) {
+            $jobs[] = new SpeechJob("j{$i}", "line {$i}", 'en', $ref, "{$this->dir}/j{$i}.wav", 0, 0.5, 0.5);
+        }
+
+        // Exit 255 (SSH) on the second line of the first connection only.
+        $results = $this->synthesize(['ssh://remote.0.2.0.255.1@mac'], $jobs);
+
+        self::assertSame(array_fill_keys(['j0', 'j1', 'j2', 'j3', 'j4'], null), self::sortedByKey($results));
+        self::assertSame(5, $this->linesBy('remote', $jobs));
+        self::assertSame(['speech: worker w1 remote.0.2.0.255.1@mac lost (exit 255) – reconnecting in 0.01 s (attempt 1/5)'], $this->logged('lost'));
+        self::assertSame(['speech: worker w1 remote.0.2.0.255.1@mac reconnected'], $this->logged('reconnected'));
+        // The new connection is a new process: it gets the reference inline again.
+        $sent = 0;
+        foreach ($jobs as $job) {
+            $sent += str_contains((string) file_get_contents($job->wavPath), '|sent=1|') ? 1 : 0;
+        }
+        self::assertSame(2, $sent);
+    }
+
+    public function testAWorkerThatAlwaysDropsGivesUpAndTheOthersFinish(): void
+    {
+        $this->useFakeWorkers();
+        putenv('FAKE_SPEECH_CPU=local.20');
+        $jobs = [];
+        for ($i = 0; $i < 6; $i++) {
+            $jobs[] = new SpeechJob("j{$i}", "line {$i}", 'en', null, "{$this->dir}/j{$i}.wav", 0, 0.5, 0.5);
+        }
+
+        $results = $this->synthesize(['ssh://remote.0.0.255@mac', 'cpu'], $jobs, retries: 3);
+
+        self::assertCount(6, $results);
+        self::assertSame([], array_filter($results));
+        self::assertSame(6, $this->linesBy('local', $jobs));
+        self::assertLessThanOrEqual(3, count($this->logged('reconnecting')));
+    }
+
+    public function testAWorkerThatAlwaysDropsGivesUpAfterTheLimit(): void
+    {
+        $this->useFakeWorkers();
+        $jobs = [];
+        for ($i = 0; $i < 4; $i++) {
+            $jobs[] = new SpeechJob("j{$i}", "line {$i}", 'en', null, "{$this->dir}/j{$i}.wav", 0, 0.5, 0.5);
+        }
+
+        try {
+            $this->synthesize(['ssh://remote.0.0.255@mac'], $jobs, retries: 3);
+            self::fail('a run in which no worker spoke a line must throw');
+        } catch (\RuntimeException $e) {
+            self::assertStringContainsString('exited before finishing a line', $e->getMessage());
+        }
+        self::assertCount(3, $this->logged('reconnecting'));
+        self::assertStringEndsWith('(attempt 3/3)', $this->logged('reconnecting')[2]);
+        self::assertSame(['speech: worker w1 remote.0.0.255@mac lost (exit 255) – gave up after 3 attempts'], $this->logged('gave up'));
+    }
+
+    public function testTheBackoffDoesNotHoldUpTheOtherWorkers(): void
+    {
+        $this->useFakeWorkers();
+        putenv('FAKE_SPEECH_CPU=local.20');
+        $jobs = [];
+        for ($i = 0; $i < 8; $i++) {
+            $jobs[] = new SpeechJob("j{$i}", "line {$i}", 'en', null, "{$this->dir}/j{$i}.wav", 0, 0.5, 0.5);
+        }
+
+        $start = microtime(true);
+        $results = $this->synthesize(['ssh://remote.0.2.0.255.1@mac', 'cpu'], $jobs, backoff: [60.0]);
+
+        // The local worker speaks the rest while the remote one waits; once the queue
+        // is empty the pending reconnect is dropped.
+        self::assertLessThan(30.0, microtime(true) - $start);
+        self::assertSame([], array_filter($results));
+        self::assertCount(8, $results);
+        self::assertCount(1, $this->logged('reconnecting in 60 s'));
+        self::assertSame([], $this->logged('reconnected'));
+        self::assertSame(1, $this->linesBy('remote', $jobs));
+    }
+
+    public function testAMissingRemoteEnvironmentIsNotRetried(): void
+    {
+        $this->useFakeWorkers();
+        putenv('FAKE_SPEECH_CPU=local.20');
+        $jobs = [];
+        for ($i = 0; $i < 3; $i++) {
+            $jobs[] = new SpeechJob("j{$i}", "line {$i}", 'en', null, "{$this->dir}/j{$i}.wav", 0, 0.5, 0.5);
+        }
+
+        $results = $this->synthesize(['ssh://remote.0.0.127@mac', 'cpu'], $jobs);
+
+        self::assertSame([], array_filter($results));
+        self::assertSame([], $this->logged('reconnecting'));
+    }
+
+    public function testRemoteRetriesComeFromTheConfigAndTheEnvironment(): void
+    {
+        self::assertSame(5, ChatterboxSynthesizer::fromOptions('/game')->remoteRetries());
+        $config = SpeechConfig::fromBuildJson(['keys' => ['a'], 'voices' => ['n' => ['reference' => null]], 'remoteRetries' => 2]);
+        self::assertNotNull($config);
+        self::assertSame(2, ChatterboxSynthesizer::fromConfig($config, '/game')->remoteRetries());
+
+        putenv('PHPOLYGON_SPEECH_REMOTE_RETRIES=0');
+        self::assertSame(0, ChatterboxSynthesizer::fromConfig($config, '/game')->remoteRetries());
+
+        putenv('PHPOLYGON_SPEECH_REMOTE_RETRIES=-1');
+        $this->expectExceptionMessage('PHPOLYGON_SPEECH_REMOTE_RETRIES must be a non-negative integer');
+        ChatterboxSynthesizer::fromOptions('/game');
     }
 
     /**
      * @param list<string> $workers
      * @param list<SpeechJob> $jobs
+     * @param list<float> $backoff
      * @return array<string, ?string>
      */
-    private function synthesize(array $workers, array $jobs): array
+    private function synthesize(array $workers, array $jobs, int $retries = 5, array $backoff = [0.01]): array
     {
         $fake = __DIR__ . '/fake-worker';
         $synthesizer = new ChatterboxSynthesizer(
@@ -333,6 +451,8 @@ final class ChatterboxSynthesizerTest extends TestCase
             logicalCores: 8,
             log: $this->collect(...),
             ssh: [PHP_BINARY, $fake . '/chatterbox_worker.py'],
+            remoteRetries: $retries,
+            remoteBackoff: $backoff,
         );
         $results = [];
         $synthesizer->synthesize($jobs, $this->dir, static function (SpeechJob $job, ?string $error) use (&$results): void {
@@ -347,6 +467,33 @@ final class ChatterboxSynthesizerTest extends TestCase
         $this->dir = sys_get_temp_dir() . '/phpolygon-speech-' . bin2hex(random_bytes(4));
         mkdir($this->dir);
         putenv('PHPOLYGON_SPEECH_PYTHON=' . PHP_BINARY);
+        putenv('FAKE_SPEECH_STATE=' . $this->dir);
+    }
+
+    /** @return list<string> the log lines containing $needle */
+    private function logged(string $needle): array
+    {
+        return array_values(array_filter($this->log, static fn (string $l): bool => str_contains($l, $needle)));
+    }
+
+    /** @param list<SpeechJob> $jobs */
+    private function linesBy(string $worker, array $jobs): int
+    {
+        $count = 0;
+        foreach ($jobs as $job) {
+            $count += str_starts_with((string) @file_get_contents($job->wavPath), $worker . '|') ? 1 : 0;
+        }
+        return $count;
+    }
+
+    /**
+     * @param array<string, ?string> $results
+     * @return array<string, ?string>
+     */
+    private static function sortedByKey(array $results): array
+    {
+        ksort($results);
+        return $results;
     }
 
     private function file(string $name, string $content): string

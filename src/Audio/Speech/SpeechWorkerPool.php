@@ -27,19 +27,34 @@ namespace PHPolygon\Audio\Speech;
  * A local worker that dies reports its job in flight as failed (it may be the line
  * that killed it); the others go on. A worker marked `requeue` (remote: the network
  * or SSH may drop) puts its job back into the queue for the others instead, once per
- * job, while another worker can still take it. Jobs left when every worker is gone
- * are reported as failed. When no worker reported anything and one exited with an
- * error, nothing is reported and the run throws.
+ * job, while another worker can still take it (or it reconnects). Jobs left when
+ * every worker is gone are reported as failed. When no worker reported anything and
+ * one exited with an error, nothing is reported and the run throws.
+ *
+ * Reconnect: a requeue worker that ends while lines are still queued is started
+ * again (a new SSH connection, the model loads anew) after a backoff
+ * ({@see self::BACKOFF}), up to `$remoteRetries` times in a row without a finished
+ * line; a finished line resets the count. Its job in flight goes back to the queue
+ * every time it reconnects (the reconnect count bounds a line that kills it). The
+ * other workers go on during the backoff. Exit code 127 (no speech environment on the host) is not retried. The
+ * `$onRestart` callback of {@see run()} lets the caller forget what the old process
+ * had (e.g. reference WAVs it was sent).
  */
 final class SpeechWorkerPool
 {
     /** How often one job is put back after a requeue worker dropped it. */
     private const int MAX_REQUEUES = 1;
 
+    /** @var list<float> seconds before reconnect attempt 1, 2, …; the last value repeats */
+    public const array BACKOFF = [5.0, 15.0, 45.0, 120.0];
+
+    /** Exit code of a remote command that is not there (no speech environment). */
+    private const int EXIT_NOT_FOUND = 127;
+
     /** @var \Closure(string): void */
     private readonly \Closure $log;
 
-    /** @var array<int, array{process: resource, stdin: resource|null, stdout: resource, stderr: resource|null, out: string, err: string, job: ?SpeechJob, sent: float, reference: string|null|false, seconds: float, done: int, open: bool, label: string, requeue: bool}> */
+    /** @var array<int, array{process: resource, stdin: resource|null, stdout: resource, stderr: resource|null, out: string, err: string, job: ?SpeechJob, sent: float, reference: string|null|false, seconds: float, done: int, open: bool, label: string, requeue: bool, retries: int, retryAt: ?float, restarted: bool}> */
     private array $workers = [];
 
     /** @var list<SpeechJob> */
@@ -52,14 +67,24 @@ final class SpeechWorkerPool
      * @param list<array{command: list<string>, label?: string, requeue?: bool}> $specs one per worker process
      * @param string $cwd working directory of the workers
      * @param (callable(string): void)|null $log receives worker output lines; default STDERR
+     * @param int $remoteRetries reconnects of a requeue worker in a row without a finished line; 0 = none
+     * @param list<float> $backoff seconds before reconnect attempt 1, 2, …; the last value repeats
      */
     public function __construct(
         private readonly array $specs,
         private readonly string $cwd,
         ?callable $log = null,
+        private readonly int $remoteRetries = SpeechConfig::REMOTE_RETRIES,
+        private readonly array $backoff = self::BACKOFF,
     ) {
         if ($specs === []) {
             throw new \InvalidArgumentException('a speech worker pool needs at least one worker');
+        }
+        if ($remoteRetries < 0) {
+            throw new \InvalidArgumentException('speech remoteRetries must not be negative');
+        }
+        if ($remoteRetries > 0 && $backoff === []) {
+            throw new \InvalidArgumentException('speech reconnects need a backoff');
         }
         $this->log = $log !== null ? \Closure::fromCallable($log) : static function (string $line): void {
             fwrite(STDERR, $line . "\n");
@@ -70,9 +95,11 @@ final class SpeechWorkerPool
      * @param list<SpeechJob> $jobs
      * @param callable(SpeechJob, int): string $encode the job as worker N's JSON line (no newline)
      * @param callable(SpeechJob, ?string): void $onResult called as soon as a job is done
+     * @param (callable(int): void)|null $onRestart called with the worker index when a
+     *                                   worker was started anew, before its first job
      * @return array<int, int> jobs reported per worker index
      */
-    public function run(array $jobs, callable $encode, callable $onResult): array
+    public function run(array $jobs, callable $encode, callable $onResult, ?callable $onRestart = null): array
     {
         if ($jobs === []) {
             return [];
@@ -87,22 +114,21 @@ final class SpeechWorkerPool
         $prefixed = count($this->specs) > 1;
 
         foreach ($this->specs as $i => $spec) {
-            $process = proc_open($spec['command'], [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes, $this->cwd);
-            if (!is_resource($process)) {
+            $pipes = $this->start($spec['command']);
+            if ($pipes === null) {
                 foreach ($this->workers as $worker) {
                     $this->stop($worker);
                 }
                 throw new \RuntimeException('cannot start the speech worker: ' . implode(' ', $spec['command']));
             }
-            stream_set_blocking($pipes[1], false);
-            stream_set_blocking($pipes[2], false);
             $label = 'w' . ($i + 1) . (isset($spec['label']) && $spec['label'] !== '' ? ' ' . $spec['label'] : '');
             $this->workers[$i] = [
-                'process' => $process, 'stdin' => $pipes[0], 'stdout' => $pipes[1], 'stderr' => $pipes[2],
+                ...$pipes,
                 'out' => '', 'err' => '', 'job' => null, 'sent' => 0.0,
                 // false = no job yet; null = the built-in voice
                 'reference' => false, 'seconds' => 0.0, 'done' => 0, 'open' => true,
                 'label' => $label, 'requeue' => $spec['requeue'] ?? false,
+                'retries' => 0, 'retryAt' => null, 'restarted' => false,
             ];
         }
 
@@ -113,6 +139,9 @@ final class SpeechWorkerPool
         $this->dispatch($encode);
 
         while (true) {
+            if ($this->reconnect($onRestart)) {
+                $this->dispatch($encode);
+            }
             $read = [];
             foreach ($this->workers as $worker) {
                 if ($worker['open']) {
@@ -122,12 +151,19 @@ final class SpeechWorkerPool
                     $read[] = $worker['stderr'];
                 }
             }
+            $retryAt = $this->nextRetry();
             if ($read === []) {
-                break;
+                if ($retryAt === null) {
+                    break;
+                }
+                // Only reconnects left: wait for the next one.
+                usleep((int) max(0.0, ($retryAt - microtime(true)) * 1e6));
+                continue;
             }
+            $wait = $retryAt !== null ? min(1.0, max(0.0, $retryAt - microtime(true))) : 1.0;
             $write = null;
             $except = null;
-            if (@stream_select($read, $write, $except, 1) === false) {
+            if (@stream_select($read, $write, $except, (int) $wait, (int) (fmod($wait, 1.0) * 1e6)) === false) {
                 throw new \RuntimeException('waiting for the speech workers failed');
             }
             foreach ($read as $stream) {
@@ -174,6 +210,13 @@ final class SpeechWorkerPool
                         if ($error !== null && $worker['requeue']) {
                             $error = "{$worker['label']}: {$error}";
                         }
+                        if ($worker['restarted']) {
+                            $worker['restarted'] = false;
+                            ($this->log)("speech: worker {$worker['label']} reconnected");
+                        }
+                        if ($error === null) {
+                            $worker['retries'] = 0;
+                        }
                         $onResult($byId[$id], $error);
                     }
                     if ($chunk === '' && feof($stream)) {
@@ -181,8 +224,12 @@ final class SpeechWorkerPool
                         $exits[$i] = $exit;
                         $job = $worker['job'];
                         $worker['job'] = null;
+                        $worker['restarted'] = false;
+                        $canRetry = $worker['requeue'] && $exit !== self::EXIT_NOT_FOUND && $worker['retries'] < $this->remoteRetries;
                         if ($job !== null) {
-                            if ($worker['requeue'] && ($this->requeued[$job->id] ?? 0) < self::MAX_REQUEUES && $this->anyoneCanTake()) {
+                            // A reconnecting worker always gets its line back; handing it to
+                            // the others (it may be the line that kills workers) happens once.
+                            if ($canRetry || ($worker['requeue'] && ($this->requeued[$job->id] ?? 0) < self::MAX_REQUEUES && $this->anyoneCanTake())) {
                                 $this->requeued[$job->id] = ($this->requeued[$job->id] ?? 0) + 1;
                                 array_unshift($this->queue, $job);
                                 ($this->log)("speech: worker {$worker['label']} ended (exit code {$exit}); its line goes back to the queue");
@@ -191,6 +238,9 @@ final class SpeechWorkerPool
                             }
                         } elseif ($exit !== 0) {
                             ($this->log)("speech: worker {$worker['label']} ended with exit code {$exit}");
+                        }
+                        if ($worker['requeue'] && $this->queue !== []) {
+                            $this->lost($worker, $exit, $canRetry);
                         }
                     }
                 }
@@ -217,6 +267,106 @@ final class SpeechWorkerPool
         return array_map(static fn (array $worker): int => $worker['done'], $this->workers);
     }
 
+    /**
+     * Start one worker process.
+     *
+     * @param list<string> $command
+     * @return array{process: resource, stdin: resource, stdout: resource, stderr: resource}|null
+     */
+    private function start(array $command): ?array
+    {
+        $process = proc_open($command, [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes, $this->cwd);
+        if (!is_resource($process)) {
+            return null;
+        }
+        stream_set_blocking($pipes[1], false);
+        stream_set_blocking($pipes[2], false);
+        return ['process' => $process, 'stdin' => $pipes[0], 'stdout' => $pipes[1], 'stderr' => $pipes[2]];
+    }
+
+    /**
+     * A requeue worker ended while lines are queued: schedule its reconnect, or give up.
+     *
+     * @param array{label: string, retries: int, retryAt: ?float} $worker
+     */
+    private function lost(array &$worker, int $exit, bool $canRetry): void
+    {
+        if ($canRetry) {
+            $worker['retries']++;
+            $delay = $this->backoff[min($worker['retries'], count($this->backoff)) - 1];
+            $worker['retryAt'] = microtime(true) + $delay;
+            ($this->log)(sprintf(
+                'speech: worker %s lost (exit %d) – reconnecting in %s s (attempt %d/%d)',
+                $worker['label'],
+                $exit,
+                rtrim(rtrim(number_format($delay, 2, '.', ''), '0'), '.'),
+                $worker['retries'],
+                $this->remoteRetries,
+            ));
+        } elseif ($this->remoteRetries > 0 && $exit !== self::EXIT_NOT_FOUND) {
+            ($this->log)("speech: worker {$worker['label']} lost (exit {$exit}) – gave up after {$worker['retries']} attempts");
+        }
+    }
+
+    /**
+     * Start the workers whose reconnect is due; drop pending reconnects once the
+     * queue is empty. True when a worker was started.
+     *
+     * @param (callable(int): void)|null $onRestart
+     */
+    private function reconnect(?callable $onRestart): bool
+    {
+        $started = false;
+        foreach (array_keys($this->workers) as $i) {
+            $worker = &$this->workers[$i];
+            if ($worker['retryAt'] === null) {
+                unset($worker);
+                continue;
+            }
+            if ($this->queue === []) {
+                $worker['retryAt'] = null;
+                unset($worker);
+                continue;
+            }
+            if (microtime(true) < $worker['retryAt']) {
+                unset($worker);
+                continue;
+            }
+            $worker['retryAt'] = null;
+            $pipes = $this->start($this->specs[$i]['command']);
+            if ($pipes === null) {
+                $this->lost($worker, -1, $worker['retries'] < $this->remoteRetries);
+                unset($worker);
+                continue;
+            }
+            $worker = [
+                ...$worker,
+                ...$pipes,
+                'out' => '', 'err' => '', 'job' => null, 'open' => true,
+                // a new process: no reference voice prepared yet
+                'reference' => false, 'restarted' => true,
+            ];
+            unset($worker);
+            $started = true;
+            if ($onRestart !== null) {
+                $onRestart($i);
+            }
+        }
+        return $started;
+    }
+
+    /** The earliest pending reconnect, or null. */
+    private function nextRetry(): ?float
+    {
+        $next = null;
+        foreach ($this->workers as $worker) {
+            if ($worker['retryAt'] !== null && ($next === null || $worker['retryAt'] < $next)) {
+                $next = $worker['retryAt'];
+            }
+        }
+        return $next;
+    }
+
     /** Close a worker whose stdout ended, pass on its last stderr and return its exit code. */
     private function reap(int $i, string $tag): int
     {
@@ -237,11 +387,11 @@ final class SpeechWorkerPool
         return proc_close($worker['process']);
     }
 
-    /** True while a running worker can still be handed a job. */
+    /** True while a running (or reconnecting) worker can still be handed a job. */
     private function anyoneCanTake(): bool
     {
         foreach ($this->workers as $worker) {
-            if ($worker['open'] && $worker['stdin'] !== null) {
+            if (($worker['open'] && $worker['stdin'] !== null) || $worker['retryAt'] !== null) {
                 return true;
             }
         }

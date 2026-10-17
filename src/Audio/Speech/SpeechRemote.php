@@ -14,7 +14,10 @@ namespace PHPolygon\Audio\Speech;
  *
  * The worker script is sent with the command (the host runs the engine's own copy),
  * reference WAVs and generated WAVs travel inline in the protocol, so the host needs
- * no shared paths. SSH must log in without a prompt (key or agent: BatchMode).
+ * no shared paths. SSH must log in without a prompt (key or agent: BatchMode);
+ * keep-alives (ServerAliveInterval 15 s x ServerAliveCountMax 8) ride out network
+ * gaps up to about two minutes, and a connection that drops anyway is reconnected
+ * by {@see SpeechWorkerPool}.
  */
 final readonly class SpeechRemote
 {
@@ -91,7 +94,7 @@ final readonly class SpeechRemote
      */
     public function sshCommand(array $ssh): array
     {
-        $command = [...$ssh, '-o', 'BatchMode=yes', '-o', 'ServerAliveInterval=15', '-o', 'ServerAliveCountMax=4'];
+        $command = [...$ssh, '-o', 'BatchMode=yes', '-o', 'ServerAliveInterval=15', '-o', 'ServerAliveCountMax=8'];
         if ($this->port !== null) {
             array_push($command, '-p', (string) $this->port);
         }

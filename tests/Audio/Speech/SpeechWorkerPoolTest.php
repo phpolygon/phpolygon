@@ -113,7 +113,7 @@ final class SpeechWorkerPoolTest extends TestCase
         $pool = new SpeechWorkerPool([
             ['command' => $this->fake('remote.30.2'), 'label' => 'me@mac', 'requeue' => true],
             ['command' => $this->fake('local.30')],
-        ], $this->dir, $this->collect(...));
+        ], $this->dir, $this->collect(...), remoteRetries: 0);
         $results = [];
         $pool->run($this->jobs(6), self::encode(...), static function (SpeechJob $job, ?string $error) use (&$results): void {
             $results[$job->id] = $error;

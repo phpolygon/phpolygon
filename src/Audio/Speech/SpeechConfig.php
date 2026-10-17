@@ -26,7 +26,8 @@ use PHPolygon\Audio\Dsp\Voice\VoiceProfile;
  *   "gpu": false,
  *   "workers": ["cuda", "cuda", "cpu"],
  *   "device": "auto",
- *   "cpuThreads": null
+ *   "cpuThreads": null,
+ *   "remoteRetries": 5
  * }
  * ```
  *
@@ -51,6 +52,9 @@ use PHPolygon\Audio\Dsp\Voice\VoiceProfile;
  *   device   default device of the workers: auto, cuda, cpu, mps
  *   cpuThreads  torch threads per CPU worker; null = CPU workers share half the
  *            logical cores next to GPU workers, else all of them
+ *   remoteRetries  reconnects of a remote worker that drops while lines are queued,
+ *            in a row without a finished line (backoff 5, 15, 45, then 120 s);
+ *            0 = a dropped remote worker stays gone
  */
 final readonly class SpeechConfig
 {
@@ -70,6 +74,9 @@ final readonly class SpeechConfig
     /** A worker on the default `device` (the int shorthand of `workers`). */
     public const string WORKER_DEFAULT = 'default';
 
+    /** Reconnects of a dropped remote worker in a row without a finished line. */
+    public const int REMOTE_RETRIES = 5;
+
     /**
      * @param list<string> $keys
      * @param list<SpeechVoice> $voices
@@ -88,6 +95,7 @@ final readonly class SpeechConfig
         public array $workers = [self::WORKER_DEFAULT],
         public string $device = self::DEVICE_AUTO,
         public ?int $cpuThreads = null,
+        public int $remoteRetries = self::REMOTE_RETRIES,
     ) {}
 
     /**
@@ -140,7 +148,7 @@ final readonly class SpeechConfig
         if (!is_array($data) || array_is_list($data)) {
             throw new \InvalidArgumentException('build.json speech must be an object like {"locales": "resources/lang", "keys": ["dialog.*"], "voices": {...}}');
         }
-        $known = ['locales', 'output', 'keys', 'only', 'voices', 'build', 'runner', 'gpu', 'workers', 'device', 'cpuThreads'];
+        $known = ['locales', 'output', 'keys', 'only', 'voices', 'build', 'runner', 'gpu', 'workers', 'device', 'cpuThreads', 'remoteRetries'];
         foreach (array_keys($data) as $key) {
             if (!in_array($key, $known, true)) {
                 throw new \InvalidArgumentException("build.json speech.{$key} is unknown (supported: " . implode(', ', $known) . ')');
@@ -177,6 +185,10 @@ final readonly class SpeechConfig
         if ($cpuThreads !== null && (!is_int($cpuThreads) || $cpuThreads < 1)) {
             throw new \InvalidArgumentException('build.json speech.cpuThreads must be a positive integer or null');
         }
+        $remoteRetries = $data['remoteRetries'] ?? self::REMOTE_RETRIES;
+        if (!is_int($remoteRetries) || $remoteRetries < 0) {
+            throw new \InvalidArgumentException('build.json speech.remoteRetries must be a non-negative integer');
+        }
 
         return new self(
             self::path($data['locales'] ?? 'resources/lang', 'locales'),
@@ -190,6 +202,7 @@ final readonly class SpeechConfig
             $workers,
             $device,
             $cpuThreads,
+            $remoteRetries,
         );
     }
 
@@ -233,6 +246,7 @@ final readonly class SpeechConfig
             'workers' => $this->workers,
             'device' => $this->device,
             'cpuThreads' => $this->cpuThreads,
+            'remoteRetries' => $this->remoteRetries,
         ];
     }
 
