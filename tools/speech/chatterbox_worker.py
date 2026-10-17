@@ -166,6 +166,7 @@ def main() -> int:
                     condition(model, torchaudio, job, cache)
                     reference = key
             torch.manual_seed(job["seed"])
+            drop_alignment_hooks(model)
             if exact:
                 wav = generate(model, torch, job)
             else:
@@ -241,6 +242,23 @@ def condition(model, torchaudio, job: dict, cache: str) -> None:
                 delattr(model, name)  # back to the class attribute
         if excerpt is not None and os.path.exists(excerpt):
             os.remove(excerpt)
+
+
+def drop_alignment_hooks(model):
+    """
+    T3.inference builds a new AlignmentStreamAnalyzer for every line (it resets its
+    `compiled` flag each call), and each one registers a forward hook on attention
+    layers that is never removed. The hooks pile up: after n lines every token runs
+    n hooks, each copying attention weights to the CPU – a worker gets slower with
+    every line (measured: a third of the throughput after ~1000 lines). They only
+    read, so dropping the stale ones before the next line changes no output.
+    """
+    tfmr = getattr(getattr(model, "t3", None), "tfmr", None)
+    for layer in getattr(tfmr, "layers", []) or []:
+        attn = getattr(layer, "self_attn", None)
+        hooks = getattr(attn, "_forward_hooks", None)
+        if hooks:
+            hooks.clear()
 
 
 def generate(model, torch, job: dict):
