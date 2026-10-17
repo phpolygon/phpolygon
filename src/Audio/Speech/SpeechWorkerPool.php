@@ -229,7 +229,13 @@ final class SpeechWorkerPool
                         if ($job !== null) {
                             // A reconnecting worker always gets its line back; handing it to
                             // the others (it may be the line that kills workers) happens once.
-                            if ($canRetry || ($worker['requeue'] && ($this->requeued[$job->id] ?? 0) < self::MAX_REQUEUES && $this->anyoneCanTake())) {
+                            // Only a hand-over counts against MAX_REQUEUES: a worker that
+                            // reconnected several times and then gives up still passes its
+                            // line on to the others once.
+                            if ($canRetry) {
+                                array_unshift($this->queue, $job);
+                                ($this->log)("speech: worker {$worker['label']} ended (exit code {$exit}); its line goes back to the queue");
+                            } elseif ($worker['requeue'] && ($this->requeued[$job->id] ?? 0) < self::MAX_REQUEUES && $this->anyoneCanTake()) {
                                 $this->requeued[$job->id] = ($this->requeued[$job->id] ?? 0) + 1;
                                 array_unshift($this->queue, $job);
                                 ($this->log)("speech: worker {$worker['label']} ended (exit code {$exit}); its line goes back to the queue");
