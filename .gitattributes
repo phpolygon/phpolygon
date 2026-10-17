@@ -16,3 +16,7 @@
 
 # Shell scripts run in Linux containers and on macOS: never CRLF.
 *.sh text eol=lf
+
+# Audio fixtures are compared byte for byte: no line-ending conversion.
+*.flac binary
+*.wav binary

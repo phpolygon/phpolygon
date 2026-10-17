@@ -1274,10 +1274,10 @@ $menuPlayer->adopt($handoffs[0]);                 // the new owner fades it out 
 ## Audio DSP — offline signal processing
 
 `PHPolygon\Audio\Dsp` and `PHPolygon\Audio\Codec` are plain-PHP tools for audio a
-game renders **ahead of time** (build hooks, prebake scripts): read and write WAV,
-encode FLAC, Opus and Vorbis, resample, measure loudness, reshape recorded voices. Nothing
+game renders **ahead of time** (build hooks, prebake scripts): read and write WAV
+and FLAC, read any source (`AudioReader`), encode Opus and Vorbis, resample, measure loudness, reshape recorded voices. Nothing
 here runs per frame – playback stays with `AudioManager`; only the Opus/Vorbis writers
-call php-vio (its encoder), everything else is plain PHP. Every class works
+and `AudioReader`'s compressed path call php-vio (its codecs), everything else is plain PHP. Every class works
 on `list<float>` mono (or two lists for stereo) at a sample rate that defaults to
 `Pcm::SAMPLE_RATE` (44.1 kHz) and is a parameter everywhere. All of it is
 deterministic: same input, same bytes.
@@ -1293,6 +1293,8 @@ deterministic: same input, same bytes.
 | `Codec\WavReader` | RIFF/WAVE → mono floats at a target rate: 16/24-bit PCM, 32-bit float, any channel count, `WAVE_FORMAT_EXTENSIBLE` |
 | `Codec\WavWriter` | 16-bit PCM RIFF header, stereo interleave |
 | `Codec\FlacWriter` | Lossless FLAC (fixed predictors, Rice coding, stereo decorrelation), stereo and mono, STREAMINFO MD5; php-vio decodes it |
+| `Codec\FlacReader` + `FlacInfo` | Complete RFC 9639 decoder in plain PHP: fixed and variable block sizes, every block size / rate / sample size code, 4–32 bit, 1–8 channels, all stereo modes, CONSTANT / VERBATIM / FIXED / LPC 1–32, wasted bits, Rice/Rice2 incl. escapes, leading ID3v2 skipped; CRC-8/CRC-16 always checked, STREAMINFO MD5 on request (`verifyMd5`). `read()`/`decode()` → mono floats at a target rate with `WavReader`'s arithmetic (FLAC and WAV of the same PCM read identically); `readSamples()`/`decodeSamples()` → exact ints per channel + `FlacInfo`; `readInfo()` reads only the head. Errors name source, frame and byte. ≈ 1.5–2.4 M samples/s without JIT, 3.5–6 M with tracing JIT |
+| `Codec\AudioReader` | "Any source" → mono floats at a target rate: sniffs the bytes (`RIFF…WAVE`, `fLaC`, ID3 + `fLaC`), else the extension (`format(path)`); WAV/FLAC in plain PHP, Opus/Vorbis/MP3 through php-vio's `vio_audio_decode()` – `RuntimeException` without it |
 | `Codec\OpusWriter` + `OpusSettings` | Ogg Opus through php-vio's libopus (`vio_audio_encode`); input off the encode rate (8/12/16/24/48 kHz) is resampled with `Resampler` first – slow for long material, so render at the encode rate. Sample-exact length (pre-skip, end trim), decodes at 48 kHz |
 | `Codec\VorbisWriter` + `VorbisSettings` | Ogg Vorbis through php-vio's libvorbis: quality −0.1…1.0 (0.5 = `oggenc -q5`) or ABR, any rate, gapless |
 | `Codec\AudioFormats` | What this process decodes/encodes (`detect()`: php-vio's `vio_audio_formats()`, else WAV/FLAC/MP3 decode + WAV/FLAC encode), `choose(preferred, player)` → first format encodable here and decodable by the player, else FLAC; `resolve(path)` → the smallest decodable sibling (`line.opus` before `line.flac`); `extension()`/`forPath()` |
