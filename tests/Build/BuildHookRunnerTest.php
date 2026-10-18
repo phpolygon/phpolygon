@@ -6,6 +6,7 @@ namespace PHPolygon\Tests\Build;
 
 use PHPolygon\Build\BuildConfig;
 use PHPolygon\Build\BuildHookRunner;
+use PHPolygon\Build\MicroIni;
 use PHPUnit\Framework\TestCase;
 
 final class BuildHookRunnerTest extends TestCase
@@ -155,7 +156,7 @@ final class BuildHookRunnerTest extends TestCase
 
         self::assertSame([[BuildHookRunner::hostPlatform(), \PHPolygon\Build\StaticPhpResolver::detectArch(), 'steam', '8.5']], $calls);
         self::assertFileExists($interpreter);
-        self::assertSame('MICROSFX' . BuildHookRunner::RUNNER_BOOTSTRAP, file_get_contents($interpreter));
+        self::assertSame('MICROSFX' . MicroIni::block(BuildHookRunner::RUNNER_INI) . BuildHookRunner::RUNNER_BOOTSTRAP, file_get_contents($interpreter));
         self::assertSame($interpreter, $runner->runner($sfx), 'the runner is built once per runtime file');
 
         putenv('PHPOLYGON_HOOK_PHP=/opt/php/bin/php');
@@ -244,7 +245,7 @@ final class BuildHookRunnerTest extends TestCase
         fclose($pipes[2]);
         self::assertSame(0, proc_close($process), $interpreter . $err);
 
-        $bootstrap = BuildHookRunner::RUNNER_BOOTSTRAP;
+        $bootstrap = MicroIni::block(BuildHookRunner::RUNNER_INI) . BuildHookRunner::RUNNER_BOOTSTRAP;
         self::assertSame($size + strlen($bootstrap), filesize($interpreter));
         $runner = fopen($interpreter, 'rb');
         self::assertIsResource($runner);
@@ -272,10 +273,55 @@ final class BuildHookRunnerTest extends TestCase
         self::assertSame(['script.php', ['a', 'b c'], 3, '9'], json_decode($out, true));
     }
 
-    /** @param array<int, mixed> $hooks */
-    private function config(array $hooks): BuildConfig
+    /**
+     * `-d` reaches the runner as ini_set(), which cannot reserve the JIT buffer
+     * or turn on OPcache: a runner without startup settings ran every hook and
+     * worker without JIT. The runner embeds them, and build.json `php` wins.
+     */
+    public function testRunnerEmbedsOpcacheWithJitAndTheGameSettings(): void
     {
-        file_put_contents($this->dir . '/build.json', json_encode(['name' => 'HookTest', 'hooks' => ['beforeBuild' => $hooks]]));
+        $sfx = $this->dir . '/micro.sfx';
+        file_put_contents($sfx, 'MICROSFX');
+
+        $plain = new BuildHookRunner($this->config([]), $this->neverResolve(), $this->dir . '/runners');
+        self::assertSame(BuildHookRunner::RUNNER_INI, $plain->runnerIni());
+        self::assertSame('1', $plain->runnerIni()['opcache.enable_cli']);
+        self::assertNotSame('0', $plain->runnerIni()['opcache.jit_buffer_size']);
+        self::assertNotSame('disable', $plain->runnerIni()['opcache.jit']);
+        $plainRunner = $plain->runner($sfx);
+
+        $game = new BuildHookRunner($this->config([], ['php' => ['ini' => ['opcache.jit' => 'function', 'memory_limit' => '1G']]]), $this->neverResolve(), $this->dir . '/runners');
+        self::assertSame(['opcache.enable_cli' => '1', 'opcache.jit' => 'function', 'opcache.jit_buffer_size' => '128M', 'memory_limit' => '1G'], $game->runnerIni());
+
+        $interpreter = $game->runner($sfx);
+        self::assertSame('MICROSFX' . MicroIni::block($game->runnerIni()) . BuildHookRunner::RUNNER_BOOTSTRAP, file_get_contents($interpreter));
+        self::assertNotSame($interpreter, $plainRunner, 'other settings, other runner');
+    }
+
+    /** A `-d` the runner cannot apply says which value stays, instead of being dropped silently. */
+    public function testRunnerBootstrapNamesStartupOnlyOptionsItCannotApply(): void
+    {
+        file_put_contents($this->dir . '/bootstrap.php', BuildHookRunner::RUNNER_BOOTSTRAP);
+        file_put_contents($this->dir . '/script.php', '<?php echo ini_get("memory_limit");');
+
+        $process = proc_open([PHP_BINARY, '-d', 'max_input_time=-1', $this->dir . '/bootstrap.php', '-d', 'max_input_time=12345', '-d', 'memory_limit=77M', '-d', 'no.such.setting=1', $this->dir . '/script.php'], [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
+        self::assertIsResource($process);
+        $out = (string) stream_get_contents($pipes[1]);
+        $err = (string) stream_get_contents($pipes[2]);
+        fclose($pipes[1]);
+        fclose($pipes[2]);
+        self::assertSame(0, proc_close($process), $err);
+        self::assertSame('77M', $out);
+        self::assertSame("runner: max_input_time is fixed at startup, keeping max_input_time=-1\n", $err);
+    }
+
+    /**
+     * @param array<int, mixed> $hooks
+     * @param array<string, mixed> $extra
+     */
+    private function config(array $hooks, array $extra = []): BuildConfig
+    {
+        file_put_contents($this->dir . '/build.json', json_encode(['name' => 'HookTest', 'hooks' => ['beforeBuild' => $hooks]] + $extra));
         return BuildConfig::load($this->dir);
     }
 

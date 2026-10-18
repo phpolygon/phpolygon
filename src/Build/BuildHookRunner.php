@@ -28,7 +28,9 @@ namespace PHPolygon\Build;
  *      `runtimeVariant` (default: the build variant), wrapped as a runner that
  *      takes `[-d key=value]... script.php [args...]`. A hook can so use the
  *      extensions the shipped game has, also inside a build container whose own
- *      PHP lacks them.
+ *      PHP lacks them. The runner embeds OPcache with JIT plus build.json `php`
+ *      as startup settings ({@see RUNNER_INI}); its `-d` options are ini_set()
+ *      calls and cannot change startup-only settings.
  *
  * PHPOLYGON_HOOK_PHP in the environment of an `@php` hook names its interpreter.
  * A hook starts further PHP processes with it: PHP_BINARY is empty inside a
@@ -54,7 +56,9 @@ final class BuildHookRunner
         array_shift($args);
         while (count($args) >= 2 && $args[0] === '-d') {
             [$key, $value] = array_pad(explode('=', $args[1], 2), 2, '1');
-            ini_set($key, $value);
+            if (ini_set($key, $value) === false && ($current = ini_get($key)) !== false && $current !== $value) {
+                fwrite(STDERR, "runner: {$key} is fixed at startup, keeping {$key}={$current}\n");
+            }
             $args = array_slice($args, 2);
         }
         if ($args === []) {
@@ -69,6 +73,20 @@ final class BuildHookRunner
         $_SERVER['SCRIPT_FILENAME'] = $script;
         require $script;
         PHP;
+
+    /**
+     * Startup settings a runner gets on top of build.json `php`, embedded like
+     * the shipped game's ({@see MicroIni}). The bootstrap applies `-d` with
+     * ini_set(), which cannot turn on OPcache or reserve the JIT buffer: without
+     * them a hook and every worker it starts ran without JIT (`opcache.jit` set
+     * at run time: "JIT is disabled"). With the buffer reserved, a `-d
+     * opcache.jit=...` still switches the JIT mode per process.
+     */
+    public const array RUNNER_INI = [
+        'opcache.enable_cli' => '1',
+        'opcache.jit' => 'tracing',
+        'opcache.jit_buffer_size' => '128M',
+    ];
 
     /** @var \Closure(string, string, string, string): string */
     private \Closure $runtimeResolver;
@@ -206,9 +224,21 @@ final class BuildHookRunner
     }
 
     /**
-     * The micro.sfx at $microSfx with {@see RUNNER_BOOTSTRAP} appended, built once per
-     * runtime file, with $libs next to it: the runtime loads them from its own
-     * directory and does not start without them (0xC0000135 on Windows).
+     * Startup settings embedded in a runner: {@see RUNNER_INI}, overridden by
+     * build.json `php` - a hook runs with the settings the shipped game has.
+     *
+     * @return array<string, string>
+     */
+    public function runnerIni(): array
+    {
+        return [...self::RUNNER_INI, ...$this->config->phpIni];
+    }
+
+    /**
+     * The micro.sfx at $microSfx with the {@see runnerIni()} section and
+     * {@see RUNNER_BOOTSTRAP} appended, built once per runtime file, with $libs
+     * next to it: the runtime loads them from its own directory and does not
+     * start without them (0xC0000135 on Windows).
      *
      * @param list<string> $libs
      */
@@ -218,7 +248,8 @@ final class BuildHookRunner
         if ($size === false) {
             throw new \RuntimeException("Game runtime not readable: {$microSfx}");
         }
-        $key = substr(md5($microSfx . '|' . $size . '|' . (int) filemtime($microSfx) . '|' . self::RUNNER_BOOTSTRAP), 0, 16);
+        $ini = MicroIni::block($this->runnerIni());
+        $key = substr(md5($microSfx . '|' . $size . '|' . (int) filemtime($microSfx) . '|' . $ini . self::RUNNER_BOOTSTRAP), 0, 16);
         $path = $this->runnerDir . '/' . $key . '/php-runtime' . (PHP_OS_FAMILY === 'Windows' ? '.exe' : '');
 
         if (!is_file($path)) {
@@ -228,7 +259,7 @@ final class BuildHookRunner
             // Copied as a stream: a runtime is some 70 MB, and a build PHP without a
             // php.ini has 128 MB of memory - reading it and appending held it twice.
             $tmp = $path . '.tmp' . getmypid();
-            if (!copy($microSfx, $tmp) || file_put_contents($tmp, self::RUNNER_BOOTSTRAP, FILE_APPEND) === false) {
+            if (!copy($microSfx, $tmp) || file_put_contents($tmp, $ini . self::RUNNER_BOOTSTRAP, FILE_APPEND) === false) {
                 @unlink($tmp);
                 throw new \RuntimeException("Cannot build the hook runner from {$microSfx}");
             }

@@ -888,6 +888,8 @@ Once OPcache is on (`opcache.enable_cli` or `opcache.enable` truthy), `MicroIni:
 
 `@php` resolves to `PHPOLYGON_HOOK_PHP`, else the PHP running the build when it has every `requires` function, else the game's static runtime (micro.sfx for the host, variant `runtimeVariant`) wrapped as a runner taking `[-d key=value]... script [args]` with the runtime's libraries (Windows DLLs, Steam API) copied next to it - so a hook can use the shipped game's extensions inside a build container whose PHP lacks them. Hooks see `PHPOLYGON_BUILD_PLATFORM/ARCH/VARIANT/TYPE`, and `PHPOLYGON_HOOK_PHP` names the interpreter of an `@php` hook: start further PHP processes with it, because `PHP_BINARY` is empty inside a micro runtime.
 
+The runner's `-d` options are `ini_set()` calls, so startup-only settings (`opcache.enable_cli`, `opcache.jit_buffer_size`) cannot come from them. The runner therefore embeds a startup ini section (`MicroIni`) of `BuildHookRunner::RUNNER_INI` (OPcache on, tracing JIT, 128M buffer) overridden by build.json `php.ini`: hooks and the workers they start run with JIT (`opcache_get_status()['jit']['on']`), and a `-d opcache.jit=...` still switches the mode per process. A `-d` the runner cannot apply prints `runner: <key> is fixed at startup, keeping <key>=<value>` to stderr. php-vio initialises GLFW at module startup, so a runner without a display prints two `GLFW` startup warnings; they are harmless (a window would re-init GLFW).
+
 ### Build types and verification
 
 `buildTypes.<type>.constants` are written into the staged bootstrap files - `bootstrap.php` and every
