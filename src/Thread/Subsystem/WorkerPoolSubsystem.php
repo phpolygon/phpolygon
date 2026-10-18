@@ -13,9 +13,9 @@ use PHPolygon\Thread\SubsystemInterface;
  * N workers share a job queue. Main thread enqueues jobs, workers dequeue
  * and process them. Results are collected each frame.
  *
- * This is an engine-level extension point. Game-specific pools (e.g.
- * Netrunner's city ticking, NEXUS runtime) extend or compose this class
- * in the game repository.
+ * This is an engine-level extension point. Game-specific pools (e.g. a
+ * simulation tick spread over workers) extend or compose this class in the
+ * game repository.
  *
  * Job format: ['id' => string, 'type' => string, 'data' => array]
  * Result format: ['id' => string, 'result' => array]

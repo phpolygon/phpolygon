@@ -37,8 +37,9 @@ namespace PHPolygon\Build;
  * micro runtime.
  *
  * The environment carries PHPOLYGON_BUILD_PLATFORM, PHPOLYGON_BUILD_ARCH,
- * PHPOLYGON_BUILD_VARIANT and PHPOLYGON_BUILD_TYPE. A failing hook fails the
- * build; PHPOLYGON_SKIP_HOOKS=1 skips all hooks.
+ * PHPOLYGON_BUILD_VARIANT and PHPOLYGON_BUILD_TYPE. On a host without a display
+ * it also carries VIO_PLATFORM=null ({@see withoutWindowSystem()}). A failing
+ * hook fails the build; PHPOLYGON_SKIP_HOOKS=1 skips all hooks.
  *
  * `hooks.afterPackage` has the same form and runs per target once its bundle
  * is assembled ({@see runAfterPackage()}).
@@ -177,6 +178,7 @@ final class BuildHookRunner
             'PHPOLYGON_BUILD_VARIANT' => $context['variant'],
             'PHPOLYGON_BUILD_TYPE' => $context['type'],
         ] + getenv();
+        $environment = self::withoutWindowSystem($environment);
 
         foreach ($hooks as $index => $hook) {
             $command = $hook['run'];
@@ -298,6 +300,32 @@ final class BuildHookRunner
             $current = $environment[$variable] ?? '';
             $environment[$variable] = $current === '' ? $dir : $dir . PATH_SEPARATOR . $current;
         }
+
+        return $environment;
+    }
+
+    /**
+     * $environment with VIO_PLATFORM=null when it names no display and sets no
+     * VIO_PLATFORM itself. php-vio starts its window system when the extension
+     * loads, before any PHP code runs: without a display (a build container) a
+     * hook and every worker it starts printed two GLFW warnings ("error 65544 ...
+     * DISPLAY ... missing", "Failed to initialize GLFW"). The null platform skips
+     * the window system; audio encoding and text rasterisation do not use it.
+     * Windows and macOS always have one, so their hooks keep the native platform
+     * (a hook may still open an OpenGL context there).
+     *
+     * @param array<string, string> $environment
+     * @return array<string, string>
+     */
+    public static function withoutWindowSystem(array $environment, string $osFamily = PHP_OS_FAMILY): array
+    {
+        if (($environment['VIO_PLATFORM'] ?? '') !== '' || $osFamily === 'Windows' || $osFamily === 'Darwin') {
+            return $environment;
+        }
+        if (($environment['DISPLAY'] ?? '') !== '' || ($environment['WAYLAND_DISPLAY'] ?? '') !== '') {
+            return $environment;
+        }
+        $environment['VIO_PLATFORM'] = 'null';
 
         return $environment;
     }

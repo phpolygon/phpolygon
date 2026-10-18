@@ -13,7 +13,7 @@ use ReflectionMethod;
  *
  * vio rasterizes glyphs into a fixed-size atlas and bilinearly stretches that
  * atlas when a transform magnifies text — so UI drawn through a design-grid
- * scale (e.g. Code Tycoon's 1280×720 grid magnified to 1440p) rasterized text
+ * scale (e.g. a 1280×720 design grid magnified to 1440p) rasterized text
  * at its logical size and upscaled it, producing blurry text. Setting a render
  * scale makes the renderer rasterize the atlas at size*scale physical pixels via
  * the vio_font `$scale` param, while the C side reports every metric back in

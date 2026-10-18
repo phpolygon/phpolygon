@@ -116,6 +116,32 @@ final class BuildHookRunnerTest extends TestCase
         self::assertSame(PHP_BINARY, file_get_contents($this->dir . '/php.txt'));
     }
 
+    public function testHooksWithoutADisplaySkipTheWindowSystem(): void
+    {
+        self::assertSame(
+            ['PATH' => '/usr/bin', 'VIO_PLATFORM' => 'null'],
+            BuildHookRunner::withoutWindowSystem(['PATH' => '/usr/bin'], 'Linux'),
+            'no display: php-vio starts no window system (no GLFW warnings)',
+        );
+        self::assertSame(['VIO_PLATFORM' => 'null'], BuildHookRunner::withoutWindowSystem(['VIO_PLATFORM' => ''], 'Linux'));
+        self::assertSame(['VIO_PLATFORM' => 'x11'], BuildHookRunner::withoutWindowSystem(['VIO_PLATFORM' => 'x11'], 'Linux'), 'the caller decides');
+        self::assertSame(['DISPLAY' => ':0'], BuildHookRunner::withoutWindowSystem(['DISPLAY' => ':0'], 'Linux'));
+        self::assertSame(['WAYLAND_DISPLAY' => 'wayland-0'], BuildHookRunner::withoutWindowSystem(['WAYLAND_DISPLAY' => 'wayland-0'], 'BSD'));
+        self::assertSame([], BuildHookRunner::withoutWindowSystem([], 'Windows'));
+        self::assertSame([], BuildHookRunner::withoutWindowSystem([], 'Darwin'));
+    }
+
+    public function testHookProcessesGetTheWindowSystemChoice(): void
+    {
+        file_put_contents($this->dir . '/platform.php', '<?php file_put_contents("platform.txt", var_export(getenv("VIO_PLATFORM"), true));');
+        $runner = new BuildHookRunner($this->config([['@php', 'platform.php']]), $this->neverResolve());
+
+        $runner->runBeforeBuild($this->context);
+
+        $expected = BuildHookRunner::withoutWindowSystem(getenv())['VIO_PLATFORM'] ?? false;
+        self::assertSame(var_export($expected, true), file_get_contents($this->dir . '/platform.txt'));
+    }
+
     public function testFailingHookFailsTheBuild(): void
     {
         file_put_contents($this->dir . '/fail.php', '<?php exit(3);');

@@ -289,13 +289,13 @@ per-platform depot IDs, branch to set live, Steam login). Example:
   "steamUser": "your-login",
   "uploads": {
     "full": {
-      "appId": "4347780",
+      "appId": "1234560",
       "buildType": "full",
       "setLive": "",
-      "depots": { "windows-x86_64": "4347782", "linux-x86_64": "4347783", "macos-universal": "4347784" }
+      "depots": { "windows-x86_64": "1234561", "linux-x86_64": "1234562", "macos-universal": "1234563" }
     },
-    "beta": { "appId": "4417500", "buildType": "full", "setLive": "beta",
-      "depots": { "windows-x86_64": "4417501", "linux-x86_64": "4417505", "macos-universal": "4417506" } }
+    "beta": { "appId": "1234570", "buildType": "full", "setLive": "beta",
+      "depots": { "windows-x86_64": "1234571", "linux-x86_64": "1234572", "macos-universal": "1234573" } }
   }
 }
 ```
