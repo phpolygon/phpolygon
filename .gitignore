@@ -11,3 +11,4 @@ composer.lock
 /game.log
 /.phpbench/
 /saves/
+__pycache__/
