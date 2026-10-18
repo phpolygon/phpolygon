@@ -95,7 +95,26 @@ steam_stage_content() {
         [ -x "$f" ] || { echo "  ${C_R}not executable after chmod: $f${C_0}"; bad=1; }
     done
     [ "$bad" = "0" ] || return 1
+    steam_check_case_collisions "$suffix" || return 1
     echo "  staged upload content: $STEAM_STAGE (executable bits verified)"
+}
+
+# Steam depots map paths case-insensitively: two files that differ only in case
+# (terminfo's E/Eterm and e/eterm) fail the depot build in steamcmd - after the
+# upload of the other depots. Find them here, before anything goes to Steam.
+steam_check_case_collisions() {
+    local suffix="$1" depot dupes bad=0
+    for depot in "windows-x86_64-${suffix}" "linux-x86_64-${suffix}" "macos-universal-${suffix}"; do
+        [ -d "${STEAM_STAGE}/${depot}" ] || continue
+        dupes="$(cd "${STEAM_STAGE}/${depot}" && find . -mindepth 1 | awk '{ print tolower($0) "\t" $0 }' \
+            | sort | awk -F'\t' '$1 == prev { print last; print $2 } { prev = $1; last = $2 }' | sort -u)"
+        if [ -n "$dupes" ]; then
+            echo "  ${C_R}${depot}: paths that differ only in case (a Steam depot refuses them):${C_0}"
+            echo "$dupes" | head -20 | sed 's/^/    /'
+            bad=1
+        fi
+    done
+    return "$bad"
 }
 
 # Build $STEAM_STAGE/macos-universal-<suffix>/<App>.app from the arm64 + x86_64 bundles.

@@ -75,6 +75,8 @@ class PythonRuntimeTrimmerTest extends TestCase
             'lib/python3.14/lib-dynload/_tkinter.cpython-314-x86_64-linux-gnu.so',
             'lib/python3.14/lib-dynload/_json.cpython-314-x86_64-linux-gnu.so',
             'include/python3.14/Python.h', 'share/man/man1/python3.1',
+            // ncurses' terminal database: names that differ only in case.
+            'share/terminfo/E/Eterm', 'share/terminfo/e/eterm',
         ]);
 
         $this->assertSame(['lib/python3.14', 'lib/python3.14/lib-dynload'], PythonRuntimeTrimmer::layout($root));
@@ -86,7 +88,7 @@ class PythonRuntimeTrimmerTest extends TestCase
         foreach (['bin/pip3', 'bin/idle3.14', 'bin/python3.14-config', 'lib/libtcl9.0.so', 'lib/python3.14/lib-dynload/_tkinter.cpython-314-x86_64-linux-gnu.so'] as $gone) {
             $this->assertFileDoesNotExist($root . '/' . $gone);
         }
-        foreach (['lib/tcl9.0', 'lib/thread3.0.6', 'lib/pkgconfig', 'lib/python3.14/tkinter', 'lib/python3.14/site-packages/pip', 'lib/python3.14/config-3.14-x86_64-linux-gnu', 'include', 'share/man'] as $gone) {
+        foreach (['lib/tcl9.0', 'lib/thread3.0.6', 'lib/pkgconfig', 'lib/python3.14/tkinter', 'lib/python3.14/site-packages/pip', 'lib/python3.14/config-3.14-x86_64-linux-gnu', 'include', 'share/man', 'share/terminfo'] as $gone) {
             $this->assertDirectoryDoesNotExist($root . '/' . $gone);
         }
     }

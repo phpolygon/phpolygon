@@ -10,7 +10,7 @@ namespace PHPolygon\Build;
  * scripts needs, for games that ship Python to execute player code.
  *
  * Removal is grouped. {@see DEFAULT_GROUPS} only drops what a script run never
- * loads: package/venv tooling, the Tk GUI stack, the stdlib's own test suites
+ * loads: package/venv tooling, the Tk GUI stack and the terminal database, the stdlib's own test suites
  * and test extension modules, C headers / import libraries / man pages, and the
  * optimised `.opt-1/.opt-2.pyc` duplicates (plain `.pyc` stay - a game that
  * starts Python with `-B` cannot rebuild them, every run would recompile).
@@ -38,6 +38,10 @@ final class PythonRuntimeTrimmer
             '{dynload}/_tkinter*', '{dynload}/tcl*.dll', '{dynload}/tk*.dll',
             'tcl', 'pythonw.exe',
             'lib/libtcl*', 'lib/libtk*', 'lib/tcl9*', 'lib/tk9*', 'lib/itcl4*', 'lib/thread3*',
+            // Terminal capability database of the bundled ncurses (curses/readline
+            // UIs). Its entries differ only in case (E/Eterm, e/eterm), which a
+            // case-insensitive file system or Steam depot refuses.
+            'share/terminfo',
         ],
         'tests' => [
             '{lib}/test', '{lib}/**/test', '{lib}/**/tests', '{lib}/**/idle_test',

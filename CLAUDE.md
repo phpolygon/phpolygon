@@ -836,7 +836,8 @@ all depots on the container's own filesystem (`STEAM_STAGE`, default
 `/tmp/phpolygon-steam-content`: chmod on a Windows bind mount may not stick),
 sets and verifies the executable bits, and aborts when a binary or `.dylib`
 lacks its arm64/x86_64 slice (a `.dylib` below a folder named for one architecture -
-`runtimes/macos-x86_64/…`, `lib-arm64/…` - needs only that one). Signing (`docker/build-all.sh`): the bare micro.sfx is
+`runtimes/macos-x86_64/…`, `lib-arm64/…` - needs only that one) or when a depot holds two paths
+that differ only in case (Steam maps them case-insensitively and fails the depot). Signing (`docker/build-all.sh`): the bare micro.sfx is
 ad-hoc signed before the launcher is appended, with JIT/library entitlements
 (`allow-jit`, `allow-unsigned-executable-memory`, `disable-library-validation`);
 `MAC_HARDENED=1` adds the hardened-runtime flag. **Unverified on hardware** -
@@ -932,7 +933,8 @@ $remove, $keep, $dryRun)`, or declaratively for external resources in the packag
 ```
 
 - `default` = `tooling` (pip, ensurepip, venv, Scripts, bin/pip|idle|pydoc|-config), `gui` (tkinter,
-  idlelib, turtle, Tcl/Tk, pythonw), `tests` (stdlib test dirs, `_test*`/`xx*` modules), `devel`
+  idlelib, turtle, Tcl/Tk, pythonw, `share/terminfo` - its names differ only in case, which a Steam
+  depot refuses), `tests` (stdlib test dirs, `_test*`/`xx*` modules), `devel`
   (include, libs, pkgconfig, config-*, man pages), `bytecode-variants` (`*.opt-1/2.pyc`; plain `.pyc`
   stay, a `-B` run could not rebuild them). Nothing a script run imports.
 - Opt-in: `network` (OpenSSL, `_ssl`, `_hashlib` - `hashlib` keeps its built-in md5/sha*/blake2),
