@@ -835,7 +835,8 @@ start: `game.log` → `game.log.1`, `boot.log` → `boot.log.1`. The upload stag
 all depots on the container's own filesystem (`STEAM_STAGE`, default
 `/tmp/phpolygon-steam-content`: chmod on a Windows bind mount may not stick),
 sets and verifies the executable bits, and aborts when a binary or `.dylib`
-lacks its arm64/x86_64 slice. Signing (`docker/build-all.sh`): the bare micro.sfx is
+lacks its arm64/x86_64 slice (a `.dylib` below a folder named for one architecture -
+`runtimes/macos-x86_64/…`, `lib-arm64/…` - needs only that one). Signing (`docker/build-all.sh`): the bare micro.sfx is
 ad-hoc signed before the launcher is appended, with JIT/library entitlements
 (`allow-jit`, `allow-unsigned-executable-memory`, `disable-library-validation`);
 `MAC_HARDENED=1` adds the hardened-runtime flag. **Unverified on hardware** -

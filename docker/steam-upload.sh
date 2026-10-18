@@ -134,12 +134,32 @@ steam_make_universal() {
     chmod 0755 "${mac}/${APP_NAME}" "${mac}/${APP_NAME}-arm64" "${mac}/${APP_NAME}-x86_64"
     macho_require_arch "${mac}/${APP_NAME}-arm64" arm64 || return 1
     macho_require_arch "${mac}/${APP_NAME}-x86_64" x86_64 || return 1
-    local lib
+    # A library both binaries may load needs both slices. One inside a folder
+    # named for an architecture (runtimes/macos-x86_64/..., lib-arm64/...) is
+    # only ever loaded by that architecture and is thin on purpose.
+    local lib want
     while IFS= read -r -d '' lib; do
+        want="$(macho_dir_arch "${lib#"$uni"/}")"
+        if [ -n "$want" ]; then
+            macho_require_arch "$lib" "$want" || return 1
+            continue
+        fi
         macho_require_arch "$lib" arm64 || return 1
         macho_require_arch "$lib" x86_64 || return 1
     done < <(find "$uni" -name '*.dylib' -print0)
     echo "  universal bundle: ${uni}"
+}
+
+# Architecture a bundle-relative path is scoped to by one of its folder names
+# (arm64/aarch64 or x86_64/amd64/x64 as a whole word between - _ .), else empty.
+macho_dir_arch() {
+    local dir seg
+    dir="$(dirname "$1")"
+    local IFS=/
+    for seg in $dir; do
+        if [[ "$seg" =~ (^|[-_.])(arm64|aarch64)($|[-_.]) ]]; then echo arm64; return; fi
+        if [[ "$seg" =~ (^|[-_.])(x86_64|amd64|x64)($|[-_.]) ]]; then echo x86_64; return; fi
+    done
 }
 # CPU architectures of a Mach-O file (thin or fat), space-separated.
 _macho_cpu_name() { case "$1" in 0100000c) echo arm64 ;; 01000007) echo x86_64 ;; *) echo "cpu-$1" ;; esac; }
