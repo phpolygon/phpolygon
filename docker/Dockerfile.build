@@ -98,8 +98,10 @@ WORKDIR /app
 COPY build-all.sh /usr/local/bin/build-all
 COPY steam-upload.sh /usr/local/bin/steam-upload
 COPY macos-launcher.sh /usr/local/share/phpolygon/macos-launcher.sh
+COPY sync-workdir.sh /usr/local/share/phpolygon/sync-workdir.sh
 RUN chmod +x /usr/local/bin/build-all /usr/local/bin/steam-upload; \
-    sed -i 's/\r$//' /usr/local/bin/build-all /usr/local/bin/steam-upload /usr/local/share/phpolygon/macos-launcher.sh
+    sed -i 's/\r$//' /usr/local/bin/build-all /usr/local/bin/steam-upload /usr/local/share/phpolygon/macos-launcher.sh \
+        /usr/local/share/phpolygon/sync-workdir.sh
 
 # Persist the micro.sfx download cache (/root/.phpolygon) and the steamcmd
 # session + Steam Guard sentry (/root/Steam) across runs via mounted volumes.

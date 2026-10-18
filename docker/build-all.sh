@@ -35,6 +35,11 @@
 #                  build/ then lives in that volume (see sync_workdir)
 #   PHPOLYGON_SYNC_EXCLUDE  rsync patterns (project-relative, space-separated) the
 #                  PHPOLYGON_WORKDIR mirror skips, e.g. "artwork/ docs/"
+#   PHPOLYGON_SYNC_SEED  paths (relative to /app, space-separated) copied into the
+#                  mirror after it only where the host file is NEWER (rsync --update,
+#                  nothing deleted) - hook outputs excluded from the mirror, e.g.
+#                  "assets/audio/voice/"; may also be in PHPOLYGON_SYNC_EXCLUDE
+#   PHPOLYGON_SYNC_PROGRESS_STEP / _SECS  progress line every N % / N s (5 / 10)
 #   PHPOLYGON_COPY_OUT "<package dir> ..." or "all": with PHPOLYGON_WORKDIR, copy
 #                  finished packages back to /app/build
 set -uo pipefail
@@ -245,28 +250,14 @@ inject_version() {
 }
 
 # ── PHPOLYGON_WORKDIR: build in a container-local mirror of the project ───────
-# On Docker Desktop (Windows/macOS) the /app bind mount is slow for many small
-# files - measured on a 594 MB / 18k-file package: 98 s to write it there, 1 s
-# into a volume, 64 s to delete it, 186 s to read it. With PHPOLYGON_WORKDIR set
-# (mount a named volume there), /app is mirrored into it with rsync - the first
-# run copies, later runs only what changed - and everything (hooks, staging,
-# packaging, build/) happens there. Not mirrored: build/ (outputs and caches stay
-# in the volume) and .git. resources.exclude IS mirrored: those files never ship,
-# but hooks read them (recording sources a prebake renders from). Project-relative
-# rsync patterns in PHPOLYGON_SYNC_EXCLUDE ("artwork/ docs/") skip files no build
-# step needs. PHPOLYGON_COPY_OUT="<dir> ..." (or "all") copies finished packages
-# back to /app/build for the host.
-sync_workdir() {
-    local dst="$1" t0=$SECONDS pattern
-    local -a excludes=(--exclude=/build/ --exclude=/.git/)
-    for pattern in ${PHPOLYGON_SYNC_EXCLUDE:-}; do
-        excludes+=("--exclude=/${pattern#/}")
-    done
-    mkdir -p "$dst"
-    echo "  mirroring /app -> ${dst} (rsync, ${#excludes[@]} excludes)..."
-    rsync -a --delete "${excludes[@]}" /app/ "$dst/" || { echo "  ${C_R}rsync to ${dst} failed${C_0}"; return 1; }
-    echo "  mirrored in $(( SECONDS - t0 ))s ($(du -sh --exclude=build "$dst" 2>/dev/null | cut -f1))"
-}
+# sync_workdir / seed_workdir (rsync with a line-wise progress log) live in
+# sync-workdir.sh - see there. PHPOLYGON_COPY_OUT="<dir> ..." (or "all") copies
+# finished packages back to /app/build for the host.
+for _sync_lib in /usr/local/share/phpolygon/sync-workdir.sh "$(dirname "${BASH_SOURCE[0]}")/sync-workdir.sh"; do
+    # shellcheck source=sync-workdir.sh
+    [ -f "$_sync_lib" ] && { source "$_sync_lib"; break; }
+done
+declare -F sync_workdir >/dev/null || { echo "FATAL: sync-workdir.sh not found next to build-all" >&2; exit 1; }
 
 # ── confirm (interactive) ─────────────────────────────────────────────────────
 if [ "$INTERACTIVE" = "1" ]; then
@@ -289,6 +280,7 @@ VERSION="$CUR_VERSION"
 
 if [ -n "${PHPOLYGON_WORKDIR:-}" ]; then
     sync_workdir "$PHPOLYGON_WORKDIR" || exit 1
+    seed_workdir "$PHPOLYGON_WORKDIR" || exit 1
     cd "$PHPOLYGON_WORKDIR" || exit 1
 fi
 

@@ -178,6 +178,34 @@ rsync patterns in `PHPOLYGON_SYNC_EXCLUDE` - not `resources.exclude`: those file
 never ship, but hooks read them) and builds there. `build/` then lives in that volume; mount it
 again for an upload step, or set `PHPOLYGON_COPY_OUT` to get packages back.
 
+The copy logs its progress line by line (rsync `--info=progress2`, one total percentage; a
+line every 5 % or 10 s - `PHPOLYGON_SYNC_PROGRESS_STEP` / `_SECS` - then a summary). Nothing
+changed = one line:
+
+```text
+  mirroring /app -> /work (rsync, 18 excludes)...
+  sync: 43 % – 1002.7 MB – 12.7 MB/s – 1:44 left
+  sync: done – 27,997 of 27,997 files, 2.3 GB of 2.3 GB – 298 s
+  sync: up to date – 27,595 files checked (2.2 GB) – 22 s
+```
+
+**Seeding hook outputs.** Prebake outputs (`hooks.beforeBuild`) usually belong in
+`PHPOLYGON_SYNC_EXCLUDE`, so a stale host copy never overwrites what the container rendered.
+When the host copy is the newer one (re-rendered on the host), list the paths in
+`PHPOLYGON_SYNC_SEED` too: after the mirror each one is copied with `rsync -a --update` - a
+host file only when it is newer than the volume's, nothing in the volume deleted - so the hook
+finds it up to date instead of rendering everything again. A path missing on the host is
+reported and skipped.
+
+```text
+  seed assets/audio/voice/: 50 % – 173.1 MB – 9.6 MB/s – 0:29 left
+  seed assets/audio/voice/: done – 15,412 of 15,412 files, 346.3 MB of 346.3 MB – 46 s
+  seed assets/holograms/: up to date – 330 files checked (17.2 MB) – 0 s
+```
+
+The sync functions live in `sync-workdir.sh`; `tests/sync-workdir-test.sh` checks them in the
+image: `docker run --rm --entrypoint bash -v "$PWD/docker:/harness" phpolygon-build /harness/tests/sync-workdir-test.sh`.
+
 ```bash
 docker run --rm --platform linux/amd64 \
   -e GITHUB_TOKEN="$(gh auth token)" -e PHPOLYGON_WORKDIR=/work \
@@ -205,6 +233,8 @@ docker run --rm --platform linux/amd64 \
 | `VERSION_CONST_FILE` / `VERSION_CONST` | _(auto)_ | override the in-game version constant file / name (default `bootstrap_version.php` / `GAME_VERSION`); `phpolygon.project.json` `version` follows too |
 | `PHPOLYGON_WORKDIR` | _(off)_ | path of a mounted volume to build in (rsync mirror of `/app`, see above) |
 | `PHPOLYGON_SYNC_EXCLUDE` | _(none)_ | rsync patterns the `PHPOLYGON_WORKDIR` mirror skips (`"artwork/ docs/"`) - only what no build step reads |
+| `PHPOLYGON_SYNC_SEED` | _(none)_ | paths (relative to `/app`) copied into the mirror afterwards where the host file is newer (`rsync --update`, no delete) - hook outputs, may also be excluded |
+| `PHPOLYGON_SYNC_PROGRESS_STEP` / `_SECS` | `5` / `10` | sync progress line every N percent / N seconds |
 | `PHPOLYGON_COPY_OUT` | _(none)_ | with `PHPOLYGON_WORKDIR`: `all` or package dir names (`windows-x86_64-steam ...`) copied back to `/app/build` |
 
 `TYPE` and `VARIANT` are passed straight through to `phpolygon build`; the engine

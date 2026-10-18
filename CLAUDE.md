@@ -925,6 +925,13 @@ build; assets and the build id stay the same. `docker/build-all.sh` builds the f
 others. A type whose hooks produce type-specific files sets `"sharedPhar": false` in its `buildTypes`
 entry and is built from scratch.
 
+**Build in a volume (`PHPOLYGON_WORKDIR`).** `docker/sync-workdir.sh` (sourced by `build-all.sh`) mirrors
+`/app` into the volume with rsync, minus `build/`, `.git` and `PHPOLYGON_SYNC_EXCLUDE`; then each path in
+`PHPOLYGON_SYNC_SEED` gets `rsync -a --update` (host file only when newer, no delete) - for hook outputs that
+are excluded so a stale host copy cannot overwrite the container's, but a newer one saves the re-render.
+Progress is rsync `--info=progress2` turned into plain log lines (every 5 % / 10 s, then a summary; nothing
+changed = one line), no `\r` in the log. Test: `docker/tests/sync-workdir-test.sh`, run in the image.
+
 ### Embedded Python runtimes
 
 A game that runs player code in a shipped CPython (python-build-standalone, Windows `Lib/`+`DLLs/`
