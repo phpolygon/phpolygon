@@ -114,6 +114,22 @@ class BuildConfig
     public array $buildTypes = [];
 
     /**
+     * build.json `verify.versionConstant`: the bootstrap constant that carries the
+     * game version; {@see BuildVerifier} checks that it equals `version`.
+     */
+    public ?string $verifyVersionConstant = null;
+
+    /**
+     * build.json `verify.files`: build type (or `*` for every type) => paths
+     * relative to the project root (`resources/...`, `assets/...`) that a build
+     * must ship non-empty - in the PHAR or among the external resources. For
+     * git-ignored files a build silently loses on a fresh checkout (tokens, keys).
+     *
+     * @var array<string, list<string>>
+     */
+    public array $verifyFiles = [];
+
+    /**
      * UI-layout transpile config (build.json `ui.transpile`): when set, the build
      * regenerates `<dir>/*.ui.json` into `<output>/<Studly>Layout.php` (namespace
      * `namespace`) on the staged tree, so the PHAR always ships zero-parse PHP.
@@ -319,8 +335,11 @@ class BuildConfig
             $buildTypes = $data['buildTypes'];
             $this->buildTypes = $buildTypes;
         }
+        if (isset($data['verify'])) {
+            $this->parseVerify($data['verify']);
+        }
 
-        $hooks = isset($data['hooks']) && is_array($data['hooks']) ? $data['hooks'] : [];
+        $hooks =isset($data['hooks']) && is_array($data['hooks']) ? $data['hooks'] : [];
         if (isset($hooks['beforeBuild']) && is_array($hooks['beforeBuild'])) {
             foreach ($hooks['beforeBuild'] as $hook) {
                 $parsed = self::parseHook($hook);
@@ -340,6 +359,42 @@ class BuildConfig
 
         $this->upscalers = UpscalerConfig::fromBuildJson($data['upscalers'] ?? null, $this->phpIni);
         $this->speech = SpeechConfig::fromBuildJson($data['speech'] ?? null);
+    }
+
+    /**
+     * build.json `verify`: `{"versionConstant": "GAME_VERSION", "files": {"*": ["resources/key"]}}`.
+     *
+     * @throws \InvalidArgumentException on a malformed section
+     */
+    private function parseVerify(mixed $verify): void
+    {
+        if (!is_array($verify)) {
+            throw new \InvalidArgumentException('build.json verify must be an object');
+        }
+        $constant = $verify['versionConstant'] ?? null;
+        if ($constant !== null) {
+            if (!is_string($constant) || preg_match('/^[A-Za-z_][A-Za-z0-9_]*$/', $constant) !== 1) {
+                throw new \InvalidArgumentException('build.json verify.versionConstant must be a constant name');
+            }
+            $this->verifyVersionConstant = $constant;
+        }
+        $files = $verify['files'] ?? [];
+        if (!is_array($files) || ($files !== [] && array_is_list($files))) {
+            throw new \InvalidArgumentException('build.json verify.files must map a build type (or "*") to a list of paths');
+        }
+        foreach ($files as $type => $paths) {
+            if (!is_array($paths) || !array_is_list($paths)) {
+                throw new \InvalidArgumentException("build.json verify.files.{$type} must be a list of paths");
+            }
+            $list = [];
+            foreach ($paths as $path) {
+                if (!is_string($path) || $path === '' || preg_match('#(^|[/\\\\])\.\.([/\\\\]|$)|^[/\\\\]|^[A-Za-z]:#', $path) === 1) {
+                    throw new \InvalidArgumentException("build.json verify.files.{$type}: relative paths without '..' only, got " . json_encode($path));
+                }
+                $list[] = str_replace('\\', '/', $path);
+            }
+            $this->verifyFiles[(string) $type] = $list;
+        }
     }
 
     /**
@@ -460,6 +515,8 @@ class BuildConfig
             'resources.exclude' => $this->resourcesExclude,
             'platforms' => $this->platforms,
             'buildTypes' => $this->buildTypes,
+            'verify.versionConstant' => $this->verifyVersionConstant,
+            'verify.files' => $this->verifyFiles,
             'hooks.beforeBuild' => $this->hooksBeforeBuild,
             'hooks.afterPackage' => $this->hooksAfterPackage,
             'upscalers' => $this->upscalers->toArray(),

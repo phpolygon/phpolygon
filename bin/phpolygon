@@ -179,6 +179,11 @@ if ($command === 'build:transpile') {
     exit(0);
 }
 
+if ($command === 'verify-build') {
+    $explicitType = in_array('--type', $args, true) ? $options['type'] : null;
+    exit(verifyBuild($platformArg, $explicitType, $options['output']));
+}
+
 if ($command === 'speech:status') {
     speechStatus($args);
     exit(0);
@@ -479,6 +484,53 @@ function launchEditor(): void
     exit($exitCode);
 }
 
+/**
+ * `verify-build [path] [--type T] [--output DIR]`: {@see \PHPolygon\Build\BuildVerifier}
+ * on one package (a .phar, .app, package dir or binary) or on every package dir
+ * in the output directory. Without --type the type follows the dir name.
+ */
+function verifyBuild(string $path, ?string $type, string $outputDir): int
+{
+    $root = getcwd() ?: '.';
+    $config = BuildConfig::load($root);
+    $verifier = new \PHPolygon\Build\BuildVerifier($config);
+    $paths = $path !== '' ? [$path] : [];
+    if ($paths === []) {
+        $dir = $outputDir !== '' ? $outputDir : $root . '/build';
+        foreach (glob($dir . '/*-*', GLOB_ONLYDIR) ?: [] as $candidate) {
+            if (preg_match('/^(macos|linux|windows)-(arm64|x86_64)(-|$)/', basename($candidate)) === 1) {
+                $paths[] = $candidate;
+            }
+        }
+        if ($paths === []) {
+            fwrite(STDERR, "No packages in {$dir}\n");
+            return 1;
+        }
+    }
+    $failed = 0;
+    foreach ($paths as $package) {
+        $packageType = $type ?? $verifier->typeFromPath($package);
+        try {
+            $result = $verifier->verifyPackage($package, $packageType);
+        } catch (\RuntimeException $e) {
+            echo "\033[31m✗\033[0m {$package} ({$packageType}): {$e->getMessage()}\n";
+            $failed++;
+            continue;
+        }
+        if ($result->ok()) {
+            echo "\033[32m✓\033[0m {$package} ({$packageType})" . ($result->passed !== [] ? ': ' . implode(', ', $result->passed) : '') . "\n";
+            continue;
+        }
+        $failed++;
+        echo "\033[31m✗\033[0m {$package} ({$packageType})\n";
+        foreach ($result->problems as $problem) {
+            echo "    - {$problem}\n";
+        }
+    }
+
+    return $failed > 0 ? 1 : 0;
+}
+
 function printUsage(): void
 {
     echo <<<'USAGE'
@@ -499,6 +551,8 @@ Commands:
   build              Build game for distribution (auto-transpiles UI layouts)
   build:transpile    Transpile resources/ui/*.ui.json into PHP builder classes
                      (--check verifies they are in sync instead of writing)
+  verify-build       Check built packages against build.json: build type constants,
+                     verify.versionConstant, verify.files (path, or every package in build/)
   speech:status      Spoken lines of build.json "speech" per locale: current, missing, stale
   speech:sync        Generate missing/stale spoken lines (--locale=de,en --key=dialog.* --check)
   speech:setup       Set up the speech synthesizer: Python environment, --docker [--gpu] image,
@@ -550,6 +604,8 @@ Examples:
   phpolygon build --dry-run                      Show config without building
   phpolygon build:transpile                      Regenerate UI PHP from *.ui.json
   phpolygon build:transpile --check              Fail if UI PHP is out of sync
+  phpolygon verify-build                         Verify every package in build/ (type from the dir name)
+  phpolygon verify-build build/linux-x86_64-steam-demo --type demo   Verify one package as a demo
   phpolygon speech:setup                         Python environment for speech synthesis
   phpolygon speech:setup --docker --gpu          Speech synthesis as a CUDA Docker image
   phpolygon speech:setup --remote=ssh://me@mac   Python environment on a remote worker host

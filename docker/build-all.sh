@@ -528,8 +528,8 @@ else
 fi
 echo ""
 
-# ── Build verification (project-provided, before any upload) ─────────────────
-# If the project ships scripts/verify_build.php, run it against each built target
+# ── Build verification (before any upload) ───────────────────────────────────
+# On top, if the project ships scripts/verify_build.php, run it against each built target
 # so a binary whose baked identity contradicts its build type can never reach
 # Steam (e.g. a demo build that resolves to the full game). The container-native
 # linux binary is executed per build type via the game's --build-info self-check;
@@ -537,8 +537,22 @@ echo ""
 # is authoritative. A failure bumps $fails and the upload guard below skips.
 # Package layout is nested: build/<target>-<variant>[-type]/<App>/<App> (the flat
 # package dir holds the executable + resources), so the binary is $out/$APP/$APP.
-if [ -n "$UPLOAD" ] && [ "$fails" -eq 0 ] && [ -f scripts/verify_build.php ]; then
+# Engine check first: every built target against build.json (build type constants,
+# verify.versionConstant, verify.files) - `phpolygon build` already ran it per
+# target; this re-reads the finished packages, so nothing that touched them since
+# slips through.
+if [ "$fails" -eq 0 ]; then
     echo "${C_B}=== Build verification ===${C_0}"
+    for rf in "${RESULTS[@]}"; do
+        [ -f "$rf" ] || continue
+        IFS=$'\t' read -r tgt typ dt st sz sg out < "$rf"
+        [ "$st" = "FAILED" ] && continue
+        php vendor/bin/phpolygon verify-build "$out" --type "$typ" || fails=$((fails+1))
+    done
+    echo ""
+fi
+if [ -n "$UPLOAD" ] && [ "$fails" -eq 0 ] && [ -f scripts/verify_build.php ]; then
+    echo "${C_B}=== Build verification (project) ===${C_0}"
     declare -A _verified=()
     for rf in "${RESULTS[@]}"; do
         [ -f "$rf" ] || continue

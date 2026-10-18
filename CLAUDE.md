@@ -855,6 +855,8 @@ run a build once on an Apple Silicon Mac.
 | `PlatformPackager` | Creates .app bundle, Linux dir, Windows .exe |
 | `GameBuilder` | Orchestrates the 7-phase pipeline |
 | `BuildHookRunner` | Runs build.json `hooks.beforeBuild` before staging (see below) |
+| `BuildConstants` | Build type constants: rewrite `define()` in the staged bootstrap files, resolve what a set of sources defines |
+| `BuildVerifier` / `BuildVerification` | Checks a built PHAR / package against build.json (see "Build verification") |
 | `MicroIni` | Encodes build.json `php.ini` as the ini section between micro.sfx and PHAR (see below) |
 | `UpscalerConfig` | Parses/validates build.json `upscalers` (see below) |
 | `NativeUpscalerResolver` | FSR 3 / DLSS runtimes for a target: FidelityFX SDK tag (checksummed) or folder; DLSS plugin from a folder or a private GitHub release; cached; warnings, never a failed build |
@@ -882,6 +884,32 @@ The combined executable ignores php.ini files, and startup-only settings (OPcach
 ```
 
 `@php` resolves to `PHPOLYGON_HOOK_PHP`, else the PHP running the build when it has every `requires` function, else the game's static runtime (micro.sfx for the host, variant `runtimeVariant`) wrapped as a runner taking `[-d key=value]... script [args]` with the runtime's libraries (Windows DLLs, Steam API) copied next to it - so a hook can use the shipped game's extensions inside a build container whose PHP lacks them. Hooks see `PHPOLYGON_BUILD_PLATFORM/ARCH/VARIANT/TYPE`, and `PHPOLYGON_HOOK_PHP` names the interpreter of an `@php` hook: start further PHP processes with it, because `PHP_BINARY` is empty inside a micro runtime.
+
+### Build types and verification
+
+`buildTypes.<type>.constants` are written into the staged bootstrap files - `bootstrap.php` and every
+file of `phar.additionalRequires`, wherever one has `define('NAME', ...)` (`BuildConstants::apply`).
+A constant none of them defines fails the build (it used to be skipped silently when the game kept its
+flags outside `bootstrap.php`, shipping a demo as the full game).
+
+Every `phpolygon build` then checks the artifact (`BuildVerifier`, phase 6c, also for a reused
+`--phar`); a problem fails the target, `PHPOLYGON_SKIP_VERIFY=1` turns it into a warning:
+
+- each constant any build type sets resolves, inside the PHAR, to the requested type's value; the ones
+  the type leaves alone keep the project's own value (a full build never carries a demo flag). Only the
+  `define()` calls are read, first one in require order wins, values must be constant expressions;
+- `verify.versionConstant` equals build.json `version`;
+- every path of `verify.files` (`"*"` plus the type) ships non-empty, in the PHAR or among the external
+  resources - for git-ignored files a fresh checkout silently lacks (tokens, keys).
+
+```json
+"verify": { "versionConstant": "GAME_VERSION", "files": { "*": ["resources/bugreport/token"] } }
+```
+
+`phpolygon verify-build [path] [--type T]` checks finished packages: a `.phar`, a macOS `.app`, a package
+dir or a combined binary (its PHAR is found by the stub's `PharBuilder::STUB_MARKER`, since the runtime
+itself contains `__HALT_COMPILER`); without a path every `build/<platform>-<arch>*` dir, the type taken
+from the dir name. `docker/build-all.sh` runs it on every built target before an upload.
 
 ### Embedded Python runtimes
 

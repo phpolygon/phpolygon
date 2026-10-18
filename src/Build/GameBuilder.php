@@ -135,13 +135,17 @@ class GameBuilder
                 $fileCount = $this->countFiles($stagingDir);
                 $this->log('success', "Staged {$fileCount} files");
 
-                // Phase 2b: Apply build type constant overrides
+                // Phase 2b: Apply build type constant overrides in every staged
+                // bootstrap file that defines them (bootstrap.php, phar.additionalRequires);
+                // a constant none of them defines fails the build.
                 $buildTypeConfig = $this->config->buildTypes[$buildType] ?? [];
                 if ($buildType !== 'full' && isset($buildTypeConfig['constants']) && is_array($buildTypeConfig['constants'])) {
                     /** @var array<string, mixed> $constants */
                     $constants = $buildTypeConfig['constants'];
-                    $this->applyBuildTypeConstants($stagingDir, $constants);
-                    $this->log('info', "Applied build type '{$buildType}' constants");
+                    $applied = BuildConstants::apply($stagingDir, $constants, BuildConstants::files($this->config, $stagingDir));
+                    foreach ($applied as $name => $files) {
+                        $this->log('info', "Build type '{$buildType}': {$name} = " . var_export($constants[$name], true) . ' in ' . implode(', ', $files));
+                    }
                 }
 
                 // Phase 2c: Transpile UI layouts to PHP so the PHAR ships
@@ -265,6 +269,10 @@ class GameBuilder
                 $platform === 'macos' ? $outputPath . '/Contents/Resources' : $outputPath,
             );
 
+            // Phase 6c: verify the artifact against build.json - the PHAR that went
+            // into this target (also a reused one) and the packaged files.
+            $this->verify($pharPath, $buildType, $platform === 'macos' ? $outputPath . '/Contents/Resources' : $outputPath);
+
             // Phase 7: Report
             $bundleSize = $this->getDirectorySize($outputPath);
 
@@ -374,26 +382,24 @@ class GameBuilder
     }
 
     /**
-     * @param array<string, mixed> $constants
+     * {@see BuildVerifier} on the built PHAR; a failure fails the build.
+     * PHPOLYGON_SKIP_VERIFY=1 turns it into a warning.
      */
-    private function applyBuildTypeConstants(string $stagingDir, array $constants): void
+    private function verify(string $pharPath, string $buildType, string $resourcesRoot): void
     {
-        $file = $stagingDir . '/bootstrap.php';
-        if (!file_exists($file)) {
+        $result = (new BuildVerifier($this->config))->verifyPhar($pharPath, $buildType, $resourcesRoot);
+        if ($result->ok()) {
+            if ($result->passed !== []) {
+                $this->log('success', "Verified ({$buildType}): " . implode(', ', $result->passed));
+            }
             return;
         }
-
-        $content = file_get_contents($file);
-        if ($content === false) {
+        $message = "Build verification failed ({$buildType}):\n  - " . implode("\n  - ", $result->problems);
+        if (getenv('PHPOLYGON_SKIP_VERIFY') === '1') {
+            $this->log('warning', $message . "\n  (PHPOLYGON_SKIP_VERIFY=1 - continuing)");
             return;
         }
-        foreach ($constants as $name => $value) {
-            $phpValue = var_export($value, true);
-            $pattern = "/(define\(\s*['\"]" . preg_quote($name, '/') . "['\"]\s*,\s*).+?(\))/";
-            $replacement = '${1}' . $phpValue . '${2}';
-            $content = preg_replace($pattern, $replacement, $content) ?? $content;
-        }
-        file_put_contents($file, $content);
+        throw new \RuntimeException($message);
     }
 
     private function log(string $level, string $message): void

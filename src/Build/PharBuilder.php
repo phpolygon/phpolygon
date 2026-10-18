@@ -42,6 +42,12 @@ class PharBuilder
      */
     public const BUILD_ID_FILE = '.phpolygon-build-id';
 
+    /**
+     * The first comment line of every stub ({@see generateStub()}). A combined
+     * binary's PHAR starts at the `<?php` right before it ({@see BuildVerifier}).
+     */
+    public const STUB_MARKER = '// __FILE__ is the archive:';
+
     private BuildConfig $config;
 
     private ?PathGlob $excludeGlob = null;
