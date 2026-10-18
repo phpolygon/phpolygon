@@ -162,6 +162,29 @@ package run per reuse target. In practice the first target takes ~50-90s
 (composer + staging + PHAR) and each remaining target ~1-4s, run in parallel.
 All four desktop targets land in roughly the time of one.
 
+Further build types do not repeat any of it: the first type builds the PHAR, every
+later one derives its PHAR from it in about two seconds (`phpolygon build
+--derive-phar`, only the type's constants differ). A type whose hooks produce
+type-specific files sets `"sharedPhar": false` in `build.json`.
+
+### Speed: build in a volume, not on the bind mount
+
+On Docker Desktop (Windows, macOS) the `/app` bind mount is the bottleneck - for a
+594 MB package of 18k files: **98 s** to write it there, **1 s** into a volume,
+64 s to delete the previous one, 186 s to read it. Mount a named volume and point
+`PHPOLYGON_WORKDIR` at it: the harness mirrors `/app` into it with rsync (first run
+copies, later runs only what changed; `build/` and `.git` stay out, so do the
+rsync patterns in `PHPOLYGON_SYNC_EXCLUDE` - not `resources.exclude`: those files
+never ship, but hooks read them) and builds there. `build/` then lives in that volume; mount it
+again for an upload step, or set `PHPOLYGON_COPY_OUT` to get packages back.
+
+```bash
+docker run --rm --platform linux/amd64 \
+  -e GITHUB_TOKEN="$(gh auth token)" -e PHPOLYGON_WORKDIR=/work \
+  -v "$PWD:/app" -v mygame-work:/work -v phpolygon-buildcache:/root/.phpolygon \
+  phpolygon-build
+```
+
 ### Build hooks
 
 `build.json` `hooks.beforeBuild` run inside the container before the first PHAR is built. `@php` falls back to the game's static runtime when the image PHP lacks a function the hook `requires` (e.g. GD with FreeType or php-vio), and the image carries `build-essential`/`cmake` for hooks that compile tools. Set `-e PHPOLYGON_SKIP_HOOKS=1` to skip them.
@@ -179,7 +202,10 @@ All four desktop targets land in roughly the time of one.
 | `SPC_REPO` | `hmennen90/static-php-cli` | static-php-cli releases repo (matches `StaticPhpResolver::GITHUB_REPO`) |
 | `INTERACTIVE` | _(auto)_ | `1` forces the menu even without a detected TTY |
 | `NONINTERACTIVE` | `0` | `1` forces env-driven mode even with a TTY |
-| `VERSION_CONST_FILE` / `VERSION_CONST` | _(auto)_ | override the in-game version constant file / name (default `bootstrap_version.php` / `GAME_VERSION`) |
+| `VERSION_CONST_FILE` / `VERSION_CONST` | _(auto)_ | override the in-game version constant file / name (default `bootstrap_version.php` / `GAME_VERSION`); `phpolygon.project.json` `version` follows too |
+| `PHPOLYGON_WORKDIR` | _(off)_ | path of a mounted volume to build in (rsync mirror of `/app`, see above) |
+| `PHPOLYGON_SYNC_EXCLUDE` | _(none)_ | rsync patterns the `PHPOLYGON_WORKDIR` mirror skips (`"artwork/ docs/"`) - only what no build step reads |
+| `PHPOLYGON_COPY_OUT` | _(none)_ | with `PHPOLYGON_WORKDIR`: `all` or package dir names (`windows-x86_64-steam ...`) copied back to `/app/build` |
 
 `TYPE` and `VARIANT` are passed straight through to `phpolygon build`; the engine
 reads the build type's constant overrides from the game's `build.json`. The

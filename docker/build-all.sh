@@ -30,6 +30,13 @@
 #   NONINTERACTIVE 1 to force env-driven mode even with a TTY
 #   VERSION_CONST_FILE / VERSION_CONST  override the in-game version constant file
 #                  (default: auto-detect bootstrap_version.php, const GAME_VERSION)
+#   PHPOLYGON_WORKDIR  build in an rsync mirror of /app at this path (mount a named
+#                  volume there) - far faster than the bind mount on Docker Desktop;
+#                  build/ then lives in that volume (see sync_workdir)
+#   PHPOLYGON_SYNC_EXCLUDE  rsync patterns (project-relative, space-separated) the
+#                  PHPOLYGON_WORKDIR mirror skips, e.g. "artwork/ docs/"
+#   PHPOLYGON_COPY_OUT "<package dir> ..." or "all": with PHPOLYGON_WORKDIR, copy
+#                  finished packages back to /app/build
 set -uo pipefail
 
 cd /app
@@ -222,13 +229,43 @@ inject_version() {
         done
     fi
     local const="${VERSION_CONST:-GAME_VERSION}"
+    # The project manifest carries the version too.
+    local manifest=""
+    if [ -f phpolygon.project.json ] && jq -e 'has("version")' phpolygon.project.json >/dev/null 2>&1; then
+        jq --arg v "$v" '.version = $v' phpolygon.project.json > "$tmp" && mv "$tmp" phpolygon.project.json
+        manifest=" + phpolygon.project.json"
+    fi
     if [ -n "$f" ] && [ -f "$f" ] && grep -q "$const" "$f"; then
         sed -i -E "s/(define\((['\"])${const}\2[[:space:]]*,[[:space:]]*(['\"]))[^'\"]*(['\"])/\1${v}\4/" "$f"
-        echo "  version: ${C_G}${v}${C_0}  ->  build.json + ${f} (${const})"
+        echo "  version: ${C_G}${v}${C_0}  ->  build.json${manifest} + ${f} (${const})"
     else
-        echo "  version: ${C_G}${v}${C_0}  ->  build.json  ${C_DIM}(no version const file found)${C_0}"
+        echo "  version: ${C_G}${v}${C_0}  ->  build.json${manifest}  ${C_DIM}(no version const file found)${C_0}"
     fi
     CUR_VERSION="$v"
+}
+
+# ── PHPOLYGON_WORKDIR: build in a container-local mirror of the project ───────
+# On Docker Desktop (Windows/macOS) the /app bind mount is slow for many small
+# files - measured on a 594 MB / 18k-file package: 98 s to write it there, 1 s
+# into a volume, 64 s to delete it, 186 s to read it. With PHPOLYGON_WORKDIR set
+# (mount a named volume there), /app is mirrored into it with rsync - the first
+# run copies, later runs only what changed - and everything (hooks, staging,
+# packaging, build/) happens there. Not mirrored: build/ (outputs and caches stay
+# in the volume) and .git. resources.exclude IS mirrored: those files never ship,
+# but hooks read them (recording sources a prebake renders from). Project-relative
+# rsync patterns in PHPOLYGON_SYNC_EXCLUDE ("artwork/ docs/") skip files no build
+# step needs. PHPOLYGON_COPY_OUT="<dir> ..." (or "all") copies finished packages
+# back to /app/build for the host.
+sync_workdir() {
+    local dst="$1" t0=$SECONDS pattern
+    local -a excludes=(--exclude=/build/ --exclude=/.git/)
+    for pattern in ${PHPOLYGON_SYNC_EXCLUDE:-}; do
+        excludes+=("--exclude=/${pattern#/}")
+    done
+    mkdir -p "$dst"
+    echo "  mirroring /app -> ${dst} (rsync, ${#excludes[@]} excludes)..."
+    rsync -a --delete "${excludes[@]}" /app/ "$dst/" || { echo "  ${C_R}rsync to ${dst} failed${C_0}"; return 1; }
+    echo "  mirrored in $(( SECONDS - t0 ))s ($(du -sh --exclude=build "$dst" 2>/dev/null | cut -f1))"
 }
 
 # ── confirm (interactive) ─────────────────────────────────────────────────────
@@ -249,6 +286,11 @@ fi
 
 [ -n "$VERSION" ] && inject_version "$VERSION"
 VERSION="$CUR_VERSION"
+
+if [ -n "${PHPOLYGON_WORKDIR:-}" ]; then
+    sync_workdir "$PHPOLYGON_WORKDIR" || exit 1
+    cd "$PHPOLYGON_WORKDIR" || exit 1
+fi
 
 # ── composer auth (phpolygon/phpolygon resolve over authenticated HTTPS) ──────
 TOKEN="${GITHUB_TOKEN:-${GH_TOKEN:-}}"
@@ -596,6 +638,21 @@ if [ -n "$UPLOAD" ] && [ "$fails" -eq 0 ]; then
     [ "$fails" -eq 0 ] && echo "  ${C_G}Steam upload(s) complete.${C_0}  Build logs in steam/output/."
 elif [ -n "$UPLOAD" ]; then
     echo "  ${C_Y}Skipping Steam upload${C_0} - not all targets built."
+fi
+
+# ── PHPOLYGON_COPY_OUT: finished packages back to the host's /app/build ───────
+if [ -n "${PHPOLYGON_WORKDIR:-}" ] && [ -n "${PHPOLYGON_COPY_OUT:-}" ]; then
+    for rf in "${RESULTS[@]}"; do
+        [ -f "$rf" ] || continue
+        IFS=$'\t' read -r tgt typ dt st sz sg out < "$rf"
+        [ "$st" = "FAILED" ] && continue
+        case " ${PHPOLYGON_COPY_OUT} " in
+            *" all "*|*" $(basename "$out") "*) ;;
+            *) continue ;;
+        esac
+        echo "  copying ${out} -> /app/${out}"
+        rm -rf "/app/${out}" && mkdir -p "/app/$(dirname "$out")" && cp -a "$out" "/app/${out}"
+    done
 fi
 
 # clean up scratch result files (not the cache volume)
