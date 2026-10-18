@@ -623,9 +623,9 @@ fi
 # ── Steam upload (only when every build succeeded) ───────────────────────────
 if [ -n "$UPLOAD" ] && [ "$fails" -eq 0 ]; then
     echo "${C_B}=== Steam upload ===${C_0}"
-    for t in $UPLOAD; do
-        steam_upload "$t" || { echo "  ${C_R}upload '$t' failed${C_0}"; fails=$((fails+1)); }
-    done
+    # All targets in one steamcmd session (one login), live status per app.
+    # shellcheck disable=SC2086
+    steam_upload_many $UPLOAD || { echo "  ${C_R}Steam upload failed${C_0}"; fails=$((fails+1)); }
     echo ""
     [ "$fails" -eq 0 ] && echo "  ${C_G}Steam upload(s) complete.${C_0}  Build logs in steam/output/."
 elif [ -n "$UPLOAD" ]; then

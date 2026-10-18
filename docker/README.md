@@ -257,8 +257,9 @@ The harness can authenticate, build, and push to Steam in one run. Set `UPLOAD`
 to one or more **upload target** names (in interactive mode you're asked after the
 build prompts). The flow is **auth → build → upload**: it logs in first (so you
 enter Steam Guard up front), builds all four desktop targets, assembles the macOS
-**universal** bundle (one `.app`, launcher picks arm64/x86_64), generates the
-`app_build` VDF and runs `steamcmd +run_app_build`.
+**universal** bundle (one `.app`, launcher picks arm64/x86_64), generates one
+`app_build` VDF per target and uploads all of them in **one** steamcmd session
+(`steamcmd +login <user> +run_app_build <vdf1> +run_app_build <vdf2> … +quit`).
 
 ```bash
 docker run --rm -it \
@@ -276,7 +277,63 @@ docker run --rm -it \
 - **`-e UPLOAD="full demo"`** uploads several targets; their build types are added
   to the build set automatically, and `UPLOAD` forces all four desktop targets.
 - **`-e STEAM_DRY_RUN=1`** does everything except the actual upload (and skips
-  login) - it prints the generated VDF. Use it to check config before going live.
+  login) - it prints the steamcmd session it would run and every generated VDF.
+  Use it to check config before going live.
+
+### One session, status table
+
+`steam_upload_many <target>...` (what the harness runs; `steam_upload <target>`
+is the one-target case of it) first prepares **every** target - builds present,
+content staged under `STEAM_STAGE` (each build type once, side by side),
+`STEAM_STAGE_HOOK` (optional shell function, called once with the staged
+suffixes, for game-side checks), required files verified, VDFs written. If any
+of that fails, nothing is uploaded. Then one steamcmd session uploads all apps.
+
+steamcmd's own output goes, complete, to `steam/output/steamcmd-<date>.log`.
+The terminal gets a compact block instead - plain lines, no `\r` or cursor
+control, so it reads the same in a pipe or a CI log. It is checked every
+`STEAM_STATUS_INTERVAL` s (5) and printed when a depot changes phase, otherwise
+every `STEAM_STATUS_HEARTBEAT` s (15):
+
+```
+[1:06] steam upload
+  Main game windows ✓ 62 s · linux ✓ 41 s · macos ✓ 62 s
+  demo      windows ✓ 38 s · linux ✓ 39 s · macos ⠿ upload 312/~648 MB · 13.0 MB/s
+```
+
+The states come from the `depot_build_<depot>.log` / `app_build_<app>.log` files
+steamcmd writes into the VDF `BuildOutput` - only those written by this run
+(modified after it started); old logs of earlier uploads are ignored. Phases:
+`waiting`, `⠿ scan`, `⠿ upload <sent>/~<added+changed> MB · <MB/s>`, `✓ <duration>`,
+`✗ failed`, `✗ not built` (an earlier depot of that app failed). The logs carry no
+byte progress, so sent MB and MB/s are the container's TX counters
+(`/proc/net/dev`, all interfaces but `lo`) - only one depot uploads at a time.
+The line label is the target's `label` in `steam-build.json`, else the target
+name. At the end a summary per depot: manifest id, new chunks, files
+added/changed/removed with MB, duration (from the log timestamps), BuildID per
+app, total time. On a failure: the relevant last lines of the steamcmd log, its
+path, and a non-zero exit.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `STEAM_STATUS` | `1` | `0` streams steamcmd's raw output instead (still logged) |
+| `STEAM_STATUS_INTERVAL` / `STEAM_STATUS_HEARTBEAT` | `5` / `15` | seconds between checks / re-prints of an unchanged block |
+| `STEAM_BUILD_OUTPUT` | `/app/steam/output` | VDF `BuildOutput` (steamcmd logs) |
+| `STEAM_VDF_DIR` | `/tmp` | where the generated VDFs go |
+| `STEAMCMD` | `steamcmd` | the binary (the test points it at a fake) |
+
+steamcmd runs with stdin from `/dev/null`: if the cached login has expired it
+fails (visible in the log tail) instead of waiting for a Steam Guard code no one
+sees. Log in again with `-it` (`steam_auth` runs before the build).
+
+Test without Steam: `docker/tests/steam-upload-test.sh` drives the whole flow
+against `docker/tests/fake-steamcmd.sh`, which plays depot/app logs into
+`BuildOutput` over time (synthetic, or real ones via `FAKE_STEAM_SAMPLES=<dir>`):
+
+```bash
+docker run --rm --entrypoint bash -v "$PWD/docker:/harness" phpolygon-build \
+    /harness/tests/steam-upload-test.sh
+```
 
 ### `steam-build.json` (in the game dir)
 
@@ -302,7 +359,8 @@ per-platform depot IDs, branch to set live, Steam login). Example:
 
 `buildType` picks which `build/<plat>-<suffix>` dirs ship; `setLive` (a branch)
 is set live after upload, or empty to upload only. The macOS depot always takes
-the universal bundle.
+the universal bundle. An optional `label` names the target in the upload status
+(default: the target name).
 
 ## Benchmarking across machines
 

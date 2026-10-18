@@ -837,7 +837,17 @@ all depots on the container's own filesystem (`STEAM_STAGE`, default
 sets and verifies the executable bits, and aborts when a binary or `.dylib`
 lacks its arm64/x86_64 slice (a `.dylib` below a folder named for one architecture -
 `runtimes/macos-x86_64/…`, `lib-arm64/…` - needs only that one) or when a depot holds two paths
-that differ only in case (Steam maps them case-insensitively and fails the depot). Signing (`docker/build-all.sh`): the bare micro.sfx is
+that differ only in case (Steam maps them case-insensitively and fails the depot).
+`steam_upload_many <target>...` (used by `build-all.sh`; `steam_upload` is its
+one-target case) prepares every target first (builds, staging - each build type
+once, side by side -, optional `STEAM_STAGE_HOOK`, file check, VDFs; any failure
+uploads nothing), then runs ONE `steamcmd +login … +run_app_build <vdf>… +quit`.
+steamcmd's output goes complete to `steam/output/steamcmd-<date>.log`; the terminal
+shows a plain-line status block per app (label = `uploads.<t>.label` or the target
+name) parsed from this run's `depot_build_*/app_build_*` logs (mtime ≥ start),
+upload MB/s from `/proc/net/dev`, then a per-depot summary (manifest, chunks,
+files, duration) and the log tail on failure. Tested without Steam by
+`docker/tests/steam-upload-test.sh` + `fake-steamcmd.sh`; details in `docker/README.md` §4. Signing (`docker/build-all.sh`): the bare micro.sfx is
 ad-hoc signed before the launcher is appended, with JIT/library entitlements
 (`allow-jit`, `allow-unsigned-executable-memory`, `disable-library-validation`);
 `MAC_HARDENED=1` adds the hardened-runtime flag. **Unverified on hardware** -

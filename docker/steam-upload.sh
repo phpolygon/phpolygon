@@ -13,6 +13,7 @@
 #         "appId": "...",
 #         "buildType": "full",          # which build/<plat>-<suffix> dirs to ship
 #         "setLive": "",                # branch to set live, or "" to just upload
+#         "label": "",                  # optional name in the upload status (default: <target>)
 #         "depots": { "windows-x86_64": "...", "linux-x86_64": "...", "macos-universal": "..." }
 #       }
 #     }
@@ -23,6 +24,12 @@
 # arm64 or x86_64 binary at runtime (both are already ad-hoc signed). No lipo.
 
 STEAM_CONFIG="/app/steam-build.json"
+# steamcmd binary (a test points this at a fake), the VDF BuildOutput folder
+# (steamcmd writes depot_build_<depot>.log / app_build_<app>.log there) and where
+# the generated app_build VDFs go.
+STEAMCMD="${STEAMCMD:-steamcmd}"
+STEAM_BUILD_OUTPUT="${STEAM_BUILD_OUTPUT:-/app/steam/output}"
+STEAM_VDF_DIR="${STEAM_VDF_DIR:-/tmp}"
 
 # build/<plat>-<suffix> suffix for a build type (full has no type suffix).
 steam_suffix_for() {
@@ -78,11 +85,14 @@ STEAM_STAGE="${STEAM_STAGE:-/tmp/phpolygon-steam-content}"
 PHPOLYGON_MAC_LAUNCHER="${PHPOLYGON_MAC_LAUNCHER:-/usr/local/share/phpolygon/macos-launcher.sh}"
 
 # Copy the Windows + Linux packages into $STEAM_STAGE and build the universal
-# macOS bundle there; set and verify the executable bits.
+# macOS bundle there; set and verify the executable bits. Replaces only this
+# suffix's folders, so several build types can be staged side by side for one
+# steamcmd session.
 steam_stage_content() {
     local suffix="$1" d
-    rm -rf "$STEAM_STAGE"; mkdir -p "$STEAM_STAGE"
+    mkdir -p "$STEAM_STAGE"
     for d in "windows-x86_64-${suffix}" "linux-x86_64-${suffix}"; do
+        rm -rf "${STEAM_STAGE:?}/${d}"
         cp -R "build/${d}" "${STEAM_STAGE}/${d}" || return 1
     done
     steam_make_universal "$suffix" || return 1
@@ -257,7 +267,7 @@ steam_gen_vdf() {
     "AppID" "${appid}"
     "Desc" "${APP_NAME} v${VERSION} (${target}) - Windows x64, Linux x64, macOS Universal"
     "ContentRoot" "${STEAM_STAGE}"
-    "BuildOutput" "/app/steam/output"
+    "BuildOutput" "${STEAM_BUILD_OUTPUT}"
     "SetLive" "${setlive}"
     "Depots"
     {
@@ -289,46 +299,340 @@ steam_auth() {
     echo ""
     echo "${C_C}Authenticating with Steam (user: ${user})${C_0}"
     echo "  ${C_DIM}First time needs your password + Steam Guard code; then it's cached.${C_0}"
-    if ! steamcmd +login "$user" +quit; then
+    if ! "$STEAMCMD" +login "$user" +quit; then
         echo "  ${C_R}steamcmd login failed${C_0} - cannot upload."
         return 1
     fi
     echo "  ${C_G}Steam session ready.${C_0}"
 }
 
-# Verify builds, assemble universal bundle, generate VDF, run_app_build.
+# Upload one target. Same path as several (steam_upload_many), one app.
 steam_upload() {
-    local target="$1"
-    local btype suffix
-    btype="$(steam_cfg_get ".uploads[\"$target\"].buildType")"; btype="${btype:-full}"
-    suffix="$(steam_suffix_for "$btype")"
+    steam_upload_many "$1"
+}
 
-    echo ""
-    echo "${C_B}Uploading '${target}' to Steam (app $(steam_cfg_get ".uploads[\"$target\"].appId"), type ${btype})${C_0}"
+# Upload several targets in ONE steamcmd session (one login, one
+# +run_app_build per app). Everything is prepared first - builds checked,
+# content staged, files verified, VDFs written; if any target fails there,
+# nothing is uploaded. steamcmd's own output goes to a log file in
+# $STEAM_BUILD_OUTPUT; the terminal gets a compact status block per app, read
+# from the depot_build_*/app_build_* logs of this run, and a summary at the end.
+#
+#   STEAM_STAGE_HOOK      shell function called once after staging, with the
+#                         staged suffixes as arguments (game-side checks of
+#                         $STEAM_STAGE); non-zero aborts before any upload
+#   STEAM_STATUS=0        stream steamcmd's raw output instead (still logged)
+#   STEAM_STATUS_INTERVAL seconds between status checks (default 5)
+#   STEAM_STATUS_HEARTBEAT re-print an unchanged block after this many s (15)
+#   STEAM_NET_DEV         interface counters for the throughput (/proc/net/dev)
+#
+# Usage: steam_upload_many <target>...   (returns non-zero on any failure)
+steam_upload_many() {
+    [ "$#" -gt 0 ] || { echo "  ${C_R}steam_upload_many: no target given${C_0}"; return 1; }
+    local t btype suffix d miss=0
+    local -a targets=("$@") suffixes=() vdfs=()
+    local -A staged=()
 
-    local miss=0 d
-    for d in "build/windows-x86_64-${suffix}" "build/linux-x86_64-${suffix}" \
-             "build/macos-arm64-${suffix}" "build/macos-x86_64-${suffix}"; do
-        [ -d "$d" ] || { echo "  ${C_R}missing build: $d${C_0}"; miss=1; }
+    for t in "${targets[@]}"; do
+        steam_prepare "$t" || return 1
     done
-    [ "$miss" = "1" ] && { echo "  build the '${btype}' type for all desktop targets first."; return 1; }
 
-    steam_stage_content "$suffix" || return 1
-    steam_verify_files "$suffix" || return 1
+    # 1. builds present for every target
+    for t in "${targets[@]}"; do
+        btype="$(steam_cfg_get ".uploads[\"$t\"].buildType")"; btype="${btype:-full}"
+        suffix="$(steam_suffix_for "$btype")"
+        echo ""
+        echo "${C_B}Preparing '${t}' (app $(steam_cfg_get ".uploads[\"$t\"].appId"), type ${btype})${C_0}"
+        for d in "build/windows-x86_64-${suffix}" "build/linux-x86_64-${suffix}" \
+                 "build/macos-arm64-${suffix}" "build/macos-x86_64-${suffix}"; do
+            [ -d "$d" ] || { echo "  ${C_R}missing build: $d${C_0}"; miss=1; }
+        done
+        suffixes+=("$suffix")
+    done
+    if [ "$miss" = "1" ]; then
+        echo "  ${C_R}build every listed type for all desktop targets first - nothing uploaded.${C_0}"
+        return 1
+    fi
 
-    mkdir -p /app/steam/output
-    local vdf="/tmp/app_build_${target}.vdf"
-    steam_gen_vdf "$target" "$suffix" > "$vdf"
-    echo "  VDF: $vdf  (SetLive: '$(steam_cfg_get ".uploads[\"$target\"].setLive")')"
+    # 2. stage each build type once (two targets may ship the same type)
+    rm -rf "$STEAM_STAGE"
+    for suffix in "${suffixes[@]}"; do
+        [ -n "${staged[$suffix]:-}" ] && continue
+        echo "  staging ${suffix}"
+        steam_stage_content "$suffix" || { echo "  ${C_R}staging failed - nothing uploaded.${C_0}"; return 1; }
+        staged[$suffix]=1
+    done
+    if [ -n "${STEAM_STAGE_HOOK:-}" ]; then
+        "$STEAM_STAGE_HOOK" "${!staged[@]}" \
+            || { echo "  ${C_R}stage check (${STEAM_STAGE_HOOK}) failed - nothing uploaded.${C_0}"; return 1; }
+    fi
+    for suffix in "${!staged[@]}"; do
+        steam_verify_files "$suffix" || return 1
+    done
+
+    # 3. one VDF per target
+    mkdir -p "$STEAM_BUILD_OUTPUT" "$STEAM_VDF_DIR"
+    local i vdf
+    for i in "${!targets[@]}"; do
+        t="${targets[$i]}"
+        vdf="${STEAM_VDF_DIR}/app_build_${t}.vdf"
+        steam_gen_vdf "$t" "${suffixes[$i]}" > "$vdf" || return 1
+        vdfs+=("$vdf")
+        echo "  VDF ${t}: $vdf  (SetLive: '$(steam_cfg_get ".uploads[\"$t\"].setLive")')"
+    done
+
+    local user="${STEAM_RESOLVED_USER:-$(steam_cfg_get '.steamUser')}"
+    local -a cmd=("$STEAMCMD" +login "$user")
+    for vdf in "${vdfs[@]}"; do cmd+=(+run_app_build "$vdf"); done
+    cmd+=(+quit)
 
     if [ "${STEAM_DRY_RUN:-0}" = "1" ]; then
-        echo "  ${C_Y}DRY RUN${C_0} - not uploading. Generated VDF:"
-        sed 's/^/    /' "$vdf"
+        echo ""
+        echo "  ${C_Y}DRY RUN${C_0} - not uploading. One steamcmd session:"
+        echo "    ${cmd[*]}"
+        for i in "${!targets[@]}"; do
+            echo "  VDF '${targets[$i]}':"
+            sed 's/^/    /' "${vdfs[$i]}"
+        done
         return 0
     fi
 
-    local user; user="$(steam_cfg_get '.steamUser')"
-    steamcmd +login "$user" +run_app_build "$vdf" +quit
+    _steam_run_session "${targets[*]}" "${cmd[@]}"
+}
+
+# ── upload status ─────────────────────────────────────────────────────────────
+# Per app i: _SU_LABEL[i], _SU_APP[i], _SU_DEPOTS[i] ("plat:id plat:id ...").
+# Per depot id: _SU_PHASE (wait|scan|upload|done|fail|skip), _SU_UPTX (TX bytes when
+# its upload began), _SU_TOTMB (added+changed MB from the depot log summary).
+
+# Run the steamcmd session in the background, watch it, print the summary.
+# Usage: _steam_run_session "<targets>" <steamcmd argv...>
+_steam_run_session() {
+    local targets="$1"; shift
+    local start log rc t i plat id
+    start="$(date +%s)"
+    log="${STEAM_BUILD_OUTPUT}/steamcmd-$(date +%Y%m%d-%H%M%S).log"
+    _SU_START="$start"; _SU_LOG="$log"
+    _SU_LABEL=(); _SU_APP=(); _SU_DEPOTS=(); _SU_PREVTX=""
+    declare -gA _SU_PHASE=() _SU_UPTX=() _SU_TOTMB=()
+
+    i=0
+    for t in $targets; do
+        _SU_LABEL[i]="$(steam_cfg_get ".uploads[\"$t\"].label")"; _SU_LABEL[i]="${_SU_LABEL[i]:-$t}"
+        _SU_APP[i]="$(steam_cfg_get ".uploads[\"$t\"].appId")"
+        _SU_DEPOTS[i]="$(jq -r --arg t "$t" '.uploads[$t].depots // {} | to_entries[]
+            | select(.value != "") | "\(.key | split("-")[0]):\(.value)"' "$STEAM_CONFIG" | tr '\n' ' ')"
+        for plat in ${_SU_DEPOTS[i]}; do id="${plat#*:}"; _SU_PHASE[$id]=wait; done
+        i=$((i + 1))
+    done
+
+    echo ""
+    echo "${C_B}Steam upload: ${#_SU_APP[@]} app(s) in one steamcmd session${C_0}"
+    echo "  ${C_DIM}steamcmd log: ${log}${C_0}"
+
+    if [ "${STEAM_STATUS:-1}" = "0" ]; then
+        "$@" < /dev/null 2>&1 | tee "$log"
+        rc="${PIPESTATUS[0]}"
+    else
+        "$@" < /dev/null > "$log" 2>&1 &
+        local pid=$!
+        _steam_watch "$pid"
+        wait "$pid"; rc=$?
+    fi
+
+    _steam_eval_all 1
+    _steam_summary "$rc"
+}
+
+# Sum of TX bytes over all non-loopback interfaces.
+_steam_tx_bytes() {
+    local f="${STEAM_NET_DEV:-/proc/net/dev}"
+    [ -r "$f" ] || { echo 0; return; }
+    awk -F: 'NR > 2 { gsub(/ /, "", $1); if ($1 != "lo") { split($2, f, " "); s += f[9] } }
+        END { printf "%.0f\n", s + 0 }' "$f" 2>/dev/null
+}
+
+# A log written by this run (not one left over from an earlier upload).
+_steam_fresh() {
+    [ -f "$1" ] && [ "$(stat -c %Y "$1" 2>/dev/null || echo 0)" -ge "$_SU_START" ]
+}
+
+# Epoch of a "[YYYY-MM-DD HH:MM:SS]" log line (steamcmd writes UTC).
+_steam_ts() {
+    local ts; ts="$(sed -n 's/^\[\([0-9-]* [0-9:]*\)\].*/\1/p' <<<"$1" | head -1)"
+    [ -n "$ts" ] && date -u -d "$ts" +%s 2>/dev/null
+}
+
+# Seconds between a depot log's first line and its success line.
+_steam_depot_secs() {
+    local log="$1" a b
+    a="$(_steam_ts "$(head -1 "$log")")"
+    b="$(_steam_ts "$(grep -m1 'Success! New manifestID' "$log")")"
+    [ -n "$a" ] && [ -n "$b" ] && echo $((b - a))
+}
+
+_steam_fmt_secs() {
+    local s="${1:-0}"
+    if [ "$s" -lt 120 ]; then echo "${s} s"; else printf '%d:%02d min\n' $((s / 60)) $((s % 60)); fi
+}
+
+# Lines of a depot log that are not the per-file change listing.
+_steam_log_events() { grep -vE ': (Added|Changed|Removed) *:' "$1" 2>/dev/null; }
+
+# Update _SU_PHASE for every depot. With final=1 (steamcmd has exited), a depot
+# that never finished is a failure.
+_steam_eval_all() {
+    local final="${1:-0}" i plat id log ev app_log app_ok
+    for i in "${!_SU_APP[@]}"; do
+        app_log="${STEAM_BUILD_OUTPUT}/app_build_${_SU_APP[i]}.log"
+        app_ok=0
+        _steam_fresh "$app_log" && grep -q 'Successfully finished AppID' "$app_log" && app_ok=1
+        for plat in ${_SU_DEPOTS[i]}; do
+            id="${plat#*:}"; log="${STEAM_BUILD_OUTPUT}/depot_build_${id}.log"
+            case "${_SU_PHASE[$id]}" in done|fail) continue ;; esac
+            if _steam_fresh "$log"; then
+                ev="$(_steam_log_events "$log")"
+                if grep -q 'Success! New manifestID' <<<"$ev"; then
+                    _SU_PHASE[$id]=done
+                elif grep -qE 'ERROR|Failed to' <<<"$ev"; then
+                    _SU_PHASE[$id]=fail
+                elif grep -qE 'Uploading new manifest|Uploading [0-9]+ out of' <<<"$ev"; then
+                    if [ "${_SU_PHASE[$id]}" != upload ]; then
+                        # began after the previous check: count from its TX reading
+                        _SU_PHASE[$id]=upload; _SU_UPTX[$id]="${_SU_PREVTX:-$(_steam_tx_bytes)}"
+                        _SU_TOTMB[$id]="$(sed -n 's/.*Summary: [0-9]* files added (\([0-9.]*\) MB), [0-9]* files changed (\([0-9.]*\) MB).*/\1 \2/p' <<<"$ev" \
+                            | awk '{ printf "%.0f", $1 + $2 }')"
+                    fi
+                else
+                    _SU_PHASE[$id]=scan
+                fi
+            elif { _steam_fresh "$app_log" && grep -qw "Building depot ${id}" "$app_log"; } \
+                 || grep -qw "Building depot ${id}" "$_SU_LOG" 2>/dev/null; then
+                _SU_PHASE[$id]=scan
+            fi
+            if [ "$final" = "1" ]; then
+                case "${_SU_PHASE[$id]}" in
+                    done|fail) ;;
+                    wait) if [ "$app_ok" = "1" ]; then _SU_PHASE[$id]=done; else _SU_PHASE[$id]=skip; fi ;;
+                    *)    if [ "$app_ok" = "1" ]; then _SU_PHASE[$id]=done; else _SU_PHASE[$id]=fail; fi ;;
+                esac
+            fi
+        done
+    done
+}
+
+# Build the status block into _SU_BLOCK and its change signature into _SU_SIG.
+# Usage: _steam_status_block <tx-rate-bytes-per-s>
+_steam_status_block() {
+    local rate="${1:-0}" i plat id name log part line w=0 secs sent now
+    now="$(date +%s)"
+    for i in "${!_SU_LABEL[@]}"; do [ "${#_SU_LABEL[i]}" -gt "$w" ] && w="${#_SU_LABEL[i]}"; done
+    secs=$((now - _SU_START))
+    _SU_BLOCK="$(printf '%s[%d:%02d] steam upload%s' "${C_DIM}" $((secs / 60)) $((secs % 60)) "${C_0}")"
+    _SU_SIG=""
+    for i in "${!_SU_APP[@]}"; do
+        line="$(printf "  %-${w}s " "${_SU_LABEL[i]}")"
+        part=""
+        for plat in ${_SU_DEPOTS[i]}; do
+            name="${plat%%:*}"; id="${plat#*:}"
+            log="${STEAM_BUILD_OUTPUT}/depot_build_${id}.log"
+            [ -n "$part" ] && part+=" · "
+            _SU_SIG+="${id}=${_SU_PHASE[$id]} "
+            case "${_SU_PHASE[$id]}" in
+                wait)   part+="${name} ${C_DIM}waiting${C_0}" ;;
+                scan)   part+="${name} ${C_C}⠿ scan${C_0}" ;;
+                upload)
+                    sent=$(( ($(_steam_tx_bytes) - ${_SU_UPTX[$id]:-0}) / 1048576 ))
+                    [ "$sent" -lt 0 ] && sent=0
+                    part+="${name} ${C_C}⠿ upload ${sent}"
+                    [ -n "${_SU_TOTMB[$id]:-}" ] && part+="/~${_SU_TOTMB[$id]}"
+                    part+=" MB"
+                    [ "$rate" -gt 0 ] && part+=" · $(awk -v r="$rate" 'BEGIN { printf "%.1f", r / 1048576 }') MB/s"
+                    part+="${C_0}" ;;
+                done)   part+="${name} ${C_G}✓ $(_steam_fmt_secs "$(_steam_depot_secs "$log")")${C_0}" ;;
+                fail)   part+="${name} ${C_R}✗ failed${C_0}" ;;
+                skip)   part+="${name} ${C_R}✗ not built${C_0}" ;;
+            esac
+        done
+        _SU_BLOCK+=$'\n'"${line}${part}"
+    done
+}
+
+# Print the status block while steamcmd runs: every STEAM_STATUS_INTERVAL s
+# when a depot changed phase, else every STEAM_STATUS_HEARTBEAT s. Plain lines
+# (no CR, no cursor control) so it reads the same in a pipe or a log file.
+_steam_watch() {
+    local pid="$1" interval="${STEAM_STATUS_INTERVAL:-5}" beat="${STEAM_STATUS_HEARTBEAT:-15}"
+    local last_sig="" last_print=0 now tx prev_tx prev_t rate s
+    prev_tx="$(_steam_tx_bytes)"; prev_t="$(date +%s)"
+    while kill -0 "$pid" 2>/dev/null; do
+        for ((s = 0; s < interval; s++)); do kill -0 "$pid" 2>/dev/null || break; sleep 1; done
+        kill -0 "$pid" 2>/dev/null || break
+        now="$(date +%s)"; tx="$(_steam_tx_bytes)"
+        rate=0; [ "$now" -gt "$prev_t" ] && rate=$(( (tx - prev_tx) / (now - prev_t) ))
+        [ "$rate" -lt 0 ] && rate=0
+        _SU_PREVTX="$prev_tx"; prev_tx="$tx"; prev_t="$now"
+        _steam_eval_all 0
+        _steam_status_block "$rate"
+        if [ "$_SU_SIG" != "$last_sig" ] || [ $((now - last_print)) -ge "$beat" ]; then
+            echo "$_SU_BLOCK"
+            last_sig="$_SU_SIG"; last_print="$now"
+        fi
+    done
+}
+
+# Final status block + per-depot summary; on failure the relevant tail of the
+# steamcmd log. Returns 0 only when steamcmd exited 0 and every depot succeeded.
+_steam_summary() {
+    local rc="$1" i plat name id log ev failed=0 build total
+    _steam_status_block 0
+    echo "$_SU_BLOCK"
+    total=$(( $(date +%s) - _SU_START ))
+    echo ""
+    echo "${C_B}Steam upload summary${C_0}"
+    for i in "${!_SU_APP[@]}"; do
+        build=""
+        _steam_fresh "${STEAM_BUILD_OUTPUT}/app_build_${_SU_APP[i]}.log" \
+            && build="$(sed -n 's/.*Successfully finished AppID [0-9]* build (BuildID \([0-9]*\)).*/\1/p' \
+                "${STEAM_BUILD_OUTPUT}/app_build_${_SU_APP[i]}.log" | head -1)"
+        echo "  ${C_B}${_SU_LABEL[i]}${C_0} (app ${_SU_APP[i]}${build:+, BuildID $build})"
+        for plat in ${_SU_DEPOTS[i]}; do
+            name="${plat%%:*}"; id="${plat#*:}"; log="${STEAM_BUILD_OUTPUT}/depot_build_${id}.log"
+            if [ "${_SU_PHASE[$id]}" != done ]; then
+                failed=1
+                if [ "${_SU_PHASE[$id]}" = skip ]; then
+                    echo "    $(printf '%-8s' "$name") ${C_R}✗ not built${C_0} (depot ${id}, an earlier depot of this app failed)"
+                else
+                    echo "    $(printf '%-8s' "$name") ${C_R}✗ failed${C_0} (depot ${id})"
+                fi
+                continue
+            fi
+            if ! _steam_fresh "$log"; then
+                echo "    $(printf '%-8s' "$name") ${C_G}✓${C_0} depot ${id} (no depot log)"
+                continue
+            fi
+            ev="$(_steam_log_events "$log")"
+            local man chunks files
+            man="$(sed -n 's/.*New manifestID \([0-9]*\) created.*/\1/p' <<<"$ev" | head -1)"
+            chunks="$(sed -n 's/.*created and \([0-9]*\) new chunks uploaded.*/\1/p' <<<"$ev" | head -1)"
+            files="$(sed -n 's/.*Summary: \([0-9]*\) files added (\([0-9.]*\) MB), \([0-9]*\) files changed (\([0-9.]*\) MB), \([0-9]*\) files removed (\([0-9.]*\) MB).*/added \1 (\2 MB), changed \3 (\4 MB), removed \5 (\6 MB)/p' <<<"$ev" | head -1)"
+            echo "    $(printf '%-8s' "$name") ${C_G}✓ $(_steam_fmt_secs "$(_steam_depot_secs "$log")")${C_0}" \
+                "· manifest ${man:-?} · ${chunks:-?} new chunks · ${files:-no file changes}"
+        done
+    done
+    echo "  total: $(_steam_fmt_secs "$total")"
+
+    if [ "$rc" -ne 0 ] || [ "$failed" = 1 ]; then
+        echo ""
+        echo "  ${C_R}Steam upload FAILED${C_0} (steamcmd exit ${rc}). Last relevant lines:"
+        local tail_lines
+        tail_lines="$(grep -iE 'error|fail|denied|invalid|timeout|steam guard|password' "$_SU_LOG" 2>/dev/null | tail -12)"
+        [ -n "$tail_lines" ] || tail_lines="$(tail -12 "$_SU_LOG" 2>/dev/null)"
+        sed 's/^/    /' <<<"$tail_lines"
+        echo "  full steamcmd log: ${_SU_LOG}"
+        return 1
+    fi
+    echo "  ${C_G}all depots uploaded.${C_0}  steamcmd log: ${_SU_LOG}"
 }
 
 # Entry point: prepare config (prompt if needed), return the resolved user.
