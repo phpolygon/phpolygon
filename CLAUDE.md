@@ -872,6 +872,8 @@ The combined executable ignores php.ini files, and startup-only settings (OPcach
 "php": { "ini": { "opcache.enable_cli": "1", "opcache.jit": "tracing", "opcache.jit_buffer_size": "128M" } }
 ```
 
+Once OPcache is on (`opcache.enable_cli` or `opcache.enable` truthy), `MicroIni::settings()` forces `opcache.validate_timestamps=0` and `opcache.file_update_protection=0`, over whatever build.json says: the embedded script has no file behind it, and the timestamp check (`zend_get_file_handle_timestamp`) read script text as a pointer – SIGSEGV before the first line on macOS. The script never changes, so the check is useless on every platform.
+
 ### Build hooks
 
 `build.json` `hooks.beforeBuild` lists commands a build runs in the project root before it stages the game (asset pre-bakes, generated data). They run once per build that creates a PHAR; `--phar` reuse targets skip them. A failing hook fails the build; `PHPOLYGON_SKIP_HOOKS=1` skips them.

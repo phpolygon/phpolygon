@@ -364,10 +364,11 @@ class GameBuilder
                 // build.json php.ini goes between the runtime and the PHAR.
                 if ($inputFile === $sfxPath && $ini !== []) {
                     fwrite($out, MicroIni::block($ini));
+                    $embedded = MicroIni::settings($ini);
                     $this->log('info', 'Embedded php.ini: ' . implode(', ', array_map(
                         static fn (string $key, string $value): string => "{$key}={$value}",
-                        array_keys($ini),
-                        $ini,
+                        array_keys($embedded),
+                        $embedded,
                     )));
                 }
             }

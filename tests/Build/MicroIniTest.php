@@ -22,7 +22,8 @@ class MicroIniTest extends TestCase
             'opcache.jit_buffer_size' => '128M',
         ]);
 
-        $ini = "opcache.enable_cli=1\nopcache.jit=tracing\nopcache.jit_buffer_size=128M\n";
+        $ini = "opcache.enable_cli=1\nopcache.jit=tracing\nopcache.jit_buffer_size=128M\n"
+            . "opcache.validate_timestamps=0\nopcache.file_update_protection=0\n";
         $this->assertSame("\xfd\xf6\x69\xe6" . pack('N', strlen($ini)) . $ini, $block);
     }
 
@@ -55,5 +56,46 @@ class MicroIniTest extends TestCase
     {
         $this->expectException(\InvalidArgumentException::class);
         MicroIni::block(["opcache.jit\nmemory_limit" => '1']);
+    }
+
+    public function testOpcacheOnTurnsOffTheTimestampCheck(): void
+    {
+        $parsed = parse_ini_string(substr(MicroIni::block([
+            'opcache.enable_cli' => '1',
+            'opcache.jit' => 'tracing',
+        ]), 8), false, INI_SCANNER_RAW);
+
+        $this->assertIsArray($parsed);
+        $this->assertSame('0', $parsed['opcache.validate_timestamps']);
+        $this->assertSame('0', $parsed['opcache.file_update_protection']);
+        $this->assertSame('tracing', $parsed['opcache.jit']);
+    }
+
+    public function testOpcacheEnableAlsoCounts(): void
+    {
+        $settings = MicroIni::settings(['opcache.enable' => 'On']);
+
+        $this->assertSame('0', $settings['opcache.validate_timestamps']);
+        $this->assertSame('0', $settings['opcache.file_update_protection']);
+    }
+
+    public function testProjectCannotTurnTheTimestampCheckBackOn(): void
+    {
+        $settings = MicroIni::settings([
+            'opcache.enable_cli' => 'true',
+            'opcache.validate_timestamps' => '1',
+            'opcache.file_update_protection' => '2',
+        ]);
+
+        $this->assertSame('0', $settings['opcache.validate_timestamps']);
+        $this->assertSame('0', $settings['opcache.file_update_protection']);
+    }
+
+    public function testOpcacheOffAddsNothing(): void
+    {
+        $settings = ['opcache.enable_cli' => '0', 'memory_limit' => '-1'];
+
+        $this->assertSame($settings, MicroIni::settings($settings));
+        $this->assertSame(['date.timezone' => 'UTC'], MicroIni::settings(['date.timezone' => 'UTC']));
     }
 }
