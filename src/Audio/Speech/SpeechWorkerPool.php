@@ -36,7 +36,11 @@ namespace PHPolygon\Audio\Speech;
  * ({@see self::BACKOFF}), up to `$remoteRetries` times in a row without a finished
  * line; a finished line resets the count. Its job in flight goes back to the queue
  * every time it reconnects (the reconnect count bounds a line that kills it). The
- * other workers go on during the backoff. Exit code 127 (no speech environment on the host) is not retried. The
+ * other workers go on during the backoff. Exit code 127 (no speech environment on the host) is not retried.
+ * Exit code 75 ({@see self::EXIT_OUT_OF_MEMORY}: device memory ran out, or the worker
+ * recycles itself before it does) restarts any worker, local ones too, the same way –
+ * its line goes back to the queue instead of failing, and the worker does not go on
+ * failing every line it takes. The
  * `$onRestart` callback of {@see run()} lets the caller forget what the old process
  * had (e.g. reference WAVs it was sent).
  */
@@ -50,6 +54,12 @@ final class SpeechWorkerPool
 
     /** Exit code of a remote command that is not there (no speech environment). */
     private const int EXIT_NOT_FOUND = 127;
+
+    /**
+     * Exit code of a worker that ran out of device memory (or recycles itself before it
+     * does): its line goes back to the queue and it starts anew, local workers too.
+     */
+    public const int EXIT_OUT_OF_MEMORY = 75;
 
     /** @var \Closure(string): void */
     private readonly \Closure $log;
@@ -225,7 +235,10 @@ final class SpeechWorkerPool
                         $job = $worker['job'];
                         $worker['job'] = null;
                         $worker['restarted'] = false;
-                        $canRetry = $worker['requeue'] && $exit !== self::EXIT_NOT_FOUND && $worker['retries'] < $this->remoteRetries;
+                        // Out of device memory: a fresh process frees it, so it restarts
+                        // like a dropped remote worker, whether local or remote.
+                        $restarts = $worker['requeue'] || $exit === self::EXIT_OUT_OF_MEMORY;
+                        $canRetry = $restarts && $exit !== self::EXIT_NOT_FOUND && $worker['retries'] < $this->remoteRetries;
                         if ($job !== null) {
                             // A reconnecting worker always gets its line back; handing it to
                             // the others (it may be the line that kills workers) happens once.
@@ -245,7 +258,7 @@ final class SpeechWorkerPool
                         } elseif ($exit !== 0) {
                             ($this->log)("speech: worker {$worker['label']} ended with exit code {$exit}");
                         }
-                        if ($worker['requeue'] && $this->queue !== []) {
+                        if ($restarts && $this->queue !== []) {
                             $this->lost($worker, $exit, $canRetry);
                         }
                     }

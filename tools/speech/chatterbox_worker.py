@@ -27,11 +27,16 @@ others run through model.generate().
                 the WAV, sent once as base64 in "reference_wav" and cached in the temp
                 directory; the result carries the generated WAV as base64 in "wav"
   --require V   exit with code 3 unless chatterbox-tts V is installed
+
+Exit code 75: out of device memory on a line even after freeing the cache, or more than
+RECYCLE_AT of it in use after a line. The line in flight is not reported; the engine puts
+it back into the queue and starts the worker anew (a fresh process frees what leaked).
 """
 import argparse
 import base64
 import copy
 import dataclasses
+import gc
 import json
 import os
 import sys
@@ -40,6 +45,13 @@ import time
 
 # The version generate() below re-implements; other versions only run model.generate().
 EXACT_VERSION = "0.1.7"
+
+# Exit code for "out of device memory" (SpeechWorkerPool::EXIT_OUT_OF_MEMORY): the engine puts
+# the line in flight back into the queue and starts this worker anew.
+EXIT_OUT_OF_MEMORY = 75
+
+# Share of the device memory in tensors above which the worker recycles itself between lines.
+RECYCLE_AT = 0.6
 
 # Job fields that need the re-implementation (or the reference handling) of this worker.
 EXTENDED = ("temperature", "top_p", "min_p", "repetition_penalty", "max_new_tokens", "cfm_steps", "watermark")
@@ -165,17 +177,29 @@ def main() -> int:
                     reference = None  # until the conditioning succeeds
                     condition(model, torchaudio, job, cache)
                     reference = key
-            torch.manual_seed(job["seed"])
-            drop_alignment_hooks(model)
-            if exact:
-                wav = generate(model, torch, job)
-            else:
-                wav = model.generate(
-                    job["text"],
-                    language_id=job["language"],
-                    exaggeration=job["exaggeration"],
-                    cfg_weight=job["cfg_weight"],
-                )
+            for attempt in (1, 2):
+                try:
+                    torch.manual_seed(job["seed"])
+                    drop_alignment_hooks(model)
+                    if exact:
+                        wav = generate(model, torch, job)
+                    else:
+                        wav = model.generate(
+                            job["text"],
+                            language_id=job["language"],
+                            exaggeration=job["exaggeration"],
+                            cfg_weight=job["cfg_weight"],
+                        )
+                    break
+                except Exception as e:
+                    if not is_out_of_memory(e):
+                        raise
+                    free_memory(torch, device)
+                    if attempt == 2:
+                        # Still out of memory in a cleaned-up process: only a new one helps.
+                        # Not reported – the engine puts the line back and starts the worker anew.
+                        print(f"chatterbox: out of memory on {device} ({e}) - restarting", file=sys.stderr, flush=True)
+                        return EXIT_OUT_OF_MEMORY
             torchaudio.save(out, wav.cpu(), model.sr)
             result = {"id": job["id"], "ok": True, "seconds": round(time.time() - start, 1)}
             if args.inline:
@@ -187,7 +211,40 @@ def main() -> int:
         finally:
             if scratch is not None and os.path.exists(scratch):
                 os.remove(scratch)
+        free_memory(torch, device)
+        # Device memory creeps up over a long run (MPS: 28 GB after ~500 lines). Recycle
+        # between lines, before a line fails on it; the engine starts the worker anew.
+        used = memory_used(torch, device)
+        if used is not None and used > RECYCLE_AT:
+            print(f"chatterbox: {used:.0%} of {device} memory in use - restarting", file=sys.stderr, flush=True)
+            return EXIT_OUT_OF_MEMORY
     return 0
+
+
+def is_out_of_memory(e: Exception) -> bool:
+    """CUDA's OutOfMemoryError, or the RuntimeError MPS and older torch raise."""
+    return type(e).__name__ == "OutOfMemoryError" or "out of memory" in str(e).lower()
+
+
+def free_memory(torch, device: str) -> None:
+    """Drop what the last line left behind and hand cached blocks back to the device."""
+    gc.collect()
+    if device == "mps":
+        torch.mps.empty_cache()
+    elif device == "cuda":
+        torch.cuda.empty_cache()
+
+
+def memory_used(torch, device: str):
+    """Share of the device memory this process holds in tensors, or None (CPU, unknown)."""
+    try:
+        if device == "mps":
+            return torch.mps.current_allocated_memory() / torch.mps.recommended_max_memory()
+        if device == "cuda":
+            return torch.cuda.memory_allocated() / torch.cuda.get_device_properties(0).total_memory
+    except Exception:
+        return None
+    return None
 
 
 def reference_key(job: dict):

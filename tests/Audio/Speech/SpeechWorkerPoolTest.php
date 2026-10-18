@@ -128,6 +128,25 @@ final class SpeechWorkerPoolTest extends TestCase
         self::assertNotEmpty(array_filter($this->log, static fn (string $l): bool => str_contains($l, 'w1 me@mac ended (exit code 7)')));
     }
 
+    public function testALocalWorkerOutOfMemoryRestartsAndKeepsItsLine(): void
+    {
+        // Exit 75 on its 2nd job, on the first start only; a local worker (no requeue).
+        putenv('FAKE_SPEECH_STATE=' . $this->dir);
+        try {
+            $pool = new SpeechWorkerPool([['command' => $this->fake('gpu.0.2.0.75.1')]], $this->dir, $this->collect(...), backoff: [0.05]);
+            $results = [];
+            $pool->run($this->jobs(4), self::encode(...), static function (SpeechJob $job, ?string $error) use (&$results): void {
+                $results[$job->id] = $error;
+            });
+        } finally {
+            putenv('FAKE_SPEECH_STATE');
+        }
+
+        self::assertSame(['j0' => null, 'j1' => null, 'j2' => null, 'j3' => null], $results, 'no line fails, the one in flight comes back');
+        self::assertNotEmpty(array_filter($this->log, static fn (string $l): bool => str_contains($l, 'w1 ended (exit code 75); its line goes back to the queue')));
+        self::assertNotEmpty(array_filter($this->log, static fn (string $l): bool => str_contains($l, 'w1 reconnected')));
+    }
+
     public function testWorkerOutputIsPrefixedPerWorker(): void
     {
         $this->runPool(['a.0', 'b.0'], $this->jobs(2));
