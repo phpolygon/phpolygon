@@ -20,6 +20,8 @@ declare(strict_types=1);
  *   --micro-sfx PATH   Path to a pre-built micro.sfx binary
  *   --phar PATH         Cross-target PHAR cache: build the PHAR once at PATH,
  *                       reuse it for every later target (skips vendor+stage+phar)
+ *   --derive-phar PATH  With --phar: make a missing --phar from this PHAR of another
+ *                       build type (rewrites the type's constants; no hooks, no staging)
  *   --output DIR        Output directory (default: build/)
  *   --variant NAME      Build variant: base or steam (default: base)
  *   --type NAME         Build type from build.json (default: full)
@@ -81,6 +83,7 @@ $options = [
     'dry-run' => false,
     'micro-sfx' => null,
     'phar' => null, // cross-target PHAR cache path: build once, reuse per target
+    'derive-phar' => null, // PHAR of another build type to derive --phar from (constants only)
     'output' => '',
     'variant' => 'base',
     'type' => 'full',
@@ -104,6 +107,8 @@ while ($i < count($args)) {
         $options['micro-sfx'] = $args[++$i];
     } elseif ($arg === '--phar' && isset($args[$i + 1])) {
         $options['phar'] = $args[++$i];
+    } elseif ($arg === '--derive-phar' && isset($args[$i + 1])) {
+        $options['derive-phar'] = $args[++$i];
     } elseif (($arg === '--output' || $arg === '--out') && isset($args[$i + 1])) {
         $options['output'] = $args[++$i];
     } elseif ($arg === '-o' && isset($args[$i + 1])) {
@@ -282,6 +287,7 @@ foreach ($targets as $targetName => $target) {
             $iosRelease,
             $iosExportIpa,
             $sharedPharPath,
+            $options['derive-phar'],
         );
         $results[$targetName] = $result;
 
@@ -584,6 +590,9 @@ Platforms:
 Options:
   --dry-run          Show resolved config without building
   --micro-sfx PATH   Path to a pre-built micro.sfx binary
+  --phar PATH        Build the PHAR once at PATH, reuse it for every later target
+  --derive-phar PATH With --phar: make a missing PATH from this PHAR of another build
+                     type (only the type's constants differ; no hooks, no staging)
   -o, --output DIR   Output directory (default: build/)
   --variant NAME     Build variant: base or steam (default: base)
   --type NAME        Build type from build.json (default: full)

@@ -134,6 +134,45 @@ class BuildVerifierTest extends TestCase
         $this->assertContains('PLAYTEST_MODE = true', $result->passed);
     }
 
+    public function testADerivedPharCarriesTheTargetTypeAndRevertsTheRest(): void
+    {
+        $verifier = new BuildVerifier(BuildConfig::load($this->projectDir));
+        $playtest = $this->buildPhar('playtest');
+
+        // playtest -> demo: DEMO_MODE on, PLAYTEST_MODE back to the project's false.
+        $demo = $this->derive($playtest, 'demo');
+        $result = $verifier->verifyPhar($demo, 'demo');
+        $this->assertTrue($result->ok(), implode("\n", $result->problems));
+        $this->assertSame(['DEMO_MODE = true', 'PLAYTEST_MODE = false', "GAME_VERSION = '2.3.4'", 'resources/keys/token present'], $result->passed);
+
+        // demo -> full: nothing of a demo left.
+        $full = $this->derive($demo, 'full');
+        $this->assertTrue($verifier->verifyPhar($full, 'full')->ok());
+        $this->assertSame(
+            (string) file_get_contents('phar://' . str_replace('\\', '/', $playtest) . '/resources/keys/token'),
+            (string) file_get_contents('phar://' . str_replace('\\', '/', $full) . '/resources/keys/token'),
+            'everything but the bootstrap files is copied as it is',
+        );
+    }
+
+    private function derive(string $source, string $type): string
+    {
+        $target = $this->tempDir . '/derived-' . $type . '-' . uniqid() . '.phar';
+        $code = sprintf(
+            'require %s; $c = PHPolygon\Build\BuildConfig::load(%s);'
+            . ' (new PHPolygon\Build\PharBuilder($c))->deriveBuildType(%s, %s, (new PHPolygon\Build\BuildVerifier($c))->typeConstants(%s));',
+            var_export(dirname(__DIR__, 2) . '/vendor/autoload.php', true),
+            var_export($this->projectDir, true),
+            var_export($source, true),
+            var_export($target, true),
+            var_export($type, true),
+        );
+        exec(escapeshellarg(PHP_BINARY) . ' -d phar.readonly=0 -r ' . escapeshellarg($code) . ' 2>&1', $output, $exit);
+        $this->assertSame(0, $exit, "derive failed:\n" . implode("\n", $output));
+
+        return $target;
+    }
+
     /**
      * Stage, apply the type's constants the way GameBuilder does and build the
      * PHAR - in a child process, since creating a PHAR needs phar.readonly=0.

@@ -410,17 +410,19 @@ human_size() { local b; b="$(du -sb "$1" 2>/dev/null | cut -f1)"; awk -v b="${b:
 
 # Build one target. Writes a TSV result line to $1 (result file). $5=stream|quiet.
 build_target() {
-    local rfile="$1" target="$2" type="$3" phar="$4" mode="$5"
+    local rfile="$1" target="$2" type="$3" phar="$4" mode="$5" derive="${6:-}"
     local out="build/${target}-${VARIANT}"; [ "$type" != "full" ] && out="${out}-${type}"
     local t0=$SECONDS rc=0 log="/tmp/buildlog-${target}-${type}.txt"
+    local -a extra=()
+    [ -n "$derive" ] && extra=(--derive-phar "$derive")
     if [ "$mode" = "stream" ]; then
         php -d phar.readonly=0 vendor/bin/phpolygon build "$target" \
-            --variant "$VARIANT" --type "$type" --php-version "$PHP_VERSION" --phar "$phar" \
+            --variant "$VARIANT" --type "$type" --php-version "$PHP_VERSION" --phar "$phar" "${extra[@]}" \
             2>&1 | sed "s/^/    ${C_DIM}|${C_0} /"
         rc=${PIPESTATUS[0]}
     else
         php -d phar.readonly=0 vendor/bin/phpolygon build "$target" \
-            --variant "$VARIANT" --type "$type" --php-version "$PHP_VERSION" --phar "$phar" >"$log" 2>&1
+            --variant "$VARIANT" --type "$type" --php-version "$PHP_VERSION" --phar "$phar" "${extra[@]}" >"$log" 2>&1
         rc=$?
     fi
     local dt=$(( SECONDS - t0 )) status="ok" size="-" sig="-"
@@ -468,6 +470,11 @@ ETA_FILE="${CACHE_ROOT}/.phar-build-secs"
 declare -a RESULTS=()
 TOTAL_START=$SECONDS
 
+# Build types differ only in their constants: the first type builds the PHAR (hooks,
+# production install, staging, compression), every later one derives its PHAR from
+# it in seconds (phpolygon build --derive-phar; a type with "sharedPhar": false in
+# build.json is still built from scratch).
+BASE_PHAR=""
 for type in "${TYPES[@]}"; do
     PHAR="/tmp/phpolygon-phar-${VARIANT}-${type}.phar"
     rm -f "$PHAR"
@@ -482,8 +489,9 @@ for type in "${TYPES[@]}"; do
     echo ""
     echo "${C_C}▶ [${type}] ${first}${C_0} - building shared PHAR + bundle${eta}"
     rf="/tmp/res-${first}-${type}"
-    build_target "$rf" "$first" "$type" "$PHAR" "stream"
+    build_target "$rf" "$first" "$type" "$PHAR" "stream" "$BASE_PHAR"
     RESULTS+=("$rf")
+    [ -z "$BASE_PHAR" ] && [ -s "$PHAR" ] && BASE_PHAR="$PHAR"
     # persist phar-build duration for next run's ETA
     awk -F'\t' '{print $3}' "$rf" > "$ETA_FILE" 2>/dev/null || true
 

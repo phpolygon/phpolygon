@@ -911,6 +911,15 @@ dir or a combined binary (its PHAR is found by the stub's `PharBuilder::STUB_MAR
 itself contains `__HALT_COMPILER`); without a path every `build/<platform>-<arch>*` dir, the type taken
 from the dir name. `docker/build-all.sh` runs it on every built target before an upload.
 
+**One PHAR for every build type.** Types differ only in their constants, so `phpolygon build --phar NEW
+--derive-phar BUILT` makes a missing `NEW` from a PHAR already built for another type
+(`PharBuilder::deriveBuildType`: copy, rewrite the bootstrap files with `BuildVerifier::typeConstants()` -
+the type's values and the project's for the rest, so deriving from another non-full type is safe). No
+hooks, no production install, no staging, no compression of the archive: ~2 s instead of a full PHAR
+build; assets and the build id stay the same. `docker/build-all.sh` builds the first type and derives the
+others. A type whose hooks produce type-specific files sets `"sharedPhar": false` in its `buildTypes`
+entry and is built from scratch.
+
 ### Embedded Python runtimes
 
 A game that runs player code in a shipped CPython (python-build-standalone, Windows `Lib/`+`DLLs/`

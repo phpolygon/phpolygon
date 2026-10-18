@@ -63,9 +63,14 @@ class GameBuilder
      *   micro.sfx + combine + package run per target). When it points at a path
      *   that does not exist yet, the PHAR is built once and persisted there so
      *   sibling targets reuse it. iOS never reuses (it links the staged tree).
+     * @param ?string $derivePharFrom a PHAR already built for another build type of
+     *   the same variant: when $sharedPharPath does not exist yet, it is made from this
+     *   one by rewriting the type's constants ({@see PharBuilder::deriveBuildType()}) -
+     *   no hooks, no staging. A type with build.json `"sharedPhar": false` is built
+     *   from scratch (its hooks may produce type-specific files).
      * @return array{outputPath: string, pharSize: int, binarySize: int, bundleSize: int}
      */
-    public function build(string $platform, string $outputDir, ?string $microSfxPath = null, ?string $arch = null, string $variant = 'base', string $buildType = 'full', string $phpVersion = '8.5', bool $iosRelease = false, bool $iosExportIpa = false, ?string $sharedPharPath = null): array
+    public function build(string $platform, string $outputDir, ?string $microSfxPath = null, ?string $arch = null, string $variant = 'base', string $buildType = 'full', string $phpVersion = '8.5', bool $iosRelease = false, bool $iosExportIpa = false, ?string $sharedPharPath = null, ?string $derivePharFrom = null): array
     {
         $arch = $arch ?? StaticPhpResolver::detectArch();
 
@@ -94,6 +99,20 @@ class GameBuilder
         // Reuse a cross-target PHAR when one is already built (see $sharedPharPath
         // docblock). iOS never reuses - it links the staged tree, it has no PHAR.
         $isIos = str_starts_with($platform, 'ios');
+        if (!$isIos && $sharedPharPath !== null && !is_file($sharedPharPath)
+            && $derivePharFrom !== null && is_file($derivePharFrom)
+            && ($this->config->buildTypes[$buildType]['sharedPhar'] ?? true) !== false
+        ) {
+            $this->log('info', "Deriving the '{$buildType}' PHAR from " . basename($derivePharFrom) . ' (no hooks, no staging)...');
+            if (!is_dir(dirname($sharedPharPath))) {
+                mkdir(dirname($sharedPharPath), 0755, true);
+            }
+            $this->pharBuilder->deriveBuildType(
+                $derivePharFrom,
+                $sharedPharPath,
+                (new BuildVerifier($this->config))->typeConstants($buildType),
+            );
+        }
         $reusePhar = !$isIos
             && $sharedPharPath !== null
             && is_file($sharedPharPath)

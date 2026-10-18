@@ -236,6 +236,56 @@ class PharBuilder
     }
 
     /**
+     * Turn a built PHAR into the one of another build type: copy it and rewrite
+     * the given constants in its bootstrap files ({@see BuildConstants}). Build
+     * types differ only there, so hooks, the production install, staging and
+     * compressing the archive run once per release instead of once per type.
+     * Assets and resources are the same, so is the build id. Needs phar.readonly=0.
+     *
+     * @param array<string, mixed> $constants every constant the target type must
+     *   carry, also those it leaves at the project's value (the source may be another type)
+     */
+    public function deriveBuildType(string $sourcePhar, string $targetPhar, array $constants): void
+    {
+        if (!copy($sourcePhar, $targetPhar)) {
+            throw new \RuntimeException("cannot copy {$sourcePhar} to {$targetPhar}");
+        }
+        if ($constants === []) {
+            return;
+        }
+        $base = 'phar://' . str_replace('\\', '/', $targetPhar);
+        $work = sys_get_temp_dir() . '/phpolygon-derive-' . getmypid() . '-' . bin2hex(random_bytes(4));
+        mkdir($work, 0755, true);
+        try {
+            $files = [];
+            foreach ([BuildConstants::BOOTSTRAP, ...$this->config->additionalRequires] as $file) {
+                $file = ltrim(str_replace('\\', '/', $file), '/');
+                $content = @file_get_contents($base . '/' . $file);
+                if (is_string($content) && !in_array($file, $files, true)) {
+                    @mkdir(dirname($work . '/' . $file), 0755, true);
+                    file_put_contents($work . '/' . $file, $content);
+                    $files[] = $file;
+                }
+            }
+            $applied = BuildConstants::apply($work, $constants, $files);
+            $changed = array_values(array_unique(array_merge(...array_values($applied))));
+
+            $phar = new Phar($targetPhar);
+            $phar->startBuffering();
+            foreach ($changed as $file) {
+                $phar->addFromString($file, (string) file_get_contents($work . '/' . $file));
+                if ($this->config->pharCompression === BuildConfig::PHAR_COMPRESSION_GZIP) {
+                    $phar[$file]->compress(Phar::GZ);
+                }
+            }
+            $phar->stopBuffering();
+            unset($phar);
+        } finally {
+            FileTree::remove($work);
+        }
+    }
+
+    /**
      * Hash of everything the stub extracts (staged assets/ and resources/):
      * paths, sizes and contents. Two builds with the same files get the same id,
      * so an update that only changes code extracts nothing on the next start.
