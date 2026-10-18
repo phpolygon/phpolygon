@@ -1,0 +1,1 @@
+# Stand-in for tools/speech/speech_worker.py: remote commands bundle it, the fake ignores it.

@@ -27,7 +27,8 @@ use PHPolygon\Audio\Dsp\Voice\VoiceProfile;
  *   "workers": ["cuda", "cuda", "cpu"],
  *   "device": "auto",
  *   "cpuThreads": null,
- *   "remoteRetries": 5
+ *   "remoteRetries": 5,
+ *   "synthesizer": "chatterbox"
  * }
  * ```
  *
@@ -55,6 +56,10 @@ use PHPolygon\Audio\Dsp\Voice\VoiceProfile;
  *   remoteRetries  reconnects of a remote worker that drops while lines are queued,
  *            in a row without a finished line (backoff 5, 15, 45, then 120 s);
  *            0 = a dropped remote worker stays gone
+ *   synthesizer  chatterbox (default) or voxcpm ({@see SpeechSynthesizers}); the voices'
+ *            `params` follow its table ({@see SpeechParams} / {@see VoxCpmParams}).
+ *            VoxCPM2 voices take no exaggeration/cfgWeight and need a reference or
+ *            `params.description` (no built-in voice)
  */
 final readonly class SpeechConfig
 {
@@ -96,6 +101,7 @@ final readonly class SpeechConfig
         public string $device = self::DEVICE_AUTO,
         public ?int $cpuThreads = null,
         public int $remoteRetries = self::REMOTE_RETRIES,
+        public string $synthesizer = SpeechSynthesizers::CHATTERBOX,
     ) {}
 
     /**
@@ -148,7 +154,7 @@ final readonly class SpeechConfig
         if (!is_array($data) || array_is_list($data)) {
             throw new \InvalidArgumentException('build.json speech must be an object like {"locales": "resources/lang", "keys": ["dialog.*"], "voices": {...}}');
         }
-        $known = ['locales', 'output', 'keys', 'only', 'voices', 'build', 'runner', 'gpu', 'workers', 'device', 'cpuThreads', 'remoteRetries'];
+        $known = ['locales', 'output', 'keys', 'only', 'voices', 'build', 'runner', 'gpu', 'workers', 'device', 'cpuThreads', 'remoteRetries', 'synthesizer'];
         foreach (array_keys($data) as $key) {
             if (!in_array($key, $known, true)) {
                 throw new \InvalidArgumentException("build.json speech.{$key} is unknown (supported: " . implode(', ', $known) . ')');
@@ -164,9 +170,10 @@ final readonly class SpeechConfig
         if (!is_array($voicesData) || $voicesData === [] || array_is_list($voicesData)) {
             throw new \InvalidArgumentException('build.json speech.voices must be an object of named voices, e.g. {"narrator": {"reference": "resources/voice-ref/narrator.wav"}}');
         }
+        $synthesizer = self::choice($data['synthesizer'] ?? SpeechSynthesizers::CHATTERBOX, 'synthesizer', SpeechSynthesizers::NAMES);
         $voices = [];
         foreach ($voicesData as $name => $voice) {
-            $voices[] = self::parseVoice((string) $name, $voice);
+            $voices[] = self::parseVoice((string) $name, $voice, $synthesizer);
         }
 
         $build = self::choice($data['build'] ?? self::BUILD_GENERATE, 'build', [self::BUILD_GENERATE, self::BUILD_CHECK, self::BUILD_OFF]);
@@ -203,6 +210,7 @@ final readonly class SpeechConfig
             $device,
             $cpuThreads,
             $remoteRetries,
+            $synthesizer,
         );
     }
 
@@ -247,10 +255,11 @@ final readonly class SpeechConfig
             'device' => $this->device,
             'cpuThreads' => $this->cpuThreads,
             'remoteRetries' => $this->remoteRetries,
+            'synthesizer' => $this->synthesizer,
         ];
     }
 
-    private static function parseVoice(string $name, mixed $voice): SpeechVoice
+    private static function parseVoice(string $name, mixed $voice, string $synthesizer): SpeechVoice
     {
         if (!is_array($voice) || array_is_list($voice)) {
             throw new \InvalidArgumentException("build.json speech.voices.{$name} must be an object (\"reference\": a WAV to clone, or null for the built-in voice)");
@@ -259,6 +268,12 @@ final readonly class SpeechConfig
         foreach (array_keys($voice) as $key) {
             if (!in_array($key, $known, true)) {
                 throw new \InvalidArgumentException("build.json speech.voices.{$name}.{$key} is unknown (supported: " . implode(', ', $known) . ')');
+            }
+        }
+        $paramsClass = SpeechSynthesizers::paramsClass($synthesizer);
+        foreach (array_diff(SpeechParams::VOICE_FIELDS, $paramsClass::VOICE_FIELDS) as $field) {
+            if (array_key_exists($field, $voice)) {
+                throw new \InvalidArgumentException("build.json speech.voices.{$name}.{$field} is a Chatterbox setting; synthesizer \"{$synthesizer}\" has none");
             }
         }
         $seed = $voice['seed'] ?? SpeechParams::FIELDS['seed']['default'];
@@ -271,10 +286,13 @@ final readonly class SpeechConfig
             if (!is_array($voice['params']) || ($voice['params'] !== [] && array_is_list($voice['params']))) {
                 throw new \InvalidArgumentException("build.json speech.voices.{$name}.params must be an object of speech parameters");
             }
-            $params = SpeechParams::fromArray($voice['params'], "build.json speech.voices.{$name}.params");
+            $params = $paramsClass::fromArray($voice['params'], "build.json speech.voices.{$name}.params");
             if (!isset($voice['reference']) && $params->usesReference()) {
-                throw new \InvalidArgumentException("build.json speech.voices.{$name}.params: " . implode(', ', SpeechParams::REFERENCE_FIELDS) . ' need a reference WAV; the built-in voice has none');
+                throw new \InvalidArgumentException("build.json speech.voices.{$name}.params: " . implode(', ', $paramsClass::REFERENCE_FIELDS) . ' need a reference WAV; the built-in voice has none');
             }
+        }
+        if ($synthesizer === SpeechSynthesizers::VOXCPM && !isset($voice['reference']) && !($params instanceof VoxCpmParams && $params->description !== null)) {
+            throw new \InvalidArgumentException("build.json speech.voices.{$name}: VoxCPM2 has no built-in voice - give it a reference WAV (designed once with speech:design) or params.description");
         }
         $profile = null;
         if (isset($voice['profile'])) {

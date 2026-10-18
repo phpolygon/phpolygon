@@ -38,7 +38,7 @@ final class ChatterboxSynthesizerTest extends TestCase
     /** @var list<string> */
     private array $log = [];
 
-    public function testSpeaksTwentyTwoOfTheSteamLanguages(): void
+    public function testSpeaksTwentyThreeOfTheSteamLanguages(): void
     {
         $synthesizer = new ChatterboxSynthesizer('/game');
         $spoken = [];
@@ -52,9 +52,11 @@ final class ChatterboxSynthesizerTest extends TestCase
             }
         }
 
-        self::assertCount(22, $spoken);
-        self::assertSame(['bg', 'zh-TW', 'cs', 'hu', 'id', 'ro', 'th', 'uk', 'vi'], $silent);
+        self::assertCount(23, $spoken);
+        self::assertSame(['bg', 'cs', 'hu', 'id', 'ro', 'th', 'uk', 'vi'], $silent);
         self::assertSame('zh', $spoken['zh-CN']);
+        // Traditional characters are read as Mandarin too (measured: 9 of 10 zh-TW lines right).
+        self::assertSame('zh', $spoken['zh-TW']);
         self::assertSame('pt', $spoken['pt-BR']);
         self::assertSame('es', $spoken['es-419']);
     }
@@ -66,7 +68,10 @@ final class ChatterboxSynthesizerTest extends TestCase
         self::assertSame('de', $synthesizer->language('de_DE'));
         self::assertSame('no', $synthesizer->language('nb'));
         self::assertSame('zh', $synthesizer->language('zh-Hans'));
-        self::assertNull($synthesizer->language('zh-Hant'));
+        self::assertSame('zh', $synthesizer->language('zh-Hant'));
+        self::assertSame('zh', $synthesizer->language('zh_TW'));
+        self::assertSame('zh', $synthesizer->language('zh-HK'));
+        self::assertSame('zh', $synthesizer->language('tchinese'));
         self::assertNull($synthesizer->language('xx'));
     }
 
@@ -104,6 +109,48 @@ final class ChatterboxSynthesizerTest extends TestCase
         self::assertContains('--gpus', $command);
         self::assertSame(['phpolygon-speech:chatterbox-' . ChatterboxSynthesizer::VERSION . '-cuda', '--jobs', '-', '--device', 'cuda'], array_slice($command, -5));
         self::assertNotContains('--gpus', $synthesizer->command(SpeechConfig::RUNNER_DOCKER, 'cpu', 4));
+    }
+
+    public function testDockerPathsAreNormalisedBeforeTheyAreMapped(): void
+    {
+        $synthesizer = ChatterboxSynthesizer::fromOptions('D:/Projects/game', SpeechConfig::RUNNER_DOCKER);
+
+        // Backslashes as PowerShell hands them over, mixed separators, another drive-letter case.
+        self::assertSame('/work/build/voice/probe/00.wav', $synthesizer->workerPath('D:\Projects\game\build\voice\probe/00.wav', SpeechConfig::RUNNER_DOCKER));
+        self::assertSame('/work/build/00.wav', $synthesizer->workerPath('d:\projects\GAME\build\00.wav', SpeechConfig::RUNNER_DOCKER));
+        self::assertSame('/work/ref.wav', $synthesizer->workerPath('D:/Projects/game/./build/../ref.wav', SpeechConfig::RUNNER_DOCKER));
+        self::assertSame('C:\elsewhere\x.wav', $synthesizer->workerPath('C:\elsewhere\x.wav', SpeechConfig::RUNNER_NATIVE));
+
+        $this->expectExceptionMessage('is outside the project');
+        $synthesizer->workerPath('D:\Projects\game-other\x.wav', SpeechConfig::RUNNER_DOCKER);
+    }
+
+    public function testDockerPathsResolveSymlinksAndCaseOnlyOnWindowsPaths(): void
+    {
+        $this->useFakeWorkers();
+        mkdir($this->dir . '/build');
+        $root = str_replace('\\', '/', $this->dir);
+        $synthesizer = new ChatterboxSynthesizer($root, SpeechConfig::RUNNER_DOCKER);
+
+        // An existing directory resolves through realpath, the file still to be written below it.
+        self::assertSame('/work/build/new/00.wav', $synthesizer->workerPath($this->dir . DIRECTORY_SEPARATOR . 'build' . DIRECTORY_SEPARATOR . 'new/00.wav', SpeechConfig::RUNNER_DOCKER));
+        rmdir($this->dir . '/build');
+
+        $posix = new ChatterboxSynthesizer('/srv/Game', SpeechConfig::RUNNER_DOCKER);
+        $this->expectExceptionMessage('is outside the project');
+        $posix->workerPath('/srv/game/x.wav', SpeechConfig::RUNNER_DOCKER);
+    }
+
+    public function testTheImageIsBuiltFromTheSharedDockerfile(): void
+    {
+        $command = (new ChatterboxSynthesizer('/game', gpu: true, toolsDir: '/engine/tools/speech'))->buildCommand();
+
+        self::assertSame(['docker', 'build', '-t', 'phpolygon-speech:chatterbox-' . ChatterboxSynthesizer::VERSION . '-cuda'], array_slice($command, 0, 4));
+        self::assertContains('WORKER=chatterbox_worker.py', $command);
+        self::assertContains('REQUIREMENTS=requirements.txt', $command);
+        self::assertContains('TORCH_VERSION=2.6.0', $command);
+        self::assertNotContains('SYSTEM_PACKAGES=', array_map(static fn (string $a): string => explode('=', $a)[0] . '=', $command));
+        self::assertSame('/engine/tools/speech', $command[count($command) - 1]);
     }
 
     public function testOptionsWithoutBuildJsonHonourTheEnvironment(): void
@@ -226,13 +273,17 @@ final class ChatterboxSynthesizerTest extends TestCase
         self::assertSame(['-p', '2222', 'me@mac.local', '--'], array_slice($command, -5, 4));
         $shell = $command[count($command) - 1];
         self::assertStringStartsWith('PY="$HOME"/\'.phpolygon/speech/chatterbox-' . ChatterboxSynthesizer::VERSION . '/bin/python\';', $shell);
-        self::assertStringContainsString('PYTORCH_ENABLE_MPS_FALLBACK=1 exec "$PY" -c \'import base64,sys;', $shell);
+        self::assertStringContainsString('PYTORCH_ENABLE_MPS_FALLBACK=1 exec "$PY" -c \'import base64,sys,types,zlib;', $shell);
         self::assertStringEndsWith('--jobs - --inline --require ' . ChatterboxSynthesizer::VERSION . ' --device mps', $shell);
         self::assertStringContainsString('speech:setup --remote=ssh://me@mac.local:2222?device=mps', $shell);
 
-        // The worker script travels with the command.
-        preg_match('~b64decode\(\W*([A-Za-z0-9+/=]{100,})~', $shell, $m);
-        self::assertSame(file_get_contents(dirname(__DIR__, 3) . '/tools/speech/chatterbox_worker.py'), base64_decode($m[1] ?? ''));
+        // The shared worker module and the worker script travel with the command, compressed.
+        preg_match_all('~d\(\W*([A-Za-z0-9+/=]{100,})~', $shell, $m);
+        self::assertSame(file_get_contents(dirname(__DIR__, 3) . '/tools/speech/speech_worker.py'), gzuncompress(base64_decode($m[1][0] ?? '')));
+        self::assertSame(file_get_contents(dirname(__DIR__, 3) . '/tools/speech/chatterbox_worker.py'), gzuncompress(base64_decode($m[1][1] ?? '')));
+        // Well below the 32 767 characters of a Windows command line.
+        self::assertLessThan(20000, strlen(implode(' ', $command)));
+        self::assertStringContainsString('types.ModuleType(', $shell);
     }
 
     public function testRemoteWorkerOptionsAreValidated(): void

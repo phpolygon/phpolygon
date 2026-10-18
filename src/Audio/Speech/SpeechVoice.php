@@ -16,7 +16,7 @@ final readonly class SpeechVoice
      * @param string|null $reference project-relative WAV the voice is cloned from; null = the synthesizer's built-in voice
      * @param list<string> $keys fnmatch patterns of the line keys this voice speaks; [] = every line no other voice claims
      * @param VoiceProfile|null $profile post-processing through {@see \PHPolygon\Audio\Dsp\Voice\VoiceChain}; null = loudness only
-     * @param SpeechParams|null $params sampling, decoder, watermark and reference excerpt; null = the model's defaults
+     * @param SynthesizerParams|null $params the synthesizer's fine controls ({@see SpeechParams}, {@see VoxCpmParams}); null = the model's defaults
      */
     public function __construct(
         public string $name,
@@ -26,7 +26,7 @@ final readonly class SpeechVoice
         public float $exaggeration = 0.5,
         public float $cfgWeight = 0.5,
         public ?VoiceProfile $profile = null,
-        public ?SpeechParams $params = null,
+        public ?SynthesizerParams $params = null,
     ) {}
 
     public function claims(string $key): bool

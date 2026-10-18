@@ -472,8 +472,10 @@ final class SpeechWorkerPool
     }
 
     /**
-     * True when the other running workers, at their measured pace, would speak the
-     * $queued lines before this worker finished one of them.
+     * True when the other busy workers, at their measured pace, would speak the
+     * $queued lines before this worker finished one of them. Only busy workers
+     * count: an idle one may hold back as well, and idle workers that all wait for
+     * each other leave the last lines to nobody (the run never ends).
      */
     private function othersFinishFirst(int $self, int $queued): bool
     {
@@ -484,11 +486,12 @@ final class SpeechWorkerPool
         $rate = 0.0;
         $busy = 0;
         foreach ($this->workers as $i => $worker) {
-            if ($i === $self || !$worker['open'] || $worker['stdin'] === null || $worker['done'] === 0 || $worker['seconds'] <= 0.0) {
+            if ($i === $self || !$worker['open'] || $worker['stdin'] === null || $worker['job'] === null
+                || $worker['done'] === 0 || $worker['seconds'] <= 0.0) {
                 continue;
             }
             $rate += 1.0 / $worker['seconds'];
-            $busy += $worker['job'] !== null ? 1 : 0;
+            $busy++;
         }
         if ($rate <= 0.0) {
             return false;

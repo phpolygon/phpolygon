@@ -9,7 +9,7 @@ namespace PHPolygon\Audio\Speech;
  *
  *   device   the worker's device on that host (auto, cuda, cpu, mps); default auto
  *   python   interpreter of the host's speech environment; default
- *            ~/.phpolygon/speech/chatterbox-{version}/bin/python (`speech:setup --remote=…`)
+ *            ~/.phpolygon/speech/{synthesizer}-{version}/bin/python (`speech:setup [--synth=…] --remote=…`)
  *   workers  processes on that host, each one model; default 1
  *
  * The worker script is sent with the command (the host runs the engine's own copy),
@@ -104,9 +104,9 @@ final readonly class SpeechRemote
     }
 
     /** The interpreter as a shell word: $HOME-relative paths stay expandable. */
-    public function pythonWord(string $version): string
+    public function pythonWord(string $version, string $synthesizer = 'chatterbox'): string
     {
-        $python = $this->python ?? "~/.phpolygon/speech/chatterbox-{$version}/bin/python";
+        $python = $this->python ?? "~/.phpolygon/speech/{$synthesizer}-{$version}/bin/python";
         if (str_starts_with($python, '~/')) {
             return '"$HOME"/' . self::quote(substr($python, 2));
         }

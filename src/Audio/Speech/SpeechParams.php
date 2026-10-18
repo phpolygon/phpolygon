@@ -20,29 +20,27 @@ namespace PHPolygon\Audio\Speech;
  * no speaking-rate control (its `speed` is an unimplemented TODO); change the
  * tempo afterwards with {@see \PHPolygon\Audio\Dsp\Voice\VoiceProfile} `tempo`.
  */
-final readonly class SpeechParams
+final readonly class SpeechParams extends SynthesizerParams
 {
-    public const string TYPE_FLOAT = 'float';
-    public const string TYPE_INT = 'int';
-    public const string TYPE_BOOL = 'bool';
-
-    public const string GROUP_VOICE = 'voice';
-    public const string GROUP_SAMPLING = 'sampling';
-    public const string GROUP_REFERENCE = 'reference';
-    public const string GROUP_DECODER = 'decoder';
-    public const string GROUP_OUTPUT = 'output';
-
-    /** Fields of the voice itself ({@see SpeechVoice}), not of the params object. */
+    /**
+     * Fields of the voice itself ({@see SpeechVoice}), not of the params object.
+     *
+     * @var list<string>
+     */
     public const array VOICE_FIELDS = ['seed', 'exaggeration', 'cfgWeight'];
 
-    /** Fields that only act on a cloned voice (a reference WAV), not on the built-in one. */
+    /**
+     * Fields that only act on a cloned voice (a reference WAV), not on the built-in one.
+     *
+     * @var list<string>
+     */
     public const array REFERENCE_FIELDS = ['referenceStart', 'referenceLength', 'promptSeconds', 'voiceSeconds'];
 
     /**
      * Every parameter: type, model default (null = none, e.g. "the whole file"),
      * range, editor step, group, the worker's job field and a description.
      *
-     * @var array<string, array{type: string, default: int|float|bool|null, min: int|float|null, max: int|float|null, step: int|float|null, group: string, worker: string, description: string}>
+     * @var array<string, array{type: string, default: int|float|bool|string|null, min: int|float|null, max: int|float|null, step: int|float|null, group: string, worker: string, description: string}>
      */
     public const array FIELDS = [
         'seed' => [
@@ -130,151 +128,6 @@ final readonly class SpeechParams
         public ?float $voiceSeconds = null,
         public ?bool $watermark = null,
     ) {
-        foreach ($this->toArray() as $name => $value) {
-            if (!is_bool($value)) {
-                self::check($name, $value, 'params.' . $name);
-            }
-        }
-    }
-
-    /**
-     * build.json `speech.voices.<voice>.params`: camelCase keys of {@see self::FIELDS}
-     * except seed, exaggeration and cfgWeight (those stay on the voice); null = default.
-     *
-     * @param array<mixed> $data
-     * @param string $field the prefix of error messages
-     * @throws \InvalidArgumentException on unknown keys, wrong types or values out of range
-     */
-    public static function fromArray(array $data, string $field = 'params'): self
-    {
-        $known = self::names();
-        foreach (array_keys($data) as $key) {
-            if (in_array($key, self::VOICE_FIELDS, true)) {
-                throw new \InvalidArgumentException("{$field}.{$key} belongs to the voice itself, not to params");
-            }
-            if (!in_array($key, $known, true)) {
-                throw new \InvalidArgumentException("{$field}.{$key} is unknown (supported: " . implode(', ', $known) . ')');
-            }
-        }
-        $values = [];
-        foreach ($known as $name) {
-            $value = $data[$name] ?? null;
-            if ($value === null) {
-                $values[$name] = null;
-                continue;
-            }
-            $values[$name] = match (self::FIELDS[$name]['type']) {
-                self::TYPE_BOOL => is_bool($value) ? $value : throw new \InvalidArgumentException("{$field}.{$name} must be true or false"),
-                self::TYPE_INT => is_int($value) ? self::check($name, $value, "{$field}.{$name}") : throw new \InvalidArgumentException("{$field}.{$name} must be an integer"),
-                default => is_int($value) || is_float($value) ? (float) self::check($name, $value, "{$field}.{$name}") : throw new \InvalidArgumentException("{$field}.{$name} must be a number"),
-            };
-        }
-        /** @var array{temperature: ?float, topP: ?float, minP: ?float, repetitionPenalty: ?float, maxNewTokens: ?int, cfmSteps: ?int, referenceStart: ?float, referenceLength: ?float, promptSeconds: ?float, voiceSeconds: ?float, watermark: ?bool} $values */
-        return new self(...$values);
-    }
-
-    /**
-     * The parameters for an editor UI, in display order: seed, exaggeration and
-     * cfgWeight (fields of the voice) first, then every field of this class.
-     * `default` null = no default value (referenceLength: the whole file).
-     *
-     * @return list<array{name: string, type: string, default: int|float|bool|null, min: int|float|null, max: int|float|null, step: int|float|null, group: string, description: string}>
-     */
-    public static function schema(): array
-    {
-        $schema = [];
-        foreach (self::FIELDS as $name => $spec) {
-            $schema[] = [
-                'name' => $name,
-                'type' => $spec['type'],
-                'default' => $spec['default'],
-                'min' => $spec['min'],
-                'max' => $spec['max'],
-                'step' => $spec['step'],
-                'group' => $spec['group'],
-                'description' => $spec['description'],
-            ];
-        }
-        return $schema;
-    }
-
-    /**
-     * Range check of one parameter (of this class or a voice field), with the
-     * message build.json errors use.
-     *
-     * @throws \InvalidArgumentException
-     */
-    public static function check(string $name, int|float $value, string $label): int|float
-    {
-        $spec = self::FIELDS[$name] ?? throw new \InvalidArgumentException("unknown speech parameter {$name}");
-        if (($spec['min'] !== null && $value < $spec['min']) || ($spec['max'] !== null && $value > $spec['max'])) {
-            throw new \InvalidArgumentException(sprintf(
-                '%s must be a number between %s and %s, got %s',
-                $label,
-                self::format($spec['min']),
-                self::format($spec['max']),
-                self::format($value),
-            ));
-        }
-        return $value;
-    }
-
-    /** Nothing set: the model runs with its own defaults. */
-    public function isDefault(): bool
-    {
-        return $this->toArray() === [];
-    }
-
-    /** Something only a cloned voice can use is set (reference excerpt or window). */
-    public function usesReference(): bool
-    {
-        return array_intersect_key($this->toArray(), array_flip(self::REFERENCE_FIELDS)) !== [];
-    }
-
-    /**
-     * The set fields (camelCase), in {@see self::FIELDS} order.
-     *
-     * @return array<string, int|float|bool>
-     */
-    public function toArray(): array
-    {
-        $values = [];
-        foreach (self::names() as $name) {
-            $value = $this->{$name};
-            if ($value !== null) {
-                /** @var int|float|bool $value */
-                $values[$name] = $value;
-            }
-        }
-        return $values;
-    }
-
-    /**
-     * The worker's job fields (snake_case), only those that are set.
-     *
-     * @return array<string, int|float|bool>
-     */
-    public function toWorker(): array
-    {
-        $fields = [];
-        foreach ($this->toArray() as $name => $value) {
-            $fields[self::FIELDS[$name]['worker']] = $value;
-        }
-        return $fields;
-    }
-
-    /**
-     * The camelCase names of the fields of this class.
-     *
-     * @return list<string>
-     */
-    public static function names(): array
-    {
-        return array_values(array_diff(array_keys(self::FIELDS), self::VOICE_FIELDS));
-    }
-
-    private static function format(int|float|null $value): string
-    {
-        return $value === null ? '-' : (string) $value;
+        $this->validate();
     }
 }

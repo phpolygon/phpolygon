@@ -173,6 +173,25 @@ final class SpeechWorkerPoolTest extends TestCase
         self::assertSame('no speech worker left to speak this line', $results['j3']);
     }
 
+    public function testIdleWorkersDoNotAllWaitForEachOtherAtTheEnd(): void
+    {
+        // Three equally fast workers, all idle, one line left: each one alone is slower
+        // than the other two together. Counting idle workers as "finishing first" held
+        // every one of them back and the run never ended.
+        $pool = new SpeechWorkerPool([['command' => $this->fake('a')]], $this->dir, $this->collect(...));
+        $idle = ['open' => true, 'stdin' => STDIN, 'job' => null, 'done' => 5, 'seconds' => 0.04];
+        $workers = new \ReflectionProperty(SpeechWorkerPool::class, 'workers');
+        $workers->setValue($pool, [$idle, $idle, $idle]);
+        $finish = new \ReflectionMethod(SpeechWorkerPool::class, 'othersFinishFirst');
+
+        self::assertFalse($finish->invoke($pool, 0, 1));
+
+        // The tail rule itself stays: next to a busy fast worker a slow one waits.
+        $workers->setValue($pool, [['job' => $this->job('x', null)] + $idle, ['seconds' => 0.6] + $idle]);
+        self::assertTrue($finish->invoke($pool, 1, 1));
+        self::assertFalse($finish->invoke($pool, 0, 1));
+    }
+
     /**
      * @param list<string> $behaviours
      * @param list<SpeechJob> $jobs

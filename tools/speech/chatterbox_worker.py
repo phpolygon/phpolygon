@@ -17,41 +17,18 @@ generate() re-implements ChatterboxMultilingualTTS.generate of chatterbox-tts
 On another version a job that sets one of them fails with a clear message, the
 others run through model.generate().
 
-  --jobs FILE   a JSONL file with every job (the whole run at once)
-  --jobs -      jobs arrive as JSON lines on stdin and are answered in order; EOF
-                ends the worker (default). The engine runs its workers this way
-                and hands each one its next job when it reports the last.
-  --device      auto (cuda, else mps, else cpu), cuda, mps or cpu
-  --threads N   torch CPU threads when the worker runs on the CPU
-  --inline      remote host without shared paths: a job's reference is the SHA-1 of
-                the WAV, sent once as base64 in "reference_wav" and cached in the temp
-                directory; the result carries the generated WAV as base64 in "wav"
-  --require V   exit with code 3 unless chatterbox-tts V is installed
-
-Exit code 75: out of device memory on a line even after freeing the cache, or more than
-RECYCLE_AT of it in use after a line. The line in flight is not reported; the engine puts
-it back into the queue and starts the worker anew (a fresh process frees what leaked).
+Protocol, arguments (--jobs, --device, --threads, --inline, --require) and the
+out-of-memory exit code 75: speech_worker.py, shared by every speech worker.
 """
-import argparse
-import base64
 import copy
 import dataclasses
-import gc
-import json
 import os
 import sys
-import tempfile
-import time
+
+import speech_worker
 
 # The version generate() below re-implements; other versions only run model.generate().
 EXACT_VERSION = "0.1.7"
-
-# Exit code for "out of device memory" (SpeechWorkerPool::EXIT_OUT_OF_MEMORY): the engine puts
-# the line in flight back into the queue and starts this worker anew.
-EXIT_OUT_OF_MEMORY = 75
-
-# Share of the device memory in tensors above which the worker recycles itself between lines.
-RECYCLE_AT = 0.6
 
 # Job fields that need the re-implementation (or the reference handling) of this worker.
 EXTENDED = ("temperature", "top_p", "min_p", "repetition_penalty", "max_new_tokens", "cfm_steps", "watermark")
@@ -59,192 +36,61 @@ REFERENCE = ("reference_start", "reference_length", "prompt_seconds", "voice_sec
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--jobs", default="-")
-    parser.add_argument("--device", default="auto", choices=["auto", "cuda", "mps", "cpu"])
-    parser.add_argument("--threads", type=int, default=0)
-    parser.add_argument("--inline", action="store_true")
-    parser.add_argument("--require", default="")
-    args = parser.parse_args()
+    args = speech_worker.parser().parse_args()
+    if not speech_worker.check_version(args, "chatterbox-tts"):
+        return 3
+    return speech_worker.serve(args, "chatterbox", Chatterbox)
 
-    # Libraries print to stdout; keep it for the protocol.
-    protocol = sys.stdout
-    sys.stdout = sys.stderr
 
-    def emit(result: dict) -> None:
-        protocol.write(json.dumps(result) + "\n")
-        protocol.flush()
+class Chatterbox:
+    """The backend of speech_worker.serve: conditioning per voice, generation per line."""
 
-    from importlib import metadata
-    try:
-        installed = metadata.version("chatterbox-tts")
-    except metadata.PackageNotFoundError:
-        installed = None
-    if args.require:
-        if installed != args.require:
-            print(
-                f"chatterbox-tts {args.require} is required, found {installed or 'none'} in {sys.executable}"
-                " - run: vendor/bin/phpolygon speech:setup (--remote=ssh://user@host for a worker host)",
-                file=sys.stderr, flush=True,
+    def __init__(self, torch, device: str):
+        import torchaudio
+        from chatterbox.mtl_tts import ChatterboxMultilingualTTS
+
+        self.torch = torch
+        self.torchaudio = torchaudio
+        self.installed = speech_worker.installed_version("chatterbox-tts")
+        self.exact = self.installed == EXACT_VERSION
+        self.model = load_model(ChatterboxMultilingualTTS, torch, device)
+        self.builtin = snapshot(torch, self.model.conds)  # the built-in voice (conds.pt)
+        self.reference = None  # what model.conds holds: False = the built-in voice, else a reference_key()
+
+    def prepare(self, job: dict) -> None:
+        extended = [k for k in EXTENDED + REFERENCE if job.get(k) is not None]
+        if extended and not self.exact:
+            raise RuntimeError(
+                f"{', '.join(extended)} need chatterbox-tts {EXACT_VERSION}, found {self.installed or 'none'}"
+                " (the worker re-implements its generate) - run: vendor/bin/phpolygon speech:setup"
             )
-            return 3
-
-    cache = os.path.join(tempfile.gettempdir(), "phpolygon-speech-refs")
-    if args.inline:
-        os.makedirs(cache, exist_ok=True)
-
-    def inline_reference(job: dict):
-        """The cached path of an inline reference, written when the WAV came along."""
-        digest = job["reference"]
-        if digest is None:
-            return None
-        if not all(c in "0123456789abcdef" for c in digest):
-            raise ValueError(f"bad reference hash {digest!r}")
-        path = os.path.join(cache, digest + ".wav")
-        if job.get("reference_wav"):
-            fd, part = tempfile.mkstemp(dir=cache, suffix=".part")
-            with os.fdopen(fd, "wb") as f:
-                f.write(base64.b64decode(job["reference_wav"]))
-            os.replace(part, path)
-        if not os.path.exists(path):
-            raise FileNotFoundError(f"reference {digest} was never sent to this worker")
-        return path
-
-    if args.jobs == "-":
-        def jobs():
-            # Bytes, not text: the stdin encoding of a Windows pipe is the ANSI code page.
-            while True:
-                line = sys.stdin.buffer.readline()
-                if not line:
-                    return
-                if line.strip():
-                    yield json.loads(line.decode("utf-8"))
-        count = "jobs from stdin"
-    else:
-        with open(args.jobs, encoding="utf-8") as f:
-            listed = [json.loads(line) for line in f if line.strip()]
-
-        def jobs():
-            return iter(listed)
-        count = f"{len(listed)} line(s)"
-
-    import torch
-    import torchaudio
-    from chatterbox.mtl_tts import ChatterboxMultilingualTTS
-
-    device = args.device
-    if device == "auto":
-        if torch.cuda.is_available() and torch.cuda.device_count() > 0:
-            device = "cuda"
-        elif torch.backends.mps.is_available():
-            device = "mps"
+        if job["reference"] is None:
+            if self.builtin is None:
+                raise RuntimeError("this checkpoint has no built-in voice (conds.pt); give the voice a reference WAV")
+            if self.reference is not False:
+                self.model.conds = snapshot(self.torch, self.builtin)
+                self.reference = False
         else:
-            device = "cpu"
-    if device == "cpu" and args.threads > 0:
-        torch.set_num_threads(args.threads)
-    threads = f", {torch.get_num_threads()} thread(s)" if device == "cpu" else ""
-    print(f"chatterbox: {count} on {device}{threads}", file=sys.stderr, flush=True)
-    model = load_model(ChatterboxMultilingualTTS, torch, device)
-    builtin = snapshot(torch, model.conds)  # the built-in voice (conds.pt)
+            key = reference_key(job)
+            if key != self.reference:
+                self.reference = None  # until the conditioning succeeds
+                condition(self.model, self.torchaudio, job, speech_worker.reference_cache())
+                self.reference = key
 
-    exact = installed == EXACT_VERSION
-    reference = None  # what model.conds holds: False = the built-in voice, else a reference_key()
-    for job in jobs():
-        start = time.time()
-        scratch = None
-        try:
-            out = job["out"]
-            if args.inline:
-                job["reference"] = inline_reference(job)
-                fd, out = tempfile.mkstemp(dir=cache, suffix=".wav")
-                os.close(fd)
-                scratch = out
-            extended = [k for k in EXTENDED + REFERENCE if job.get(k) is not None]
-            if extended and not exact:
-                raise RuntimeError(
-                    f"{', '.join(extended)} need chatterbox-tts {EXACT_VERSION}, found {installed or 'none'}"
-                    " (the worker re-implements its generate) - run: vendor/bin/phpolygon speech:setup"
-                )
-            if job["reference"] is None:
-                if builtin is None:
-                    raise RuntimeError("this checkpoint has no built-in voice (conds.pt); give the voice a reference WAV")
-                if reference is not False:
-                    model.conds = snapshot(torch, builtin)
-                    reference = False
-            else:
-                key = reference_key(job)
-                if key != reference:
-                    reference = None  # until the conditioning succeeds
-                    condition(model, torchaudio, job, cache)
-                    reference = key
-            for attempt in (1, 2):
-                try:
-                    torch.manual_seed(job["seed"])
-                    drop_alignment_hooks(model)
-                    if exact:
-                        wav = generate(model, torch, job)
-                    else:
-                        wav = model.generate(
-                            job["text"],
-                            language_id=job["language"],
-                            exaggeration=job["exaggeration"],
-                            cfg_weight=job["cfg_weight"],
-                        )
-                    break
-                except Exception as e:
-                    if not is_out_of_memory(e):
-                        raise
-                    free_memory(torch, device)
-                    if attempt == 2:
-                        # Still out of memory in a cleaned-up process: only a new one helps.
-                        # Not reported – the engine puts the line back and starts the worker anew.
-                        print(f"chatterbox: out of memory on {device} ({e}) - restarting", file=sys.stderr, flush=True)
-                        return EXIT_OUT_OF_MEMORY
-            torchaudio.save(out, wav.cpu(), model.sr)
-            result = {"id": job["id"], "ok": True, "seconds": round(time.time() - start, 1)}
-            if args.inline:
-                with open(out, "rb") as f:
-                    result["wav"] = base64.b64encode(f.read()).decode("ascii")
-            emit(result)
-        except Exception as e:  # one bad line must not stop the run
-            emit({"id": job["id"], "error": f"{type(e).__name__}: {e}"})
-        finally:
-            if scratch is not None and os.path.exists(scratch):
-                os.remove(scratch)
-        free_memory(torch, device)
-        # Device memory creeps up over a long run (MPS: 28 GB after ~500 lines). Recycle
-        # between lines, before a line fails on it; the engine starts the worker anew.
-        used = memory_used(torch, device)
-        if used is not None and used > RECYCLE_AT:
-            print(f"chatterbox: {used:.0%} of {device} memory in use - restarting", file=sys.stderr, flush=True)
-            return EXIT_OUT_OF_MEMORY
-    return 0
+    def generate(self, job: dict):
+        self.torch.manual_seed(job["seed"])
+        drop_alignment_hooks(self.model)
+        if self.exact:
+            return generate(self.model, self.torch, job)
+        return self.model.generate(
+            job["text"],
+            language_id=job["language"],
+            exaggeration=job["exaggeration"],
+            cfg_weight=job["cfg_weight"],
+        )
 
-
-def is_out_of_memory(e: Exception) -> bool:
-    """CUDA's OutOfMemoryError, or the RuntimeError MPS and older torch raise."""
-    return type(e).__name__ == "OutOfMemoryError" or "out of memory" in str(e).lower()
-
-
-def free_memory(torch, device: str) -> None:
-    """Drop what the last line left behind and hand cached blocks back to the device."""
-    gc.collect()
-    if device == "mps":
-        torch.mps.empty_cache()
-    elif device == "cuda":
-        torch.cuda.empty_cache()
-
-
-def memory_used(torch, device: str):
-    """Share of the device memory this process holds in tensors, or None (CPU, unknown)."""
-    try:
-        if device == "mps":
-            return torch.mps.current_allocated_memory() / torch.mps.recommended_max_memory()
-        if device == "cuda":
-            return torch.cuda.memory_allocated() / torch.cuda.get_device_properties(0).total_memory
-    except Exception:
-        return None
-    return None
+    def save(self, wav, path: str) -> None:
+        self.torchaudio.save(path, wav.cpu(), self.model.sr)
 
 
 def reference_key(job: dict):
@@ -266,29 +112,14 @@ def condition(model, torchaudio, job: dict, cache: str) -> None:
     from chatterbox.models.s3tokenizer import S3_SR
 
     path = job["reference"]
-    excerpt = None
-    start = job.get("reference_start")
-    length = job.get("reference_length")
     windows = {}
     if job.get("prompt_seconds") is not None:
         windows["ENC_COND_LEN"] = max(1, int(round(float(job["prompt_seconds"]) * S3_SR)))
     if job.get("voice_seconds") is not None:
         windows["DEC_COND_LEN"] = max(1, int(round(float(job["voice_seconds"]) * S3GEN_SR)))
+    excerpt = speech_worker.excerpt(path, job.get("reference_start"), job.get("reference_length"), cache, torchaudio.load, torchaudio.save)
     try:
-        if start is not None or length is not None:
-            wav, sr = torchaudio.load(path)
-            total = wav.shape[-1]
-            first = int(round(float(start or 0) * sr))
-            last = total if length is None else min(total, first + int(round(float(length) * sr)))
-            if last - first < sr // 10:
-                raise ValueError(
-                    f"reference excerpt from {start or 0} s ({length if length is not None else 'to the end'})"
-                    f" is empty: the WAV is {total / sr:.1f} s long"
-                )
-            os.makedirs(cache, exist_ok=True)
-            fd, excerpt = tempfile.mkstemp(dir=cache, suffix=".wav")
-            os.close(fd)
-            torchaudio.save(excerpt, wav[:, first:last], sr)
+        if excerpt is not None:
             path = excerpt
         for name, value in windows.items():
             setattr(model, name, value)

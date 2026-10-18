@@ -20,6 +20,6 @@ final readonly class SpeechJob
         public int $seed,
         public float $exaggeration,
         public float $cfgWeight,
-        public ?SpeechParams $params = null,
+        public ?SynthesizerParams $params = null,
     ) {}
 }

@@ -49,7 +49,10 @@ if ($autoloader === null) {
 
 require $autoloader;
 
-use PHPolygon\Audio\Speech\ChatterboxSynthesizer;
+use PHPolygon\Audio\Speech\SpeechSynthesizers;
+use PHPolygon\Audio\Speech\VoiceDesign;
+use PHPolygon\Audio\Speech\VoxCpmParams;
+use PHPolygon\Audio\Speech\VoxCpmSynthesizer;
 use PHPolygon\Audio\Speech\SpeechRemote;
 use PHPolygon\Audio\Speech\SpeechConfig;
 use PHPolygon\Audio\Speech\SpeechLine;
@@ -202,6 +205,10 @@ if ($command === 'speech:sync') {
 if ($command === 'speech:setup') {
     speechSetup($args);
     exit(0);
+}
+
+if ($command === 'speech:design') {
+    exit(speechDesign($args));
 }
 
 if ($command !== 'build') {
@@ -561,8 +568,10 @@ Commands:
                      verify.versionConstant, verify.files (path, or every package in build/)
   speech:status      Spoken lines of build.json "speech" per locale: current, missing, stale
   speech:sync        Generate missing/stale spoken lines (--locale=de,en --key=dialog.* --check)
-  speech:setup       Set up the speech synthesizer: Python environment, --docker [--gpu] image,
-                     or --remote=ssh://user@host (environment on a worker host over SSH)
+  speech:setup       Set up the speech synthesizer (--synth=chatterbox|voxcpm): Python environment,
+                     --docker [--gpu] image, or --remote=ssh://user@host (environment on a worker host over SSH)
+  speech:design      Voice Design (VoxCPM2): a reference WAV from a description
+                     (--lang= --description= --text= --out= [--seed=N] [--takes=K] [--cfg=] [--steps=])
   editor             Launch the PHPolygon scene editor
   perf:report        Diff two benchmark JSON results in benchmarks/results/
   prototype:scaffold Copy the WebGL/JSX prototyping playground into this project
@@ -618,6 +627,8 @@ Examples:
   phpolygon speech:setup                         Python environment for speech synthesis
   phpolygon speech:setup --docker --gpu          Speech synthesis as a CUDA Docker image
   phpolygon speech:setup --remote=ssh://me@mac   Python environment on a remote worker host
+  phpolygon speech:setup --synth=voxcpm --docker --gpu   VoxCPM2 as a CUDA Docker image
+  phpolygon speech:design --lang=th --description="warm female voice, calm" --text="…" --out=ref.wav --docker --gpu
   phpolygon speech:sync --locale=de,en           Generate missing spoken lines for de and en
   phpolygon speech:sync --check                  Fail if spoken lines are missing or stale
   phpolygon editor                       Launch the scene editor
@@ -1385,7 +1396,7 @@ function speechSummary(array $lines): void
 function speechStatus(array $args): void
 {
     [$speech, $projectRoot] = speechConfig();
-    $sync = new SpeechSync($speech, $projectRoot, ChatterboxSynthesizer::fromConfig($speech, $projectRoot));
+    $sync = new SpeechSync($speech, $projectRoot, SpeechSynthesizers::fromConfig($speech, $projectRoot));
     $lines = $sync->plan(speechOption($args, 'locale'), speechOption($args, 'key'));
     if ($lines === []) {
         echo "No spoken lines: no key in {$speech->localesDir} matches " . implode(', ', $speech->keys) . "\n";
@@ -1414,7 +1425,7 @@ function speechSync(array $args): void
  */
 function runSpeechSync(SpeechConfig $speech, string $projectRoot, bool $check, array $locales = [], array $keys = []): bool
 {
-    $synthesizer = ChatterboxSynthesizer::fromConfig($speech, $projectRoot);
+    $synthesizer = SpeechSynthesizers::fromConfig($speech, $projectRoot);
     $sync = new SpeechSync($speech, $projectRoot, $synthesizer);
     try {
         $lines = $sync->plan($locales, $keys);
@@ -1464,32 +1475,115 @@ function speechSetup(array $args): void
 {
     $projectRoot = getcwd() ?: dirname(__DIR__);
     $docker = in_array('--docker', $args, true);
-    $synthesizer = new ChatterboxSynthesizer($projectRoot, gpu: in_array('--gpu', $args, true));
-    $remote = null;
-    foreach ($args as $arg) {
-        if (str_starts_with($arg, '--remote=')) {
-            $remote = substr($arg, strlen('--remote='));
-        }
-    }
+    $remote = speechValue($args, 'remote');
     try {
+        $class = SpeechSynthesizers::class(speechValue($args, 'synth') ?? SpeechSynthesizers::CHATTERBOX);
+        $synthesizer = new $class($projectRoot, gpu: in_array('--gpu', $args, true));
         if ($remote !== null) {
             [$host] = SpeechRemote::parse($remote, '--remote');
             $synthesizer->setupRemote($host, static function (string $message): void {
-                echo "→ {$message}
-";
+                echo "→ {$message}\n";
             });
-            echo "[32m✓[0m Speech synthesis ready on {$host->target()}: ~/.phpolygon/speech/chatterbox-" . ChatterboxSynthesizer::VERSION . "
-";
+            echo "\033[32m✓\033[0m Speech synthesis ready on {$host->target()}: ~/" . $synthesizer::environmentName() . "\n";
             return;
         }
         $synthesizer->setup($docker ? SpeechConfig::RUNNER_DOCKER : SpeechConfig::RUNNER_NATIVE, static function (string $message): void {
             echo "→ {$message}\n";
         });
-    } catch (\RuntimeException $e) {
+    } catch (\RuntimeException|\InvalidArgumentException $e) {
         fwrite(STDERR, "\033[31mError:\033[0m {$e->getMessage()}\n");
         exit(1);
     }
     echo "\033[32m✓\033[0m Speech synthesis ready: " . ($docker ? $synthesizer->image() : $synthesizer->environmentDir()) . "\n";
+}
+
+/**
+ * The value of --name=value (the last one wins), null when absent.
+ *
+ * @param list<string> $args
+ */
+function speechValue(array $args, string $name): ?string
+{
+    $value = null;
+    foreach ($args as $arg) {
+        if (str_starts_with($arg, "--{$name}=")) {
+            $value = substr($arg, strlen($name) + 3);
+        }
+    }
+    return $value;
+}
+
+/**
+ * Voice Design: a reference WAV from a description (VoxCPM2), one take per seed.
+ *
+ * @param list<string> $args
+ */
+function speechDesign(array $args): int
+{
+    $projectRoot = getcwd() ?: dirname(__DIR__);
+    $usage = 'usage: phpolygon speech:design [--synth=voxcpm] --lang=th --description="warm female voice, calm" --text="…" --out=path.wav'
+        . ' [--seed=N] [--takes=K] [--cfg=2.0] [--steps=10] [--docker|--native] [--gpu] [--device=cuda] [--workers=ssh://…] [--compile]';
+    try {
+        $synth = speechValue($args, 'synth') ?? SpeechSynthesizers::VOXCPM;
+        if ($synth !== SpeechSynthesizers::VOXCPM) {
+            throw new \InvalidArgumentException("Voice Design needs --synth=voxcpm (\"{$synth}\" cannot create voices)");
+        }
+        $locale = speechValue($args, 'lang');
+        $description = speechValue($args, 'description');
+        $text = speechValue($args, 'text');
+        $out = speechValue($args, 'out');
+        if ($locale === null || $description === null || $text === null || $out === null) {
+            throw new \InvalidArgumentException($usage);
+        }
+        $seed = speechValue($args, 'seed') ?? '0';
+        $takes = speechValue($args, 'takes') ?? '1';
+        if (!ctype_digit($seed) || !ctype_digit($takes) || (int) $takes < 1) {
+            throw new \InvalidArgumentException('--seed must be a non-negative integer, --takes a positive one');
+        }
+        $params = [];
+        foreach (['cfg' => 'cfgValue', 'steps' => 'inferenceTimesteps'] as $option => $field) {
+            $value = speechValue($args, $option);
+            if ($value !== null) {
+                if (!is_numeric($value)) {
+                    throw new \InvalidArgumentException("--{$option} must be a number");
+                }
+                $params[$field] = $field === 'inferenceTimesteps' ? (int) $value : (float) $value;
+            }
+        }
+        $design = new VoiceDesign($description, $text, $locale, $params !== [] ? VoxCpmParams::fromArray($params, '--') : null);
+        $runner = in_array('--docker', $args, true) ? SpeechConfig::RUNNER_DOCKER
+            : (in_array('--native', $args, true) ? SpeechConfig::RUNNER_NATIVE : SpeechConfig::RUNNER_AUTO);
+        // A few takes: torch.compile's warm-up (minutes) costs more than it saves.
+        if (getenv('PHPOLYGON_SPEECH_COMPILE') === false && !in_array('--compile', $args, true)) {
+            putenv('PHPOLYGON_SPEECH_COMPILE=0');
+        }
+        $workers = speechValue($args, 'workers');
+        $synthesizer = VoxCpmSynthesizer::fromOptions(
+            $projectRoot,
+            $runner,
+            in_array('--gpu', $args, true),
+            $workers !== null ? SpeechConfig::parseWorkers($workers, '--workers') : 1,
+            speechValue($args, 'device') ?? SpeechConfig::DEVICE_AUTO,
+        );
+        $outPath = preg_match('#^([A-Za-z]:)?[/\\\\]#', $out) === 1 ? $out : $projectRoot . '/' . $out;
+        $seeds = range((int) $seed, (int) $seed + (int) $takes - 1);
+        echo "→ Designing " . count($seeds) . " take(s) with {$synthesizer->id()}: \"{$description}\"\n";
+        $failed = 0;
+        $synthesizer->design($design, $outPath, $seeds, static function (int $seed, string $path, ?string $error, ?float $seconds) use (&$failed): void {
+            if ($error !== null) {
+                $failed++;
+                echo "  \033[31m✗\033[0m seed {$seed}: {$error}\n";
+                return;
+            }
+            $fits = $seconds !== null && $seconds >= VoiceDesign::MIN_SECONDS && $seconds <= VoiceDesign::MAX_SECONDS;
+            echo sprintf("  %s seed %d: %s (%.1f s%s)\n", $fits ? "\033[32m✓\033[0m" : "\033[33m!\033[0m", $seed, $path, $seconds ?? 0.0,
+                $fits ? '' : sprintf('; a cloning reference should be %.0f-%.0f s - lengthen or shorten the text', VoiceDesign::MIN_SECONDS, VoiceDesign::MAX_SECONDS));
+        });
+        return $failed === 0 ? 0 : 1;
+    } catch (\RuntimeException|\InvalidArgumentException $e) {
+        fwrite(STDERR, "\033[31mError:\033[0m {$e->getMessage()}\n");
+        return 1;
+    }
 }
 
 /**
