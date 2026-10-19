@@ -419,6 +419,15 @@ bulge), shoes, bottles, handles; turn it with a transform to loft along X/Z.
 `MeshData::mirrored(axis)` reflects a mesh and reverses the winding — a left part from
 a right one without the mesh turning inside out.
 
+**Colour spaces — material albedo is LINEAR.** The lit shaders multiply light by
+`Material::$albedo` as a linear value and gamma-encode (ACES, then 1/2.2) at the end.
+A colour picked as an sRGB hex ("how it should look") therefore belongs in
+`Color::srgb('#A85A30')` (sRGB hex → linear); `Color::hex()` stays a plain 0–1
+reading of the digits and is right for values that already are linear (e.g. glTF
+`baseColorFactor`), for emission/HDR intensities and for UI/2D colours. A raw-hex
+albedo renders lifted and washed out. `Color::toLinear()` / `toSrgb()` convert an
+existing colour. Nothing converts implicitly — choosing `srgb()` is the opt-in.
+
 **Graph nodes (`ProceduralMesh` / `*.mesh.json` graphs).** `ProceduralMeshEvaluator`
 evaluates: generators `box`, `cylinder`, `sphere`, `plane`, `torus`, `octahedron`,
 `wedge`, `lathe`, `ellipseLoft`; operators `transform`, `mirror` (`keep` 0 = only the

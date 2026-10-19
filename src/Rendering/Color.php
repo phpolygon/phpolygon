@@ -62,6 +62,45 @@ class Color
         return new self((float)$r, (float)$g, (float)$b, (float)$a);
     }
 
+    /**
+     * A colour written as an sRGB hex – the way a designer picks it, "how it
+     * should look on screen" – converted to LINEAR for use as a material
+     * albedo.
+     *
+     * The lit shaders take albedo as linear and gamma-encode the result, so a
+     * plain {@see hex()} albedo comes out lifted and, after the tonemap,
+     * washed out (#A85A30 terracotta reads as a pale skin tone). Use this for
+     * surface colours authored as hex; keep {@see hex()} for values that are
+     * already linear, for emission/HDR intensities and for UI colours, which
+     * are drawn as they are. Alpha is not converted.
+     */
+    public static function srgb(string $hex): self
+    {
+        return self::hex($hex)->toLinear();
+    }
+
+    /** Decode sRGB-encoded RGB channels to linear (the exact sRGB curve); alpha unchanged. */
+    public function toLinear(): self
+    {
+        return new self(self::srgbToLinear($this->r), self::srgbToLinear($this->g), self::srgbToLinear($this->b), $this->a);
+    }
+
+    /** Encode linear RGB channels as sRGB (inverse of {@see toLinear()}); alpha unchanged. */
+    public function toSrgb(): self
+    {
+        return new self(self::linearToSrgb($this->r), self::linearToSrgb($this->g), self::linearToSrgb($this->b), $this->a);
+    }
+
+    private static function srgbToLinear(float $c): float
+    {
+        return $c <= 0.04045 ? $c / 12.92 : (($c + 0.055) / 1.055) ** 2.4;
+    }
+
+    private static function linearToSrgb(float $c): float
+    {
+        return $c <= 0.0031308 ? $c * 12.92 : 1.055 * ($c ** (1.0 / 2.4)) - 0.055;
+    }
+
     public static function rgba(int $r, int $g, int $b, int $a = 255): self
     {
         return new self($r / 255.0, $g / 255.0, $b / 255.0, $a / 255.0);
