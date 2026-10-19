@@ -82,6 +82,29 @@ parameterize rather than silently leaving it.
   the serialiser handles this automatically.
 - Scene PHP files are version-controlled as code. JSON files are derived artefacts.
 
+### Layout sockets — how level parts fit together
+When a room, hall or yard is built from independent parts (walls, ceiling, doors,
+lights, furniture, screens), each part publishes where the others may attach or must
+keep clear as plain data from `PHPolygon\Scene\Layout\`, instead of everyone guessing
+coordinates:
+- `Opening(name, center, normal, width, height, kind, ?up)` — door/window/pass-through;
+  `center` = middle of the BOTTOM edge in the wall's centre plane, `normal` = the
+  direction you pass through. `top()` (lintel, for a sign), `middle()`, `across()`,
+  `clearance(depth)` → the `Zone` to keep free on both sides.
+- `MountPoint(name, position, normal, kind)` — one attachment point ON a surface,
+  `normal` away from it (down for a ceiling). `offset(d)`.
+- `MountLine(name, start, end, normal, kind)` — a run along a surface (rail, tray,
+  screen strip). `pointAt(t)`, `pointAtDistance(m)`, `midpoint()`, `length()`.
+- `Zone(name, min, max, kind)` / `Zone::around(name, center, half, kind)` — an
+  axis-aligned box (walk zone, keep-out, viewing zone, station footprint).
+  `contains[XZ]()`, `overlaps[XZ]()` (touching faces do not overlap), `expanded(m)`.
+
+All four are immutable, carry a free `kind` tag the game chooses (the engine gives it
+no meaning), and live in the publisher's space — usually room-local. `transformed(Mat4)`
+moves any of them into another space (the room's world matrix); exact for translations
+and quarter turns, which is how rooms are normally placed. Normals are normalised on
+construction; a zero normal or a zero-sized opening throws.
+
 ### Render interface: Layered
 - `RenderContextInterface` — base: `beginFrame()`, `endFrame()`, `clear()`,
   `setViewport()`
