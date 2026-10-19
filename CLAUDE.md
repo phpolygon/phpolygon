@@ -267,6 +267,25 @@ Rules that follow from it:
 - Escape hatches: `PHPOLYGON_VIO_MRT=0` forces the forward path, `=1` skips the php-vio
   version gate. `mrtActive()` tells tests which path a frame took.
 
+**Transparency** (material `alpha < 1`; `VioRendererTransparencyTest`, `TransparentDrawSorterTest`):
+- Only the opaque pass writes depth. The transparent pipelines (`transparent`, `transparent_water`,
+  forward and MRT) test against the opaque depth and never write it, so a pane drawn first does not
+  hide water, the far face of a glass box or a submerged pane drawn after it. The OpenGL backend
+  does the same (`glDepthMask(false)`).
+- Order is set once per frame by `Rendering\TransparentDrawSorter` (called by `Renderer3DSystem::render()`
+  over the WHOLE list, so particles and instanced batches from other systems join): stable back to
+  front by the view depth of the nearest point of each draw's world AABB, camera = the list's last
+  `SetCamera` (eye offset and interpolation included). Reflective water (`ProcModeRegistry::isReflectiveWater()`,
+  proc modes 2 / 11) is drawn before every other transparent. Draws never cross a `ClearDepthBuffer`
+  or `SetShader`. Lists handed to `VioRenderer3D::render()` directly are drawn in submission order.
+- Instanced transparent batches with up to `PER_INSTANCE_SORT_MAX` (256) CPU instances are re-ordered
+  per instance (emitted non-static); larger batches keep their order and storage-buffer batches sort
+  as nearest. Rules for games: build glass as single entities or small batches, never as one big
+  static instanced batch; one mesh = one sort unit, so a glass box intersecting other glass can still
+  layer wrongly — split long facades into panes.
+- The vio mesh shader lights transparent fragments with the viewer-facing normal (a pane's back face
+  shades like its front). Clearcoat IBL honours `Material::$useEnvironmentMap` like the base IBL.
+
 **Outline pass** (`DrawOutline`, php-vio >= 2.12 with `VIO_FEATURE_STENCIL`): runs on both paths after SSR
 and before post-processing, into the bound scene target. Pass 1 draws every outlined mesh into the
 stencil buffer (alpha-0 blend, colour untouched), pass 2 redraws them pushed outward by a constant
@@ -380,6 +399,19 @@ components on the same entity.
 | System | Purpose |
 |---|---|
 | `Renderer3DSystem` | Collects `MeshRenderer` + `Transform3D`, builds `RenderCommandList`, flushes |
+
+`Renderer3DSystem` culling and selection (`Renderer3DSystemCullingTest`): the camera position is the
+inverse view of the queued `SetCamera`; frustum radii use the world-matrix scale (parents included);
+the coarse 256 m bin cull is trusted only while an entity still has the `worldMatrix` instance it was
+binned with (movers fall through to the sphere test); `MeshRenderer::$castShadows` travels as
+`DrawMesh::$castShadows` into the shadow pass. Point and spot lights whose influence sphere misses the
+frustum take no slot; the rest rank by the camera's distance to the sphere (0 inside), then to the
+centre, capped at `MAX_POINT_LIGHTS` / `MAX_SPOT_LIGHTS`.
+
+Static instanced batches (`DrawMeshInstanced::$isStatic`) are cached by `VioRenderer3D` under
+`$staticKey` (or mesh + shader + material) and re-uploaded when count or first/last matrix change;
+pass a distinct `staticKey` per batch that shares mesh and material, and call
+`VioRenderer3D::invalidateStaticInstances()` for subtler edits or on scene unload.
 | `Camera3DSystem` | Updates view/projection matrices, pushes `SetCamera` command |
 | `Physics3DSystem` | Capsule vs AABB collision, gravity integration (Phase 7+) |
 | `OutlineSystem` | Emits `DrawOutline` for every enabled `Outline`; register BEFORE `Renderer3DSystem` |

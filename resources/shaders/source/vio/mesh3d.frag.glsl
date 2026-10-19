@@ -958,6 +958,15 @@ void main() {
         albedo = texAlbedo * (1.0 + (nse - 0.5) * 0.12 * noiseMask);
     }
 
+    // Transparent surfaces are seen from both sides (a pane, the far wall of a
+    // glass box): light them with the normal that faces the viewer, so a back
+    // face is not shaded as if it pointed away (dark, unlit triangle halves).
+    // Opaque geometry keeps its authored normal. Self-shading procedural
+    // branches (water, cloud, moon) have returned above and are unaffected.
+    if (u_alpha < 1.0) {
+        N = Nv;
+    }
+
     // Procedural normal-map pattern (mirrors mesh3d.frag.glsl). Self-shading
     // procedural materials (water, cloud, moon) have early-returned above so
     // this only affects standard, sand, rock, palm, wood, thatch, carpaint.
@@ -1238,11 +1247,15 @@ void main() {
                    * ccNdotL * shadow * u_clearcoat;
         }
         // Clearcoat IBL: sharp, weakly roughness-modulated reflection of the
-        // environment cube (sky/horizon tint when no map is bound).
-        vec3 ccR = reflect(-V, N);
-        vec3 ccEnv = sampleEnvironment(ccR, ccRough);
-        vec3 ccFres = fresnelSchlick(NdotV, ccF0);
-        localAcc += ccEnv * ccFres * u_clearcoat * (1.0 - ccRough * 0.5) * 0.4;
+        // environment cube (sky/horizon tint when no map is bound). Skipped,
+        // like the base IBL, by materials that opt out of the environment map
+        // (an interior pane must not mirror the outdoor sky).
+        if (u_use_environment_map == 1) {
+            vec3 ccR = reflect(-V, N);
+            vec3 ccEnv = sampleEnvironment(ccR, ccRough);
+            vec3 ccFres = fresnelSchlick(NdotV, ccF0);
+            localAcc += ccEnv * ccFres * u_clearcoat * (1.0 - ccRough * 0.5) * 0.4;
+        }
     }
 
     localAcc += u_emission;

@@ -20,6 +20,12 @@ namespace PHPolygon\Rendering;
  */
 final class ProcModeRegistry
 {
+    /**
+     * The proc modes the renderers treat as a reflective water surface (SSR
+     * G-buffer writes, the water layer that the transparent sort draws first).
+     */
+    public const REFLECTIVE_WATER_MODES = [2, 11];
+
     /** @var array<string, int> prefix → mode; longest matching prefix wins at resolve */
     private static array $prefixToMode = [];
 
@@ -66,6 +72,12 @@ final class ProcModeRegistry
         }
 
         return self::$cache[$materialId] = $mode;
+    }
+
+    /** Whether $materialId resolves to a reflective water surface mode. */
+    public static function isReflectiveWater(string $materialId): bool
+    {
+        return in_array(self::resolve($materialId), self::REFLECTIVE_WATER_MODES, true);
     }
 
     public static function clear(): void

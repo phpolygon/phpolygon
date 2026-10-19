@@ -25,12 +25,11 @@ use PHPolygon\Rendering\RenderCommandList;
  * commands looking correct. Register it right after Camera3DSystem and before
  * Renderer3DSystem.
  *
- * Materials passed here must be opaque (alpha == 1.0). Renderer3DSystem
- * sorts transparent {@see DrawMesh} draws back-to-front, but transparent
- * instanced draws would need per-instance distance sorting (which defeats
- * the point of batching), so the engine deliberately doesn't support it.
- * Transparent materials are skipped with a one-shot E_USER_WARNING per
- * material id rather than rendered out of order.
+ * Materials passed here must be opaque (alpha == 1.0). Terrain batches are
+ * static and large; the transparent sort (TransparentDrawSorter) only orders
+ * small instanced batches per instance, so transparent terrain would render
+ * out of order. Transparent materials are skipped with a one-shot
+ * E_USER_WARNING per material id instead.
  */
 class InstancedTerrainSystem extends AbstractSystem
 {
@@ -55,6 +54,10 @@ class InstancedTerrainSystem extends AbstractSystem
                     materialId: $materialId,
                     matrices: $matrices,
                     isStatic: true,
+                    // One cache slot per terrain component and material group:
+                    // two terrains sharing mesh + material must not share the
+                    // renderer's static instance buffer.
+                    staticKey: 'instanced_terrain:' . spl_object_id($terrain) . ':' . $materialId,
                 ));
             }
         }

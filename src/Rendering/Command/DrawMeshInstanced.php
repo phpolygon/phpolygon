@@ -75,6 +75,16 @@ readonly class DrawMeshInstanced
      *                                VIO_FEATURE_INDIRECT_DRAW.
      * @param int     $indirectMaxDraws Number of consecutive argument records to
      *                                issue (>= 1); one per LOD / sub-mesh.
+     * @param string|null $staticKey  Static mode only: the caller's identity for
+     *                                this batch in the renderer's static instance
+     *                                cache. Two static batches that share mesh and
+     *                                material need distinct keys (e.g. the owning
+     *                                entity + group); null derives the key from
+     *                                mesh, shader and material. A changed batch is
+     *                                re-uploaded under the same key when its
+     *                                instance count or first/last matrix differ;
+     *                                anything subtler needs
+     *                                VioRenderer3D::invalidateStaticInstances().
      */
     public function __construct(
         public string $meshId,
@@ -87,6 +97,7 @@ readonly class DrawMeshInstanced
         public ?object $storageBuffer = null,
         public ?object $indirectArgs = null,
         public int $indirectMaxDraws = 1,
+        public ?string $staticKey = null,
     ) {}
 
     /**
@@ -103,6 +114,7 @@ readonly class DrawMeshInstanced
         array $flatMatrices,
         int $instanceCount,
         bool $isStatic = false,
+        ?string $staticKey = null,
     ): self {
         return new self(
             meshId: $meshId,
@@ -111,6 +123,7 @@ readonly class DrawMeshInstanced
             isStatic: $isStatic,
             instanceCount: $instanceCount,
             flatMatrices: $flatMatrices,
+            staticKey: $staticKey,
         );
     }
 

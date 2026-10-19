@@ -82,6 +82,9 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
     /** @var array<string, int> Cache key -> instance count */
     private array $staticInstanceCountCache = [];
 
+    /** @var array<string, string> Cache key -> fingerprint (count + first/last matrix) of the cached batch */
+    private array $staticFingerprintCache = [];
+
     private ?string $shaderOverride = null;
 
     /**
@@ -2760,6 +2763,12 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
      * Bind the scene-geometry pipeline for $pass: 'opaque', 'transparent', or —
      * MRT path only — 'transparent_water' (transparent that also writes the
      * G-buffer attachment, for surfaces the SSR pass should reflect off).
+     *
+     * Only the opaque pass writes depth. Transparent passes test against the
+     * opaque depth but never write it: a pane that wrote depth would hide every
+     * transparent surface drawn after it (water behind glass, the far face of
+     * a glass box, a submerged pane under water), so the image would depend on
+     * draw order and on the triangle order inside one mesh.
      */
     private function bindPipeline(string $pass, bool $storageInstances = false): void
     {
@@ -2785,6 +2794,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
                 $cfg = [
                     'shader' => $this->shaderCache[$program],
                     'depth_test' => true,
+                    'depth_write' => $pass === 'opaque',
                     'cull_mode' => VIO_CULL_NONE,
                     'blend' => $pass === 'opaque' ? VIO_BLEND_NONE : VIO_BLEND_ALPHA,
                     'attachments' => self::mrtFormats($mv),
@@ -2814,6 +2824,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
                 $pipeline = vio_pipeline($this->ctx, [
                     'shader' => $shader,
                     'depth_test' => true,
+                    'depth_write' => $pass === 'opaque',
                     'cull_mode' => VIO_CULL_NONE,
                     'blend' => $pass === 'opaque' ? VIO_BLEND_NONE : VIO_BLEND_ALPHA,
                     // FP16 scene target → PSO RTVFormats[0] = R16G16B16A16_FLOAT so
@@ -3243,6 +3254,9 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         $instancedCasters = [];
         foreach ($commandList->getCommands() as $cmd) {
             if ($cmd instanceof DrawMesh) {
+                if (!$cmd->castShadows) {
+                    continue;
+                }
                 $mat = MaterialRegistry::get($cmd->materialId);
                 if ($mat === null || $mat->alpha < 0.9 || !$this->castsShadow($cmd->materialId)) {
                     continue;
@@ -3685,8 +3699,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
      */
     private function isReflectiveTransparent(string $materialId): bool
     {
-        $procMode = ProcModeRegistry::resolve($materialId);
-        return $procMode === 2 || $procMode === 11;
+        return ProcModeRegistry::isReflectiveWater($materialId);
     }
 
     /**
@@ -4895,11 +4908,23 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
      */
     private function resolveInstanceData(string $meshId, Material $material, DrawMeshInstanced $cmd): array
     {
-        $isStatic = $cmd->isStatic;
-        $cacheKey = $meshId . ':' . ($material->shader) . ':' . spl_object_id($material);
-
-        if ($isStatic && isset($this->staticMatrixCache[$cacheKey])) {
-            return [$this->staticMatrixCache[$cacheKey], $this->staticInstanceCountCache[$cacheKey]];
+        $isStatic = $cmd->isStatic && $cmd->packedMatrices === '';
+        $cacheKey = '';
+        $fingerprint = '';
+        if ($isStatic) {
+            // The caller's key when given (two static batches may share mesh and
+            // material), else mesh + shader + material. The fingerprint catches
+            // a different batch arriving under the same key - it is re-uploaded
+            // instead of drawing the cached one's instances.
+            $cacheKey = $cmd->staticKey !== null
+                ? 'k:' . $cmd->staticKey
+                : $meshId . ':' . $material->shader . ':' . spl_object_id($material);
+            $fingerprint = self::instanceFingerprint($cmd);
+            if (isset($this->staticMatrixCache[$cacheKey])
+                && $this->staticFingerprintCache[$cacheKey] === $fingerprint
+            ) {
+                return [$this->staticMatrixCache[$cacheKey], $this->staticInstanceCountCache[$cacheKey]];
+            }
         }
 
         // Packed mode: the matrices already are a raw f32 byte buffer (a GPU
@@ -4929,9 +4954,62 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         if ($isStatic) {
             $this->staticMatrixCache[$cacheKey] = $packed;
             $this->staticInstanceCountCache[$cacheKey] = $count;
+            $this->staticFingerprintCache[$cacheKey] = $fingerprint;
         }
 
         return [$packed, $count];
+    }
+
+    /**
+     * Drop cached static instance buffers: the one stored under $staticKey
+     * (DrawMeshInstanced::$staticKey), or all of them. Call it when a static
+     * batch changed in a way its fingerprint (instance count, first and last
+     * matrix) does not show, or when a scene is unloaded.
+     */
+    public function invalidateStaticInstances(?string $staticKey = null): void
+    {
+        if ($staticKey === null) {
+            $this->staticMatrixCache = [];
+            $this->staticInstanceCountCache = [];
+            $this->staticFingerprintCache = [];
+            return;
+        }
+        $key = 'k:' . $staticKey;
+        unset(
+            $this->staticMatrixCache[$key],
+            $this->staticInstanceCountCache[$key],
+            $this->staticFingerprintCache[$key],
+        );
+    }
+
+    /** Number of cached static instance buffers (for tests and diagnostics). */
+    public function staticInstanceCacheSize(): int
+    {
+        return count($this->staticMatrixCache);
+    }
+
+    /**
+     * Cheap identity of an instanced batch: instance count plus the first and
+     * last instance matrix, without packing the whole batch.
+     */
+    private static function instanceFingerprint(DrawMeshInstanced $cmd): string
+    {
+        if ($cmd->flatMatrices !== []) {
+            $flat = $cmd->flatMatrices;
+            $n = count($flat);
+            $count = $cmd->instanceCount >= 0 ? $cmd->instanceCount : intdiv($n, 16);
+            $head = array_slice($flat, 0, 16);
+            $tail = $n >= 16 ? array_slice($flat, $n - 16, 16) : [];
+            return 'f' . $count . ':' . implode(',', $head) . '|' . implode(',', $tail);
+        }
+        $matrices = $cmd->matrices;
+        $count = count($matrices);
+        if ($count === 0) {
+            return 'm0';
+        }
+        $first = reset($matrices);
+        $last = end($matrices);
+        return 'm' . $count . ':' . implode(',', $first->toArray()) . '|' . implode(',', $last->toArray());
     }
 
     /**

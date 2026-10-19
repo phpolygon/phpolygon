@@ -364,6 +364,37 @@ final class HeadlessShaderHarness
     }
 
     /**
+     * A fullscreen quad (NDC, z = 0) with a chosen vertex normal and winding,
+     * e.g. the back face of a pane: normal pointing away from the viewer and
+     * the winding reversed so the rasteriser sees it as back-facing.
+     *
+     * @param array{0: float, 1: float, 2: float} $normal
+     */
+    public function fullscreenQuadWith(array $normal, bool $reversedWinding = false): VioMesh
+    {
+        $key = sprintf('quad:%g,%g,%g:%d', $normal[0], $normal[1], $normal[2], $reversedWinding ? 1 : 0);
+        if (isset($this->meshCache[$key])) {
+            return $this->meshCache[$key];
+        }
+        [$nx, $ny, $nz] = $normal;
+        $mesh = vio_mesh($this->ctx, [
+            'vertices' => [
+                -1.0, -1.0, 0.0,  $nx, $ny, $nz,  0.0, 0.0,
+                 1.0, -1.0, 0.0,  $nx, $ny, $nz,  1.0, 0.0,
+                 1.0,  1.0, 0.0,  $nx, $ny, $nz,  1.0, 1.0,
+                -1.0,  1.0, 0.0,  $nx, $ny, $nz,  0.0, 1.0,
+            ],
+            'indices' => $reversedWinding ? [0, 2, 1, 0, 3, 2] : [0, 1, 2, 0, 2, 3],
+            'layout'  => [VIO_FLOAT3, VIO_FLOAT3, VIO_FLOAT2],
+        ]);
+        if ($mesh === false) {
+            throw new \RuntimeException("vio_mesh failed for quad {$key}");
+        }
+        $this->meshCache[$key] = $mesh;
+        return $mesh;
+    }
+
+    /**
      * A single quad covering the whole offscreen target in NDC.
      * Layout: position(vec3) + normal(vec3) + uv(vec2).
      */

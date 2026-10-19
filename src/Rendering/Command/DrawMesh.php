@@ -20,5 +20,10 @@ readonly class DrawMesh
          * last frame): its motion then comes from the camera alone.
          */
         public ?Mat4 $prevModelMatrix = null,
+        /**
+         * False keeps this draw out of the shadow-map pass (it still renders
+         * and receives shadows). Set from MeshRenderer::$castShadows.
+         */
+        public bool $castShadows = true,
     ) {}
 }

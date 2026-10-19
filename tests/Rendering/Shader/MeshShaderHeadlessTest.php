@@ -369,6 +369,54 @@ class MeshShaderHeadlessTest extends TestCase
     }
 
     /**
+     * Transparent surfaces are lit from the side the viewer sees: the back
+     * face of a pane (normal pointing away, back-facing winding) must shade
+     * like its front face. Opaque back faces keep their authored normal.
+     */
+    public function testTransparentBackFaceIsLitLikeTheFrontFace(): void
+    {
+        $front = $this->renderQuadSum([0.0, 0.0, 1.0], false, 0.5);
+        $back = $this->renderQuadSum([0.0, 0.0, -1.0], true, 0.5);
+        $this->assertGreaterThan(0.5, $front, 'the lit front face is bright');
+        $this->assertEqualsWithDelta($front, $back, 0.03, sprintf(
+            'transparent back face (sum=%.3f) must match the front face (sum=%.3f)',
+            $back,
+            $front,
+        ));
+
+        $opaqueBack = $this->renderQuadSum([0.0, 0.0, -1.0], true, 1.0);
+        $this->assertLessThan($front - 0.2, $opaqueBack, 'an opaque back face keeps its away-facing normal');
+    }
+
+    /**
+     * @param array{0: float, 1: float, 2: float} $normal
+     */
+    private function renderQuadSum(array $normal, bool $reversedWinding, float $alpha): float
+    {
+        $h = HeadlessShaderHarness::open(64, 64);
+        $this->assertNotNull($h);
+        try {
+            $shader   = $h->compileShaderFromFiles('vio/mesh3d.vert.glsl', 'vio/mesh3d.frag.glsl');
+            $pipeline = $h->createPipeline($shader);
+            $rgba     = $h->renderAndRead(
+                $pipeline,
+                $h->fullscreenQuadWith($normal, $reversedWinding),
+                function (HeadlessShaderHarness $h) use ($alpha): void {
+                    self::setNeutralMeshUniforms($h, 64, 64);
+                    // Light from the viewer's side only; no ambient fill, so an
+                    // away-facing normal goes dark.
+                    $h->setUniform('u_ambient_intensity', 0.0);
+                    $h->setUniform('u_alpha', $alpha);
+                },
+            );
+            [$r, $g, $b] = $h->samplePixel($rgba, 32, 32);
+            return $r + $g + $b;
+        } finally {
+            $h->close();
+        }
+    }
+
+    /**
      * Render mesh3d at a given albedo on a fresh harness and return the sum
      * of the centre pixel's RGB channels. Each call gets its own context so
      * the test does not depend on inter-frame state leakage on the OpenGL

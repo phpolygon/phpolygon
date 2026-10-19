@@ -124,7 +124,7 @@ class Systems3DTest extends TestCase
         $renderer = new NullRenderer3D();
         $commandList = new RenderCommandList();
 
-        // Camera at the origin so distance-from-camera = |position|.
+        // Camera at the origin looking down -Z: view depth = -z.
         $camera = $world->createEntity();
         $camera->attach(new Camera3DComponent(active: true));
         $camera->attach(new Transform3D(new Vec3(0, 0, 0)));
@@ -132,21 +132,22 @@ class Systems3DTest extends TestCase
         // Two opaque entities (any order).
         $opaque1 = $world->createEntity();
         $opaque1->attach(new MeshRenderer('m1', 'opaque_test'));
-        $opaque1->attach(new Transform3D(new Vec3(0, 0, 5)));
+        $opaque1->attach(new Transform3D(new Vec3(0, 0, -5)));
         $opaque2 = $world->createEntity();
         $opaque2->attach(new MeshRenderer('m2', 'opaque_test'));
-        $opaque2->attach(new Transform3D(new Vec3(0, 0, 50)));
+        $opaque2->attach(new Transform3D(new Vec3(0, 0, -50)));
 
-        // Three transparent entities at increasing distance (5, 25, 100).
+        // Three transparent entities in front of the camera at increasing
+        // distance (5, 25, 100).
         $glassNear = $world->createEntity();
         $glassNear->attach(new MeshRenderer('near',  'glass_test'));
-        $glassNear->attach(new Transform3D(new Vec3(0, 0, 5)));
+        $glassNear->attach(new Transform3D(new Vec3(0, 0, -5)));
         $glassMid  = $world->createEntity();
         $glassMid->attach(new MeshRenderer('mid',   'glass_test'));
-        $glassMid->attach(new Transform3D(new Vec3(0, 0, 25)));
+        $glassMid->attach(new Transform3D(new Vec3(0, 0, -25)));
         $glassFar  = $world->createEntity();
         $glassFar->attach(new MeshRenderer('far',   'glass_test'));
-        $glassFar->attach(new Transform3D(new Vec3(0, 0, 100)));
+        $glassFar->attach(new Transform3D(new Vec3(0, 0, -100)));
 
         $world->addSystem(new Camera3DSystem($commandList, 1280, 720));
         $world->addSystem(new Renderer3DSystem($renderer, $commandList));

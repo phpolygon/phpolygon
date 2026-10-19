@@ -1667,6 +1667,9 @@ class OpenGLRenderer3D implements Renderer3DInterface, AnimationClockInterface
 
             foreach ($commandList->getCommands() as $command) {
                 if ($command instanceof DrawMesh) {
+                    if (!$command->castShadows) {
+                        continue;
+                    }
                     $mat = MaterialRegistry::get($command->materialId);
                     if ($mat !== null && $mat->alpha >= 0.9) {
                         $matId = $command->materialId;

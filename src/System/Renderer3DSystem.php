@@ -32,6 +32,7 @@ use PHPolygon\Rendering\Quality\FieldtracingMode;
 use PHPolygon\Rendering\MaterialRegistry;
 use PHPolygon\Rendering\RenderCommandList;
 use PHPolygon\Rendering\Renderer3DInterface;
+use PHPolygon\Rendering\TransparentDrawSorter;
 use PHPolygon\Runtime\PerfProfiler;
 
 /**
@@ -103,6 +104,20 @@ class Renderer3DSystem extends AbstractSystem
     /** @var array<int, string> */
     private array $entityBin = [];
 
+    /**
+     * The world matrix each entity had when it was binned. Bins (with tight
+     * per-entity AABBs) are rebuilt only every BIN_REBUILD_INTERVAL frames, so
+     * the coarse pre-cull trusts a "bin culled" verdict only while the entity
+     * still has this very matrix. Transform3DSystem replaces worldMatrix only
+     * when the transform changed, so an identity check is an allocation-free
+     * "has it moved (or turned, or scaled)?" test: a mover falls through to the
+     * always-correct per-entity sphere test instead of strobing with its stale,
+     * now-behind bin.
+     *
+     * @var array<int, Mat4>
+     */
+    private array $entityBinMatrix = [];
+
     private const BIN_SIZE = 256.0;
     private const BIN_REBUILD_INTERVAL = 30;
 
@@ -163,6 +178,7 @@ class Renderer3DSystem extends AbstractSystem
     {
         $this->binAabbs = [];
         $this->entityBin = [];
+        $this->entityBinMatrix = [];
         $this->frameCount = 0;
         // Ids restart after clear(): a fresh entity must not inherit the
         // previous occupant's matrix as fake motion.
@@ -192,6 +208,10 @@ class Renderer3DSystem extends AbstractSystem
         PerfProfiler::begin('render3d.build_commands');
         try {
             $this->renderCommands($world);
+            // One back-to-front order for EVERY transparent draw of the frame -
+            // this system's meshes and whatever particles / instanced batches
+            // other systems appended - keyed by the camera the list renders with.
+            TransparentDrawSorter::sortList($this->commandList);
         } finally {
             PerfProfiler::end();
         }
@@ -223,20 +243,30 @@ class Renderer3DSystem extends AbstractSystem
                 $light->intensity,
             ));
         }
-        // Pick the closest MAX_POINT_LIGHTS to the active camera. Backend
-        // shaders cap at 4-8 active lights and pick whichever they receive
-        // first, so without sorting a faraway torch can outrank the sun
-        // beacon next to the player. Distance is squared to skip the sqrt.
-        $cameraPos = null;
-        foreach ($world->query(Camera3DComponent::class, Transform3D::class) as $entity) {
-            $cameraPos = $entity->get(Transform3D::class)->getWorldPosition();
-            break;
-        }
+        // The camera this frame renders with: the SetCamera Camera3DSystem
+        // pushed (inverse view - eye offset and render interpolation included).
+        // Falls back to the active camera entity when no SetCamera is queued.
+        $cameraPos = $this->cameraPosition($world);
 
+        // Camera3DSystem already pushed a SetCamera with the active view +
+        // projection matrices. Pull the most recent one and derive 6 planes.
+        // PHPOLYGON_NO_CULL=1 disables frustum/bin/LOD/light culling entirely
+        // (diagnostic: a constant draw count isolates backend buffer-growth
+        // glitches from cull-driven draw-count swings).
+        $planes = getenv('PHPOLYGON_NO_CULL') === '1' ? null : $this->extractFrustumPlanes();
+
+        // Point lights by effect, not by camera distance alone: a light whose
+        // influence sphere (position, radius) lies completely outside the view
+        // frustum lights no visible surface and takes no slot. The rest rank by
+        // the distance from the camera to the light's sphere (0 inside it), then
+        // by the distance to its centre, and the first MAX_POINT_LIGHTS are
+        // emitted (the shaders honour only a few). A lamp lighting the wall the
+        // camera looks at keeps its slot even when the camera stands outside its
+        // radius - the reason the former camera-radius cull was dropped.
         $candidates = [];
         foreach ($world->query(PointLight::class, Transform3D::class) as $entity) {
             $light = $entity->get(PointLight::class);
-            // Skip lights dimmed to (near) nothing — e.g. decorative lights
+            // Skip lights dimmed to (near) nothing - e.g. decorative lights
             // switched off in daylight. Keeps them from consuming a slot in the
             // per-frame point-light budget where they'd contribute no visible
             // light anyway.
@@ -244,22 +274,15 @@ class Renderer3DSystem extends AbstractSystem
                 continue;
             }
             $pos = $entity->get(Transform3D::class)->getWorldPosition();
-            if ($cameraPos !== null) {
-                $dx = $pos->x - $cameraPos->x;
-                $dy = $pos->y - $cameraPos->y;
-                $dz = $pos->z - $cameraPos->z;
-                $distSq = $dx * $dx + $dy * $dy + $dz * $dz;
-                // NOTE: distance-to-camera cull temporarily REMOVED to verify it
-                // was suppressing the cargo-plane interior lights. distSq is still
-                // computed below to keep the closest-MAX_POINT_LIGHTS selection.
-            } else {
-                $distSq = 0.0;
+            $rank = self::rankLight($pos, $light->radius, $cameraPos, $planes);
+            if ($rank === null) {
+                continue;
             }
-            $candidates[] = [$distSq, $pos, $light];
+            $candidates[] = [$rank, $pos, $light];
         }
 
         if (count($candidates) > self::MAX_POINT_LIGHTS) {
-            usort($candidates, static fn(array $a, array $b): int => $a[0] <=> $b[0]);
+            usort($candidates, static fn(array $a, array $b): int => ($a[0][0] <=> $b[0][0]) ?: ($a[0][1] <=> $b[0][1]));
             $candidates = array_slice($candidates, 0, self::MAX_POINT_LIGHTS);
         }
 
@@ -282,10 +305,11 @@ class Renderer3DSystem extends AbstractSystem
             }
         }
 
-        // Spot lights — mirror the point-light pipeline exactly: skip dimmed
-        // lights, cull by range against the camera, keep the closest
-        // MAX_SPOT_LIGHTS. Position comes from the entity's Transform3D; the
-        // beam direction comes from the SpotLight component itself.
+        // Spot lights - the same selection as point lights, with the range as
+        // the influence radius: skip dimmed lights, drop beams whose range
+        // sphere misses the frustum, keep the best MAX_SPOT_LIGHTS. Position
+        // comes from the entity's Transform3D; the beam direction comes from
+        // the SpotLight component itself.
         $spotCandidates = [];
         foreach ($world->query(SpotLight::class, Transform3D::class) as $entity) {
             $light = $entity->get(SpotLight::class);
@@ -293,24 +317,15 @@ class Renderer3DSystem extends AbstractSystem
                 continue;
             }
             $pos = $entity->get(Transform3D::class)->getWorldPosition();
-            if ($cameraPos !== null) {
-                $dx = $pos->x - $cameraPos->x;
-                $dy = $pos->y - $cameraPos->y;
-                $dz = $pos->z - $cameraPos->z;
-                $distSq = $dx * $dx + $dy * $dy + $dz * $dz;
-                // Same ×4 cushion as point lights so beams stay lit just out
-                // of immediate range when the player turns toward them.
-                if ($distSq > $light->range * $light->range * 4.0) {
-                    continue;
-                }
-            } else {
-                $distSq = 0.0;
+            $rank = self::rankLight($pos, $light->range, $cameraPos, $planes);
+            if ($rank === null) {
+                continue;
             }
-            $spotCandidates[] = [$distSq, $pos, $light];
+            $spotCandidates[] = [$rank, $pos, $light];
         }
 
         if (count($spotCandidates) > self::MAX_SPOT_LIGHTS) {
-            usort($spotCandidates, static fn(array $a, array $b): int => $a[0] <=> $b[0]);
+            usort($spotCandidates, static fn(array $a, array $b): int => ($a[0][0] <=> $b[0][0]) ?: ($a[0][1] <=> $b[0][1]));
             $spotCandidates = array_slice($spotCandidates, 0, self::MAX_SPOT_LIGHTS);
         }
 
@@ -362,13 +377,6 @@ class Renderer3DSystem extends AbstractSystem
             $this->commandList->add(new SetFieldtracing($this->fieldtracingMode));
         }
 
-        // Camera3DSystem already pushed a SetCamera with the active view +
-        // projection matrices. Pull the most recent one and derive 6 planes.
-        // PHPOLYGON_NO_CULL=1 disables frustum/bin/LOD culling entirely
-        // (diagnostic: a constant draw count isolates backend buffer-growth
-        // glitches from cull-driven draw-count swings).
-        $planes = getenv('PHPOLYGON_NO_CULL') === '1' ? null : $this->extractFrustumPlanes();
-
         // Coarse spatial bin culling. We bin entities into a 2D X-Z grid and
         // test each bin's AABB against the frustum once per frame; entities
         // in a rejected bin skip the per-entity sphere test entirely. Bins
@@ -384,18 +392,11 @@ class Renderer3DSystem extends AbstractSystem
             $visibleBins = null;
         }
 
-        // Transparent draws are buffered, sorted back-to-front, and emitted
-        // after the opaque set so the backend's alpha-blend pass produces
-        // correct over/under blending. Without this, two overlapping glass
-        // panels render in iteration order, which depending on camera angle
-        // shows nondeterministic edge artefacts.
-        //
-        // Scope: only DrawMesh draws produced by this system are sorted.
-        // DrawMeshInstanced batches generated by other systems (e.g.
-        // InstancedTerrainSystem) are NOT depth-sorted - per-instance
-        // sorting would defeat batching. InstancedTerrainSystem rejects
-        // transparent materials with a warning instead.
-        /** @var list<array{0: float, 1: DrawMesh}> $transparentDraws */
+        // Transparent draws are buffered and emitted after the opaque set; the
+        // back-to-front order of ALL transparent draws of the frame (these and
+        // other systems' particles / instanced batches) is set afterwards by
+        // TransparentDrawSorter in render().
+        /** @var list<DrawMesh> $transparentDraws */
         $transparentDraws = [];
         $drawnOpaque = 0;
         $lastDrawn = $this->lastDrawnMatrix;
@@ -421,7 +422,12 @@ class Renderer3DSystem extends AbstractSystem
             // after a new entity is spawned).
             if ($visibleBins !== null) {
                 $binKey = $this->entityBin[$entity->id] ?? null;
-                if ($binKey !== null && !isset($visibleBins[$binKey])) {
+                if ($binKey !== null && !isset($visibleBins[$binKey])
+                    && ($this->entityBinMatrix[$entity->id] ?? null) === $matrix
+                ) {
+                    // Culled bin, and the entity has not moved since binning.
+                    // A mover (different worldMatrix instance) falls through to
+                    // the per-entity sphere test - see $entityBinMatrix.
                     continue;
                 }
             }
@@ -446,11 +452,10 @@ class Renderer3DSystem extends AbstractSystem
                         $ty = $worldCenter->y;
                         $tz = $worldCenter->z;
                     }
-                    $sx = abs($transform->scale->x);
-                    $sy = abs($transform->scale->y);
-                    $sz = abs($transform->scale->z);
-                    $maxScale = $sx > $sy ? ($sx > $sz ? $sx : $sz) : ($sy > $sz ? $sy : $sz);
-                    $worldRadius = $sphere['radius'] * $maxScale;
+                    // World scale (parents included), not the local Transform3D
+                    // scale: a child of a scaled parent must not be culled with
+                    // its unscaled radius.
+                    $worldRadius = $sphere['radius'] * self::maxAxisScale($matrix);
 
                     // Inlined sphere-vs-frustum test. Saves a function call
                     // per entity, which adds up at 1k+ entities × 60 fps.
@@ -492,16 +497,11 @@ class Renderer3DSystem extends AbstractSystem
                 $matrix,
                 $mesh->excludeFromGbuffer,
                 $prev !== $matrix ? $prev : null,
+                $mesh->castShadows,
             );
 
             if ($isTransparent) {
-                // Use the mesh's bounding-sphere centre (transformed into
-                // world space) instead of just the matrix translation, so
-                // off-pivot meshes (e.g. a glass panel pivoted at its
-                // corner) sort by their actual centre. Falls back to the
-                // translation when the sphere is unknown.
-                $distSq = self::distanceSqToCameraForMesh($matrix, $mesh->meshId, $cameraPos);
-                $transparentDraws[] = [$distSq, $draw];
+                $transparentDraws[] = $draw;
             } else {
                 $this->commandList->add($draw);
                 $drawnOpaque++;
@@ -510,13 +510,8 @@ class Renderer3DSystem extends AbstractSystem
 
         $this->lastDrawnMatrix = $drawnNow;
 
-        if ($transparentDraws !== []) {
-            // Sort descending: farthest first, so back-to-front blending is
-            // applied by the backend's alpha pass.
-            usort($transparentDraws, static fn(array $a, array $b): int => $b[0] <=> $a[0]);
-            foreach ($transparentDraws as [, $draw]) {
-                $this->commandList->add($draw);
-            }
+        foreach ($transparentDraws as $draw) {
+            $this->commandList->add($draw);
         }
 
         if (\getenv('PHPOLYGON_DRAW_DEBUG') === '1') {
@@ -534,44 +529,69 @@ class Renderer3DSystem extends AbstractSystem
     }
 
     /**
-     * Distance² from camera to the world-space centre of the mesh's
-     * bounding sphere. Off-pivot meshes (e.g. a glass panel anchored at a
-     * corner) sort by their actual centre rather than their pivot, which
-     * is what the alpha-blend pass needs to avoid sort glitches between
-     * overlapping translucent geometry.
-     *
-     * Falls through to the matrix translation when the sphere is missing
-     * or when its local centre is at the origin (the common case for the
-     * procedural Box/Sphere/Cylinder primitives).
+     * World position of the camera the list renders with: the inverse view of
+     * the last queued SetCamera (eye offset and interpolation included), else
+     * the active camera entity (with its eye offset), else the first camera.
      */
-    private static function distanceSqToCameraForMesh(Mat4 $modelMatrix, string $meshId, ?Vec3 $cameraPos): float
+    private function cameraPosition(World $world): ?Vec3
     {
-        if ($cameraPos === null) {
-            return 0.0;
+        $camera = $this->commandList->lastOfType(SetCamera::class);
+        if ($camera !== null) {
+            return $camera->viewMatrix->inverse()->getTranslation();
         }
-        $sphere = self::getMeshSphere($meshId);
-        if ($sphere !== null && ($sphere['cx'] !== 0.0 || $sphere['cy'] !== 0.0 || $sphere['cz'] !== 0.0)) {
-            $worldCenter = $modelMatrix->transformPoint(
-                new Vec3($sphere['cx'], $sphere['cy'], $sphere['cz']),
-            );
-            $dx = $worldCenter->x - $cameraPos->x;
-            $dy = $worldCenter->y - $cameraPos->y;
-            $dz = $worldCenter->z - $cameraPos->z;
-            return $dx * $dx + $dy * $dy + $dz * $dz;
+        $fallback = null;
+        foreach ($world->query(Camera3DComponent::class, Transform3D::class) as $entity) {
+            $position = $entity->get(Transform3D::class)->getWorldPosition();
+            $component = $entity->get(Camera3DComponent::class);
+            if ($component->active) {
+                return $position->add($component->eyeOffset);
+            }
+            $fallback ??= $position;
         }
-        return self::distanceSqToCamera($modelMatrix, $cameraPos);
+        return $fallback;
     }
 
-    private static function distanceSqToCamera(Mat4 $modelMatrix, ?Vec3 $cameraPos): float
+    /**
+     * Rank of a light with influence radius $radius at $pos, or null when its
+     * influence sphere lies completely outside the frustum (it lights nothing
+     * visible). Rank = [distance from the camera to the sphere (0 inside),
+     * distance to the centre]; smaller ranks first.
+     *
+     * @param array<int, array{0:float,1:float,2:float,3:float}>|null $planes
+     * @return array{0: float, 1: float}|null
+     */
+    private static function rankLight(Vec3 $pos, float $radius, ?Vec3 $cameraPos, ?array $planes): ?array
     {
-        if ($cameraPos === null) {
-            return 0.0;
+        $r = max(0.0, $radius);
+        if ($planes !== null) {
+            foreach ($planes as $p) {
+                if ($p[0] * $pos->x + $p[1] * $pos->y + $p[2] * $pos->z + $p[3] < -$r) {
+                    return null;
+                }
+            }
         }
-        $tr = $modelMatrix->getTranslation();
-        $dx = $tr->x - $cameraPos->x;
-        $dy = $tr->y - $cameraPos->y;
-        $dz = $tr->z - $cameraPos->z;
-        return $dx * $dx + $dy * $dy + $dz * $dz;
+        if ($cameraPos === null) {
+            return [0.0, 0.0];
+        }
+        $dx = $pos->x - $cameraPos->x;
+        $dy = $pos->y - $cameraPos->y;
+        $dz = $pos->z - $cameraPos->z;
+        $dist = sqrt($dx * $dx + $dy * $dy + $dz * $dz);
+        return [max(0.0, $dist - $r), $dist];
+    }
+
+    /**
+     * Largest axis scale of a world matrix (column lengths of its 3x3 part),
+     * so a bounding sphere scaled by it contains the mesh under any rotation
+     * and any parent scale.
+     */
+    private static function maxAxisScale(Mat4 $matrix): float
+    {
+        $m = $matrix->toArray();
+        $sx = $m[0] * $m[0] + $m[1] * $m[1] + $m[2] * $m[2];
+        $sy = $m[4] * $m[4] + $m[5] * $m[5] + $m[6] * $m[6];
+        $sz = $m[8] * $m[8] + $m[9] * $m[9] + $m[10] * $m[10];
+        return sqrt($sx > $sy ? ($sx > $sz ? $sx : $sz) : ($sy > $sz ? $sy : $sz));
     }
 
     /**
@@ -583,6 +603,7 @@ class Renderer3DSystem extends AbstractSystem
     {
         $this->binAabbs = [];
         $this->entityBin = [];
+        $this->entityBinMatrix = [];
 
         foreach ($world->query(MeshRenderer::class, Transform3D::class) as $entity) {
             $mesh = $entity->get(MeshRenderer::class);
@@ -595,6 +616,7 @@ class Renderer3DSystem extends AbstractSystem
             $bz = (int) floor($tr->z / self::BIN_SIZE);
             $key = $bx . ',' . $bz;
             $this->entityBin[$entity->id] = $key;
+            $this->entityBinMatrix[$entity->id] = $transform->worldMatrix;
 
             // Expand the bin AABB by the entity's actual world-space extent.
             // A 3 km water plane sitting at one bin centre would otherwise
@@ -603,11 +625,7 @@ class Renderer3DSystem extends AbstractSystem
             // plane — making the water "pop out" mid-screen.
             $sphere = self::getMeshSphere($mesh->meshId);
             if ($sphere !== null) {
-                $sx = abs($transform->scale->x);
-                $sy = abs($transform->scale->y);
-                $sz = abs($transform->scale->z);
-                $maxScale = $sx > $sy ? ($sx > $sz ? $sx : $sz) : ($sy > $sz ? $sy : $sz);
-                $r = $sphere['radius'] * $maxScale;
+                $r = $sphere['radius'] * self::maxAxisScale($transform->worldMatrix);
             } else {
                 // Unknown mesh size — fall back to a half-bin pad so we
                 // never under-estimate the extent.

@@ -19,6 +19,17 @@ class RenderCommandList
         $this->commands = [];
     }
 
+    /**
+     * Replace the whole list (e.g. after reordering it). The caller keeps
+     * every command it does not mean to drop.
+     *
+     * @param list<object> $commands
+     */
+    public function replaceCommands(array $commands): void
+    {
+        $this->commands = $commands;
+    }
+
     /** @return list<object> */
     public function getCommands(): array
     {
