@@ -12,9 +12,10 @@ final class SpeechSynthesizers
 {
     public const string CHATTERBOX = 'chatterbox';
     public const string VOXCPM = 'voxcpm';
+    public const string MOSS = 'moss';
 
     /** @var list<string> */
-    public const array NAMES = [self::CHATTERBOX, self::VOXCPM];
+    public const array NAMES = [self::CHATTERBOX, self::VOXCPM, self::MOSS];
 
     /**
      * @return class-string<PythonSynthesizer>
@@ -25,6 +26,7 @@ final class SpeechSynthesizers
         return match ($name) {
             self::CHATTERBOX => ChatterboxSynthesizer::class,
             self::VOXCPM => VoxCpmSynthesizer::class,
+            self::MOSS => MossTtsSynthesizer::class,
             default => throw new \InvalidArgumentException("unknown speech synthesizer \"{$name}\" (" . implode(', ', self::NAMES) . ')'),
         };
     }
@@ -38,6 +40,7 @@ final class SpeechSynthesizers
         return match ($name) {
             self::CHATTERBOX => SpeechParams::class,
             self::VOXCPM => VoxCpmParams::class,
+            self::MOSS => MossParams::class,
             default => throw new \InvalidArgumentException("unknown speech synthesizer \"{$name}\" (" . implode(', ', self::NAMES) . ')'),
         };
     }

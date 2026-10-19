@@ -568,7 +568,7 @@ Commands:
                      verify.versionConstant, verify.files (path, or every package in build/)
   speech:status      Spoken lines of build.json "speech" per locale: current, missing, stale
   speech:sync        Generate missing/stale spoken lines (--locale=de,en --key=dialog.* --check)
-  speech:setup       Set up the speech synthesizer (--synth=chatterbox|voxcpm): Python environment,
+  speech:setup       Set up the speech synthesizer (--synth=chatterbox|voxcpm|moss): Python environment,
                      --docker [--gpu] image, or --remote=ssh://user@host (environment on a worker host over SSH)
   speech:design      Voice Design (VoxCPM2): a reference WAV from a description
                      (--lang= --description= --text= --out= [--seed=N] [--takes=K] [--cfg=] [--steps=])
@@ -628,6 +628,7 @@ Examples:
   phpolygon speech:setup --docker --gpu          Speech synthesis as a CUDA Docker image
   phpolygon speech:setup --remote=ssh://me@mac   Python environment on a remote worker host
   phpolygon speech:setup --synth=voxcpm --docker --gpu   VoxCPM2 as a CUDA Docker image
+  phpolygon speech:setup --synth=moss --remote=ssh://me@mac   MOSS-TTS v1.5 on a worker host
   phpolygon speech:design --lang=th --description="warm female voice, calm" --text="…" --out=ref.wav --docker --gpu
   phpolygon speech:sync --locale=de,en           Generate missing spoken lines for de and en
   phpolygon speech:sync --check                  Fail if spoken lines are missing or stale

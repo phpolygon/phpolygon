@@ -285,7 +285,7 @@ final class VoxCpmSynthesizerTest extends TestCase
                 self::assertStringContainsString($message, $e->getMessage());
             }
         }
-        $this->expectExceptionMessage('speech.synthesizer must be one of: chatterbox, voxcpm');
+        $this->expectExceptionMessage('speech.synthesizer must be one of: chatterbox, voxcpm, moss');
         SpeechConfig::fromBuildJson(['keys' => ['a'], 'synthesizer' => 'piper', 'voices' => ['n' => ['reference' => null]]]);
     }
 

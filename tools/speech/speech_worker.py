@@ -27,6 +27,7 @@ import base64
 import gc
 import json
 import os
+import re
 import sys
 import tempfile
 import time
@@ -222,6 +223,30 @@ def memory_used(torch, device: str):
     except Exception:
         return None
     return None
+
+
+def clean(text: str) -> str:
+    """A text as one line with single spaces (what the models' own generate() does to it)."""
+    return re.sub(r"\s+", " ", text.replace("\n", " ")).strip()
+
+
+def trim_silence(numpy, audio, sr: int, threshold_db: float = -45.0, keep: float = 0.15):
+    """Cut leading and trailing silence (20 ms frames below threshold_db of the peak), keeping `keep` s of it."""
+    if audio.size == 0:
+        return audio
+    frame = max(1, int(sr * 0.02))
+    count = len(audio) // frame
+    if count == 0:
+        return audio
+    frames = audio[: count * frame].reshape(count, frame)
+    rms = numpy.sqrt((frames.astype("float64") ** 2).mean(axis=1) + 1e-12)
+    loud = numpy.nonzero(20 * numpy.log10(rms / (rms.max() + 1e-12)) > threshold_db)[0]
+    if loud.size == 0:
+        return audio
+    pad = int(sr * keep)
+    first = max(0, loud[0] * frame - pad)
+    last = min(len(audio), (loud[-1] + 1) * frame + pad)
+    return audio[first:last]
 
 
 def excerpt(path: str, start, length, cache: str, read, write):

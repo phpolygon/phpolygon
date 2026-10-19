@@ -56,10 +56,11 @@ use PHPolygon\Audio\Dsp\Voice\VoiceProfile;
  *   remoteRetries  reconnects of a remote worker that drops while lines are queued,
  *            in a row without a finished line (backoff 5, 15, 45, then 120 s);
  *            0 = a dropped remote worker stays gone
- *   synthesizer  chatterbox (default) or voxcpm ({@see SpeechSynthesizers}); the voices'
- *            `params` follow its table ({@see SpeechParams} / {@see VoxCpmParams}).
- *            VoxCPM2 voices take no exaggeration/cfgWeight and need a reference or
- *            `params.description` (no built-in voice)
+ *   synthesizer  chatterbox (default), voxcpm or moss ({@see SpeechSynthesizers}); the
+ *            voices' `params` follow its table ({@see SpeechParams} / {@see VoxCpmParams}
+ *            / {@see MossParams}). VoxCPM2 and MOSS-TTS voices take no
+ *            exaggeration/cfgWeight; VoxCPM2 needs a reference or `params.description`,
+ *            MOSS-TTS a reference (neither has a built-in voice)
  */
 final readonly class SpeechConfig
 {
@@ -293,6 +294,9 @@ final readonly class SpeechConfig
         }
         if ($synthesizer === SpeechSynthesizers::VOXCPM && !isset($voice['reference']) && !($params instanceof VoxCpmParams && $params->description !== null)) {
             throw new \InvalidArgumentException("build.json speech.voices.{$name}: VoxCPM2 has no built-in voice - give it a reference WAV (designed once with speech:design) or params.description");
+        }
+        if ($synthesizer === SpeechSynthesizers::MOSS && !isset($voice['reference'])) {
+            throw new \InvalidArgumentException("build.json speech.voices.{$name}: MOSS-TTS has no built-in voice - give it a reference WAV (e.g. designed once with speech:design)");
         }
         $profile = null;
         if (isset($voice['profile'])) {
