@@ -24,6 +24,8 @@ class UIStyle
         public float $borderWidth = 1.0,
         public float $itemSpacing = 4.0,
         public string $fontName = 'default',
+        /** Line height of wrapped widget text, as a factor of the font size. */
+        public float $lineHeight = 1.3,
     ) {}
 
     public static function dark(): self

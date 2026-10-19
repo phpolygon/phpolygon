@@ -1058,6 +1058,35 @@ else `MemoryClipboard` - tests never touch the user's clipboard. The selection i
 drawn after the underlay and before the text; `TextAreaView` reports `caret` and
 `selectionStart/End`.
 
+### UIContext — wrapping buttons (never truncate)
+
+`button()` draws one line at style height. For labels that must survive long
+translations use `wrapButton()`: the label wraps (`TextWrap`, so CJK breaks
+between characters), the button grows by `wrapLineHeight()` per extra line
+(`UIStyle::$lineHeight`, default 1.3; one line = `rowHeight()`), nothing is cut.
+
+```php
+// A row of equal buttons: one shared font size, at most 2 lines, shrink to 16 first.
+$fit = $ui->fitButtonLabels($labels, $bw, maxLines: 2, minFontSize: 16.0, keycap: true, leadingSpace: 30.0);
+$h = $ui->wrapButtonHeight($fit->lineCount(), $fit->fontSize);
+foreach ($labels as $i => $_) {
+    $ui->begin($x + $i * ($bw + $gap), $y, $bw);
+    $clicked = $ui->wrapButton("opt_$i", $fit->label($i), $bw, height: $h, fontSize: $fit->fontSize,
+        keycap: (string) ($i + 1), leadingSpace: 30.0);   // icon goes into $ui->lastButtonLeading()
+    $ui->end();
+}
+// A row sized to its labels (Next / Repeat / Skip ...): widths follow the text,
+// font shrinks to $min, then the widest labels go to two lines one by one.
+$row = $ui->layoutButtonRow($labels, $totalWidth, gap: 12.0, minFontSize: 16.0);  // ButtonRow: xs, widths, lines, fontSize, height
+```
+
+- `$keycap` draws the shortcut in a small key cap left of the label, apart from
+  answers that are numbers themselves; `$align` TextAlign::LEFT for code rows;
+  `$textColor` overrides the state colour. Click/hover/disabled are `button()`'s.
+- Pure building blocks: `TextWrap::linesWithin()` (like `lines()`, but an
+  overlong word is split between characters instead of overflowing) and
+  `LabelFit::fit()` (shared-size fitting with a measuring callback).
+
 ### UIContext — dropdown overlays
 
 Dropdown option lists are rendered as deferred overlays via `flushOverlays()`.

@@ -68,6 +68,48 @@ final class TextWrap
      */
     public static function lines(string $text, float $breakWidth, callable $lineWidth): array
     {
+        return self::wrap($text, $breakWidth, $lineWidth);
+    }
+
+    /**
+     * Like {@see lines()}, but no line is ever wider than $breakWidth: a single
+     * word that does not fit on its own is split between two characters
+     * instead of overflowing. For fixed-size boxes (buttons, chips) where an
+     * overflowing word would run past the edge and truncating would lose text.
+     *
+     * @param  callable(string): float $lineWidth measures a candidate line
+     * @return list<string>
+     */
+    public static function linesWithin(string $text, float $breakWidth, callable $lineWidth): array
+    {
+        $out = [];
+        foreach (self::wrap($text, $breakWidth, $lineWidth) as $line) {
+            if ($line === '' || $lineWidth($line) <= $breakWidth) {
+                $out[] = $line;
+                continue;
+            }
+            $part = '';
+            foreach (preg_split('//u', $line, -1, PREG_SPLIT_NO_EMPTY) ?: [] as $char) {
+                if ($part !== '' && $lineWidth($part . $char) > $breakWidth) {
+                    $out[] = $part;
+                    $part = '';
+                }
+                $part .= $char;
+            }
+            if ($part !== '') {
+                $out[] = $part;
+            }
+        }
+
+        return $out;
+    }
+
+    /**
+     * @param  callable(string): float $lineWidth
+     * @return list<string>
+     */
+    private static function wrap(string $text, float $breakWidth, callable $lineWidth): array
+    {
         $paragraphs = preg_split('/\r\n?|\n/', $text);
         if ($paragraphs === false) {
             $paragraphs = [$text];

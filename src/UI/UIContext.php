@@ -8,6 +8,8 @@ use PHPolygon\Math\Rect;
 use PHPolygon\Math\Vec2;
 use PHPolygon\Rendering\Color;
 use PHPolygon\Rendering\Renderer2DInterface;
+use PHPolygon\Rendering\TextAlign;
+use PHPolygon\Rendering\TextWrap;
 use PHPolygon\Runtime\ClipboardInterface;
 use PHPolygon\Runtime\InputInterface;
 use PHPolygon\Runtime\KeyboardLayoutInterface;
@@ -48,6 +50,12 @@ class UIContext
 
     /** Tracks the active (pressed) widget ID */
     private string $activeWidget = '';
+
+    /** Gap between a wrapButton() key cap and what follows it. */
+    private const float KEYCAP_GAP = 12.0;
+
+    /** Area reserved by $leadingSpace in the last wrapButton(). */
+    private Rect $lastLeading;
 
     /**
      * True once the left mouse button has been fully released since the last
@@ -180,6 +188,7 @@ class UIContext
         $system = $input instanceof VioInput;
         $this->clipboard = $clipboard ?? ($system ? new VioClipboard() : new MemoryClipboard());
         $this->keyboardLayout = $keyboardLayout ?? ($system ? new VioKeyboardLayout() : new UsKeyboardLayout());
+        $this->lastLeading = new Rect();
     }
 
     public function getClipboard(): ClipboardInterface
@@ -452,7 +461,251 @@ class UIContext
         $w = min($w, $this->regionWidth);
 
         $rect = new Rect($this->cursorX, $this->cursorY, $w, $h);
+        [$clicked, $textColor] = $this->buttonBody($id, $rect, $disabled);
+        $this->renderer->drawTextCentered($label, $rect->x + $w * 0.5, $rect->y + $h * 0.5, $s->fontSize, $textColor);
 
+        $this->advance($this->flow === 'horizontal' ? $w : $h);
+        return $clicked;
+    }
+
+    // ── Wrapping buttons ─────────────────────────────────────────
+
+    /**
+     * A button whose label wraps instead of being cut, and whose height follows
+     * the number of lines. Click behaviour and colours are {@see button()}'s.
+     *
+     * $label is either a string (wrapped here into at most $maxLines lines,
+     * shrinking down to $minFontSize first) or lines already fitted for a whole
+     * row ({@see fitButtonLabels()} / {@see layoutButtonRow()}) together with
+     * their $fontSize - pass the row's $height too, so all buttons of the row
+     * are equally tall.
+     *
+     * $keycap draws a small key cap with that text (e.g. the shortcut digit)
+     * at the left edge, set apart from the label so it is never read as part
+     * of it. $leadingSpace reserves room after the key cap for something the
+     * caller draws itself (an icon); {@see lastButtonLeading()} returns that
+     * area. $align is TextAlign::CENTER (default) or TextAlign::LEFT.
+     * $textColor overrides the label colour (the key cap follows it).
+     *
+     * @param string|list<string> $label
+     */
+    public function wrapButton(
+        string $id,
+        string|array $label,
+        float $width = 0.0,
+        bool $disabled = false,
+        ?float $height = null,
+        ?float $fontSize = null,
+        string $keycap = '',
+        float $leadingSpace = 0.0,
+        int $align = TextAlign::CENTER,
+        ?Color $textColor = null,
+        int $maxLines = 2,
+        ?float $minFontSize = null,
+    ): bool {
+        $s = $this->style;
+        $w = min($width > 0.0 ? $width : $this->regionWidth, $this->regionWidth);
+        if (is_string($label)) {
+            $fit = $this->fitButtonLabels([$label], $w, $maxLines, $minFontSize, $keycap !== '', $leadingSpace);
+            $lines = $fit->label(0);
+            $fontSize ??= $fit->fontSize;
+        } else {
+            $lines = $label;
+            $fontSize ??= $s->fontSize;
+        }
+        $h = $height ?? $this->wrapButtonHeight(count($lines), $fontSize);
+
+        $rect = new Rect($this->cursorX, $this->cursorY, $w, $h);
+        [$clicked, $color] = $this->buttonBody($id, $rect, $disabled);
+        if ($textColor !== null) {
+            $color = $textColor;
+        }
+
+        $this->renderer->setFont($s->fontName);
+        $cy = $rect->y + $h * 0.5;
+        $left = $rect->x + $s->buttonPaddingH;
+        if ($keycap !== '') {
+            $k = $this->keycapSize();
+            $capColor = new Color($color->r, $color->g, $color->b, $color->a * 0.7);
+            $this->renderer->drawRoundedRectOutline(round($left), round($cy - $k * 0.5), $k, $k, max(2.0, $s->borderRadius), $capColor, 1.5);
+            $this->renderer->drawTextCentered($keycap, round($left + $k * 0.5), round($cy), round($s->fontSize * 0.7), $capColor);
+            $left += $k + self::KEYCAP_GAP;
+        }
+        $this->lastLeading = new Rect($left, $rect->y, $leadingSpace, $h);
+        $left += $leadingSpace;
+        $right = $rect->x + $w - $s->buttonPaddingH;
+
+        $lh = $this->wrapLineHeight($fontSize);
+        $top = $cy - count($lines) * $lh * 0.5;
+        foreach ($lines as $i => $line) {
+            $mid = round($top + ($i + 0.5) * $lh);
+            $cx = ($align & TextAlign::LEFT) !== 0
+                ? $left + $this->renderer->measureText($line, $fontSize)->width * 0.5
+                : ($left + $right) * 0.5;
+            $this->renderer->drawTextCentered($line, round($cx), $mid, $fontSize, $color);
+        }
+
+        $this->advance($this->flow === 'horizontal' ? $w : $h);
+        return $clicked;
+    }
+
+    /**
+     * Wrap the labels of a row of equally wide buttons ($width each) with one
+     * shared font size: at most $maxLines lines each, shrinking from the style
+     * size down to $minFontSize (default: no shrinking) before a word would be
+     * split. Pass the same $keycap / $leadingSpace as to {@see wrapButton()}.
+     *
+     * @param list<string> $labels
+     */
+    public function fitButtonLabels(
+        array $labels,
+        float $width,
+        int $maxLines = 2,
+        ?float $minFontSize = null,
+        bool $keycap = false,
+        float $leadingSpace = 0.0,
+    ): LabelFit {
+        $s = $this->style;
+        $inner = $width - 2 * $s->buttonPaddingH - $leadingSpace
+            - ($keycap ? $this->keycapSize() + self::KEYCAP_GAP : 0.0);
+        $this->renderer->setFont($s->fontName);
+
+        return LabelFit::fit($labels, max(1.0, $inner), $s->fontSize, $minFontSize ?? $s->fontSize, $maxLines, $this->measurer());
+    }
+
+    /**
+     * A row of buttons across $totalWidth, each as wide as its label, the
+     * spare room shared out evenly. When the labels do not fit on one line at
+     * the style size, the font shrinks towards $minFontSize; when they still do
+     * not fit, the widest labels go to two lines one by one until the row
+     * fits, and as a last resort widths shrink in proportion. Nothing is cut.
+     *
+     * @param list<string> $labels
+     */
+    public function layoutButtonRow(array $labels, float $totalWidth, float $gap = 12.0, ?float $minFontSize = null): ButtonRow
+    {
+        $s = $this->style;
+        $n = max(1, count($labels));
+        $pad = $s->buttonPaddingH;
+        $room = $totalWidth - ($n - 1) * $gap;
+        $measure = $this->measurer();
+        $this->renderer->setFont($s->fontName);
+        $natural = static function (float $size) use ($labels, $measure, $pad): array {
+            return array_map(static fn(string $t): float => ceil($measure($t, $size)) + 2 * $pad, $labels);
+        };
+
+        $size = $s->fontSize;
+        $min = min($size, $minFontSize ?? $size);
+        $widths = null;
+        $lines = array_map(static fn(string $t): array => [$t], $labels);
+        for ($try = $size; $try >= $min; $try -= 1.0) {
+            $nat = $natural($try);
+            if (array_sum($nat) <= $room) {
+                $extra = ($room - array_sum($nat)) / $n;
+                $widths = array_map(static fn(float $w): float => floor($w + $extra), $nat);
+                $size = $try;
+                break;
+            }
+        }
+
+        if ($widths === null) {
+            $size = $min;
+            $at = static fn(string $t): float => $measure($t, $size);
+            $nat = $natural($size);
+            $need = $nat;
+            $split = [];
+            while (array_sum($need) > $room && count($split) < $n) {
+                $widest = null;
+                foreach ($need as $i => $w) {
+                    if (!isset($split[$i]) && ($widest === null || $w > $need[$widest])) {
+                        $widest = $i;
+                    }
+                }
+                if ($widest === null) {
+                    break;
+                }
+                $split[$widest] = true;
+                // The narrowest width at which two lines are enough.
+                $two = [$labels[$widest]];
+                for ($f = 0.5; $f < 1.0; $f += 0.05) {
+                    $two = TextWrap::lines($labels[$widest], ($nat[$widest] - 2 * $pad) * $f, $at);
+                    if (count($two) <= 2) {
+                        break;
+                    }
+                }
+                $twoW = 0.0;
+                foreach ($two as $line) {
+                    $twoW = max($twoW, ceil($at($line)));
+                }
+                $need[$widest] = min($nat[$widest], $twoW + 2 * $pad);
+            }
+            $scale = min(1.0, $room / max(1.0, array_sum($need)));
+            $extra = max(0.0, ($room - array_sum($need)) / $n);
+            $widths = array_map(static fn(float $w): float => floor($w * $scale + $extra), $need);
+            $lines = [];
+            foreach ($labels as $i => $label) {
+                $lines[] = TextWrap::linesWithin($label, max(1.0, $widths[$i] - 2 * $pad), $at);
+            }
+        }
+
+        $xs = [];
+        $x = 0.0;
+        foreach ($widths as $w) {
+            $xs[] = $x;
+            $x += $w + $gap;
+        }
+        $count = 1;
+        foreach ($lines as $l) {
+            $count = max($count, count($l));
+        }
+
+        return new ButtonRow($xs, array_values($widths), $lines, $size, $this->wrapButtonHeight($count, $size));
+    }
+
+    /**
+     * Height of a {@see wrapButton()} with $lines lines at $fontSize: one line
+     * is exactly {@see rowHeight()}, so a row of plain and wrapping buttons
+     * lines up; every further line adds {@see wrapLineHeight()}.
+     */
+    public function wrapButtonHeight(int $lines, float $fontSize): float
+    {
+        return $this->rowHeight() + (max(1, $lines) - 1) * $this->wrapLineHeight($fontSize);
+    }
+
+    /** Line pitch of wrapped widget text ({@see UIStyle::$lineHeight}). */
+    public function wrapLineHeight(float $fontSize): float
+    {
+        return round($fontSize * $this->style->lineHeight);
+    }
+
+    /** Edge length of the key cap {@see wrapButton()} draws for $keycap. */
+    public function keycapSize(): float
+    {
+        return round($this->style->fontSize * 1.15);
+    }
+
+    /** The area reserved by $leadingSpace in the last {@see wrapButton()}. */
+    public function lastButtonLeading(): Rect
+    {
+        return $this->lastLeading;
+    }
+
+    /** @return callable(string, float): float */
+    private function measurer(): callable
+    {
+        $r = $this->renderer;
+
+        return static fn(string $t, float $size): float => $r->measureText($t, $size)->width;
+    }
+
+    /**
+     * Shared button behaviour: hover, press-then-release click, background.
+     *
+     * @return array{0: bool, 1: Color} clicked, text colour for the state
+     */
+    private function buttonBody(string $id, Rect $rect, bool $disabled): array
+    {
+        $s = $this->style;
         $hovered = !$disabled && $this->isHovered($rect);
         $clicked = false;
         $pressing = false;
@@ -490,11 +743,9 @@ class UIContext
             $textColor = $s->textColor;
         }
 
-        $this->renderer->drawRoundedRect($rect->x, $rect->y, $w, $h, $s->borderRadius, $bg);
-        $this->renderer->drawTextCentered($label, $rect->x + $w * 0.5, $rect->y + $h * 0.5, $s->fontSize, $textColor);
+        $this->renderer->drawRoundedRect($rect->x, $rect->y, $rect->width, $rect->height, $s->borderRadius, $bg);
 
-        $this->advance($this->flow === 'horizontal' ? $w : $h);
-        return $clicked;
+        return [$clicked, $textColor];
     }
 
     /**
