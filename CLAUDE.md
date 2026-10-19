@@ -283,6 +283,14 @@ Rules that follow from it:
   as nearest. Rules for games: build glass as single entities or small batches, never as one big
   static instanced batch; one mesh = one sort unit, so a glass box intersecting other glass can still
   layer wrongly — split long facades into panes.
+- Inside one mesh the far faces go first: without depth writes the triangle order of a closed mesh
+  decided which face ended on top (a thin textured box – a text panel – showed its far face mirrored
+  over the near one). The transparent pass therefore draws every mesh that is not flat and one-sided
+  twice, `VIO_CULL_FRONT` (far faces) then `VIO_CULL_BACK` (near faces); a flat one-sided mesh
+  (`MeshData::facesOneWay()`, by winding, cached per registry version – panes, quads, particles,
+  water planes) keeps one unculled draw. The OpenGL backend does the same with `glCullFace`. Winding
+  must be CCW-outward for transparent closed meshes; a mesh with flipped winding layers inside out
+  (it never disappears).
 - The vio mesh shader lights transparent fragments with the viewer-facing normal (a pane's back face
   shades like its front). Clearcoat IBL honours `Material::$useEnvironmentMap` like the base IBL.
 

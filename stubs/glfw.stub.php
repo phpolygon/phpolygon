@@ -138,6 +138,8 @@ namespace {
     const GL_DEPTH_TEST = 0x0B71;
     const GL_BLEND = 0x0BE2;
     const GL_CULL_FACE = 0x0B44;
+    const GL_FRONT = 0x0404;
+    const GL_BACK = 0x0405;
     const GL_TRIANGLES = 4;
     const GL_TEXTURE0 = 0x84C0;
 
@@ -153,6 +155,7 @@ namespace {
     function glBlendFunc(int $sfactor, int $dfactor): void {}
     function glDepthFunc(int $func): void {}
     function glDepthMask(bool $flag): void {}
+    function glCullFace(int $mode): void {}
     function glFrontFace(int $mode): void {}
     function glGetError(): int {}
     function glGetString(int $name): string {}

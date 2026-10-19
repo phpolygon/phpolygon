@@ -110,6 +110,18 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
     /** Scene pass whose regular pipeline is bound ('opaque', 'transparent', 'transparent_water'). */
     private string $currentScenePass = 'opaque';
 
+    /** Cull mode of the bound scene pipeline (VIO_CULL_*); the transparent pass switches it per draw. */
+    private int $currentSceneCull = 0;
+
+    /**
+     * Per mesh: whether every triangle faces the same way (a flat, one-sided
+     * pane, quad or particle), keyed by mesh id with the registry version it
+     * was computed for. Such a mesh needs no far-faces-first ordering.
+     *
+     * @var array<string, array{0: int, 1: bool}>
+     */
+    private array $oneSidedFlatCache = [];
+
     /**
      * Frame uniform inputs of the current frame ([frameState, hasShadowMap,
      * dirLights]), re-uploaded when a storage-instance draw switches programs.
@@ -2408,11 +2420,29 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
                     $transparentPass = $pass;
                 }
             }
-            if ($cmd instanceof DrawMesh) {
-                $this->drawMeshCommand($cmd->meshId, $material, $cmd->modelMatrix, $cmd->materialId, $cmd->excludeFromGbuffer, $cmd->prevModelMatrix);
+            // Far faces first, near faces last. The transparent pass writes no
+            // depth, so inside ONE mesh the triangle order decided which face
+            // ended up on top: a closed mesh (box, sphere, a thin textured
+            // panel) whose back faces come later in its index buffer painted
+            // them over its front faces - the far face of a text panel showed
+            // its texture mirrored over the near one. Two culled draws give
+            // every closed mesh the back-to-front order the sorter gives whole
+            // draws. A flat one-sided mesh (pane, quad, particle) has nothing
+            // to order and keeps one unculled draw.
+            if ($this->isOneSidedFlat($cmd->meshId)) {
+                if ($this->currentSceneCull !== VIO_CULL_NONE) {
+                    $this->bindPipeline($transparentPass, cull: VIO_CULL_NONE, keepDrawState: true);
+                }
+                $this->drawTransparentCommand($cmd, $material);
             } else {
-                $this->drawMeshInstancedCommand($cmd, $material);
+                $this->bindPipeline($transparentPass, cull: VIO_CULL_FRONT, keepDrawState: true);
+                $this->drawTransparentCommand($cmd, $material);
+                $this->bindPipeline($transparentPass, cull: VIO_CULL_BACK, keepDrawState: true);
+                $this->drawTransparentCommand($cmd, $material);
             }
+        }
+        if ($this->currentSceneCull !== VIO_CULL_NONE) {
+            $this->bindPipeline($transparentPass);
         }
         PerfProfiler::end();
 
@@ -2769,8 +2799,11 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
      * transparent surface drawn after it (water behind glass, the far face of
      * a glass box, a submerged pane under water), so the image would depend on
      * draw order and on the triangle order inside one mesh.
+     *
+     * $cull selects a culled variant (VIO_CULL_FRONT / VIO_CULL_BACK) – the
+     * transparent pass draws a closed mesh's far faces before its near faces.
      */
-    private function bindPipeline(string $pass, bool $storageInstances = false): void
+    private function bindPipeline(string $pass, bool $storageInstances = false, int $cull = VIO_CULL_NONE, bool $keepDrawState = false): void
     {
         $shaderId = $storageInstances ? 'default_storage' : $this->activeShaderId();
         $hdr = $this->sceneTargetIsHdr();
@@ -2780,6 +2813,9 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         // the PSO RTV formats (R8 vs FP16, 1 vs 4 vs 6 attachments) are baked in
         // and must match the bound target.
         $key = $pass . ':' . $shaderId . ($mrt ? ':mrt' . ($mv ? ':mv' : '') : ($hdr ? ':hdr' : ''));
+        if ($cull !== VIO_CULL_NONE) {
+            $key .= ':cull' . $cull;
+        }
 
         if (!isset($this->pipelineCache[$key])) {
             if ($mrt) {
@@ -2795,7 +2831,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
                     'shader' => $this->shaderCache[$program],
                     'depth_test' => true,
                     'depth_write' => $pass === 'opaque',
-                    'cull_mode' => VIO_CULL_NONE,
+                    'cull_mode' => $cull,
                     'blend' => $pass === 'opaque' ? VIO_BLEND_NONE : VIO_BLEND_ALPHA,
                     'attachments' => self::mrtFormats($mv),
                 ];
@@ -2825,7 +2861,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
                     'shader' => $shader,
                     'depth_test' => true,
                     'depth_write' => $pass === 'opaque',
-                    'cull_mode' => VIO_CULL_NONE,
+                    'cull_mode' => $cull,
                     'blend' => $pass === 'opaque' ? VIO_BLEND_NONE : VIO_BLEND_ALPHA,
                     // FP16 scene target → PSO RTVFormats[0] = R16G16B16A16_FLOAT so
                     // the draw isn't dropped with "render target format does not
@@ -2844,13 +2880,18 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         vio_bind_pipeline($this->ctx, $this->pipelineCache[$key]);
         if (!$storageInstances) {
             $this->currentScenePass = $pass;
+            $this->currentSceneCull = $cull;
         }
 
         // A pipeline bind may switch the bound shader object (its own cbuffer),
         // and the new pipeline starts a fresh draw run — invalidate the per-draw
         // material/mesh dedup trackers so the first draw after the bind always
-        // re-uploads its material uniforms + AABB.
-        $this->resetDrawStateCache();
+        // re-uploads its material uniforms + AABB. $keepDrawState: the caller
+        // only switches the cull variant of the same pass and shader, whose
+        // cbuffer keeps what the previous draw uploaded.
+        if (!$keepDrawState) {
+            $this->resetDrawStateCache();
+        }
     }
 
     /**
@@ -4726,6 +4767,36 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
     // Drawing
     // ----------------------------------------------------------------
 
+    private function drawTransparentCommand(DrawMesh|DrawMeshInstanced $cmd, Material $material): void
+    {
+        if ($cmd instanceof DrawMesh) {
+            $this->drawMeshCommand($cmd->meshId, $material, $cmd->modelMatrix, $cmd->materialId, $cmd->excludeFromGbuffer, $cmd->prevModelMatrix);
+        } else {
+            $this->drawMeshInstancedCommand($cmd, $material);
+        }
+    }
+
+    /**
+     * Whether every triangle of $meshId faces the same way: a flat, one-sided
+     * pane, quad or particle. Its faces cannot overlap one another on screen,
+     * so the transparent pass draws it once without culling. Anything else (a
+     * box, a sphere, a double-sided plane) gets its far faces drawn first.
+     * Decided by the triangle winding, the same thing the cull mode uses, and
+     * cached per mesh registry version.
+     */
+    private function isOneSidedFlat(string $meshId): bool
+    {
+        $version = MeshRegistry::version($meshId);
+        $cached = $this->oneSidedFlatCache[$meshId] ?? null;
+        if ($cached !== null && $cached[0] === $version) {
+            return $cached[1];
+        }
+        $mesh = MeshRegistry::get($meshId);
+        $flat = $mesh !== null && $mesh->facesOneWay();
+        $this->oneSidedFlatCache[$meshId] = [$version, $flat];
+        return $flat;
+    }
+
     private function drawMeshCommand(string $meshId, Material $material, Mat4 $modelMatrix, string $materialId = '', bool $excludeFromGbuffer = false, ?Mat4 $prevModelMatrix = null): void
     {
         $mesh = $this->uploadMesh($meshId);
@@ -5243,7 +5314,8 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         if ($this->motionThisFrame && !$this->ensureStorageMotionShader()) {
             return;
         }
-        $this->bindPipeline($pass, storageInstances: true);
+        $cull = $this->currentSceneCull;
+        $this->bindPipeline($pass, storageInstances: true, cull: $cull);
         [$frameState, $hasShadowMap, $dirLights] = $inputs;
         $this->uploadFrameUniforms($frameState);
         $this->uploadShadowUniforms($hasShadowMap, $dirLights);
@@ -5269,7 +5341,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
 
         // Back to the pass's regular program. Its cbuffer still holds the frame
         // uniforms; bindPipeline() resets the per-draw material / mesh dedup.
-        $this->bindPipeline($pass);
+        $this->bindPipeline($pass, cull: $cull);
     }
 
     /**

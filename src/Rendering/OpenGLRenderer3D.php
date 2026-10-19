@@ -644,17 +644,32 @@ class OpenGLRenderer3D implements Renderer3DInterface, AnimationClockInterface
                 $this->setUniformFloat('u_wave_amplitude', $command->amplitude);
                 $this->setUniformFloat('u_wave_frequency', $command->frequency);
                 $this->setUniformFloat('u_wave_phase', $command->phase);
-            } elseif ($command instanceof DrawMesh) {
+            } elseif ($command instanceof DrawMesh || $command instanceof DrawMeshInstanced) {
                 $mat = MaterialRegistry::get($command->materialId);
-                if ($mat !== null && $mat->alpha < 1.0) {
-                    $this->activateShaderForMaterial($mat);
-                    $this->drawMeshCommand($command->meshId, $command->materialId, $command->modelMatrix);
+                if ($mat === null || $mat->alpha >= 1.0) {
+                    continue;
                 }
-            } elseif ($command instanceof DrawMeshInstanced) {
-                $mat = MaterialRegistry::get($command->materialId);
-                if ($mat !== null && $mat->alpha < 1.0) {
-                    $this->activateShaderForMaterial($mat);
-                    $this->drawMeshInstancedCommand($command);
+                $this->activateShaderForMaterial($mat);
+                // No depth writes here, so inside one closed mesh the triangle
+                // order decided which face ended up on top. Far faces first,
+                // near faces last; a flat one-sided mesh needs one draw.
+                $flat = $this->isOneSidedFlat($command->meshId);
+                if (!$flat) {
+                    glEnable(GL_CULL_FACE);
+                    glCullFace(GL_FRONT);
+                }
+                for ($face = $flat ? 1 : 0; $face < 2; $face++) {
+                    if ($face === 1 && !$flat) {
+                        glCullFace(GL_BACK);
+                    }
+                    if ($command instanceof DrawMesh) {
+                        $this->drawMeshCommand($command->meshId, $command->materialId, $command->modelMatrix);
+                    } else {
+                        $this->drawMeshInstancedCommand($command);
+                    }
+                }
+                if (!$flat) {
+                    glDisable(GL_CULL_FACE);
                 }
             }
         }
@@ -672,6 +687,23 @@ class OpenGLRenderer3D implements Renderer3DInterface, AnimationClockInterface
     /**
      * Draw a single mesh with a model matrix uniform (non-instanced path).
      */
+    /** @var array<string, array{0: int, 1: bool}> mesh id => [registry version, faces one way] */
+    private array $oneSidedFlatCache = [];
+
+    /** Whether $meshId is a flat one-sided mesh (see MeshData::facesOneWay()), cached per registry version. */
+    private function isOneSidedFlat(string $meshId): bool
+    {
+        $version = MeshRegistry::version($meshId);
+        $cached = $this->oneSidedFlatCache[$meshId] ?? null;
+        if ($cached !== null && $cached[0] === $version) {
+            return $cached[1];
+        }
+        $mesh = MeshRegistry::get($meshId);
+        $flat = $mesh !== null && $mesh->facesOneWay();
+        $this->oneSidedFlatCache[$meshId] = [$version, $flat];
+        return $flat;
+    }
+
     private function drawMeshCommand(string $meshId, string $materialId, Mat4 $modelMatrix): void
     {
         $meshData = MeshRegistry::get($meshId);

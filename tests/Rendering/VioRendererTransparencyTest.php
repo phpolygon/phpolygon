@@ -25,6 +25,7 @@ use PHPolygon\Rendering\Quality\ScreenSpaceAO;
 use PHPolygon\Rendering\Quality\ShadowQuality;
 use PHPolygon\Rendering\RenderCommandList;
 use PHPolygon\Rendering\VioRenderer3D;
+use PHPolygon\Rendering\VioTextureManager;
 
 /**
  * The transparent pass tests depth but never writes it. Checked on rendered
@@ -157,6 +158,68 @@ final class VioRendererTransparencyTest extends TestCase
         }
     }
 
+    public function testTexturedPanelShowsItsNearFaceFromBothSides(): void
+    {
+        $this->assertPanelShowsItsNearFace(ScreenSpaceAO::Off);
+    }
+
+    public function testMrtPathDrawsTheFarFacesFirstToo(): void
+    {
+        self::assertNotNull($this->ctx);
+        if (!in_array(vio_backend_name($this->ctx), ['d3d11', 'd3d12'], true)
+            || !defined('VIO_FEATURE_MRT') || !vio_supports_feature($this->ctx, VIO_FEATURE_MRT)
+        ) {
+            $this->markTestSkipped('MRT scene path engages on Direct3D only');
+        }
+        putenv('PHPOLYGON_VIO_MRT=1');
+        $this->assertPanelShowsItsNearFace(ScreenSpaceAO::Medium);
+    }
+
+    private function assertPanelShowsItsNearFace(ScreenSpaceAO $ao): void
+    {
+        // A thin box textured on every face, left half red, right half green
+        // - a text panel. Each face reads correctly from outside, so seen from
+        // the front the far face shows the texture mirrored behind the near
+        // one. Without depth writes the face drawn LAST ended on top: BoxMesh
+        // emits -Z after +Z, so from +Z the mirrored far face covered the near
+        // face (a hologram title read backwards). Far faces must go first.
+        MaterialRegistry::register('panel_split', new Material(
+            albedo: new Color(1.0, 1.0, 1.0),
+            alpha: 0.9,
+            albedoTexture: 'split_red_green',
+            useEnvironmentMap: false,
+        ));
+        $panel = Mat4::scaling(2.4, 2.4, 0.04);
+        $turned = Mat4::rotationY(M_PI)->multiply($panel);
+
+        foreach (['front (+Z face near)' => $panel, 'turned (-Z face near)' => $turned] as $label => $matrix) {
+            $image = $this->render([['panel_split', $matrix]], $ao, prepare: $this->bindSplitTexture(...));
+            $left = self::px($image, 34, 48);
+            $right = self::px($image, 62, 48);
+            self::assertGreaterThan($left[1] + 60, $left[0], "{$label}: the left half reads red, not the mirrored far face");
+            self::assertGreaterThan($right[0] + 60, $right[1], "{$label}: the right half reads green, not the mirrored far face");
+        }
+    }
+
+    /** Hand the renderer a 2x1 texture (red | green) under the id 'split_red_green'. */
+    private function bindSplitTexture(VioRenderer3D $renderer): void
+    {
+        self::assertNotNull($this->ctx);
+        $texture = vio_texture($this->ctx, [
+            'data' => "\xff\x00\x00\xff\x00\xff\x00\xff",
+            'width' => 2,
+            'height' => 1,
+            'filter' => VIO_FILTER_NEAREST,
+            'wrap' => VIO_WRAP_CLAMP,
+        ]);
+        self::assertNotFalse($texture);
+        // Textures resolve only with a manager bound; a resolved entry in the
+        // renderer's (fresh, empty) texture cache wins over the manager.
+        $renderer->setTextureManager(new VioTextureManager($this->ctx));
+        (new \ReflectionProperty(VioRenderer3D::class, 'textureCache'))
+            ->setValue($renderer, ['split_red_green' => $texture]);
+    }
+
     public function testPaneUnderTheWaterSurfaceStaysVisible(): void
     {
         // Looking down at a translucent horizontal surface (drawn first, as the
@@ -199,8 +262,11 @@ final class VioRendererTransparencyTest extends TestCase
         return Mat4::translation($x, $y, $z)->multiply(Mat4::scaling($size, $size, 0.03));
     }
 
-    /** @param list<array{0: string, 1: Mat4}> $draws in submission order */
-    private function render(array $draws, ScreenSpaceAO $ao = ScreenSpaceAO::Off, ?Mat4 $view = null, string $mesh = 'box'): string
+    /**
+     * @param list<array{0: string, 1: Mat4}> $draws in submission order
+     * @param (\Closure(VioRenderer3D): void)|null $prepare runs on the renderer before the frame
+     */
+    private function render(array $draws, ScreenSpaceAO $ao = ScreenSpaceAO::Off, ?Mat4 $view = null, string $mesh = 'box', ?\Closure $prepare = null): string
     {
         self::assertNotNull($this->ctx);
         $renderer = new VioRenderer3D($this->ctx, self::W, self::H);
@@ -210,6 +276,9 @@ final class VioRendererTransparencyTest extends TestCase
             ambientOcclusion: $ao,
             bloom: false,
         ));
+        if ($prepare !== null) {
+            $prepare($renderer);
+        }
 
         $list = new RenderCommandList();
         $list->add(new SetCamera(

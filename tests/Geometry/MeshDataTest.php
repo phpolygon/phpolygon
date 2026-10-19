@@ -7,6 +7,8 @@ namespace PHPolygon\Tests\Geometry;
 use PHPUnit\Framework\TestCase;
 use PHPolygon\Geometry\BoxMesh;
 use PHPolygon\Geometry\MeshData;
+use PHPolygon\Geometry\PlaneMesh;
+use PHPolygon\Geometry\SphereMesh;
 
 final class MeshDataTest extends TestCase
 {
@@ -105,4 +107,29 @@ final class MeshDataTest extends TestCase
         }
     }
 
+    public function testFlatOneSidedMeshesFaceOneWay(): void
+    {
+        $this->assertTrue(PlaneMesh::generate(2.0, 2.0, 4)->facesOneWay(), 'a subdivided plane');
+        $quad = new MeshData([0, 0, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0], array_fill(0, 12, 0.0), array_fill(0, 8, 0.0), [0, 1, 2, 0, 2, 3]);
+        $this->assertTrue($quad->facesOneWay(), 'a two-triangle quad');
+    }
+
+    public function testClosedOrDoubleSidedMeshesDoNotFaceOneWay(): void
+    {
+        $this->assertFalse(BoxMesh::generate(1.0, 1.0, 0.04)->facesOneWay(), 'a thin box has a front and a back face');
+        $this->assertFalse(SphereMesh::generate(1.0, 8, 6)->facesOneWay(), 'a sphere');
+        $front = PlaneMesh::generate(1.0, 1.0, 1);
+        $this->assertFalse(MeshData::merge($front, $front->mirrored(1))->facesOneWay(), 'a double-sided plane');
+    }
+
+    public function testDegenerateTrianglesAreIgnored(): void
+    {
+        $mesh = new MeshData(
+            [0, 0, 0, 1, 0, 0, 1, 1, 0, 2, 2, 2],
+            array_fill(0, 12, 0.0),
+            array_fill(0, 8, 0.0),
+            [3, 3, 3, 0, 1, 2, 0, 0, 1],
+        );
+        $this->assertTrue($mesh->facesOneWay());
+    }
 }

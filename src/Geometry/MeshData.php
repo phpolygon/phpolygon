@@ -37,6 +37,46 @@ readonly class MeshData
     }
 
     /**
+     * Whether every triangle faces the same way (by winding): a flat, one-sided
+     * pane, quad or particle. Such a mesh cannot overlap itself on screen, so
+     * a renderer that draws a closed transparent mesh far faces first can draw
+     * it once. False for anything with faces pointing apart (box, sphere,
+     * double-sided plane). Degenerate triangles are ignored.
+     */
+    public function facesOneWay(): bool
+    {
+        $v = $this->vertices;
+        $idx = $this->indices;
+        $nx = $ny = $nz = null;
+        for ($t = 0, $n = count($idx) - 2; $t < $n; $t += 3) {
+            $a = $idx[$t] * 3;
+            $b = $idx[$t + 1] * 3;
+            $c = $idx[$t + 2] * 3;
+            $ux = $v[$b] - $v[$a];
+            $uy = $v[$b + 1] - $v[$a + 1];
+            $uz = $v[$b + 2] - $v[$a + 2];
+            $wx = $v[$c] - $v[$a];
+            $wy = $v[$c + 1] - $v[$a + 1];
+            $wz = $v[$c + 2] - $v[$a + 2];
+            $cx = $uy * $wz - $uz * $wy;
+            $cy = $uz * $wx - $ux * $wz;
+            $cz = $ux * $wy - $uy * $wx;
+            $len = sqrt($cx * $cx + $cy * $cy + $cz * $cz);
+            if ($len < 1e-12) {
+                continue;
+            }
+            if ($nx === null) {
+                $nx = $cx / $len;
+                $ny = $cy / $len;
+                $nz = $cz / $len;
+            } elseif (($cx * $nx + $cy * $ny + $cz * $nz) / $len < 0.999) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
      * The mesh reflected across the axis-aligned plane through the origin
      * (`$axis` 0 = X, 1 = Y, 2 = Z): positions and normals flip on that axis and
      * every triangle's winding is reversed, so the copy still faces outward. A
