@@ -12,7 +12,7 @@
 > **nicht** in die Forward-Mesh-Shader integriert, und es gibt kein `applySettings()`-
 > Tier-Gating in den Backends. Tier B ist damit als Prototyp über Examples validiert,
 > aber noch nicht in den Engine-Renderpfad verdrahtet.
-> **Ziel-Release:** offen — **nach** Code Tycoon Next Fest (15.–22. Juni 2026) und iPad-Port.
+> **Ziel-Release:** offen – **nach** dem iPad-Port.
 > **Harte Vorbedingung:** vio muss Compute-Dispatch **oder** einen HDR-Fragment-Pass
 > plus eine Volume-Repräsentation zur PHP-API durchreichen (§3). Ohne die fällt das
 > Feature auf den bestehenden Forward-Shader + Screen-Space-Pfad zurück (Tier C).

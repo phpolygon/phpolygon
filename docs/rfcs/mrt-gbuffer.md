@@ -136,10 +136,10 @@ Screen-UV, also identisch.
 
 ### Kosten/Nutzen
 
-- Gewinn: eine Geometrie-Submission weniger (~3 ms bei ~13 ms `vio_submit` in CodeCity, also
+- Gewinn: eine Geometrie-Submission weniger (~3 ms bei ~13 ms `vio_submit` in einer dichten Stadtszene eines Verbraucherspiels, also
   rund +25 % Bildrate auf dem CPU-gebundenen Pfad); der Composite-Pass ist ein Fullscreen-Quad.
 - GPU: 4× FP16-Attachments statt 1× FP16 + 1× FP16-G-Buffer → +2 Attachments Bandbreite; die
-  GPU ist in beiden Spielen unbeschäftigt (Auflösung wirkt nicht auf die Bildrate).
+  GPU ist in beiden gemessenen Spielen unbeschäftigt (Auflösung wirkt nicht auf die Bildrate).
 - Speicher: 2 zusätzliche FP16-Targets in Szenenauflösung (~16 MB bei 1080p).
 
 ## Phasen

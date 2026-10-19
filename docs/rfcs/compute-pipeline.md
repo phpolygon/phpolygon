@@ -3,7 +3,7 @@
 **Status**: draft
 **Author**: engineering
 **Last update**: 2026-05-10
-**Related issues / PRs**: cloth-procedural (this branch), Netrunner roadmap
+**Related issues / PRs**: cloth-procedural (this branch)
 
 ## Summary
 

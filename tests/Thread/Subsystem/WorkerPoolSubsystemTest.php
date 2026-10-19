@@ -14,15 +14,15 @@ class WorkerPoolSubsystemTest extends TestCase
     public function testEnqueueAndPrepareInput(): void
     {
         $pool = new WorkerPoolSubsystem();
-        $pool->enqueue('job_1', 'city_tick', ['cityId' => 'volkhaven', 'hour' => 12.0]);
-        $pool->enqueue('job_2', 'city_tick', ['cityId' => 'ironspire', 'hour' => 12.0]);
+        $pool->enqueue('job_1', 'region_tick', ['regionId' => 'region_a', 'hour' => 12.0]);
+        $pool->enqueue('job_2', 'region_tick', ['regionId' => 'region_b', 'hour' => 12.0]);
 
         $world = new World();
         $input = $pool->prepareInput($world, 0.016);
 
         $this->assertCount(2, $input['jobs']);
         $this->assertSame('job_1', $input['jobs'][0]['id']);
-        $this->assertSame('volkhaven', $input['jobs'][0]['data']['cityId']);
+        $this->assertSame('region_a', $input['jobs'][0]['data']['regionId']);
 
         // Queue should be flushed
         $input2 = $pool->prepareInput($world, 0.016);

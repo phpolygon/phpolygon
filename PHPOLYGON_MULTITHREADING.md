@@ -75,22 +75,22 @@ Der Render-Call läuft **während** die Threads rechnen — das ist der eigentli
 
 | Thread | Inhalt |
 |---|---|
-| `NEXUS Runtime` | Globaler Koordinator (nur Netrunner — siehe Abschnitt 7) |
+| `Coordinator Runtime` | Globaler Koordinator (optional, für Spiele mit vielen simulierten Regionen – siehe Abschnitt 11) |
 | `Physics` | Ab 5 Kernen eigener Thread |
 
 ### Priorität 3 — Worker Pool (restliche Kerne)
 
 | Thread | Inhalt |
 |---|---|
-| `City Worker Pool` | Inaktive Städte, sequentiell bei 1 Worker, parallel bei mehreren |
+| `Region Worker Pool` | Inaktive Regionen, sequentiell bei 1 Worker, parallel bei mehreren |
 
 ### Kern-Szenarien
 
 | Kerne | Konfiguration |
 |---|---|
-| 4 | Main · AI+Audio · NEXUS · Pool(1) |
-| 6 | Main · AI+Audio · NEXUS · Physics · Pool(2) |
-| 8 | Main · AI · Audio · NEXUS · Physics · Pool(3) |
+| 4 | Main · AI+Audio · Coordinator · Pool(1) |
+| 6 | Main · AI+Audio · Coordinator · Physics · Pool(2) |
+| 8 | Main · AI · Audio · Coordinator · Physics · Pool(3) |
 | 12+ | alle Threads · Pool(6) |
 
 ---
@@ -125,15 +125,15 @@ class ThreadScheduler
         }
 
         // Priorität 2 — ab 4 Kernen
-        if ($available >= 1) { $this->spawnNexus();   $available--; }
+        if ($available >= 1) { $this->spawnCoordinator(); $available--; }
         if ($available >= 1) { $this->spawnPhysics();  $available--; }
 
         // Priorität 3 — restliche Kerne als Worker Pool
         $workerCount = max(1, $available);
-        $this->spawnCityPool($workerCount);
+        $this->spawnRegionPool($workerCount);
     }
 
-    private function spawnCityPool(int $workers): void
+    private function spawnRegionPool(int $workers): void
     {
         $queue = new Channel(Channel::Infinite);
 
@@ -143,12 +143,12 @@ class ThreadScheduler
                 while (true) {
                     $job = $queue->recv();
                     if ($job === null) break;
-                    $this->tickCity($job);
+                    $this->tickRegion($job);
                 }
             }, [$queue]);
         }
 
-        $this->channels['city_queue'] = $queue;
+        $this->channels['region_queue'] = $queue;
     }
 
     private function getCpuCount(): int
@@ -449,7 +449,7 @@ class AISystem
 
 ---
 
-## 10. World State & CityState (für Netrunner)
+## 10. World State & RegionState (für Spiele mit vielen simulierten Regionen)
 
 ```php
 <?php
@@ -457,19 +457,15 @@ class AISystem
 namespace PHPolygon\World;
 
 /**
- * Schlankes State-Objekt pro inaktiver Stadt.
- * Wird von City Worker Threads geticktet.
- * Immer aktuell — kein Catch-up beim Stadtladen.
+ * Schlankes State-Objekt pro inaktiver Region.
+ * Wird von Region Worker Threads geticktet.
+ * Immer aktuell – kein Catch-up beim Laden der Region.
  */
-class CityState
+class RegionState
 {
-    public float $threatLevel    = 0.0;   // 0–5
-    public float $economyIndex   = 1.0;
-    public array $factionControl = [];
-    public array $activeEvents   = [];
-    public bool  $isPlayerKnown  = false;
-    public int   $alertCooldown  = 0;
-    public float $lastVisited    = 0.0;
+    public array $activeEvents = [];
+    public float $lastVisited  = 0.0;
+    public array $data         = [];      // spielspezifische Werte, vom Spiel definiert
 }
 ```
 
@@ -480,23 +476,23 @@ class CityState
 
 public function onHourTick(float $gameHour): void
 {
-    // UNVERÄNDERLICHER Snapshot — alle Städte lesen dieselbe Version
-    $snapshot = $this->worldState['cities'];
+    // UNVERÄNDERLICHER Snapshot – alle Regionen lesen dieselbe Version
+    $snapshot = $this->worldState['regions'];
 
-    // Phase 1: alle Cities gleichzeitig anstoßen
-    foreach ($this->channels as $cityId => $channel) {
+    // Phase 1: alle Regionen gleichzeitig anstoßen
+    foreach ($this->channels as $regionId => $channel) {
         $channel['in']->send([
             'gameHour'  => $gameHour,
-            'ownState'  => $snapshot[$cityId],
-            'allCities' => $snapshot, // kompletter Snapshot für Kontext
+            'ownState'  => $snapshot[$regionId],
+            'allRegions' => $snapshot, // kompletter Snapshot für Kontext
         ]);
     }
 
     // Phase 2: Deltas einsammeln
-    foreach ($this->channels as $cityId => $channel) {
+    foreach ($this->channels as $regionId => $channel) {
         $delta = $channel['out']->recv();
-        $this->worldState['cities'][$cityId] = array_merge(
-            $this->worldState['cities'][$cityId],
+        $this->worldState['regions'][$regionId] = array_merge(
+            $this->worldState['regions'][$regionId],
             $delta
         );
     }
@@ -505,22 +501,22 @@ public function onHourTick(float $gameHour): void
 
 ---
 
-## 11. NEXUS Runtime (Netrunner-spezifisch)
+## 11. Coordinator Runtime (optional)
 
-NEXUS ist kein Spieler, keine Stadt — NEXUS ist das globale Netzwerk. Alle Stadt-zu-Stadt-Kommunikation läuft **ausschließlich** über NEXUS. Das eliminiert das Update-Order-Problem vollständig.
+Der Coordinator ist kein Spieler und keine Region – er ist der globale Vermittler. Alle Region-zu-Region-Kommunikation läuft **ausschließlich** über den Coordinator. Das eliminiert das Update-Order-Problem vollständig.
 
 ```php
 <?php
 
-namespace Netrunner\Thread;
+namespace App\Thread;
 
 use parallel\Runtime;
 use parallel\Channel;
 
-class NexusRuntime
+class CoordinatorRuntime
 {
-    private Channel $eventIn;   // Events von aktiver Stadt → NEXUS
-    private Channel $directOut; // NEXUS-Direktiven → alle Städte
+    private Channel $eventIn;   // Events von aktiver Region → Coordinator
+    private Channel $directOut; // Coordinator-Direktiven → alle Regionen
 
     public function boot(): void
     {
@@ -529,16 +525,16 @@ class NexusRuntime
 
         $runtime = new Runtime();
         $runtime->run(function(Channel $in, Channel $out) {
-            $nexus = new NexusIntelligence();
+            $policy = new CoordinatorPolicy(); // vom Spiel geliefert
 
             while (true) {
-                $event = $in->recv(); // irgendeine Stadt meldet ein Ereignis
+                $event = $in->recv(); // irgendeine Region meldet ein Ereignis
                 if ($event === null) break;
 
-                // NEXUS entscheidet sofort und global
-                $directives = $nexus->respond($event);
+                // Coordinator entscheidet sofort und global
+                $directives = $policy->respond($event);
 
-                // Broadcast an alle betroffenen Städte — simultan
+                // Broadcast an alle betroffenen Regionen – simultan
                 foreach ($directives as $directive) {
                     $out->send($directive);
                 }
@@ -551,19 +547,19 @@ class NexusRuntime
 ### Event-Flow
 
 ```
-Aktive Stadt:
-  $nexusIn->send([
-      'type'     => 'player_detected',
-      'origin'   => 'volkhaven',
+Aktive Region:
+  $coordinatorIn->send([
+      'type'     => 'alert_raised',
+      'origin'   => 'region_a',
       'severity' => 4,
       'gameHour' => $currentHour,
   ]);
 
-NEXUS antwortet simultan:
-  → Ironspire: threatLevel + 2, Grenze schließen
-  → Neonveil:  Bounty erhöhen, Desinformation
-  → Ashgate:   Militäreinheiten aktivieren
-  → alle:      Beobachtungsmodus ++
+Coordinator antwortet simultan:
+  → region_b: Zustandswert anpassen, Zugang sperren
+  → region_c: Reaktion A auslösen
+  → region_d: Reaktion B auslösen
+  → alle:     gemeinsamen Status-Zähler erhöhen
 ```
 
 ---
@@ -619,8 +615,8 @@ public function shutdown(): void
 5. `AISystem` mit internem Takt-Splitting
 6. `AudioSystem` — Buffer-basiert, höchste Priorität
 7. `AssetSystem` — non-blocking mit `Events::poll()`
-8. `CityWorkerPool` — für Netrunner
-9. `NexusRuntime` — für Netrunner
+8. `RegionWorkerPool` – optional, für Spiele mit vielen simulierten Regionen
+9. `CoordinatorRuntime` – optional, zusammen mit dem `RegionWorkerPool`
 
 ---
 
@@ -635,4 +631,4 @@ public function shutdown(): void
 7. **Pathfinding intern auf 10–20fps drosseln** — Perception bleibt 60fps
 8. **Shutdown via `null`-Signal** auf den `in`-Channel
 9. **Zweiphasen-Tick für Stunden-Events** — unveränderlicher Snapshot verhindert Update-Order-Probleme
-10. **NEXUS ist der einzige globale Koordinator** — keine direkte Stadt-zu-Stadt-Kommunikation
+10. **Der Coordinator ist der einzige globale Koordinator** – keine direkte Region-zu-Region-Kommunikation
