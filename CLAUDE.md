@@ -407,6 +407,28 @@ value object (vertices, normals, UVs, indices) that the backend uploads to the G
 Meshes are uploaded once and referenced by string ID. Instance-drawing
 (`DrawMeshInstanced`) is used whenever the same mesh appears multiple times in a scene.
 
+**Organic shapes — `LatheMesh` vs. `EllipseLoftMesh`.** `LatheMesh` revolves a
+profile about Y (round sections only). `EllipseLoftMesh::generate(list<LoftRing>,
+segments, capBottom, capTop, capSteps)` lofts a smooth skin through cross-sections
+given bottom to top: each `LoftRing(y, xPos, xNeg, zPos, zNeg, cx, cz)` reaches its own
+radius in each of ±X/±Z around an off-axis centre, blended without a crease
+(the outline stays inside the radii up to a 3:1 ratio between opposite radii). Ends
+close with rounded caps (`cap* = 0` → flat lid). Winding matches `LatheMesh`, the UV
+seam shares its normal. Use it for anatomy (a calf fuller behind, a thigh with a front
+bulge), shoes, bottles, handles; turn it with a transform to loft along X/Z.
+`MeshData::mirrored(axis)` reflects a mesh and reverses the winding — a left part from
+a right one without the mesh turning inside out.
+
+**Graph nodes (`ProceduralMesh` / `*.mesh.json` graphs).** `ProceduralMeshEvaluator`
+evaluates: generators `box`, `cylinder`, `sphere`, `plane`, `torus`, `octahedron`,
+`wedge`, `lathe`, `ellipseLoft`; operators `transform`, `mirror` (`keep` 0 = only the
+mirrored copy), `combine`. Node params are plain numbers, so lists are numbered keys
+plus a count: `lathe` → `points`, `p{i}_r`, `p{i}_y`; `ellipseLoft` → `rings`,
+`r{i}_y`, `r{i}_xp`, `r{i}_xn`, `r{i}_zp`, `r{i}_zn`, `r{i}_cx`, `r{i}_cz` (missing xn →
+xp, zp → xp, zn → zp) plus `segments`, `capBottom`, `capTop`, `capSteps`. The editor's
+node catalogue (`resources/js/prefab/graph.ts` in the editor repo) mirrors this list —
+add a node type in both places.
+
 Benefits of this approach over file-based assets:
 - Entire world is version-controlled as PHP code
 - Parameters change in one place — world updates everywhere

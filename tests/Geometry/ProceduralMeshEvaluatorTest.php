@@ -28,6 +28,67 @@ class ProceduralMeshEvaluatorTest extends TestCase
         $this->assertSame(12, $mesh->triangleCount(), 'a box is 12 triangles');
     }
 
+    public function testEllipseLoftNodeMatchesTheGenerator(): void
+    {
+        $graph = new ProceduralMesh();
+        $graph->nodes = [[
+            'id' => 'l',
+            'type' => 'ellipseLoft',
+            'params' => [
+                'rings' => 2.0, 'segments' => 10.0, 'capBottom' => 0.05, 'capTop' => 0.1, 'capSteps' => 3.0,
+                'r0_y' => 0.0, 'r0_xp' => 0.3, 'r0_xn' => 0.2, 'r0_zp' => 0.25, 'r0_zn' => 0.15, 'r0_cx' => 0.01, 'r0_cz' => -0.02,
+                'r1_y' => 0.8, 'r1_xp' => 0.2,
+            ],
+        ]];
+        $graph->output = 'l';
+
+        $fromGraph = (new ProceduralMeshEvaluator())->evaluate($graph);
+        $direct = \PHPolygon\Geometry\EllipseLoftMesh::generate([
+            new \PHPolygon\Geometry\LoftRing(0.0, 0.3, 0.2, 0.25, 0.15, 0.01, -0.02),
+            // Missing radii fall back: xn → xp, zp → xp, zn → zp.
+            new \PHPolygon\Geometry\LoftRing(0.8, 0.2, 0.2, 0.2, 0.2),
+        ], 10, 0.05, 0.1, 3);
+
+        $this->assertSame($direct->vertices, $fromGraph->vertices);
+        $this->assertSame($direct->indices, $fromGraph->indices);
+    }
+
+    public function testLatheNodeMatchesTheGenerator(): void
+    {
+        $graph = new ProceduralMesh();
+        $graph->nodes = [[
+            'id' => 'l',
+            'type' => 'lathe',
+            'params' => ['points' => 3.0, 'segments' => 12.0, 'p0_r' => 0.0, 'p0_y' => 0.0, 'p1_r' => 0.4, 'p1_y' => 0.5, 'p2_r' => 0.0, 'p2_y' => 1.0],
+        ]];
+        $graph->output = 'l';
+
+        $fromGraph = (new ProceduralMeshEvaluator())->evaluate($graph);
+        $direct = \PHPolygon\Geometry\LatheMesh::generate([
+            new \PHPolygon\Math\Vec2(0.0, 0.0), new \PHPolygon\Math\Vec2(0.4, 0.5), new \PHPolygon\Math\Vec2(0.0, 1.0),
+        ], 12);
+
+        $this->assertSame($direct->vertices, $fromGraph->vertices);
+    }
+
+    public function testMirrorWithoutKeepReturnsOnlyTheReflection(): void
+    {
+        $graph = new ProceduralMesh();
+        $graph->nodes = [
+            ['id' => 'b', 'type' => 'box', 'params' => ['width' => 1.0, 'height' => 1.0, 'depth' => 1.0]],
+            ['id' => 't', 'type' => 'transform', 'inputs' => ['mesh' => 'b'], 'params' => ['tx' => 2.0]],
+            ['id' => 'm', 'type' => 'mirror', 'inputs' => ['mesh' => 't'], 'params' => ['axis' => 0.0, 'keep' => 0.0]],
+        ];
+        $graph->output = 'm';
+
+        $mesh = (new ProceduralMeshEvaluator())->evaluate($graph);
+
+        $this->assertSame(24, $mesh->vertexCount(), 'only the mirrored copy');
+        for ($i = 0, $n = count($mesh->vertices); $i < $n; $i += 3) {
+            $this->assertLessThan(0.0, $mesh->vertices[$i], 'the box moved to +X now sits at -X');
+        }
+    }
+
     public function testTransformNodeMovesGeometry(): void
     {
         $graph = new ProceduralMesh();

@@ -37,6 +37,31 @@ readonly class MeshData
     }
 
     /**
+     * The mesh reflected across the axis-aligned plane through the origin
+     * (`$axis` 0 = X, 1 = Y, 2 = Z): positions and normals flip on that axis and
+     * every triangle's winding is reversed, so the copy still faces outward. A
+     * left part from a right one. Tangents are dropped (recompute when needed).
+     */
+    public function mirrored(int $axis = 0): self
+    {
+        $axis = max(0, min(2, $axis));
+        $vertices = $this->vertices;
+        $normals = $this->normals;
+        for ($i = $axis, $n = count($vertices); $i < $n; $i += 3) {
+            $vertices[$i] = -$vertices[$i];
+        }
+        for ($i = $axis, $n = count($normals); $i < $n; $i += 3) {
+            $normals[$i] = -$normals[$i];
+        }
+        $indices = $this->indices;
+        for ($i = 0, $n = count($indices); $i + 2 < $n; $i += 3) {
+            [$indices[$i + 1], $indices[$i + 2]] = [$indices[$i + 2], $indices[$i + 1]];
+        }
+
+        return new self($vertices, $normals, $this->uvs, $indices);
+    }
+
+    /**
      * Return self if tangents are already populated; otherwise return a new
      * MeshData with tangents computed from the existing vertex / normal /
      * uv / index buffers.

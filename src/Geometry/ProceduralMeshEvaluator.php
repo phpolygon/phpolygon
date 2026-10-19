@@ -7,6 +7,7 @@ namespace PHPolygon\Geometry;
 use PHPolygon\Component\ProceduralMesh;
 use PHPolygon\Math\Mat4;
 use PHPolygon\Math\Quaternion;
+use PHPolygon\Math\Vec2;
 use PHPolygon\Math\Vec3;
 use RuntimeException;
 
@@ -24,10 +25,20 @@ use RuntimeException;
  *     torus      params: radius, tube, radialSegments, tubularSegments
  *     octahedron params: radius
  *     wedge      params: peakZ
+ *     lathe      params: points, segments, p{i}_r, p{i}_y (i = 0 … points-1,
+ *                bottom to top) — a {@see LatheMesh} revolved about Y
+ *     ellipseLoft params: rings, segments, capBottom, capTop, capSteps and per
+ *                ring i (0 … rings-1, bottom to top) r{i}_y, r{i}_xp, r{i}_xn,
+ *                r{i}_zp, r{i}_zn, r{i}_cx, r{i}_cz — an {@see EllipseLoftMesh}.
+ *                A missing xn falls back to xp, zp to xp, zn to zp.
  *   Operators (mesh inputs):
  *     transform input 'mesh'; params: tx,ty,tz  rx,ry,rz (degrees)  sx,sy,sz
- *     mirror    input 'mesh'; params: axis (0=X,1=Y,2=Z) — mirror + merge
+ *     mirror    input 'mesh'; params: axis (0=X,1=Y,2=Z), keep (1 = merge the
+ *               mirrored copy with the original, 0 = only the mirrored copy)
  *     combine   merges all of its inputs into one mesh
+ *
+ * Node parameters are plain numbers, so list-shaped inputs (profile points,
+ * loft rings) are spelled as numbered keys plus a count.
  *
  * New node types are added by extending {@see build()} — the graph format and
  * everything downstream stay unchanged.
@@ -148,6 +159,8 @@ final class ProceduralMeshEvaluator
             'wedge' => WedgeMesh::generate(
                 $this->f($params, 'peakZ', 0.0),
             ),
+            'lathe' => $this->buildLathe($params),
+            'ellipseLoft' => $this->buildEllipseLoft($params),
             'transform' => $this->applyTransform($this->requireInput($inputs, 'mesh', $id), $params),
             'mirror' => $this->applyMirror($this->requireInput($inputs, 'mesh', $id), $params),
             'combine' => MeshData::merge(...array_values($inputs)),
@@ -156,46 +169,68 @@ final class ProceduralMeshEvaluator
     }
 
     /**
-     * Mirror the mesh across an axis-aligned plane through the origin and merge
-     * the mirrored copy with the original (a symmetric "mirror modifier").
+     * Mirror the mesh across an axis-aligned plane through the origin
+     * ({@see MeshData::mirrored()}) and – with `keep` 1, the default – merge the
+     * mirrored copy with the original (a symmetric "mirror modifier"); `keep` 0
+     * returns only the mirrored copy (a left part from a right one).
      * `axis`: 0 = X, 1 = Y, 2 = Z.
      *
      * @param array<string, mixed> $params
      */
     private function applyMirror(MeshData $mesh, array $params): MeshData
     {
-        $axis = (int) $this->f($params, 'axis', 0.0);
-        $axis = max(0, min(2, $axis));
+        $mirror = $mesh->mirrored((int) $this->f($params, 'axis', 0.0));
 
-        $vertices = $mesh->vertices;
-        $mirroredVertices = [];
-        for ($i = 0, $n = count($vertices); $i < $n; $i += 3) {
-            $mirroredVertices[] = $axis === 0 ? -$vertices[$i] : $vertices[$i];
-            $mirroredVertices[] = $axis === 1 ? -$vertices[$i + 1] : $vertices[$i + 1];
-            $mirroredVertices[] = $axis === 2 ? -$vertices[$i + 2] : $vertices[$i + 2];
+        return $this->f($params, 'keep', 1.0) >= 0.5 ? MeshData::merge($mesh, $mirror) : $mirror;
+    }
+
+    /**
+     * @param array<string, mixed> $params
+     */
+    private function buildLathe(array $params): MeshData
+    {
+        $profile = [];
+        $count = max(0, (int) $this->f($params, 'points', 0.0));
+        for ($i = 0; $i < $count; $i++) {
+            $profile[] = new Vec2(
+                max(0.0, $this->f($params, "p{$i}_r", 0.0)),
+                $this->f($params, "p{$i}_y", 0.0),
+            );
         }
 
-        $normals = $mesh->normals;
-        $mirroredNormals = [];
-        for ($i = 0, $n = count($normals); $i < $n; $i += 3) {
-            $mirroredNormals[] = $axis === 0 ? -$normals[$i] : $normals[$i];
-            $mirroredNormals[] = $axis === 1 ? -$normals[$i + 1] : $normals[$i + 1];
-            $mirroredNormals[] = $axis === 2 ? -$normals[$i + 2] : $normals[$i + 2];
+        return LatheMesh::generate($profile, (int) $this->f($params, 'segments', 16.0));
+    }
+
+    /**
+     * @param array<string, mixed> $params
+     */
+    private function buildEllipseLoft(array $params): MeshData
+    {
+        $rings = [];
+        $count = max(0, (int) $this->f($params, 'rings', 0.0));
+        for ($i = 0; $i < $count; $i++) {
+            $xp = max(0.0, $this->f($params, "r{$i}_xp", 0.5));
+            $xn = max(0.0, $this->f($params, "r{$i}_xn", $xp));
+            $zp = max(0.0, $this->f($params, "r{$i}_zp", $xp));
+            $zn = max(0.0, $this->f($params, "r{$i}_zn", $zp));
+            $rings[] = new LoftRing(
+                $this->f($params, "r{$i}_y", (float) $i),
+                $xp,
+                $xn,
+                $zp,
+                $zn,
+                $this->f($params, "r{$i}_cx", 0.0),
+                $this->f($params, "r{$i}_cz", 0.0),
+            );
         }
 
-        // Reflection flips triangle orientation; swap two indices per triangle
-        // so the mirrored copy faces outward again.
-        $indices = $mesh->indices;
-        $mirroredIndices = [];
-        for ($i = 0, $n = count($indices); $i < $n; $i += 3) {
-            $mirroredIndices[] = $indices[$i];
-            $mirroredIndices[] = $indices[$i + 2];
-            $mirroredIndices[] = $indices[$i + 1];
-        }
-
-        $mirror = new MeshData($mirroredVertices, $mirroredNormals, $mesh->uvs, $mirroredIndices);
-
-        return MeshData::merge($mesh, $mirror);
+        return EllipseLoftMesh::generate(
+            $rings,
+            (int) $this->f($params, 'segments', 16.0),
+            $this->f($params, 'capBottom', 0.0),
+            $this->f($params, 'capTop', 0.0),
+            (int) $this->f($params, 'capSteps', 4.0),
+        );
     }
 
     /**
