@@ -1430,6 +1430,59 @@ $audio->getChannelDuck(AudioChannel::Music);   // current dB incl. ramp
   engine loop (tools, tests) calls it itself; fade 0 applies immediately.
 - Ducking Master lowers every channel.
 
+## Spatial audio — 3D sources, listener, pitch, pan, pause
+
+`AudioManager` positions voices in the world itself; the backend only gets a
+final volume and a listener-space unit direction. One volume formula for all:
+`voice × channel × master × ducks × distance gain`.
+
+```php
+$id = $audio->playAt('pump', $pos, AudioChannel::SFX, 0.8, loop: true,
+    attenuation: new Attenuation(2.0, 40.0, AttenuationCurve::Inverse), pitch: 0.9);
+$audio->playWith('blip', AudioChannel::UI, new PlaybackOptions(0.5, pitch: 1.2, pan: -0.3));
+$audio->setPlaybackPosition($id, $movedPos);       // moving source – call when it moves
+$audio->setListener(AudioListener::fromActiveCamera($world)); // or add AudioListenerSystem
+$audio->setDefaultAttenuation(new Attenuation(1.0, 60.0));
+$audio->pause($id); $audio->pauseChannel(AudioChannel::Music);
+$audio->pauseAll(AudioChannel::UI);                // pause menu: everything but UI
+$audio->resumeAll();                               // own pause() survives
+```
+
+- `Spatial\Attenuation(min, max, curve, rolloff)`: 1 up to `min`, 0 from `max`;
+  `Linear`, `Inverse`, `Exponential` (both tapered to reach exactly 0 at `max`),
+  `None` (pan only). `gain($d)` is pure arithmetic.
+- `Spatial\AudioListener(position, forward, up)` or `fromRotation($pos, $quat)`
+  (camera convention: forward = rot·(0,0,−1)); `fromActiveCamera($world)` = first
+  active `Camera3DComponent` + `eyeOffset`, no render interpolation.
+  `System\AudioListenerSystem($engine->audio)` does that every tick (opt-in).
+  Listener space: +X right, +Y up, −Z forward.
+- `setListener()` and `setPlaybackPosition()` re-attenuate and re-pan at once;
+  out of range = volume 0, the voice keeps running. `setPlaybackPosition()` on a
+  2D voice makes it 3D with the default roll-off.
+- Pitch is a rate factor, fixed for the playback (php-vio sets it only at
+  start). Pan (−1…+1) is for unpositioned voices, also start-only; positioned
+  voices pan by direction.
+- Pause reasons stack: own, channel, Master. A voice plays only when none
+  holds it; voices started on a paused channel start paused (silently).
+  `isPlaying()` stays true while paused – a paused voice is never swept.
+- Backends: `SpatialAudioBackendInterface` (`playVoice`, `setDirection`, `pause`,
+  `resume`, `isPaused`) – implemented by `VioAudioBackend`, `NullAudioBackend`
+  and `SimulatedAudioBackend`. Other backends (php-glfw, a game's own) still
+  get distance attenuation through `setVolume()`; pitch/pan are dropped and
+  pause is emulated by muting (the voice runs on).
+- `SimulatedAudioBackend` is the test backend: voices stay alive, `voice($id)`
+  shows volume, pitch, pan, direction, paused; `setClipDuration()` +
+  `advance($dt)` end one-shots (time × pitch, paused voices stand still);
+  `finish($id)`, `failPlays`.
+- php-vio (miniaudio) specifics, handled in `VioAudioBackend`: every sound is
+  spatialised and php-vio exposes neither min/max distance nor the attenuation
+  model, so the native listener is **never moved** (`vio_audio_listener` would
+  attenuate every 2D sound by its distance to the origin). A 3D voice is put on
+  the unit sphere around the origin in listener space – miniaudio's gain is 1
+  there, only its direction panning acts. That panning lowers both channels
+  (0.854 ahead, 0.2 floor behind); `directionCompensation()` lifts the louder
+  channel back to the voice's level. No Doppler.
+
 ## Stem player — layered music against run-time marks
 
 `StemPlayer` plays pre-rendered stems (ids → file paths) that come and go as
@@ -1482,6 +1535,13 @@ deterministic: same input, same bytes.
 | `Dsp\Loudness` | ITU-R BS.1770 integrated loudness (LUFS), stereo and mono |
 | `Dsp\Limiter` | Offline look-ahead peak limiter: `new Limiter(ceilingDb, lookaheadMs, releaseMs, sampleRate, truePeak)`, `processMono()` / `processStereo()` / `process(list<list<float>>)` (linked channels), `gains()` for the curve. Linear ramps: a full gain swing takes `lookaheadMs` down (complete when the peak arrives) and `releaseMs` back up. No sample ends above the ceiling; a buffer that never exceeds it comes back bit-identical. `truePeak` adds a 4× Catmull-Rom inter-sample estimate (an approximation, ~0.1 %) |
 | `Dsp\GainFollower` | Stateful gain that follows a dB target on a linear (amplitude) ramp with separate down/up speeds: `new GainFollower(downSeconds, upSeconds, swingDb)` – the times are for a full 0 dB ↔ `swingDb` swing, so they are rates; a target change mid-ramp continues from the current gain. `step(dt, ?targetDb)` per frame, `envelope(frames, sampleRate, Closure(t): targetDb, block)` → control gains at every block boundary (value before the step, as live), `expand()` → per sample. `FLOOR_DB` (−80) silences. The one class here that is also meant for per-frame use (pure state, no audio) |
+| `Dsp\Biquad` | RBJ cookbook biquad: `lowPass`/`highPass(hz, q)`, `bandPass(hz, q)` (0 dB peak), `notch`, `peaking(hz, db, q)`, `lowShelf`/`highShelf(hz, db, slope)`; stateful `process()` (blocks join bit-identically), `processSample()`, `reset()`, analytic `responseDb(hz)` |
+| `Dsp\CombFilter` | Delay-line comb: feedback (with optional damping low-pass in the loop, Freeverb style) or feed-forward; `fromSeconds()`, `feedbackForDecay(delay, rt60)`; `processDelayed()` is the Freeverb comb step |
+| `Dsp\AllpassFilter` | True Schroeder all-pass (flat magnitude, energy-preserving) diffuser |
+| `Dsp\Reverb` | Freeverb-style: 8 damped combs ∥ → 4 all-passes per channel, stereo spread; `roomSize`, `damping`, `wet`, `dry`, `width`, `preDelaySeconds`; `processMono()`/`processStereo()` with `tailSeconds` of ring-out, fresh state per call |
+| `Dsp\Envelope` | ADSR (`ar()` for attack/release) → per-sample gains: `render(gateSeconds)`, `apply(pcm, gate)`; `curve` > 1 bends segments exponentially; a short gate releases from the current level (no jump) |
+| `Dsp\BubbleGenerator` | Granular bubbles: Poisson-scattered short sine glissandi (log-uniform start Hz, glide up, exponential decay, click-free edges); density constant or `Closure(t)`; seeded (`Xoshiro256StarStar`), deterministic; `wrap` folds overflowing bubbles to the start for loops; `schedule()` lists the bubbles. Not normalised |
+| `Dsp\LoopCrossfade` | Seamless loops: `make(pcm, crossfade, equalPower)` folds the last c samples over the first (loop is n − c long), `makeSeconds()`, `makeStereo()`, `seamRoughness()` (seam step ÷ largest inner step) |
 | `Codec\WavReader` | RIFF/WAVE → mono floats at a target rate: 16/24-bit PCM, 32-bit float, any channel count, `WAVE_FORMAT_EXTENSIBLE` |
 | `Codec\WavWriter` | 16-bit PCM RIFF header, stereo interleave |
 | `Codec\FlacWriter` | Lossless FLAC (fixed predictors, Rice coding, stereo decorrelation), stereo and mono, STREAMINFO MD5; php-vio decodes it |
