@@ -4,7 +4,11 @@ declare(strict_types=1);
 
 namespace PHPolygon\Audio;
 
-class NullAudioBackend implements AudioBackendInterface
+/**
+ * Silent backend: every play gets an id and finishes at once. For headless
+ * runs; tests that need voices to stay alive use {@see SimulatedAudioBackend}.
+ */
+class NullAudioBackend implements SpatialAudioBackendInterface
 {
     private float $masterVolume = 1.0;
     private int $nextPlaybackId = 1;
@@ -17,6 +21,28 @@ class NullAudioBackend implements AudioBackendInterface
     public function play(string $clipId, float $volume = 1.0, bool $loop = false): int
     {
         return $this->nextPlaybackId++;
+    }
+
+    public function playVoice(
+        string $clipId,
+        float $volume = 1.0,
+        bool $loop = false,
+        float $pitch = 1.0,
+        float $pan = 0.0,
+        ?array $direction = null,
+    ): int {
+        return $this->nextPlaybackId++;
+    }
+
+    public function setDirection(int $playbackId, float $x, float $y, float $z): void {}
+
+    public function pause(int $playbackId): void {}
+
+    public function resume(int $playbackId): void {}
+
+    public function isPaused(int $playbackId): bool
+    {
+        return false;
     }
 
     public function stop(int $playbackId): void {}

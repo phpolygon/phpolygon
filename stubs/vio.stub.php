@@ -448,14 +448,26 @@ function vio_text(VioContext $ctx, VioFont $font, string $text, float $x, float 
 /** @return VioSound|false */
 function vio_audio_load(string $path): VioSound|false {}
 
-/** @param array<string, mixed> $options Keys: volume (float), loop (bool) */
+/** @param array<string, mixed> $options Keys: volume (float), loop (bool), pan (float), pitch (float) */
 function vio_audio_play(VioSound $sound, array $options = []): void {}
 
 function vio_audio_stop(VioSound $sound): void {}
 
+/** Pause without rewinding. */
+function vio_audio_pause(VioSound $sound): void {}
+
+/** Continue a paused sound. */
+function vio_audio_resume(VioSound $sound): void {}
+
 function vio_audio_volume(VioSound $sound, float $volume): void {}
 
 function vio_audio_playing(VioSound $sound): bool {}
+
+/** 3D position of a sound (miniaudio spatializer, absolute to the listener). */
+function vio_audio_position(VioSound $sound, float $x, float $y, float $z): void {}
+
+/** Listener position and facing direction (up is fixed to +Y). */
+function vio_audio_listener(float $x, float $y, float $z, float $fx, float $fy, float $fz): void {}
 
 /** Encoded bytes (any format vio_audio_load reads) → sound. */
 function vio_audio_load_data(string $data): VioSound|false {}

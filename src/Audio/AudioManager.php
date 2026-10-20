@@ -4,6 +4,10 @@ declare(strict_types=1);
 
 namespace PHPolygon\Audio;
 
+use PHPolygon\Audio\Spatial\Attenuation;
+use PHPolygon\Audio\Spatial\AudioListener;
+use PHPolygon\Math\Vec3;
+
 class AudioManager
 {
     private AudioBackendInterface $backend;
@@ -50,6 +54,30 @@ class AudioManager
     /** @var array<string, AudioClip> id => clip */
     private array $clips = [];
 
+    /**
+     * 3D voices: world position, roll-off and the distance gain last computed.
+     *
+     * @var array<int, array{position: Vec3, attenuation: Attenuation, gain: float}>
+     */
+    private array $spatialPlaybacks = [];
+
+    private AudioListener $listener;
+    private Attenuation $defaultAttenuation;
+
+    /** @var array<int, true> playbacks paused on their own */
+    private array $pausedPlaybacks = [];
+
+    /** @var array<string, true> paused channels (Master = every channel) */
+    private array $pausedChannels = [];
+
+    /**
+     * Voices whose backend pause is in effect (natively, or emulated by muting
+     * on a backend without {@see SpatialAudioBackendInterface}).
+     *
+     * @var array<int, true>
+     */
+    private array $heldPlaybacks = [];
+
     /** @var int|null Current music playback ID (only one music track at a time) */
     private ?int $currentMusicPlaybackId = null;
     private ?string $currentMusicClipId = null;
@@ -57,6 +85,8 @@ class AudioManager
     public function __construct(?AudioBackendInterface $backend = null)
     {
         $this->backend = $backend ?? new NullAudioBackend();
+        $this->listener = new AudioListener();
+        $this->defaultAttenuation = new Attenuation();
 
         foreach (AudioChannel::cases() as $channel) {
             $this->channelVolumes[$channel->value] = 1.0;
@@ -142,8 +172,54 @@ class AudioManager
      */
     public function playOnChannel(string $clipId, AudioChannel $channel, float $volume = 1.0, bool $loop = false): int
     {
-        $effectiveVolume = $this->calculateEffectiveVolume($channel, $volume);
-        $playbackId = $this->backend->play($clipId, $effectiveVolume, $loop);
+        return $this->playWith($clipId, $channel, new PlaybackOptions($volume, $loop));
+    }
+
+    /**
+     * Play a clip with pitch, pan, a world position and roll-off (see
+     * {@see PlaybackOptions}). A positioned voice is attenuated by its
+     * distance to the listener and panned by its direction; it follows
+     * {@see setListener()} and {@see setPlaybackPosition()}.
+     *
+     * Pitch and pan need a {@see SpatialAudioBackendInterface} backend; other
+     * backends play the clip without them. A voice started on a paused
+     * channel starts paused.
+     */
+    public function playWith(string $clipId, AudioChannel $channel, PlaybackOptions $options): int
+    {
+        $spatial = null;
+        $direction = null;
+        if ($options->position !== null) {
+            $attenuation = $options->attenuation ?? $this->defaultAttenuation;
+            [$gain, $direction] = $this->spatialize($options->position, $attenuation);
+            $spatial = [
+                'position' => new Vec3($options->position->x, $options->position->y, $options->position->z),
+                'attenuation' => $attenuation,
+                'gain' => $gain,
+            ];
+        }
+
+        $nativePause = $this->backend instanceof SpatialAudioBackendInterface;
+        $startPaused = $this->isChannelPausedFor($channel);
+        // A native pause is set right after the start: start silent so
+        // nothing leaks, the level is restored once the voice is held.
+        $volume = $startPaused && $nativePause
+            ? 0.0
+            : $this->calculateEffectiveVolume($channel, $options->volume) * ($spatial['gain'] ?? 1.0);
+        $plain = $spatial === null && $options->pitch === 1.0 && $options->pan === 0.0;
+
+        if ($this->backend instanceof SpatialAudioBackendInterface && !$plain) {
+            $playbackId = $this->backend->playVoice(
+                $clipId,
+                $volume,
+                $options->loop,
+                $options->pitch,
+                $spatial === null ? $options->pan : 0.0,
+                $direction,
+            );
+        } else {
+            $playbackId = $this->backend->play($clipId, $volume, $options->loop);
+        }
         if ($playbackId === 0) {
             return 0;
         }
@@ -156,9 +232,191 @@ class AudioManager
         }
 
         $this->playbackChannels[$playbackId] = $channel;
-        $this->playbackVolumes[$playbackId] = $volume;
+        $this->playbackVolumes[$playbackId] = $options->volume;
+        if ($spatial !== null) {
+            $this->spatialPlaybacks[$playbackId] = $spatial;
+        }
+        if ($startPaused) {
+            $this->syncPause($playbackId);
+            if ($nativePause) {
+                $this->applyVolume($playbackId);
+            }
+        }
 
         return $playbackId;
+    }
+
+    /**
+     * Play a clip as a 3D source at $position.
+     */
+    public function playAt(
+        string $clipId,
+        Vec3 $position,
+        AudioChannel $channel = AudioChannel::SFX,
+        float $volume = 1.0,
+        bool $loop = false,
+        ?Attenuation $attenuation = null,
+        float $pitch = 1.0,
+    ): int {
+        return $this->playWith($clipId, $channel, PlaybackOptions::at($position, $volume, $loop, $attenuation, $pitch));
+    }
+
+    // ---- Listener and 3D sources ----------------------------------------
+
+    /**
+     * Move the ears. Every 3D voice is re-attenuated and re-panned at once.
+     * {@see AudioListener::fromActiveCamera()} and
+     * {@see \PHPolygon\System\AudioListenerSystem} take the pose from the
+     * active camera.
+     */
+    public function setListener(AudioListener $listener): void
+    {
+        $this->listener = $listener;
+        foreach ($this->spatialPlaybacks as $playbackId => $_) {
+            $this->updateSpatial($playbackId);
+        }
+    }
+
+    public function getListener(): AudioListener
+    {
+        return $this->listener;
+    }
+
+    /** Roll-off for 3D voices started without their own. */
+    public function setDefaultAttenuation(Attenuation $attenuation): void
+    {
+        $this->defaultAttenuation = $attenuation;
+    }
+
+    public function getDefaultAttenuation(): Attenuation
+    {
+        return $this->defaultAttenuation;
+    }
+
+    /**
+     * Move a 3D voice (a moving source) – call it whenever the source moves.
+     * A voice started without a position becomes a 3D voice with the
+     * default roll-off.
+     */
+    public function setPlaybackPosition(int $playbackId, Vec3 $position): void
+    {
+        if (!isset($this->playbackChannels[$playbackId])) {
+            return;
+        }
+        $copy = new Vec3($position->x, $position->y, $position->z);
+        if (isset($this->spatialPlaybacks[$playbackId])) {
+            $this->spatialPlaybacks[$playbackId]['position'] = $copy;
+        } else {
+            $this->spatialPlaybacks[$playbackId] = [
+                'position' => $copy,
+                'attenuation' => $this->defaultAttenuation,
+                'gain' => 1.0,
+            ];
+        }
+        $this->updateSpatial($playbackId);
+    }
+
+    public function getPlaybackPosition(int $playbackId): ?Vec3
+    {
+        $p = $this->spatialPlaybacks[$playbackId]['position'] ?? null;
+        return $p !== null ? new Vec3($p->x, $p->y, $p->z) : null;
+    }
+
+    public function setPlaybackAttenuation(int $playbackId, Attenuation $attenuation): void
+    {
+        if (!isset($this->spatialPlaybacks[$playbackId])) {
+            return;
+        }
+        $this->spatialPlaybacks[$playbackId]['attenuation'] = $attenuation;
+        $this->updateSpatial($playbackId);
+    }
+
+    /** Distance gain of a voice right now (1.0 for unpositioned voices). */
+    public function getPlaybackDistanceGain(int $playbackId): float
+    {
+        return $this->spatialPlaybacks[$playbackId]['gain'] ?? 1.0;
+    }
+
+    /** True when the voice is a 3D source. */
+    public function isSpatial(int $playbackId): bool
+    {
+        return isset($this->spatialPlaybacks[$playbackId]);
+    }
+
+    // ---- Pause -----------------------------------------------------------
+
+    /**
+     * Pause one voice. Pauses stack: a voice plays again only when neither it,
+     * its channel nor Master is paused.
+     */
+    public function pause(int $playbackId): void
+    {
+        if (!isset($this->playbackChannels[$playbackId])) {
+            return;
+        }
+        $this->pausedPlaybacks[$playbackId] = true;
+        $this->syncPause($playbackId);
+    }
+
+    public function resume(int $playbackId): void
+    {
+        if (!isset($this->pausedPlaybacks[$playbackId])) {
+            return;
+        }
+        unset($this->pausedPlaybacks[$playbackId]);
+        $this->syncPause($playbackId);
+    }
+
+    /** True when the voice is held – by itself, its channel or Master. */
+    public function isPaused(int $playbackId): bool
+    {
+        return isset($this->heldPlaybacks[$playbackId]);
+    }
+
+    /** Pause a channel; Master pauses every channel. Voices started on it start paused. */
+    public function pauseChannel(AudioChannel $channel): void
+    {
+        $this->pausedChannels[$channel->value] = true;
+        $this->syncChannelPause($channel);
+    }
+
+    public function resumeChannel(AudioChannel $channel): void
+    {
+        if (!isset($this->pausedChannels[$channel->value])) {
+            return;
+        }
+        unset($this->pausedChannels[$channel->value]);
+        $this->syncChannelPause($channel);
+    }
+
+    public function isChannelPaused(AudioChannel $channel): bool
+    {
+        return isset($this->pausedChannels[$channel->value]);
+    }
+
+    /**
+     * Pause every channel except $keep (e.g. keep UI for a pause menu).
+     */
+    public function pauseAll(AudioChannel ...$keep): void
+    {
+        foreach (AudioChannel::cases() as $channel) {
+            if ($channel === AudioChannel::Master || in_array($channel, $keep, true)) {
+                continue;
+            }
+            $this->pausedChannels[$channel->value] = true;
+        }
+        foreach ($this->playbackChannels as $playbackId => $_) {
+            $this->syncPause($playbackId);
+        }
+    }
+
+    /** Lift every channel pause (Master included). Voices paused on their own stay paused. */
+    public function resumeAll(): void
+    {
+        $this->pausedChannels = [];
+        foreach ($this->playbackChannels as $playbackId => $_) {
+            $this->syncPause($playbackId);
+        }
     }
 
     /**
@@ -171,8 +429,11 @@ class AudioManager
         if (isset($this->playbackChannels[$playbackId])) {
             $this->playbackVolumes[$playbackId] = $volume;
         }
-        $effective = $this->calculateEffectiveVolume($channel, $volume);
-        $this->backend->setVolume($playbackId, $effective);
+        if (isset($this->playbackChannels[$playbackId])) {
+            $this->applyVolume($playbackId);
+            return;
+        }
+        $this->backend->setVolume($playbackId, $this->calculateEffectiveVolume($channel, $volume));
     }
 
     /**
@@ -181,7 +442,7 @@ class AudioManager
     public function stop(int $playbackId): void
     {
         $this->backend->stop($playbackId);
-        unset($this->playbackChannels[$playbackId], $this->playbackVolumes[$playbackId]);
+        $this->forgetPlayback($playbackId);
     }
 
     /**
@@ -192,7 +453,7 @@ class AudioManager
         foreach ($this->playbackChannels as $playbackId => $ch) {
             if ($ch === $channel) {
                 $this->backend->stop($playbackId);
-                unset($this->playbackChannels[$playbackId], $this->playbackVolumes[$playbackId]);
+                $this->forgetPlayback($playbackId);
             }
         }
 
@@ -210,6 +471,9 @@ class AudioManager
         $this->backend->stopAll();
         $this->playbackChannels = [];
         $this->playbackVolumes = [];
+        $this->spatialPlaybacks = [];
+        $this->pausedPlaybacks = [];
+        $this->heldPlaybacks = [];
         $this->pruneThreshold = self::PRUNE_MIN_THRESHOLD;
         $this->currentMusicPlaybackId = null;
         $this->currentMusicClipId = null;
@@ -464,9 +728,99 @@ class AudioManager
                 $this->forgetPlayback($playbackId);
                 continue;
             }
-            $voice = $this->playbackVolumes[$playbackId] ?? 1.0;
-            $this->backend->setVolume($playbackId, $this->calculateEffectiveVolume($ch, $voice));
+            $this->applyVolume($playbackId);
         }
+    }
+
+    /**
+     * Push a tracked voice's full volume (voice × channel × master × ducks ×
+     * distance) to the backend; 0 while a pause is emulated by muting.
+     */
+    private function applyVolume(int $playbackId): void
+    {
+        $channel = $this->playbackChannels[$playbackId] ?? null;
+        if ($channel === null) {
+            return;
+        }
+        if (isset($this->heldPlaybacks[$playbackId]) && !$this->backend instanceof SpatialAudioBackendInterface) {
+            $this->backend->setVolume($playbackId, 0.0);
+            return;
+        }
+        $voice = $this->playbackVolumes[$playbackId] ?? 1.0;
+        $gain = $this->spatialPlaybacks[$playbackId]['gain'] ?? 1.0;
+        $this->backend->setVolume($playbackId, $this->calculateEffectiveVolume($channel, $voice) * $gain);
+    }
+
+    /**
+     * Distance gain and listener-space unit direction of a world position.
+     *
+     * @return array{float, array{float, float, float}}
+     */
+    private function spatialize(Vec3 $position, Attenuation $attenuation): array
+    {
+        $local = $this->listener->toLocal($position);
+        $distance = $local->length();
+        $gain = $attenuation->gain($distance);
+        if ($distance <= 1e-6) {
+            return [$gain, [0.0, 0.0, 0.0]];
+        }
+        return [$gain, [$local->x / $distance, $local->y / $distance, $local->z / $distance]];
+    }
+
+    private function updateSpatial(int $playbackId): void
+    {
+        $spatial = $this->spatialPlaybacks[$playbackId] ?? null;
+        if ($spatial === null) {
+            return;
+        }
+        [$gain, $direction] = $this->spatialize($spatial['position'], $spatial['attenuation']);
+        $this->spatialPlaybacks[$playbackId]['gain'] = $gain;
+        if ($this->backend instanceof SpatialAudioBackendInterface) {
+            $this->backend->setDirection($playbackId, $direction[0], $direction[1], $direction[2]);
+        }
+        $this->applyVolume($playbackId);
+    }
+
+    private function isChannelPausedFor(AudioChannel $channel): bool
+    {
+        return isset($this->pausedChannels[$channel->value]) || isset($this->pausedChannels[AudioChannel::Master->value]);
+    }
+
+    private function syncChannelPause(AudioChannel $channel): void
+    {
+        foreach ($this->playbackChannels as $playbackId => $ch) {
+            if ($ch === $channel || $channel === AudioChannel::Master) {
+                $this->syncPause($playbackId);
+            }
+        }
+    }
+
+    /** Bring the backend's pause state of a voice in line with its pause reasons. */
+    private function syncPause(int $playbackId): void
+    {
+        $channel = $this->playbackChannels[$playbackId] ?? null;
+        if ($channel === null) {
+            return;
+        }
+        $want = isset($this->pausedPlaybacks[$playbackId]) || $this->isChannelPausedFor($channel);
+        $held = isset($this->heldPlaybacks[$playbackId]);
+        if ($want === $held) {
+            return;
+        }
+        if ($want) {
+            $this->heldPlaybacks[$playbackId] = true;
+        } else {
+            unset($this->heldPlaybacks[$playbackId]);
+        }
+        if ($this->backend instanceof SpatialAudioBackendInterface) {
+            if ($want) {
+                $this->backend->pause($playbackId);
+            } else {
+                $this->backend->resume($playbackId);
+            }
+            return;
+        }
+        $this->applyVolume($playbackId);
     }
 
     /**
@@ -483,6 +837,12 @@ class AudioManager
 
     private function forgetPlayback(int $playbackId): void
     {
-        unset($this->playbackChannels[$playbackId], $this->playbackVolumes[$playbackId]);
+        unset(
+            $this->playbackChannels[$playbackId],
+            $this->playbackVolumes[$playbackId],
+            $this->spatialPlaybacks[$playbackId],
+            $this->pausedPlaybacks[$playbackId],
+            $this->heldPlaybacks[$playbackId],
+        );
     }
 }
