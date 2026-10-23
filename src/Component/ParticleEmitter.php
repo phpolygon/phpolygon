@@ -93,6 +93,53 @@ class ParticleEmitter extends AbstractComponent
     #[Property]
     public ParticleSimulation $simulation = ParticleSimulation::Auto;
 
+    /** How each particle's mesh is oriented ({@see ParticleRenderMode}). */
+    #[Property]
+    public ParticleRenderMode $renderMode = ParticleRenderMode::Billboard;
+
+    /**
+     * {@see ParticleRenderMode::Stretched} only: seconds of travel one streak
+     * covers – its length is `size + speed × stretch`. 0 = no stretch.
+     */
+    #[Property]
+    public float $stretch = 0.0;
+
+    /**
+     * Extra horizontal launch speed (m/s) outward in a random direction about
+     * the world Y axis – rings, umbrellas, crowns. Added to `$velocity` and
+     * its jitter. 0 = off.
+     */
+    #[Property]
+    public float $radialSpeed = 0.0;
+
+    /**
+     * With radial shapes: > 0 snaps the random direction to this many evenly
+     * spaced spokes (the first along +X) – separate arcs of a fountain, the
+     * rays of a starburst. 0 = any direction.
+     */
+    #[Property]
+    public int $radialSpokes = 0;
+
+    /**
+     * Particles start on a horizontal circle of this radius around the
+     * emitter (m), in the same direction as `$radialSpeed`. 0 = at the emitter.
+     */
+    #[Property]
+    public float $spawnRadius = 0.0;
+
+    /** Random ± spread of `$spawnRadius` (m) – turns the circle into a band. */
+    #[Property]
+    public float $spawnRadiusJitter = 0.0;
+
+    /**
+     * Spawn only while the camera is within this distance of the emitter (m);
+     * further away live particles run out and nothing new is born. 0 = always.
+     * Measured against the camera of the last rendered frame; before any frame
+     * was rendered the emitter spawns.
+     */
+    #[Property]
+    public float $activeDistance = 0.0;
+
     /**
      * Live particles. Each entry: [px, py, pz, vx, vy, vz, age, lifetime].
      * Nested rather than parallel because PHP arrays are fast at this
@@ -130,8 +177,22 @@ class ParticleEmitter extends AbstractComponent
         ?Color $endColor = null,
         int $maxParticles = 256,
         ParticleSimulation $simulation = ParticleSimulation::Auto,
+        ParticleRenderMode $renderMode = ParticleRenderMode::Billboard,
+        float $stretch = 0.0,
+        float $radialSpeed = 0.0,
+        float $spawnRadius = 0.0,
+        float $spawnRadiusJitter = 0.0,
+        float $activeDistance = 0.0,
+        int $radialSpokes = 0,
     ) {
+        $this->radialSpokes   = $radialSpokes;
         $this->simulation     = $simulation;
+        $this->renderMode     = $renderMode;
+        $this->stretch        = $stretch;
+        $this->radialSpeed    = $radialSpeed;
+        $this->spawnRadius    = $spawnRadius;
+        $this->spawnRadiusJitter = $spawnRadiusJitter;
+        $this->activeDistance = $activeDistance;
         $this->meshId         = $meshId;
         $this->materialId     = $materialId;
         $this->rate           = $rate;

@@ -5,8 +5,11 @@ declare(strict_types=1);
 namespace PHPolygon\Tests\System;
 
 use PHPolygon\Component\ParticleEmitter;
+use PHPolygon\Component\ParticleRenderMode;
 use PHPolygon\Math\Vec3;
 use PHPolygon\System\GpuParticleBaker;
+use PHPolygon\System\ParticleOrientation;
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\Attributes\RequiresPhpExtension;
 use PHPUnit\Framework\TestCase;
 
@@ -211,6 +214,94 @@ class GpuParticleBakerTest extends TestCase
         }
     }
 
+    /** @return array<string, array{ParticleRenderMode}> */
+    public static function renderModes(): array
+    {
+        return [
+            'billboard' => [ParticleRenderMode::Billboard],
+            'stretched' => [ParticleRenderMode::Stretched],
+            'world-aligned' => [ParticleRenderMode::WorldAligned],
+        ];
+    }
+
+    #[DataProvider('renderModes')]
+    public function testStepMatchesTheCpuMatrixOfEveryRenderMode(ParticleRenderMode $mode): void
+    {
+        $ctx = $this->ctx;
+        self::assertNotNull($ctx);
+        self::assertTrue(GpuParticleBaker::warm($ctx));
+
+        $emitter = new ParticleEmitter(
+            gravity: new Vec3(0.0, -9.81, 0.0),
+            startSize: 0.08,
+            endSize: 0.03,
+            renderMode: $mode,
+            stretch: 0.06,
+        );
+        $cam = new Vec3(3.0, 4.0, 9.0);
+        $dt = 0.016;
+        $n = 200;
+        $seed = $this->seed($n);
+        // One particle at rest and one flying straight at the camera: the
+        // stretched mode falls back to a billboard for both.
+        $seed[0] = [0.0, 1.0, 0.0, 0.0, 9.81 * $dt, 0.0, 0.1, 2.0];
+        $seed[1] = [0.0, 1.0, 0.0, 3.0, 3.0 + 9.81 * $dt, 9.0, 0.1, 2.0];
+
+        $state = GpuParticleBaker::createState($ctx, $seed, 256);
+        self::assertNotNull($state);
+        $packed = GpuParticleBaker::step($ctx, $state, $emitter, $dt, $cam, true);
+        self::assertNotNull($packed);
+        $gpu = self::floats($packed);
+
+        $maxErr = 0.0;
+        for ($i = 0; $i < $n; $i++) {
+            [$px, $py, $pz, $vx, $vy, $vz, $age, $life] = $seed[$i];
+            $age += $dt;
+            $cpu = array_fill(0, 16, 0.0);
+            if ($age < $life) {
+                $vy += $emitter->gravity->y * $dt;
+                $px += $vx * $dt; $py += $vy * $dt; $pz += $vz * $dt;
+                $size = $emitter->startSize + ($emitter->endSize - $emitter->startSize) * ($age / $life);
+                ParticleOrientation::write($cpu, 0, $mode->code(), $px, $py, $pz, $vx, $vy, $vz, $size, $emitter->stretch, $cam->x, $cam->y, $cam->z, true);
+            }
+            for ($k = 0; $k < 16; $k++) {
+                $maxErr = max($maxErr, abs($cpu[$k] - $gpu[$i * 16 + $k]));
+            }
+        }
+        self::assertLessThan(1e-3, $maxErr, "{$mode->value}: GPU matrix diverged from CPU by {$maxErr}");
+    }
+
+    #[DataProvider('renderModes')]
+    public function testBillboardKernelMatchesTheCpuMatrixOfEveryRenderMode(ParticleRenderMode $mode): void
+    {
+        $ctx = $this->ctx;
+        self::assertNotNull($ctx);
+        if (!GpuParticleBaker::isReadbackFree($ctx)) {
+            self::markTestSkipped('no vertex storage – the billboard kernel is not used here');
+        }
+        self::assertTrue(GpuParticleBaker::warm($ctx));
+
+        $emitter = new ParticleEmitter(startSize: 0.1, endSize: 0.1, renderMode: $mode, stretch: 0.05, maxParticles: 64);
+        $emitter->particles = array_slice($this->seed(64), 0, 64);
+        $cam = new Vec3(-2.0, 6.0, 12.0);
+
+        $buffer = GpuParticleBaker::tryBillboardStep($ctx, $emitter, $cam);
+        self::assertNotNull($buffer);
+        $bytes = vio_storage_buffer_read($ctx, $buffer);
+        self::assertIsString($bytes);
+        $gpu = self::floats($bytes);
+
+        $maxErr = 0.0;
+        foreach ($emitter->particles as $i => $p) {
+            $cpu = array_fill(0, 16, 0.0);
+            ParticleOrientation::write($cpu, 0, $mode->code(), $p[0], $p[1], $p[2], $p[3], $p[4], $p[5], 0.1, 0.05, $cam->x, $cam->y, $cam->z, true);
+            for ($k = 0; $k < 16; $k++) {
+                $maxErr = max($maxErr, abs($cpu[$k] - $gpu[$i * 16 + $k]));
+            }
+        }
+        self::assertLessThan(1e-3, $maxErr, "{$mode->value}: billboard kernel diverged from CPU by {$maxErr}");
+    }
+
     /** @return list<float> */
     private static function floats(string $bytes): array
     {
@@ -226,7 +317,8 @@ class GpuParticleBakerTest extends TestCase
     /**
      * CPU reference: integrate one step (semi-implicit Euler) then build the
      * camera-facing billboard matrix from the post-integrate state — identical
-     * to ParticleSystem::integrate() + writeBillboardMatrix(). Null / dead ->
+     * to ParticleSystem::integrate() + ParticleOrientation::write() in billboard
+     * mode, written out independently. Null / dead ->
      * zero matrix.
      *
      * @param array{0:float,1:float,2:float,3:float,4:float,5:float,6:float,7:float}|null $p

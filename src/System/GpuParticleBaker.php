@@ -22,9 +22,9 @@ use PHPolygon\Math\Vec3;
  * caller falls back to the canonical CPU path in
  * {@see \PHPolygon\System\ParticleSystem}.
  *
- * Keep the integration and billboard math numerically identical to
+ * Keep the integration and matrix math numerically identical to
  * {@see \PHPolygon\System\ParticleSystem::integrate()} /
- * {@see \PHPolygon\System\ParticleSystem::writeBillboardMatrix()} so an A/B
+ * {@see \PHPolygon\System\ParticleOrientation::write()} so an A/B
  * comparison stays clean. Particles are purely visual, so float divergence
  * between the CPU and GPU paths is acceptable.
  *
@@ -123,18 +123,100 @@ final class GpuParticleBaker
     private static int $descriptorBlocksUsed = 0;
 
     /**
+     * The instance matrix of one particle in GLSL — a line-by-line port of
+     * {@see ParticleOrientation::write()} (Billboard / Stretched /
+     * WorldAligned). Spliced into {@see SHADER} and {@see BILLBOARD_SHADER}
+     * after their Params block, whose `camx/camy/camz`, `hasCam`, `mode` and
+     * `stretch` it reads; it writes 16 floats of `m` from `o`.
+     */
+    public const MATRIX_GLSL = <<<'GLSL'
+
+        void writeAxisAligned(uint o, float px, float py, float pz, float size) {
+            m[o+0u]=size; m[o+1u]=0.0;  m[o+2u]=0.0;   m[o+3u]=0.0;
+            m[o+4u]=0.0;  m[o+5u]=size; m[o+6u]=0.0;   m[o+7u]=0.0;
+            m[o+8u]=0.0;  m[o+9u]=0.0;  m[o+10u]=size; m[o+11u]=0.0;
+            m[o+12u]=px;  m[o+13u]=py;  m[o+14u]=pz;   m[o+15u]=1.0;
+        }
+
+        void writeMatrix(uint o, float px, float py, float pz, float vx, float vy, float vz, float size) {
+            // WorldAligned, or no camera: world axes scaled by size.
+            if (mode == 2 || hasCam == 0) { writeAxisAligned(o, px, py, pz, size); return; }
+
+            float dx = camx - px;
+            float dy = camy - py;
+            float dz = camz - pz;
+            float len = sqrt(dx*dx + dy*dy + dz*dz);
+            if (len < 1e-6) { writeAxisAligned(o, px, py, pz, size); return; }
+            float fx = dx / len;
+            float fy = dy / len;
+            float fz = dz / len;
+
+            if (mode == 1) {
+                // Stretched: +Y along the velocity, lengthened by speed*stretch,
+                // trailing behind the particle; billboard at rest / along the view ray.
+                float speed = sqrt(vx*vx + vy*vy + vz*vz);
+                if (speed > 1e-5) {
+                    float ax = vx / speed;
+                    float ay = vy / speed;
+                    float az = vz / speed;
+                    float sx = ay*fz - az*fy;
+                    float sy = az*fx - ax*fz;
+                    float sz = ax*fy - ay*fx;
+                    float slen = sqrt(sx*sx + sy*sy + sz*sz);
+                    if (slen > 1e-4) {
+                        sx /= slen; sy /= slen; sz /= slen;
+                        float nx = sy*az - sz*ay;
+                        float ny = sz*ax - sx*az;
+                        float nz = sx*ay - sy*ax;
+                        float trail = speed * stretch;
+                        float lengthY = size + trail;
+                        float back = trail * 0.5;
+                        m[o+0u]=sx*size;    m[o+1u]=sy*size;    m[o+2u]=sz*size;    m[o+3u]=0.0;
+                        m[o+4u]=ax*lengthY; m[o+5u]=ay*lengthY; m[o+6u]=az*lengthY; m[o+7u]=0.0;
+                        m[o+8u]=nx*size;    m[o+9u]=ny*size;    m[o+10u]=nz*size;   m[o+11u]=0.0;
+                        m[o+12u]=px - ax*back; m[o+13u]=py - ay*back; m[o+14u]=pz - az*back; m[o+15u]=1.0;
+                        return;
+                    }
+                }
+            }
+
+            float upx, upy, upz;
+            if (abs(fy) > 0.999) { upx = 0.0; upy = 0.0; upz = 1.0; }
+            else                 { upx = 0.0; upy = 1.0; upz = 0.0; }
+            float rx = upy*fz - upz*fy;
+            float ry = upz*fx - upx*fz;
+            float rz = upx*fy - upy*fx;
+            float rlen = sqrt(rx*rx + ry*ry + rz*rz);
+            if (rlen > 1e-6) { rx /= rlen; ry /= rlen; rz /= rlen; }
+            float uxf = fy*rz - fz*ry;
+            float uyf = fz*rx - fx*rz;
+            float uzf = fx*ry - fy*rx;
+
+            m[o+0u]=rx*size;  m[o+1u]=ry*size;  m[o+2u]=rz*size;  m[o+3u]=0.0;
+            m[o+4u]=uxf*size; m[o+5u]=uyf*size; m[o+6u]=uzf*size; m[o+7u]=0.0;
+            m[o+8u]=fx*size;  m[o+9u]=fy*size;  m[o+10u]=fz*size; m[o+11u]=0.0;
+            m[o+12u]=px;      m[o+13u]=py;      m[o+14u]=pz;      m[o+15u]=1.0;
+        }
+
+        GLSL;
+
+    /**
      * GLSL compute shader: one thread per slot. Reads the RW state row
      * (8 floats: px,py,pz, vx,vy,vz, age, lifetime), integrates it in place,
-     * and writes the 16-float column-major billboard matrix into the output
-     * buffer. Dead slots (age past lifetime) get a zero matrix, which collapses
-     * the quad to a point — invisible in the raster, no branch needed downstream.
+     * and writes the 16-float column-major instance matrix of the emitter's
+     * render mode ({@see MATRIX_GLSL}) into the output buffer. Dead slots (age
+     * past lifetime) get a zero matrix, which collapses the quad to a point —
+     * invisible in the raster, no branch needed downstream.
      *
      *   binding 0 = State  (RW  SSBO, 8 floats/slot) — integrated in place
      *   binding 1 = OutM   (out SSBO, 16 floats/slot) — column-major matrices
      *   binding 2 = Params (UBO: dt; gravity xyz; start/end size; cam xyz;
-     *                       hasCam:int; count:int; pad:int) — 48 bytes, std140
+     *                       hasCam:int; count:int; mode:int; stretch; pad*3)
+     *                       — 64 bytes, std140
      */
-    public const SHADER = <<<'GLSL'
+    public const SHADER = self::STEP_HEAD_GLSL . self::MATRIX_GLSL . self::STEP_MAIN_GLSL;
+
+    private const STEP_HEAD_GLSL = <<<'GLSL'
         #version 450
         layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 
@@ -147,9 +229,14 @@ final class GpuParticleBaker
             float camx; float camy; float camz;
             int   hasCam;
             int   count;
-            int   pad;
+            int   mode;
+            float stretch;
+            float pad0; float pad1; float pad2;
         };
 
+        GLSL;
+
+    private const STEP_MAIN_GLSL = <<<'GLSL'
         void main() {
             uint gid = gl_GlobalInvocationID.x;
             if (gid >= uint(count)) return;
@@ -183,47 +270,7 @@ final class GpuParticleBaker
 
             float t    = age / max(life, 1e-4);
             float size = mix(startSize, endSize, t);
-
-            // Non-cam / degenerate: axis-aligned size*I with translation.
-            if (hasCam == 0) {
-                m[o+0u]=size; m[o+1u]=0.0;  m[o+2u]=0.0;   m[o+3u]=0.0;
-                m[o+4u]=0.0;  m[o+5u]=size; m[o+6u]=0.0;   m[o+7u]=0.0;
-                m[o+8u]=0.0;  m[o+9u]=0.0;  m[o+10u]=size; m[o+11u]=0.0;
-                m[o+12u]=px;  m[o+13u]=py;  m[o+14u]=pz;   m[o+15u]=1.0;
-                return;
-            }
-
-            float dx = camx - px;
-            float dy = camy - py;
-            float dz = camz - pz;
-            float len = sqrt(dx*dx + dy*dy + dz*dz);
-            if (len < 1e-6) {
-                m[o+0u]=size; m[o+1u]=0.0;  m[o+2u]=0.0;   m[o+3u]=0.0;
-                m[o+4u]=0.0;  m[o+5u]=size; m[o+6u]=0.0;   m[o+7u]=0.0;
-                m[o+8u]=0.0;  m[o+9u]=0.0;  m[o+10u]=size; m[o+11u]=0.0;
-                m[o+12u]=px;  m[o+13u]=py;  m[o+14u]=pz;   m[o+15u]=1.0;
-                return;
-            }
-
-            float fx = dx / len;
-            float fy = dy / len;
-            float fz = dz / len;
-            float upx, upy, upz;
-            if (abs(fy) > 0.999) { upx = 0.0; upy = 0.0; upz = 1.0; }
-            else                 { upx = 0.0; upy = 1.0; upz = 0.0; }
-            float rx = upy*fz - upz*fy;
-            float ry = upz*fx - upx*fz;
-            float rz = upx*fy - upy*fx;
-            float rlen = sqrt(rx*rx + ry*ry + rz*rz);
-            if (rlen > 1e-6) { rx /= rlen; ry /= rlen; rz /= rlen; }
-            float uxf = fy*rz - fz*ry;
-            float uyf = fz*rx - fx*rz;
-            float uzf = fx*ry - fy*rx;
-
-            m[o+0u]=rx*size;  m[o+1u]=ry*size;  m[o+2u]=rz*size;  m[o+3u]=0.0;
-            m[o+4u]=uxf*size; m[o+5u]=uyf*size; m[o+6u]=uzf*size; m[o+7u]=0.0;
-            m[o+8u]=fx*size;  m[o+9u]=fy*size;  m[o+10u]=fz*size; m[o+11u]=0.0;
-            m[o+12u]=px;      m[o+13u]=py;      m[o+14u]=pz;      m[o+15u]=1.0;
+            writeMatrix(o, px, py, pz, vx, vy, vz, size);
         }
         GLSL;
 
@@ -500,9 +547,9 @@ final class GpuParticleBaker
     }
 
     /**
-     * Params UBO of {@see SHADER} / {@see compactShader()}: 12 scalars, 48 bytes,
+     * Params UBO of {@see SHADER} / {@see compactShader()}: 16 scalars, 64 bytes,
      * tight std140 packing (all 4-byte scalars, none straddles a 16-byte
-     * boundary; block padded to 48 = 16*3).
+     * boundary; block padded to 64 = 16*4).
      */
     private static function stepParams(GpuParticleState $state, ParticleEmitter $emitter, float $dt, ?Vec3 $camPos): string
     {
@@ -517,7 +564,8 @@ final class GpuParticleBaker
             $emitter->gravity->x, $emitter->gravity->y, $emitter->gravity->z,
             $emitter->startSize, $emitter->endSize,
             $cx, $cy, $cz,
-        ) . pack('l3', $hasCam, $state->capacity, 0);
+        ) . pack('l3', $hasCam, $state->capacity, $emitter->renderMode->code())
+          . pack('f4', $emitter->stretch, 0.0, 0.0, 0.0);
     }
 
     /**
@@ -726,18 +774,21 @@ final class GpuParticleBaker
 
     /**
      * Billboard-only compute shader for the readback-free path. Reads a compact
-     * per-particle input (4 floats: px,py,pz, size) and writes the finished
-     * column-major billboard matrix. The CPU integration stays canonical (this
-     * offloads only the per-particle billboard build); the output buffer is
-     * bound directly as the graphics instance source, so no matrices ever cross
-     * the PHP<->GPU bus. Billboard math is identical to
-     * {@see \PHPolygon\System\ParticleSystem::writeBillboardMatrix()}.
+     * per-particle input (8 floats: px,py,pz, size, vx,vy,vz, pad) and writes
+     * the finished column-major instance matrix of the emitter's render mode
+     * ({@see MATRIX_GLSL}). The CPU integration stays canonical (this offloads
+     * only the per-particle matrix build); the output buffer is bound directly
+     * as the graphics instance source, so no matrices ever cross the PHP<->GPU
+     * bus. Math identical to {@see ParticleOrientation::write()}.
      *
-     *   binding 0 = In   (readonly  SSBO, 4 floats/particle: px,py,pz,size)
+     *   binding 0 = In   (readonly  SSBO, 8 floats/particle)
      *   binding 1 = OutM (writeonly SSBO, 16 floats/particle, column-major)
-     *   binding 2 = Params (UBO: count:int; cam xyz:float; hasCam:int; pad*3)
+     *   binding 2 = Params (UBO: count:int; cam xyz:float; hasCam:int;
+     *                       mode:int; stretch:float; pad) — 32 bytes, std140
      */
-    public const BILLBOARD_SHADER = <<<'GLSL'
+    public const BILLBOARD_SHADER = self::BILLBOARD_HEAD_GLSL . self::MATRIX_GLSL . self::BILLBOARD_MAIN_GLSL;
+
+    private const BILLBOARD_HEAD_GLSL = <<<'GLSL'
         #version 450
         layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 
@@ -747,59 +798,19 @@ final class GpuParticleBaker
             int   count;
             float camx; float camy; float camz;
             int   hasCam;
-            int   pad0; int pad1; int pad2;
+            int   mode;
+            float stretch;
+            int   pad0;
         };
 
+        GLSL;
+
+    private const BILLBOARD_MAIN_GLSL = <<<'GLSL'
         void main() {
             uint gid = gl_GlobalInvocationID.x;
             if (gid >= uint(count)) return;
-            uint b = gid * 4u;
-            uint o = gid * 16u;
-
-            float px = s[b + 0u];
-            float py = s[b + 1u];
-            float pz = s[b + 2u];
-            float size = s[b + 3u];
-
-            if (hasCam == 0) {
-                m[o+0u]=size; m[o+1u]=0.0;  m[o+2u]=0.0;   m[o+3u]=0.0;
-                m[o+4u]=0.0;  m[o+5u]=size; m[o+6u]=0.0;   m[o+7u]=0.0;
-                m[o+8u]=0.0;  m[o+9u]=0.0;  m[o+10u]=size; m[o+11u]=0.0;
-                m[o+12u]=px;  m[o+13u]=py;  m[o+14u]=pz;   m[o+15u]=1.0;
-                return;
-            }
-
-            float dx = camx - px;
-            float dy = camy - py;
-            float dz = camz - pz;
-            float len = sqrt(dx*dx + dy*dy + dz*dz);
-            if (len < 1e-6) {
-                m[o+0u]=size; m[o+1u]=0.0;  m[o+2u]=0.0;   m[o+3u]=0.0;
-                m[o+4u]=0.0;  m[o+5u]=size; m[o+6u]=0.0;   m[o+7u]=0.0;
-                m[o+8u]=0.0;  m[o+9u]=0.0;  m[o+10u]=size; m[o+11u]=0.0;
-                m[o+12u]=px;  m[o+13u]=py;  m[o+14u]=pz;   m[o+15u]=1.0;
-                return;
-            }
-
-            float fx = dx / len;
-            float fy = dy / len;
-            float fz = dz / len;
-            float upx, upy, upz;
-            if (abs(fy) > 0.999) { upx = 0.0; upy = 0.0; upz = 1.0; }
-            else                 { upx = 0.0; upy = 1.0; upz = 0.0; }
-            float rx = upy*fz - upz*fy;
-            float ry = upz*fx - upx*fz;
-            float rz = upx*fy - upy*fx;
-            float rlen = sqrt(rx*rx + ry*ry + rz*rz);
-            if (rlen > 1e-6) { rx /= rlen; ry /= rlen; rz /= rlen; }
-            float uxf = fy*rz - fz*ry;
-            float uyf = fz*rx - fx*rz;
-            float uzf = fx*ry - fy*rx;
-
-            m[o+0u]=rx*size;  m[o+1u]=ry*size;  m[o+2u]=rz*size;  m[o+3u]=0.0;
-            m[o+4u]=uxf*size; m[o+5u]=uyf*size; m[o+6u]=uzf*size; m[o+7u]=0.0;
-            m[o+8u]=fx*size;  m[o+9u]=fy*size;  m[o+10u]=fz*size; m[o+11u]=0.0;
-            m[o+12u]=px;      m[o+13u]=py;      m[o+14u]=pz;      m[o+15u]=1.0;
+            uint b = gid * 8u;
+            writeMatrix(gid * 16u, s[b + 0u], s[b + 1u], s[b + 2u], s[b + 4u], s[b + 5u], s[b + 6u], s[b + 3u]);
         }
         GLSL;
 
@@ -840,7 +851,7 @@ final class GpuParticleBaker
             $kits[$emitter] = [$inBufs, $outBuf, $cap, ($next + 1) % count($inBufs)];
 
             // Compact per-particle input: px,py,pz, size (size from the same
-            // start->end curve the CPU render path uses).
+            // start->end curve the CPU render path uses), vx,vy,vz, pad.
             $ss = $emitter->startSize;
             $es = $emitter->endSize;
             $in = [];
@@ -849,6 +860,7 @@ final class GpuParticleBaker
                 $t = $p[6] / $life;
                 $in[] = $p[0]; $in[] = $p[1]; $in[] = $p[2];
                 $in[] = $ss + ($es - $ss) * $t;
+                $in[] = $p[3]; $in[] = $p[4]; $in[] = $p[5]; $in[] = 0.0;
             }
             vio_update_buffer($inBuf, pack('f*', ...$in));
 
@@ -857,10 +869,12 @@ final class GpuParticleBaker
             if ($camPos !== null) {
                 $cx = $camPos->x; $cy = $camPos->y; $cz = $camPos->z;
             }
-            // 8 scalars, 32 bytes (16-aligned std140). count,cam.xyz,hasCam,pad*3.
+            // 8 scalars, 32 bytes (16-aligned std140). count,cam.xyz,hasCam,mode,stretch,pad.
             $params = pack('l', $count)
                     . pack('f3', $cx, $cy, $cz)
-                    . pack('l4', $hasCam, 0, 0, 0);
+                    . pack('l2', $hasCam, $emitter->renderMode->code())
+                    . pack('f', $emitter->stretch)
+                    . pack('l', 0);
 
             self::dispatch($ctx, $kernel, [
                 [$inBuf,  0, VIO_COMPUTE_READ],
@@ -897,7 +911,7 @@ final class GpuParticleBaker
         }
         $inBufs = [];
         for ($i = 0; $i < GpuParticleState::UPLOAD_ROTATION; $i++) {
-            $inBuf = vio_storage_buffer($ctx, ['data' => str_repeat("\0", $cap * 4 * 4), 'stride' => 4]);
+            $inBuf = vio_storage_buffer($ctx, ['data' => str_repeat("\0", $cap * 8 * 4), 'stride' => 4]);
             if ($inBuf === false) {
                 return null;
             }

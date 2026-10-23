@@ -51,8 +51,16 @@ use PHPolygon\Rendering\RenderCommandList;
  *      implementation paid per particle were the dominant cost, not
  *      the storage layout.
  *
- * Camera-facing billboard rotation is computed inline (no Quaternion
- * intermediate) and folded straight into the same flat buffer.
+ * The orientation of each particle ({@see ParticleEmitter::$renderMode}:
+ * billboard, velocity-stretched streak, world-aligned) is computed by
+ * {@see ParticleOrientation::write()} (no Quaternion intermediate) straight
+ * into the same flat buffer; the GPU kernels port the same math.
+ *
+ * Spawning: `$velocity` + per-axis `$velocityJitter`, plus optional radial
+ * shapes (`$radialSpeed`, `$radialSpokes`, `$spawnRadius`, `$spawnRadiusJitter` – one more
+ * `mt_rand()` for the azimuth, one for the radius jitter, only when used).
+ * An emitter with `$activeDistance` spawns only while the camera of the last
+ * rendered frame is within that distance; its live particles still run out.
  *
  * Per-instance colour interpolation is **not** supported - the renderer
  * would need a parallel colour stream attribute. The per-emitter
@@ -67,6 +75,9 @@ class ParticleSystem extends AbstractSystem
     private \WeakMap $gpuFailed;
 
     private ?bool $indirectDraw = null;
+
+    /** Camera of the last rendered frame — the reference of `activeDistance`. */
+    private ?Vec3 $lastCamera = null;
 
     /**
      * @param \VioContext|null $ctx The renderer's live vio context. Enables the
@@ -91,12 +102,14 @@ class ParticleSystem extends AbstractSystem
         foreach ($world->query(ParticleEmitter::class, Transform3D::class) as $entity) {
             $emitter = $entity->get(ParticleEmitter::class);
             $tx      = $entity->get(Transform3D::class);
+            $origin  = $tx->getWorldPosition();
+            $active  = $this->isActive($emitter, $origin);
 
             $state = $this->gpuState($emitter);
             if ($state !== null) {
                 $ledger = $state->ledger;
                 $ledger->advance($dt);
-                $rows = $this->spawnRows($emitter, $tx->getWorldPosition(), $dt, $ledger->count());
+                $rows = $active ? $this->spawnRows($emitter, $origin, $dt, $ledger->count()) : [];
                 if ($rows !== []) {
                     $ledger->queue($rows, $emitter->lifetime);
                 }
@@ -104,7 +117,10 @@ class ParticleSystem extends AbstractSystem
             }
 
             $this->integrate($emitter, $dt);
-            foreach ($this->spawnRows($emitter, $tx->getWorldPosition(), $dt, count($emitter->particles)) as $row) {
+            if (!$active) {
+                continue;
+            }
+            foreach ($this->spawnRows($emitter, $origin, $dt, count($emitter->particles)) as $row) {
                 $emitter->particles[] = $row;
             }
         }
@@ -113,6 +129,9 @@ class ParticleSystem extends AbstractSystem
     public function render(World $world): void
     {
         $cameraPos = $this->extractCameraPosition();
+        if ($cameraPos !== null) {
+            $this->lastCamera = $cameraPos;
+        }
 
         foreach ($world->query(ParticleEmitter::class) as $entity) {
             $emitter = $entity->get(ParticleEmitter::class);
@@ -160,6 +179,8 @@ class ParticleSystem extends AbstractSystem
 
             $startSize = $emitter->startSize;
             $endSize   = $emitter->endSize;
+            $mode      = $emitter->renderMode->code();
+            $stretch   = $emitter->stretch;
             $hasCam = $cameraPos !== null;
             $cx = $hasCam ? $cameraPos->x : 0.0;
             $cy = $hasCam ? $cameraPos->y : 0.0;
@@ -171,11 +192,14 @@ class ParticleSystem extends AbstractSystem
                 $t = $p[6] / $life;
                 $size = $startSize + ($endSize - $startSize) * $t;
 
-                $this->writeBillboardMatrix(
+                ParticleOrientation::write(
                     $matrices,
                     $i * 16,
+                    $mode,
                     $p[0], $p[1], $p[2],
+                    $p[3], $p[4], $p[5],
                     $size,
+                    $stretch,
                     $cx, $cy, $cz,
                     $hasCam,
                 );
@@ -323,66 +347,20 @@ class ParticleSystem extends AbstractSystem
     }
 
     /**
-     * Write a translate * rotate * scale matrix into 16 consecutive
-     * slots of $out starting at $base, column-major. Inlined for the
-     * hot per-particle render loop - no Mat4 / Quaternion / Vec3
-     * allocations.
+     * False while the camera of the last rendered frame is further than the
+     * emitter's `activeDistance` from it — then nothing new is spawned.
      */
-    /**
-     * @param array<int, float> $out flat float[N*16] instance buffer; this
-     *                               method writes 16 contiguous floats
-     *                               starting at $base.
-     */
-    private function writeBillboardMatrix(
-        array &$out, int $base,
-        float $px, float $py, float $pz,
-        float $size,
-        float $cx, float $cy, float $cz,
-        bool $hasCam,
-    ): void {
-        if (!$hasCam) {
-            $out[$base + 0]  = $size; $out[$base + 1]  = 0.0;   $out[$base + 2]  = 0.0;   $out[$base + 3]  = 0.0;
-            $out[$base + 4]  = 0.0;   $out[$base + 5]  = $size; $out[$base + 6]  = 0.0;   $out[$base + 7]  = 0.0;
-            $out[$base + 8]  = 0.0;   $out[$base + 9]  = 0.0;   $out[$base + 10] = $size; $out[$base + 11] = 0.0;
-            $out[$base + 12] = $px;   $out[$base + 13] = $py;   $out[$base + 14] = $pz;   $out[$base + 15] = 1.0;
-            return;
+    private function isActive(ParticleEmitter $emitter, Vec3 $origin): bool
+    {
+        $limit = $emitter->activeDistance;
+        $cam = $this->lastCamera;
+        if ($limit <= 0.0 || $cam === null) {
+            return true;
         }
-
-        $dx = $cx - $px;
-        $dy = $cy - $py;
-        $dz = $cz - $pz;
-        $len = sqrt($dx * $dx + $dy * $dy + $dz * $dz);
-        if ($len < 1e-6) {
-            $out[$base + 0]  = $size; $out[$base + 1]  = 0.0;   $out[$base + 2]  = 0.0;   $out[$base + 3]  = 0.0;
-            $out[$base + 4]  = 0.0;   $out[$base + 5]  = $size; $out[$base + 6]  = 0.0;   $out[$base + 7]  = 0.0;
-            $out[$base + 8]  = 0.0;   $out[$base + 9]  = 0.0;   $out[$base + 10] = $size; $out[$base + 11] = 0.0;
-            $out[$base + 12] = $px;   $out[$base + 13] = $py;   $out[$base + 14] = $pz;   $out[$base + 15] = 1.0;
-            return;
-        }
-
-        $fx = $dx / $len;
-        $fy = $dy / $len;
-        $fz = $dz / $len;
-        if (abs($fy) > 0.999) {
-            $upx = 0.0; $upy = 0.0; $upz = 1.0;
-        } else {
-            $upx = 0.0; $upy = 1.0; $upz = 0.0;
-        }
-        $rx = $upy * $fz - $upz * $fy;
-        $ry = $upz * $fx - $upx * $fz;
-        $rz = $upx * $fy - $upy * $fx;
-        $rlen = sqrt($rx * $rx + $ry * $ry + $rz * $rz);
-        if ($rlen > 1e-6) {
-            $rx /= $rlen; $ry /= $rlen; $rz /= $rlen;
-        }
-        $uxf = $fy * $rz - $fz * $ry;
-        $uyf = $fz * $rx - $fx * $rz;
-        $uzf = $fx * $ry - $fy * $rx;
-
-        $out[$base + 0]  = $rx  * $size; $out[$base + 1]  = $ry  * $size; $out[$base + 2]  = $rz  * $size; $out[$base + 3]  = 0.0;
-        $out[$base + 4]  = $uxf * $size; $out[$base + 5]  = $uyf * $size; $out[$base + 6]  = $uzf * $size; $out[$base + 7]  = 0.0;
-        $out[$base + 8]  = $fx  * $size; $out[$base + 9]  = $fy  * $size; $out[$base + 10] = $fz  * $size; $out[$base + 11] = 0.0;
-        $out[$base + 12] = $px;          $out[$base + 13] = $py;          $out[$base + 14] = $pz;          $out[$base + 15] = 1.0;
+        $dx = $cam->x - $origin->x;
+        $dy = $cam->y - $origin->y;
+        $dz = $cam->z - $origin->z;
+        return $dx * $dx + $dy * $dy + $dz * $dz <= $limit * $limit;
     }
 
     /**
@@ -442,16 +420,39 @@ class ParticleSystem extends AbstractSystem
         $vbz = $emitter->velocity->z;
         $life = $emitter->lifetime;
         $rngMax = mt_getrandmax();
+        $radialSpeed = $emitter->radialSpeed;
+        $spawnRadius = $emitter->spawnRadius;
+        $radiusJitter = $emitter->spawnRadiusJitter;
+        $spokes = $emitter->radialSpokes;
+        $radial = $radialSpeed != 0.0 || $spawnRadius != 0.0 || $radiusJitter != 0.0;
 
         $rows = [];
         for ($i = 0; $i < $toSpawn; $i++) {
-            $rows[] = [
+            $row = [
                 $position->x, $position->y, $position->z,
                 $vbx + (mt_rand() / $rngMax - 0.5) * 2.0 * $jx,
                 $vby + (mt_rand() / $rngMax - 0.5) * 2.0 * $jy,
                 $vbz + (mt_rand() / $rngMax - 0.5) * 2.0 * $jz,
                 0.0, $life,
             ];
+            if ($radial) {
+                // Radial shapes draw after x, y, z: the azimuth, then (with a
+                // jitter) the radius — emitters without them keep the RNG order.
+                $u = mt_rand() / $rngMax;
+                // Spokes: the same draw picks one of N evenly spaced directions.
+                $theta = $spokes > 0 ? floor($u * $spokes) * 2.0 * M_PI / $spokes : $u * 2.0 * M_PI;
+                $c = cos($theta);
+                $s = sin($theta);
+                $r = $spawnRadius;
+                if ($radiusJitter != 0.0) {
+                    $r += (mt_rand() / $rngMax - 0.5) * 2.0 * $radiusJitter;
+                }
+                $row[0] += $c * $r;
+                $row[2] += $s * $r;
+                $row[3] += $c * $radialSpeed;
+                $row[5] += $s * $radialSpeed;
+            }
+            $rows[] = $row;
         }
         return $rows;
     }

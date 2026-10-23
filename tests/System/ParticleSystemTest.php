@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace PHPolygon\Tests\System;
 
 use PHPolygon\Component\ParticleEmitter;
+use PHPolygon\Component\ParticleRenderMode;
 use PHPolygon\Component\ParticleSimulation;
 use PHPolygon\Component\Transform3D;
 use PHPolygon\ECS\World;
@@ -14,6 +15,7 @@ use PHPolygon\Rendering\Color;
 use PHPolygon\Rendering\Command\DrawMeshInstanced;
 use PHPolygon\Rendering\Command\SetCamera;
 use PHPolygon\Rendering\RenderCommandList;
+use PHPolygon\System\ParticleOrientation;
 use PHPolygon\System\ParticleSystem;
 use PHPUnit\Framework\TestCase;
 
@@ -262,6 +264,204 @@ class ParticleSystemTest extends TestCase
         }
         $this->assertCount(15, $emitterA->particles);
         $this->assertSame($emitterA->particles, $emitterB->particles);
+    }
+
+    public function testStretchedParticlesAlignWithTheirVelocityAndTrailBehind(): void
+    {
+        $cl = new RenderCommandList();
+        $cl->add(new SetCamera(
+            viewMatrix: Mat4::lookAt(new Vec3(10.0, 0.0, 0.0), new Vec3(0, 0, 0), new Vec3(0, 1, 0)),
+            projectionMatrix: Mat4::identity(),
+        ));
+        [$world, $emitter] = $this->emitterWorld(new ParticleEmitter(
+            rate: 10.0,
+            lifetime: 5.0,
+            velocity: new Vec3(0.0, 2.0, 0.0),
+            velocityJitter: new Vec3(0.0, 0.0, 0.0),
+            gravity: new Vec3(0.0, 0.0, 0.0),
+            startSize: 0.2,
+            endSize: 0.2,
+            renderMode: ParticleRenderMode::Stretched,
+            stretch: 0.1,
+        ));
+        $sys = new ParticleSystem($cl);
+        $sys->update($world, 0.1);
+        $sys->render($world);
+
+        $m = $cl->ofType(DrawMeshInstanced::class)[0]->flatMatrices;
+        $p = $emitter->particles[0];
+        // +Y along the velocity, size + speed × stretch long.
+        $this->assertEqualsWithDelta([0.0, 0.4, 0.0], [$m[4], $m[5], $m[6]], 1e-9);
+        // +X across, +Z towards the camera (+X world), both size long.
+        $this->assertEqualsWithDelta([0.0, 0.0, -0.2], [$m[0], $m[1], $m[2]], 1e-9);
+        $this->assertEqualsWithDelta([0.2, 0.0, 0.0], [$m[8], $m[9], $m[10]], 1e-9);
+        // Centred half the trail behind the particle: its head stays at the particle.
+        $this->assertEqualsWithDelta([$p[0], $p[1] - 0.1, $p[2]], [$m[12], $m[13], $m[14]], 1e-9);
+    }
+
+    public function testStretchedParticleAtRestOrFacingTheCameraIsABillboard(): void
+    {
+        $out = array_fill(0, 32, 0.0);
+        ParticleOrientation::write($out, 16, ParticleRenderMode::Billboard->code(), 1.0, 2.0, 3.0, 0.0, 0.0, 0.0, 0.3, 0.5, 11.0, 2.0, 3.0, true);
+        ParticleOrientation::write($out, 0, ParticleRenderMode::Stretched->code(), 1.0, 2.0, 3.0, 0.0, 0.0, 0.0, 0.3, 0.5, 11.0, 2.0, 3.0, true);
+        $this->assertSame(array_slice($out, 16, 16), array_slice($out, 0, 16));
+
+        // Flying straight at the camera: no axis to stretch along either.
+        ParticleOrientation::write($out, 0, ParticleRenderMode::Stretched->code(), 1.0, 2.0, 3.0, 4.0, 0.0, 0.0, 0.3, 0.5, 11.0, 2.0, 3.0, true);
+        $this->assertSame(array_slice($out, 16, 16), array_slice($out, 0, 16));
+    }
+
+    public function testWorldAlignedParticlesKeepWorldAxes(): void
+    {
+        $cl = new RenderCommandList();
+        $cl->add(new SetCamera(
+            viewMatrix: Mat4::lookAt(new Vec3(3.0, 5.0, 4.0), new Vec3(0, 0, 0), new Vec3(0, 1, 0)),
+            projectionMatrix: Mat4::identity(),
+        ));
+        [$world] = $this->emitterWorld(new ParticleEmitter(
+            rate: 10.0,
+            lifetime: 5.0,
+            startSize: 0.5,
+            endSize: 0.5,
+            renderMode: ParticleRenderMode::WorldAligned,
+        ));
+        $sys = new ParticleSystem($cl);
+        $sys->update($world, 0.1);
+        $sys->render($world);
+
+        $m = $cl->ofType(DrawMeshInstanced::class)[0]->flatMatrices;
+        $this->assertSame([0.5, 0.0, 0.0, 0.0, 0.0, 0.5, 0.0, 0.0, 0.0, 0.0, 0.5, 0.0], array_slice($m, 0, 12));
+    }
+
+    public function testRadialSpeedAndSpawnRadiusShapeARing(): void
+    {
+        [$world, $emitter] = $this->emitterWorld(new ParticleEmitter(
+            rate: 200.0,
+            lifetime: 5.0,
+            velocity: new Vec3(0.0, 1.0, 0.0),
+            velocityJitter: new Vec3(0.0, 0.0, 0.0),
+            gravity: new Vec3(0.0, 0.0, 0.0),
+            radialSpeed: 2.0,
+            spawnRadius: 1.5,
+        ));
+        $sys = new ParticleSystem(new RenderCommandList());
+        mt_srand(3);
+        $sys->update($world, 0.1);
+
+        $this->assertCount(20, $emitter->particles);
+        $angles = [];
+        foreach ($emitter->particles as $p) {
+            $this->assertEqualsWithDelta(1.5, hypot($p[0], $p[2]), 1e-9);
+            $this->assertEqualsWithDelta(2.0, hypot($p[3], $p[5]), 1e-9);
+            $this->assertSame(1.0, $p[4]);
+            // Outward: position and velocity share the direction.
+            $this->assertEqualsWithDelta(atan2($p[2], $p[0]), atan2($p[5], $p[3]), 1e-9);
+            $angles[] = atan2($p[2], $p[0]);
+        }
+        [$lo, $hi] = self::bounds($angles);
+        $this->assertGreaterThan(M_PI, $hi - $lo, 'directions spread around the axis');
+    }
+
+    public function testRadialSpokesSnapTheDirections(): void
+    {
+        $make = static fn (int $spokes): ParticleEmitter => new ParticleEmitter(
+            rate: 400.0,
+            lifetime: 5.0,
+            velocityJitter: new Vec3(0.0, 0.0, 0.0),
+            gravity: new Vec3(0.0, 0.0, 0.0),
+            radialSpeed: 1.0,
+            maxParticles: 1000,
+            radialSpokes: $spokes,
+        );
+        [$world, $emitter] = $this->emitterWorld($make(4));
+        $sys = new ParticleSystem(new RenderCommandList());
+        mt_srand(11);
+        $sys->update($world, 0.1);
+
+        $seen = [];
+        foreach ($emitter->particles as $p) {
+            $k = (int) round(atan2($p[5], $p[3]) / (M_PI / 2.0));
+            $this->assertEqualsWithDelta($k * M_PI / 2.0, atan2($p[5], $p[3]), 1e-9);
+            $seen[($k + 4) % 4] = true;
+        }
+        $this->assertCount(4, $seen, 'every spoke is used');
+
+        $afterSpokes = mt_rand();
+
+        // Spokes reuse the azimuth draw: as many draws as a free radial emitter.
+        [$worldFree] = $this->emitterWorld($make(0));
+        mt_srand(11);
+        (new ParticleSystem(new RenderCommandList()))->update($worldFree, 0.1);
+        $this->assertSame($afterSpokes, mt_rand());
+    }
+
+    public function testSpawnRadiusJitterMakesABand(): void
+    {
+        [$world, $emitter] = $this->emitterWorld(new ParticleEmitter(
+            rate: 500.0,
+            lifetime: 5.0,
+            velocityJitter: new Vec3(0.0, 0.0, 0.0),
+            spawnRadius: 2.0,
+            spawnRadiusJitter: 0.25,
+            maxParticles: 1000,
+        ));
+        $sys = new ParticleSystem(new RenderCommandList());
+        $sys->update($world, 0.1);
+
+        $radii = [];
+        foreach ($emitter->particles as $p) {
+            $radii[] = hypot($p[0], $p[2]);
+        }
+        $this->assertCount(50, $radii);
+        [$lo, $hi] = self::bounds($radii);
+        $this->assertGreaterThanOrEqual(1.75 - 1e-9, $lo);
+        $this->assertLessThanOrEqual(2.25 + 1e-9, $hi);
+        $this->assertGreaterThan(0.3, $hi - $lo);
+    }
+
+    /**
+     * @param list<float> $values
+     * @return array{0: float, 1: float} smallest and largest value (INF, -INF when empty)
+     */
+    private static function bounds(array $values): array
+    {
+        $lo = INF;
+        $hi = -INF;
+        foreach ($values as $v) {
+            $lo = min($lo, $v);
+            $hi = max($hi, $v);
+        }
+        return [$lo, $hi];
+    }
+
+    public function testActiveDistanceStopsSpawningWhileTheCameraIsFar(): void
+    {
+        $cl = new RenderCommandList();
+        [$world, $emitter] = $this->emitterWorld(new ParticleEmitter(rate: 100.0, lifetime: 0.25, activeDistance: 20.0));
+        $sys = new ParticleSystem($cl);
+
+        // No frame rendered yet: no camera to measure against, the emitter spawns.
+        $sys->update($world, 0.1);
+        $this->assertCount(10, $emitter->particles);
+
+        $cl->add(new SetCamera(
+            viewMatrix: Mat4::lookAt(new Vec3(0.0, 0.0, 50.0), new Vec3(0, 0, 0), new Vec3(0, 1, 0)),
+            projectionMatrix: Mat4::identity(),
+        ));
+        $sys->render($world);
+        $cl->clear();
+        $sys->update($world, 0.1);
+        $this->assertCount(10, $emitter->particles, 'far away: the live particles age, nothing new');
+        $sys->update($world, 0.2);
+        $this->assertCount(0, $emitter->particles, 'and they run out');
+
+        $cl->add(new SetCamera(
+            viewMatrix: Mat4::lookAt(new Vec3(0.0, 0.0, 15.0), new Vec3(0, 0, 0), new Vec3(0, 1, 0)),
+            projectionMatrix: Mat4::identity(),
+        ));
+        $sys->render($world);
+        $sys->update($world, 0.1);
+        $this->assertCount(10, $emitter->particles, 'back within range: spawning resumes without a burst');
     }
 
     /**
