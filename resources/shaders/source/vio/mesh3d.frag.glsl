@@ -488,6 +488,18 @@ vec3 applyVignette(vec3 color) {
 
 // PHPOLYGON:POSTCOLOR_HELPERS
 
+#ifdef PHPOLYGON_MRT
+// The attachments' alpha is COVERAGE for the composite: it blends the split over
+// the scene target's clear colour and divides the colour back out by it. An
+// opaque draw (material alpha 1, drawn with blending off) covers its pixel
+// whatever alpha its shading computed - a procedural branch such as water that
+// fades to 0 at the shore would otherwise punch the clear colour (black) into
+// the frame wherever that surface is the nearest one.
+float mrtCoverage(float alpha) {
+    return u_alpha >= 1.0 ? 1.0 : alpha;
+}
+#endif
+
 vec4 outputColor(vec3 color, float alpha) {
     color = max(color, vec3(0.0));
     if (u_linear_output == 0) {
@@ -497,6 +509,21 @@ vec4 outputColor(vec3 color, float alpha) {
         color = toneMapACES(color);
         color = pow(color, vec3(1.0 / 2.2));
     }
+#ifdef PHPOLYGON_MRT
+    // Only branches that end the fragment early call this on the MRT path
+    // (`frag_color = outputColor(c, alpha); return;` writes o_local). main()
+    // seeded o_sun / o_ambient with the MATERIAL alpha, but the branch may
+    // have computed its own: all attachments must carry the same coverage, or
+    // the empty sun / ambient terms of a surface the branch made invisible
+    // cover the geometry behind it (a black patch).
+    alpha = mrtCoverage(alpha);
+    o_sun.a = alpha;
+    o_ambient.a = alpha;
+#ifdef PHPOLYGON_MOTION
+    float reactiveAlpha = clamp(alpha, 0.0, 1.0);
+    o_reactive = vec4(reactiveAlpha, reactiveAlpha, reactiveAlpha, 1.0);
+#endif
+#endif
     return vec4(color, alpha);
 }
 
@@ -1274,9 +1301,10 @@ void main() {
     localAcc   += volumetricScatter(v_worldPos);
     vec3 pcA = applyPostColor(vec3(0.0));
     vec3 pcS = applyPostColor(vec3(1.0)) - pcA;
-    o_sun     = vec4(max(sunAcc * pcS, vec3(0.0)), alpha);
-    o_local   = vec4(max(localAcc * pcS + pcA, vec3(0.0)), alpha);
-    o_ambient = vec4(max(ambientAcc * pcS, vec3(0.0)), alpha);
+    float coverage = mrtCoverage(alpha);
+    o_sun     = vec4(max(sunAcc * pcS, vec3(0.0)), coverage);
+    o_local   = vec4(max(localAcc * pcS + pcA, vec3(0.0)), coverage);
+    o_ambient = vec4(max(ambientAcc * pcS, vec3(0.0)), coverage);
 #else
     vec3 color = sunAcc + localAcc + ambientAcc;
     color = mix(color, u_fog_color, fogT);

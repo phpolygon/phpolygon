@@ -262,6 +262,13 @@ Rules that follow from it:
 - Game snippets keep writing `frag_color` (it is `o_local` under MRT); the post-colour hook
   (`applyPostColor`) must stay affine in the colour — it is evaluated at 0 and 1 and
   distributed over the split outputs.
+- The attachments' alpha is coverage for the composite (blend over the clear colour, divide
+  it back out). `mrtCoverage()` forces 1 for opaque draws (material alpha 1, blending off),
+  whatever alpha the shading computed, and `outputColor()` gives an early-returning branch's
+  alpha to ALL attachments. Otherwise a branch that fades to alpha 0 (water at the shore)
+  shows the clear colour (black) through an opaque surface, or darkens what lies behind an
+  invisible transparent one (`VioMrtEarlyReturnAlphaTest`). Snippets must therefore end with
+  `frag_color = outputColor(c, alpha); return;`, not a raw `vec4`.
 - New pipelines that draw into the scene target need an MRT variant (see `bindPipeline`,
   `bindSkyPipeline`: `attachments` + `attachment_blend` / `attachment_color_mask`).
 - Escape hatches: `PHPOLYGON_VIO_MRT=0` forces the forward path, `=1` skips the php-vio
