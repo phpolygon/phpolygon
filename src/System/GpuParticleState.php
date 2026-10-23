@@ -42,6 +42,16 @@ final class GpuParticleState
     /** Index into {@see $rowsBufs} of the next spawn upload. */
     private int $nextRows = 0;
 
+    /**
+     * Span of the last regular GPU step (seconds; 0 = none yet). A catch-up
+     * after an off-screen pause reproduces steps of this size
+     * ({@see GpuParticleBaker::stepIndirect()} `$catchUpStep`).
+     */
+    public float $lastStep = 0.0;
+
+    /** True while the simulation is paused because the emitter is off screen. */
+    public bool $paused = false;
+
     public function __construct(
         /** Slot capacity — equals the emitter's maxParticles. */
         public readonly int $capacity,

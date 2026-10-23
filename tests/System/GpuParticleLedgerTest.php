@@ -155,6 +155,68 @@ final class GpuParticleLedgerTest extends TestCase
         self::assertSame(1.0, $r[7]);
     }
 
+    /**
+     * Catch-up after an off-screen pause: rows spawned during the pause, then
+     * ONE kernel step over the whole pause with `hstep` = h. Each row has to end
+     * where semi-implicit Euler with step h from its spawn would have taken it.
+     */
+    public function testCatchUpRowsEndWhereStepsOfTheLastFrameWouldLeaveThem(): void
+    {
+        $g = [0.3, -9.81, 0.0];
+        $h = 0.02;
+        $ledger = new GpuParticleLedger(8);
+        // Spawned after 3 steps of h, then 7 more steps pass (whole pause 10 h).
+        for ($i = 0; $i < 3; $i++) {
+            $ledger->advance($h);
+        }
+        $row = [1.0, 2.0, 3.0, 0.5, 5.0, -1.0, 0.0, 9.0];
+        $ledger->queue([$row], 9.0);
+        for ($i = 0; $i < 7; $i++) {
+            $ledger->advance($h);
+        }
+
+        $r = self::floats($ledger->takePending($g[0], $g[1], $g[2], $h));
+        $span = $ledger->takeDt();
+        self::assertEqualsWithDelta(10 * $h, $span, 1e-12);
+
+        // The kernel's catch-up branch (GpuParticleBaker::SHADER, hstep < dt).
+        $k = 0.5 * $span * ($span + $h);
+        $end = [];
+        for ($a = 0; $a < 3; $a++) {
+            $end[$a] = $r[$a] + $r[3 + $a] * $span + $g[$a] * $k;
+            $end[3 + $a] = $r[3 + $a] + $g[$a] * $span;
+        }
+
+        // Reference: 7 frame steps of h from the spawn.
+        $p = [$row[0], $row[1], $row[2]];
+        $v = [$row[3], $row[4], $row[5]];
+        for ($i = 0; $i < 7; $i++) {
+            for ($a = 0; $a < 3; $a++) {
+                $v[$a] += $g[$a] * $h;
+                $p[$a] += $v[$a] * $h;
+            }
+        }
+        for ($a = 0; $a < 3; $a++) {
+            self::assertEqualsWithDelta($p[$a], $end[$a], 1e-4, "position {$a}");
+            self::assertEqualsWithDelta($v[$a], $end[3 + $a], 1e-4, "velocity {$a}");
+        }
+        self::assertEqualsWithDelta(7 * $h, $r[6] + $span, 1e-5, 'age');
+    }
+
+    /** A catch-up step not shorter than the span is a regular step. */
+    public function testCatchUpStepNotBelowTheSpanKeepsTheRegularRewind(): void
+    {
+        $make = static function (): GpuParticleLedger {
+            $ledger = new GpuParticleLedger(4);
+            $ledger->advance(0.01);
+            $ledger->queue([[1.0, 2.0, 3.0, 0.5, 5.0, 0.0, 0.0, 1.0]], 1.0);
+            $ledger->advance(0.02);
+            return $ledger;
+        };
+        self::assertSame($make()->takePending(0.0, -10.0, 0.0), $make()->takePending(0.0, -10.0, 0.0, 0.03));
+        self::assertSame($make()->takePending(0.0, -10.0, 0.0), $make()->takePending(0.0, -10.0, 0.0, 0.0));
+    }
+
     public function testCapacityAndGenerationDecideWhetherTheLedgerIsCurrent(): void
     {
         $emitter = new ParticleEmitter(maxParticles: 8);

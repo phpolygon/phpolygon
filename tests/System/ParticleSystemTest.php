@@ -14,6 +14,8 @@ use PHPolygon\Math\Vec3;
 use PHPolygon\Rendering\Color;
 use PHPolygon\Rendering\Command\DrawMeshInstanced;
 use PHPolygon\Rendering\Command\SetCamera;
+use PHPolygon\Rendering\Material;
+use PHPolygon\Rendering\MaterialRegistry;
 use PHPolygon\Rendering\RenderCommandList;
 use PHPolygon\System\ParticleOrientation;
 use PHPolygon\System\ParticleSystem;
@@ -123,6 +125,81 @@ class ParticleSystemTest extends TestCase
         $this->assertEqualsWithDelta(1.0, $fx / $len, 1e-3);
         $this->assertEqualsWithDelta(0.0, $fy / $len, 1e-3);
         $this->assertEqualsWithDelta(0.0, $fz / $len, 1e-3);
+    }
+
+    /**
+     * A CPU emitter whose whole reach lies behind the camera skips its draw
+     * once it has stood still for a particle lifetime - unless its particles
+     * are opaque enough to cast a shadow, or it is in view.
+     *
+     * @return list<DrawMeshInstanced>
+     */
+    private function drawsAfterStandingStill(Vec3 $at, string $material, float $still, ?Vec3 $moveTo = null): array
+    {
+        MaterialRegistry::register('pt_glass', new Material(albedo: new Color(1.0, 1.0, 1.0), alpha: 0.4));
+        MaterialRegistry::register('pt_solid', new Material(albedo: new Color(1.0, 1.0, 1.0)));
+        $world = new World();
+        $cl = new RenderCommandList();
+        $sys = new ParticleSystem($cl);
+        $emitter = new ParticleEmitter(
+            materialId: $material,
+            rate: 20.0,
+            lifetime: 1.0,
+            velocity: new Vec3(0, 1, 0),
+            velocityJitter: new Vec3(0.2, 0.2, 0.2),
+            gravity: new Vec3(0, -9.81, 0),
+        );
+        $transform = new Transform3D(position: $at);
+        $world->createEntity()->attach($emitter)->attach($transform);
+
+        $camera = new SetCamera(
+            viewMatrix: Mat4::lookAt(new Vec3(0, 2, 0), new Vec3(0, 2, -10), new Vec3(0, 1, 0)),
+            projectionMatrix: Mat4::perspective(1.0, 16 / 9, 0.1, 500.0),
+        );
+        $frame = function () use ($sys, $world, $cl, $camera): void {
+            $cl->clear();
+            $cl->add($camera);
+            $sys->render($world);
+        };
+        $frame();
+        for ($t = 0.0; $t < $still; $t += 0.1) {
+            $sys->update($world, 0.1);
+            $frame();
+        }
+        if ($moveTo !== null) {
+            $transform->position = $moveTo;
+            $transform->worldMatrix = $transform->getLocalMatrix();
+            $sys->update($world, 0.1);
+            $frame();
+        }
+        self::assertNotSame([], $emitter->particles, 'the emitter keeps simulating');
+
+        return array_values(array_filter($cl->getCommands(), static fn ($c) => $c instanceof DrawMeshInstanced));
+    }
+
+    public function testOffScreenTransparentEmitterSkipsItsDraw(): void
+    {
+        self::assertSame([], $this->drawsAfterStandingStill(new Vec3(0, 2, 60), 'pt_glass', 2.0));
+    }
+
+    public function testOffScreenEmitterDrawsUntilItStoodStillForALifetime(): void
+    {
+        self::assertCount(1, $this->drawsAfterStandingStill(new Vec3(0, 2, 60), 'pt_glass', 0.5));
+    }
+
+    public function testOffScreenShadowCastingEmitterKeepsItsDraw(): void
+    {
+        self::assertCount(1, $this->drawsAfterStandingStill(new Vec3(0, 2, 60), 'pt_solid', 2.0));
+    }
+
+    public function testEmitterInViewKeepsItsDraw(): void
+    {
+        self::assertCount(1, $this->drawsAfterStandingStill(new Vec3(0, 2, -30), 'pt_glass', 2.0));
+    }
+
+    public function testMovedEmitterDrawsAgain(): void
+    {
+        self::assertCount(1, $this->drawsAfterStandingStill(new Vec3(0, 2, 60), 'pt_glass', 2.0, new Vec3(0, 2, 70)));
     }
 
     public function testRenderEmitsFlatBufferWithCorrectInstanceCount(): void

@@ -199,12 +199,15 @@ final class GpuParticleLedger
      * given gravity, so the next GPU step over {@see pendingDt()} integrates it
      * only over the time it actually existed. Returns '' when nothing is pending.
      */
-    public function takePending(float $gx, float $gy, float $gz): string
+    public function takePending(float $gx, float $gy, float $gz, float $catchUpStep = 0.0): string
     {
         if ($this->pendingCount === 0) {
             return '';
         }
         $span = $this->pendingDt;
+        if ($catchUpStep > 0.0 && $catchUpStep < $span) {
+            return $this->takePendingCatchUp($gx, $gy, $gz, $span, $catchUpStep);
+        }
         $flat = [];
         foreach ($this->pending as [$skip, $rows]) {
             $lived = $span - $skip;
@@ -222,6 +225,43 @@ final class GpuParticleLedger
                 $flat[] = $r[3] - $sgx;
                 $flat[] = $r[4] - $sgy;
                 $flat[] = $r[5] - $sgz;
+                $flat[] = $r[6] - $skip;
+                $flat[] = $r[7];
+            }
+        }
+        $this->pending = [];
+        $this->pendingCount = 0;
+        return pack('f*', ...$flat);
+    }
+
+    /**
+     * {@see takePending()} for a catch-up step: the GPU integrates the whole
+     * span S in ONE step that reproduces semi-implicit Euler with step h
+     * (kernel parameter `hstep`, see {@see GpuParticleBaker::SHADER}):
+     *
+     *   v_end = v + g·S,   p_end = p + v·S + ½·g·S·(S + h)
+     *
+     * Each row has to end where steps of h over the time it lived would have
+     * taken it: v = r.v + g·lived, p = r.p + r.v·lived + ½·g·lived·(lived + h).
+     * The start state written to the ring is solved from both.
+     */
+    private function takePendingCatchUp(float $gx, float $gy, float $gz, float $span, float $h): string
+    {
+        $flat = [];
+        $k = 0.5 * $span * ($span + $h);
+        foreach ($this->pending as [$skip, $rows]) {
+            $lived = $span - $skip;
+            $kl = 0.5 * $lived * ($lived + $h);
+            foreach ($rows as $r) {
+                $vx = $r[3] - $gx * $skip;
+                $vy = $r[4] - $gy * $skip;
+                $vz = $r[5] - $gz * $skip;
+                $flat[] = $r[0] + $r[3] * $lived + $gx * $kl - $vx * $span - $gx * $k;
+                $flat[] = $r[1] + $r[4] * $lived + $gy * $kl - $vy * $span - $gy * $k;
+                $flat[] = $r[2] + $r[5] * $lived + $gz * $kl - $vz * $span - $gz * $k;
+                $flat[] = $vx;
+                $flat[] = $vy;
+                $flat[] = $vz;
                 $flat[] = $r[6] - $skip;
                 $flat[] = $r[7];
             }

@@ -121,7 +121,20 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
      * the bound shader object changes (bindPipeline) — see resetDrawStateCache().
      */
     private ?string $lastMaterialId = null;
+
+    /**
+     * Mesh whose local AABB is resident. The AABB only feeds the cloth sway in
+     * mesh3d.vert (read under u_cloth == 1), so it is uploaded for cloth
+     * materials only - the mesh-change upload cost every other draw two native
+     * calls for a value the shader never reads.
+     */
     private ?string $lastMeshId = null;
+
+    /** Resident u_use_instancing (0 / 1), null = unknown. */
+    private ?int $lastUseInstancing = null;
+
+    /** Resident u_has_albedo_texture (u_albedo_texture is always slot 0), null = unknown. */
+    private ?int $lastHasAlbedoTexture = null;
 
     /**
      * The shader id whose per-frame uniforms (lights/fog/shadow/ssao/sdfao +
@@ -2386,20 +2399,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         // run re-uploads the ~28 material uniforms once per material instead of per
         // draw). Opaque is depth-buffer order-independent (VIO_BLEND_NONE), so
         // reordering cannot change the image.
-        $opaque = [];
-        foreach ($commands as $cmd) {
-            if ($cmd instanceof DrawMesh || $cmd instanceof DrawMeshInstanced) {
-                $material = MaterialRegistry::get($cmd->materialId);
-                if ($material === null || $material->alpha < 1.0) {
-                    continue;
-                }
-                // Moved entities last within their material + mesh run: the
-                // sticky u_has_prev then flips once per run, not per draw.
-                $moved = $this->motionThisFrame && $cmd instanceof DrawMesh && $cmd->prevModelMatrix !== null ? 1 : 0;
-                $opaque[] = [$cmd->materialId, $cmd->meshId, $cmd, $material, $moved];
-            }
-        }
-        usort($opaque, static fn (array $a, array $b): int => ($a[0] <=> $b[0]) ?: ($a[1] <=> $b[1]) ?: ($a[4] <=> $b[4]));
+        $opaque = OpaqueDrawOrder::sort($commands, $this->motionThisFrame);
         foreach ($opaque as [, , $cmd, $material]) {
             if ($cmd instanceof DrawMesh) {
                 $this->drawMeshCommand($cmd->meshId, $material, $cmd->modelMatrix, $cmd->materialId, $cmd->excludeFromGbuffer, $cmd->prevModelMatrix);
@@ -2930,6 +2930,8 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
     {
         $this->lastMaterialId = null;
         $this->lastMeshId = null;
+        $this->lastUseInstancing = null;
+        $this->lastHasAlbedoTexture = null;
         $this->lastGbufferWrite = null;
         $this->lastHasPrev = null;
     }
@@ -3448,8 +3450,10 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             vio_set_uniform($this->ctx, 'u_projection', $lightProj->toArray());
 
             // Individual casters grouped by mesh, then the instanced casters.
+            // Every shadow draw is instanced: the flag is set once per cascade
+            // (uniforms are sticky until the next pipeline bind).
+            vio_set_uniform($this->ctx, 'u_use_instancing', 1);
             foreach ($shadowDraws as [$mesh, $buf, $cnt]) {
-                vio_set_uniform($this->ctx, 'u_use_instancing', 1);
                 vio_draw_instanced($this->ctx, $mesh, $buf, $cnt);
             }
         }
@@ -4840,9 +4844,12 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         }
         $perDraw = [
             'u_model'          => $matrices[0],
-            'u_use_instancing' => 0,
             'u_normal_matrix'  => $matrices[1],
         ];
+        if ($this->lastUseInstancing !== 0) {
+            $perDraw['u_use_instancing'] = 0;
+            $this->lastUseInstancing = 0;
+        }
         // Motion vectors: only a moved entity uploads last frame's matrix; the
         // flag itself is sticky, so runs of static draws add nothing.
         if ($this->motionThisFrame) {
@@ -4868,7 +4875,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             $this->lastMaterialId = $materialId;
         }
         $this->bindMaterialTextures($material);
-        if ($meshId !== $this->lastMeshId) {
+        if ($material->cloth && $meshId !== $this->lastMeshId) {
             $this->bindMeshAabb($meshId);
             $this->lastMeshId = $meshId;
         }
@@ -4976,24 +4983,26 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         }
 
         // Sticky-uniform dedup (shared trackers with drawMeshCommand — same
-        // shader cbuffer). Texture binding always issued; u_use_instancing toggled
-        // around the draw and reset to 0 so a following non-instanced draw is fine.
+        // shader cbuffer). Texture binding always issued. u_use_instancing is
+        // sticky too: a run of instanced draws sets it once, and the next
+        // non-instanced draw (drawMeshCommand) sets it back to 0.
         if ($cmd->materialId !== $this->lastMaterialId) {
             $this->applyMaterialUniforms($material, $cmd->materialId);
             $this->lastMaterialId = $cmd->materialId;
         }
         $this->bindMaterialTextures($material);
-        if ($cmd->meshId !== $this->lastMeshId) {
+        if ($material->cloth && $cmd->meshId !== $this->lastMeshId) {
             $this->bindMeshAabb($cmd->meshId);
             $this->lastMeshId = $cmd->meshId;
         }
-        vio_set_uniform($this->ctx, 'u_use_instancing', 1);
+        if ($this->lastUseInstancing !== 1) {
+            vio_set_uniform($this->ctx, 'u_use_instancing', 1);
+            $this->lastUseInstancing = 1;
+        }
         $this->applyGbufferWrite(1);
 
         [$packed, $count] = $this->resolveInstanceData($cmd->meshId, $material, $cmd);
         vio_draw_instanced($this->ctx, $mesh, $packed, $count);
-
-        vio_set_uniform($this->ctx, 'u_use_instancing', 0);
     }
 
     /**
@@ -5009,13 +5018,42 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
      */
     private function resolveInstanceData(string $meshId, Material $material, DrawMeshInstanced $cmd): array
     {
+        // Keyed static flat batch re-sent with the very same float array: the
+        // packed buffer cached under its key is the answer. Checked before the
+        // per-frame WeakMap - a room of ~250 such batches otherwise paid the
+        // full cache walk plus a weak-reference registration per batch per frame.
+        $key = $cmd->staticKey;
+        if ($key !== null && $cmd->isStatic) {
+            $hit = $this->staticFlatHits[$key] ?? null;
+            if ($hit !== null && $hit[0] === $cmd->flatMatrices && $hit[2] === $cmd->instanceCount) {
+                return $hit[1];
+            }
+        }
+
         $this->frameInstanceData ??= new \WeakMap();
         if (isset($this->frameInstanceData[$cmd])) {
             return $this->frameInstanceData[$cmd];
         }
 
-        return $this->frameInstanceData[$cmd] = $this->resolveInstanceDataOnce($meshId, $material, $cmd);
+        $resolved = $this->frameInstanceData[$cmd] = $this->resolveInstanceDataOnce($meshId, $material, $cmd);
+        if ($key !== null && $cmd->isStatic) {
+            if ($cmd->flatMatrices !== [] && $cmd->packedMatrices === '') {
+                $this->staticFlatHits[$key] = [$cmd->flatMatrices, $resolved, $cmd->instanceCount];
+            } else {
+                unset($this->staticFlatHits[$key]);
+            }
+        }
+        return $resolved;
     }
+
+    /**
+     * Fast path of {@see resolveInstanceData()} for keyed static flat batches:
+     * staticKey => [the float array it was resolved from, the result, the
+     * command's instanceCount]. Holds the same arrays as $staticFlatCache.
+     *
+     * @var array<string, array{0: array<float>, 1: array{0: string, 1: int}, 2: int}>
+     */
+    private array $staticFlatHits = [];
 
     /** @return array{0: string, 1: int} */
     private function resolveInstanceDataOnce(string $meshId, Material $material, DrawMeshInstanced $cmd): array
@@ -5141,8 +5179,10 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             $this->staticFingerprintCache = [];
             $this->staticIdentityCache = [];
             $this->staticFlatCache = [];
+            $this->staticFlatHits = [];
             return;
         }
+        unset($this->staticFlatHits[$staticKey]);
         $key = 'k:' . $staticKey;
         unset(
             $this->staticMatrixCache[$key],
@@ -5328,10 +5368,11 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
 
     /**
      * Bind the material's albedo texture (if any) and the two texture-state
-     * uniforms. ALWAYS issued per draw (never deduped): cbuffer-uniform
-     * stickiness is verified, but texture-slot binding stickiness across
-     * pipeline binds is not, so re-issuing the bind keeps slot 0 correct
-     * regardless of what a prior material bound. Cheap (~1 bind + 2 uniforms).
+     * uniforms. The texture bind is ALWAYS issued per draw (never deduped):
+     * cbuffer-uniform stickiness is verified, but texture-slot binding
+     * stickiness across pipeline binds is not, so re-issuing the bind keeps
+     * slot 0 correct regardless of what a prior material bound. The two
+     * uniforms are cbuffer values and follow the sticky dedup.
      */
     private function bindMaterialTextures(Material $material): void
     {
@@ -5343,10 +5384,16 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
                 $hasTexture = true;
             }
         }
-        $this->setUniforms([
-            'u_has_albedo_texture' => $hasTexture ? 1 : 0,
-            'u_albedo_texture'     => 0,
-        ]);
+        // The two state uniforms are sticky like the material uniforms: only a
+        // change of u_has_albedo_texture (or a fresh pipeline) uploads them.
+        $has = $hasTexture ? 1 : 0;
+        if ($has !== $this->lastHasAlbedoTexture) {
+            $this->setUniforms([
+                'u_has_albedo_texture' => $has,
+                'u_albedo_texture'     => 0,
+            ]);
+            $this->lastHasAlbedoTexture = $has;
+        }
     }
 
     private function resolveTexture(string $textureId): ?VioTexture

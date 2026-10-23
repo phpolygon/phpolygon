@@ -256,8 +256,11 @@ final class TransparentDrawSorter
      */
     private static function backToFront(array $depths): ?array
     {
+        // arsort is stable: equal depths keep their index order - the same
+        // order as comparing (depth desc, index asc), without a PHP callback
+        // per comparison (a few hundred particles per frame).
+        arsort($depths);
         $order = array_keys($depths);
-        usort($order, static fn (int $a, int $b): int => ($depths[$b] <=> $depths[$a]) ?: ($a <=> $b));
         foreach ($order as $pos => $i) {
             if ($pos !== $i) {
                 return $order;

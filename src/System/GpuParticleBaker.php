@@ -222,7 +222,9 @@ final class GpuParticleBaker
      *   binding 0 = State  (RW  SSBO, 8 floats/slot) — integrated in place
      *   binding 1 = OutM   (out SSBO, 16 floats/slot) — column-major matrices
      *   binding 2 = Params (UBO: dt; gravity xyz; start/end size; cam xyz;
-     *                       hasCam:int; count:int; mode:int; stretch; pad*3)
+     *                       hasCam:int; count:int; mode:int; stretch; hstep;
+     *                       pad*2) — hstep > 0 and < dt: catch-up step, see
+     *                       GpuParticleLedger::takePending()
      *                       — 64 bytes, std140
      */
     public const SHADER = self::STEP_HEAD_GLSL . self::MATRIX_GLSL . self::STEP_MAIN_GLSL;
@@ -242,7 +244,7 @@ final class GpuParticleBaker
             int   count;
             int   mode;
             float stretch;
-            float pad0; float pad1; float pad2;
+            float hstep; float pad1; float pad2;
         };
 
         GLSL;
@@ -275,6 +277,15 @@ final class GpuParticleBaker
             float px = s[b + 0u] + vx * dt;
             float py = s[b + 1u] + vy * dt;
             float pz = s[b + 2u] + vz * dt;
+            if (hstep > 0.0 && hstep < dt) {
+                // Catch-up step (the emitter was off screen): the closed form
+                // of semi-implicit Euler with step hstep over dt, so the
+                // particles end where frame-by-frame steps would have left them.
+                float k = 0.5 * dt * (dt + hstep);
+                px = s[b + 0u] + s[b + 3u] * dt + gx * k;
+                py = s[b + 1u] + s[b + 4u] * dt + gy * k;
+                pz = s[b + 2u] + s[b + 5u] * dt + gz * k;
+            }
 
             s[b + 0u] = px; s[b + 1u] = py; s[b + 2u] = pz;
             s[b + 3u] = vx; s[b + 4u] = vy; s[b + 5u] = vz;
@@ -564,7 +575,7 @@ final class GpuParticleBaker
      * tight std140 packing (all 4-byte scalars, none straddles a 16-byte
      * boundary; block padded to 64 = 16*4).
      */
-    private static function stepParams(GpuParticleState $state, ParticleEmitter $emitter, float $dt, ?Vec3 $camPos): string
+    private static function stepParams(GpuParticleState $state, ParticleEmitter $emitter, float $dt, ?Vec3 $camPos, float $catchUpStep = 0.0): string
     {
         $hasCam = $camPos !== null ? 1 : 0;
         $cx = 0.0; $cy = 0.0; $cz = 0.0;
@@ -578,7 +589,7 @@ final class GpuParticleBaker
             $emitter->startSize, $emitter->endSize,
             $cx, $cy, $cz,
         ) . pack('l3', $hasCam, $state->capacity, $emitter->renderMode->code())
-          . pack('f4', $emitter->stretch, 0.0, 0.0, 0.0);
+          . pack('f4', $emitter->stretch, $catchUpStep, 0.0, 0.0);
     }
 
     /**
@@ -598,6 +609,7 @@ final class GpuParticleBaker
         ParticleEmitter $emitter,
         float $dt,
         ?Vec3 $camPos,
+        float $catchUpStep = 0.0,
     ): bool {
         $args = $state->argsBuf;
         if ($args === null || $state->indexCount <= 0 || !self::isIndirectDraw($ctx)) {
@@ -618,7 +630,7 @@ final class GpuParticleBaker
                 [$state->stateBuf, 0, VIO_COMPUTE_WRITE],
                 [$state->outBuf,   1, VIO_COMPUTE_WRITE],
                 [$args,            3, VIO_COMPUTE_WRITE],
-            ], self::stepParams($state, $emitter, $dt, $camPos), intdiv($state->capacity + self::LOCAL_SIZE - 1, self::LOCAL_SIZE));
+            ], self::stepParams($state, $emitter, $dt, $camPos, $catchUpStep), intdiv($state->capacity + self::LOCAL_SIZE - 1, self::LOCAL_SIZE));
             return true;
         } catch (\Throwable) {
             return false;

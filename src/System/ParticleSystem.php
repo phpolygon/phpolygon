@@ -13,6 +13,8 @@ use PHPolygon\Geometry\MeshRegistry;
 use PHPolygon\Math\Vec3;
 use PHPolygon\Rendering\Command\DrawMeshInstanced;
 use PHPolygon\Rendering\Command\SetCamera;
+use PHPolygon\Rendering\Frustum;
+use PHPolygon\Rendering\MaterialRegistry;
 use PHPolygon\Rendering\RenderCommandList;
 
 /**
@@ -62,6 +64,16 @@ use PHPolygon\Rendering\RenderCommandList;
  * An emitter with `$activeDistance` spawns only while the camera of the last
  * rendered frame is within that distance; its live particles still run out.
  *
+ * Off screen: an emitter that has stood still for a particle lifetime and whose
+ * whole reach (see reach()) lies outside the camera frustum costs no GPU work.
+ * Its GPU simulation pauses - update() keeps spawning (same `mt_rand()` order),
+ * the rows and the time wait in the ledger - and the first frame back in view
+ * integrates the whole pause in one step that reproduces steps of the last
+ * regular frame ({@see GpuParticleLedger::takePending()}, kernel `hstep`), so
+ * the particles stand where frame-by-frame stepping would have left them. A
+ * CPU emitter keeps simulating and only skips its draw, unless its particles
+ * are opaque enough to cast a shadow into the view.
+ *
  * Per-instance colour interpolation is **not** supported - the renderer
  * would need a parallel colour stream attribute. The per-emitter
  * material colour drives the visible tint.
@@ -79,6 +91,15 @@ class ParticleSystem extends AbstractSystem
     /** Camera of the last rendered frame — the reference of `activeDistance`. */
     private ?Vec3 $lastCamera = null;
 
+    /** Simulated seconds (sum of update() steps) — the clock of {@see $stillSince}. */
+    private float $clock = 0.0;
+
+    /** @var \WeakMap<ParticleEmitter, array{0: float, 1: float, 2: float, 3: float}> emitter origin and the clock since it stands there */
+    private \WeakMap $stillSince;
+
+    /** @var array<string, array{0: int, 1: float}> meshId => [registry version, radius] */
+    private array $meshRadii = [];
+
     /**
      * @param \VioContext|null $ctx The renderer's live vio context. Enables the
      *        GPU tiers where the backend supports them; null (headless, non-vio)
@@ -93,11 +114,13 @@ class ParticleSystem extends AbstractSystem
     ) {
         $this->gpuStates = new \WeakMap();
         $this->gpuFailed = new \WeakMap();
+        $this->stillSince = new \WeakMap();
     }
 
     public function update(World $world, float $dt): void
     {
         if ($dt <= 0.0) return;
+        $this->clock += $dt;
 
         foreach ($world->query(ParticleEmitter::class, Transform3D::class) as $entity) {
             $emitter = $entity->get(ParticleEmitter::class);
@@ -128,12 +151,27 @@ class ParticleSystem extends AbstractSystem
 
     public function render(World $world): void
     {
-        $cameraPos = $this->extractCameraPosition();
+        $camera = $this->commandList->lastOfType(SetCamera::class);
+        $cameraPos = $camera?->viewMatrix->inverse()->getTranslation();
         if ($cameraPos !== null) {
             $this->lastCamera = $cameraPos;
         }
 
-        $spawnFailed = $this->ctx !== null ? $this->injectPendingSpawns($world, $this->ctx) : null;
+        // Off-screen emitters (see offscreen()): GPU simulations pause, CPU
+        // emitters whose particles cast no shadow skip building their draw.
+        /** @var \WeakMap<ParticleEmitter, true> $offscreen */
+        $offscreen = new \WeakMap();
+        if ($camera !== null && getenv('PHPOLYGON_NO_CULL') !== '1') {
+            $planes = Frustum::planes($camera->projectionMatrix, $camera->viewMatrix);
+            foreach ($world->query(ParticleEmitter::class, Transform3D::class) as $entity) {
+                $emitter = $entity->get(ParticleEmitter::class);
+                if ($this->offscreen($emitter, $entity->get(Transform3D::class)->getWorldPosition(), $planes)) {
+                    $offscreen[$emitter] = true;
+                }
+            }
+        }
+
+        $spawnFailed = $this->ctx !== null ? $this->injectPendingSpawns($world, $this->ctx, $offscreen) : null;
 
         foreach ($world->query(ParticleEmitter::class) as $entity) {
             $emitter = $entity->get(ParticleEmitter::class);
@@ -145,6 +183,14 @@ class ParticleSystem extends AbstractSystem
                     // stale and the next update replaces it. Nothing to draw.
                     continue;
                 }
+                if (isset($offscreen[$emitter])) {
+                    // Paused: spawned rows and simulated time pile up in the
+                    // ledger and are caught up when the emitter is back in view.
+                    // A storage-buffer draw casts no shadow, so nothing visible
+                    // depends on this frame's step.
+                    $state->paused = true;
+                    continue;
+                }
                 if (!isset($spawnFailed[$emitter]) && $this->renderGpu($this->ctx, $state, $emitter, $cameraPos)) {
                     continue;
                 }
@@ -153,6 +199,10 @@ class ParticleSystem extends AbstractSystem
 
             $count = count($emitter->particles);
             if ($count === 0) continue;
+            if (isset($offscreen[$emitter]) && !$this->castsShadow($emitter)) {
+                // CPU simulation runs in update(); only the draw is skipped.
+                continue;
+            }
 
             // Readback-free path (Path B): offload the per-particle billboard
             // build to the GPU and bind the result straight as the instance
@@ -230,11 +280,16 @@ class ParticleSystem extends AbstractSystem
             return false;
         }
         $ledger = $state->ledger;
+        // Back from an off-screen pause: one step over the whole pause that
+        // reproduces steps of the last regular frame (see GpuParticleLedger::
+        // takePending() and the kernel's `hstep`).
+        $catchUp = $state->paused ? $state->lastStep : 0.0;
+        $state->paused = false;
 
         $pending = $ledger->pendingCount();
         if ($pending > 0) {
             $g = $emitter->gravity;
-            if (!GpuParticleBaker::inject($ctx, $state, $ledger->takePending($g->x, $g->y, $g->z), $pending)) {
+            if (!GpuParticleBaker::inject($ctx, $state, $ledger->takePending($g->x, $g->y, $g->z, $catchUp), $pending)) {
                 return false;
             }
         }
@@ -246,8 +301,12 @@ class ParticleSystem extends AbstractSystem
             return true;
         }
 
-        if (!GpuParticleBaker::stepIndirect($ctx, $state, $emitter, $ledger->takeDt(), $cameraPos)) {
+        $dt = $ledger->takeDt();
+        if (!GpuParticleBaker::stepIndirect($ctx, $state, $emitter, $dt, $cameraPos, $catchUp)) {
             return false;
+        }
+        if (!($catchUp > 0.0 && $catchUp < $dt) && $dt > 0.0) {
+            $state->lastStep = $dt;
         }
 
         $this->commandList->add(DrawMeshInstanced::fromStorageBuffer(
@@ -267,9 +326,12 @@ class ParticleSystem extends AbstractSystem
      * them, which then finds nothing pending. One upload per emitter and frame
      * was the dominant cost of a few live GPU emitters.
      *
+     * Paused (off-screen) emitters keep their rows for the catch-up.
+     *
+     * @param \WeakMap<ParticleEmitter, true> $offscreen
      * @return \WeakMap<ParticleEmitter, true> emitters whose spawn upload failed
      */
-    private function injectPendingSpawns(World $world, \VioContext $ctx): \WeakMap
+    private function injectPendingSpawns(World $world, \VioContext $ctx, \WeakMap $offscreen): \WeakMap
     {
         /** @var \WeakMap<ParticleEmitter, true> $failed */
         $failed = new \WeakMap();
@@ -280,6 +342,7 @@ class ParticleSystem extends AbstractSystem
             $state = $this->gpuStates[$emitter] ?? null;
             if ($state === null
                 || $state->argsBuf === null
+                || isset($offscreen[$emitter])
                 || !$state->ledger->isCurrent($emitter->maxParticles, $emitter->generation)
             ) {
                 continue;
@@ -289,7 +352,9 @@ class ParticleSystem extends AbstractSystem
                 continue;
             }
             $g = $emitter->gravity;
-            $batches[] = [$state, $state->ledger->takePending($g->x, $g->y, $g->z), $pending];
+            // Same catch-up step renderGpu() integrates with (it clears $paused).
+            $catchUp = $state->paused ? $state->lastStep : 0.0;
+            $batches[] = [$state, $state->ledger->takePending($g->x, $g->y, $g->z, $catchUp), $pending];
             $owners[] = $emitter;
         }
         if ($batches === []) {
@@ -375,20 +440,88 @@ class ParticleSystem extends AbstractSystem
     }
 
     /**
-     * Extract the camera world position from the most recent SetCamera
-     * command in this frame's command list. Returns null when no camera
-     * has been pushed yet (e.g. headless test runs).
+     * True when nothing the emitter has emitted can be on screen: the sphere
+     * every one of its particles stays inside ({@see reach()}) lies outside the
+     * view frustum of the frame's camera (the last SetCamera; ParticleSystem
+     * MUST render after the camera system that publishes it).
      *
-     * Contract: ParticleSystem MUST run after the camera system that
-     * publishes SetCamera (typically Camera3DSystem).
+     * The sphere is centred on the emitter, so it only covers particles spawned
+     * where the emitter stands now: an emitter counts as off screen only after
+     * it has stood still for a full particle lifetime (simulated time).
+     *
+     * @param list<array{0: float, 1: float, 2: float, 3: float}> $planes
      */
-    private function extractCameraPosition(): ?Vec3
+    private function offscreen(ParticleEmitter $emitter, Vec3 $origin, array $planes): bool
     {
-        $latest = $this->commandList->lastOfType(SetCamera::class);
-        if ($latest === null) {
-            return null;
+        $still = $this->stillSince[$emitter] ?? null;
+        if ($still === null || $still[0] !== $origin->x || $still[1] !== $origin->y || $still[2] !== $origin->z) {
+            $this->stillSince[$emitter] = [$origin->x, $origin->y, $origin->z, $this->clock];
+            return false;
         }
-        return $latest->viewMatrix->inverse()->getTranslation();
+        if ($this->clock - $still[3] < $emitter->lifetime) {
+            return false;
+        }
+        return Frustum::sphereOutside($planes, $origin->x, $origin->y, $origin->z, $this->reach($emitter));
+    }
+
+    /**
+     * Radius around the emitter that contains every particle it can have alive,
+     * mesh extent included: spawn offset + the farthest a particle travels in
+     * its lifetime (fastest spawn speed, gravity) + the largest particle (size,
+     * stretched trail). Generous on purpose - a too small sphere would pause
+     * particles that are on screen.
+     */
+    private function reach(ParticleEmitter $emitter): float
+    {
+        $life = max(0.0, $emitter->lifetime);
+        $v = $emitter->velocity;
+        $j = $emitter->velocityJitter;
+        $g = $emitter->gravity;
+        $speed = sqrt($v->x * $v->x + $v->y * $v->y + $v->z * $v->z)
+            + sqrt($j->x * $j->x + $j->y * $j->y + $j->z * $j->z)
+            + abs($emitter->radialSpeed);
+        $gravity = sqrt($g->x * $g->x + $g->y * $g->y + $g->z * $g->z);
+        // Semi-implicit Euler overshoots the exact parabola by ½·g·t·h; one
+        // extra second of h covers any frame step.
+        $travel = $speed * $life + $gravity * $life * ($life + 1.0);
+        $spawn = abs($emitter->spawnRadius) + abs($emitter->spawnRadiusJitter);
+        $size = max(abs($emitter->startSize), abs($emitter->endSize))
+            + ($speed + $gravity * $life) * abs($emitter->stretch);
+
+        return ($spawn + $travel + $size * $this->meshRadius($emitter->meshId)) * 1.25 + 1.0;
+    }
+
+    /** Largest vertex distance from the mesh origin (1 when unknown). */
+    private function meshRadius(string $meshId): float
+    {
+        $version = MeshRegistry::version($meshId);
+        $cached = $this->meshRadii[$meshId] ?? null;
+        if ($cached !== null && $cached[0] === $version) {
+            return $cached[1];
+        }
+        $mesh = MeshRegistry::get($meshId);
+        if ($mesh === null) {
+            return 1.0;
+        }
+        $r2 = 0.0;
+        $verts = $mesh->vertices;
+        for ($i = 0, $n = count($verts) - 2; $i < $n; $i += 3) {
+            $d = $verts[$i] * $verts[$i] + $verts[$i + 1] * $verts[$i + 1] + $verts[$i + 2] * $verts[$i + 2];
+            if ($d > $r2) {
+                $r2 = $d;
+            }
+        }
+        $radius = max(sqrt($r2), 1e-3);
+        $this->meshRadii[$meshId] = [MeshRegistry::version($meshId), $radius];
+        return $radius;
+    }
+
+    /** Whether the emitter's particles go into the shadow pass (opaque enough). */
+    private function castsShadow(ParticleEmitter $emitter): bool
+    {
+        $material = MaterialRegistry::get($emitter->materialId);
+        // The renderers' shadow collection skips materials below this alpha.
+        return $material === null || $material->alpha >= 0.9;
     }
 
     /**
