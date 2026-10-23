@@ -402,13 +402,13 @@ class Renderer3DSystem extends AbstractSystem
         $lastDrawn = $this->lastDrawnMatrix;
         $drawnNow = [];
 
-        foreach ($world->query(MeshRenderer::class, Transform3D::class) as $entity) {
-            $mesh = $entity->get(MeshRenderer::class);
-            $transform = $entity->get(Transform3D::class);
-
+        /** @var array<int, Transform3D> $transforms */
+        $transforms = $world->componentPool(Transform3D::class);
+        foreach (self::renderables($world, $transforms) as $entityId => $mesh) {
             if (!$mesh->visible) {
                 continue;
             }
+            $transform = $transforms[$entityId];
 
             // Transform3DSystem refreshed worldMatrix earlier in the frame;
             // reusing it here saves two redundant Mat4::trs() rebuilds per
@@ -421,9 +421,9 @@ class Renderer3DSystem extends AbstractSystem
             // test. Falls through when no bin is known yet (first frame
             // after a new entity is spawned).
             if ($visibleBins !== null) {
-                $binKey = $this->entityBin[$entity->id] ?? null;
+                $binKey = $this->entityBin[$entityId] ?? null;
                 if ($binKey !== null && !isset($visibleBins[$binKey])
-                    && ($this->entityBinMatrix[$entity->id] ?? null) === $matrix
+                    && ($this->entityBinMatrix[$entityId] ?? null) === $matrix
                 ) {
                     // Culled bin, and the entity has not moved since binning.
                     // A mover (different worldMatrix instance) falls through to
@@ -489,8 +489,8 @@ class Renderer3DSystem extends AbstractSystem
 
             $material = MaterialRegistry::get($mesh->materialId);
             $isTransparent = $material !== null && $material->alpha < 1.0;
-            $prev = $lastDrawn[$entity->id] ?? null;
-            $drawnNow[$entity->id] = $matrix;
+            $prev = $lastDrawn[$entityId] ?? null;
+            $drawnNow[$entityId] = $matrix;
             $draw = new DrawMesh(
                 $mesh->meshId,
                 $mesh->materialId,
@@ -595,6 +595,39 @@ class Renderer3DSystem extends AbstractSystem
     }
 
     /**
+     * Every active MeshRenderer that also has a Transform3D, keyed by entity
+     * id, in the order `query(MeshRenderer, Transform3D)` yields them (the
+     * smaller pool's order) - read straight from the component pools. The
+     * query's generator, Entity wrapper and get() calls per entity cost more
+     * than the draw loop's own work once a scene holds thousands of hidden
+     * renderers (parts drawn through an instanced batch keep their hidden
+     * MeshRenderer).
+     *
+     * @param array<int, Transform3D> $transforms the active Transform3D pool
+     * @return array<int, MeshRenderer>
+     */
+    private static function renderables(World $world, array $transforms): array
+    {
+        /** @var array<int, MeshRenderer> $meshes */
+        $meshes = $world->componentPool(MeshRenderer::class);
+        if (count($transforms) < count($meshes)) {
+            $ordered = [];
+            foreach ($transforms as $id => $_) {
+                if (isset($meshes[$id])) {
+                    $ordered[$id] = $meshes[$id];
+                }
+            }
+            return $ordered;
+        }
+        foreach ($meshes as $id => $_) {
+            if (!isset($transforms[$id])) {
+                unset($meshes[$id]);
+            }
+        }
+        return $meshes;
+    }
+
+    /**
      * Re-bin every renderable entity into a 2D X-Z spatial grid and refresh
      * the per-bin AABBs. Called periodically rather than every frame because
      * almost all renderables in a typical scene are static.
@@ -605,18 +638,19 @@ class Renderer3DSystem extends AbstractSystem
         $this->entityBin = [];
         $this->entityBinMatrix = [];
 
-        foreach ($world->query(MeshRenderer::class, Transform3D::class) as $entity) {
-            $mesh = $entity->get(MeshRenderer::class);
+        /** @var array<int, Transform3D> $transforms */
+        $transforms = $world->componentPool(Transform3D::class);
+        foreach (self::renderables($world, $transforms) as $entityId => $mesh) {
             if (!$mesh->visible) {
                 continue; // hidden meshes must not inflate a bin AABB
             }
-            $transform = $entity->get(Transform3D::class);
+            $transform = $transforms[$entityId];
             $tr = $transform->worldMatrix->getTranslation();
             $bx = (int) floor($tr->x / self::BIN_SIZE);
             $bz = (int) floor($tr->z / self::BIN_SIZE);
             $key = $bx . ',' . $bz;
-            $this->entityBin[$entity->id] = $key;
-            $this->entityBinMatrix[$entity->id] = $transform->worldMatrix;
+            $this->entityBin[$entityId] = $key;
+            $this->entityBinMatrix[$entityId] = $transform->worldMatrix;
 
             // Expand the bin AABB by the entity's actual world-space extent.
             // A 3 km water plane sitting at one bin centre would otherwise

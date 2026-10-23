@@ -88,6 +88,64 @@ final class VioRendererStaticInstancesAndShadowsTest extends TestCase
         }
     }
 
+    /**
+     * The static cache recognises a re-sent batch by its first/last Mat4
+     * objects. A batch that keeps those objects but changes in between (here: a
+     * third instance in the middle) or keeps the values in new objects must
+     * still draw what it holds now. Shadows on: the shadow and colour passes
+     * both read the batch in one frame.
+     */
+    public function testStaticBatchWithTheSameEndMatricesStillShowsItsMiddle(): void
+    {
+        $renderer = $this->renderer(ShadowQuality::Medium);
+        $left = Mat4::translation(-2.0, 0.0, 0.0);
+        $right = Mat4::translation(2.0, 0.0, 0.0);
+
+        $this->renderScene($renderer, [new DrawMeshInstanced('box', 'orange', [$left, $right], isStatic: true, staticKey: 'k')]);
+        $image = $this->renderScene($renderer, [new DrawMeshInstanced('box', 'orange', [$left, $right], isStatic: true, staticKey: 'k')]);
+        self::assertTrue(self::isClear(self::px($image, 48, 32)), 'two boxes: the middle is empty');
+
+        $three = new DrawMeshInstanced('box', 'orange', [$left, Mat4::translation(0.0, 0.0, 0.0), $right], isStatic: true, staticKey: 'k');
+        $image = $this->renderScene($renderer, [$three]);
+        self::assertFalse(self::isClear(self::px($image, 48, 32)), 'same end matrices, new middle instance: drawn');
+
+        // Equal values in new Mat4 objects: still the same three boxes.
+        $copy = new DrawMeshInstanced('box', 'orange', [
+            Mat4::translation(-2.0, 0.0, 0.0), Mat4::translation(0.0, 0.0, 0.0), Mat4::translation(2.0, 0.0, 0.0),
+        ], isStatic: true, staticKey: 'k');
+        $image = $this->renderScene($renderer, [$copy]);
+        self::assertFalse(self::isClear(self::px($image, 24, 32)));
+        self::assertFalse(self::isClear(self::px($image, 48, 32)));
+        self::assertFalse(self::isClear(self::px($image, 72, 32)));
+        self::assertSame(1, $renderer->staticInstanceCacheSize());
+    }
+
+    /**
+     * A flat static batch is compared whole: re-sending the same array keeps
+     * the cache, and a changed middle instance (same count, same first and last
+     * matrix) is drawn where it is now.
+     */
+    public function testFlatStaticBatchIsComparedWhole(): void
+    {
+        $renderer = $this->renderer(ShadowQuality::Medium);
+        $flat = static fn (float $middleY): array => [
+            ...Mat4::translation(-2.0, 0.0, 0.0)->toArray(),
+            ...Mat4::translation(0.0, $middleY, 0.0)->toArray(),
+            ...Mat4::translation(2.0, 0.0, 0.0)->toArray(),
+        ];
+        $centred = $flat(0.0);
+        $image = $this->renderScene($renderer, [DrawMeshInstanced::flat('box', 'orange', $centred, 3, isStatic: true, staticKey: 'f')]);
+        self::assertFalse(self::isClear(self::px($image, 48, 32)), 'middle box drawn');
+        $image = $this->renderScene($renderer, [DrawMeshInstanced::flat('box', 'orange', $centred, 3, isStatic: true, staticKey: 'f')]);
+        self::assertFalse(self::isClear(self::px($image, 48, 32)), 'same array: still drawn');
+
+        $image = $this->renderScene($renderer, [DrawMeshInstanced::flat('box', 'orange', $flat(20.0), 3, isStatic: true, staticKey: 'f')]);
+        self::assertTrue(self::isClear(self::px($image, 48, 32)), 'the moved middle box left the centre');
+        self::assertFalse(self::isClear(self::px($image, 24, 32)));
+        self::assertFalse(self::isClear(self::px($image, 72, 32)));
+        self::assertSame(1, $renderer->staticInstanceCacheSize());
+    }
+
     public function testInvalidateStaticInstancesDropsTheCache(): void
     {
         $renderer = $this->renderer(ShadowQuality::Off);

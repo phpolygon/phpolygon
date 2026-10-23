@@ -123,6 +123,17 @@ final class GpuParticleBaker
     private static int $descriptorBlocksUsed = 0;
 
     /**
+     * Shared spawn upload buffers of the current context ({@see injectAll()}):
+     * slot => [buffer, size in bytes].
+     *
+     * @var array<int, array{0: \VioBuffer, 1: int}>
+     */
+    private static array $sharedUploads = [];
+
+    /** Next slot of {@see $sharedUploads}. */
+    private static int $sharedUploadNext = 0;
+
+    /**
      * The instance matrix of one particle in GLSL — a line-by-line port of
      * {@see ParticleOrientation::write()} (Billboard / Stretched /
      * WorldAligned). Spliced into {@see SHADER} and {@see BILLBOARD_SHADER}
@@ -322,6 +333,8 @@ final class GpuParticleBaker
         self::$billboards = null;
         self::$descriptorBudget = null;
         self::$descriptorBlocksUsed = 0;
+        self::$sharedUploads = [];
+        self::$sharedUploadNext = 0;
     }
 
     /** The context's shared kernel $name, compiled on first use; null when it does not compile. */
@@ -619,9 +632,12 @@ final class GpuParticleBaker
      * row i to slot (head + i) % capacity, so a batch wraps around the end of
      * the ring. Which slots are free is the {@see GpuParticleLedger}'s call.
      *
+     * Thread i reads row (first + i) of the upload buffer: one shared upload
+     * holds the rows of several states ({@see injectAll()}).
+     *
      *   binding 0 = State  (RW SSBO, 8 floats/slot)
      *   binding 1 = Rows   (readonly SSBO, 8 floats/row)
-     *   binding 2 = Params (UBO: head, n, capacity, pad) — 16 bytes, std140
+     *   binding 2 = Params (UBO: head, n, capacity, first) — 16 bytes, std140
      */
     public const SPAWN_SHADER = <<<'GLSL'
         #version 450
@@ -633,17 +649,26 @@ final class GpuParticleBaker
             int head;
             int n;
             int capacity;
-            int pad;
+            int first;
         };
 
         void main() {
             uint gid = gl_GlobalInvocationID.x;
             if (gid >= uint(n)) return;
             uint b = ((uint(head) + gid) % uint(capacity)) * 8u;
-            uint i = gid * 8u;
+            uint i = (uint(first) + gid) * 8u;
             for (uint k = 0u; k < 8u; k++) s[b + k] = r[i + k];
         }
         GLSL;
+
+    /**
+     * Upload buffers {@see injectAll()} writes in rotation. A vio buffer update
+     * is a staging copy queued at once, ahead of the frame being recorded, so an
+     * upload buffer must not be rewritten while a dispatch recorded earlier in
+     * the same frame still has to read it: the rotation covers several batched
+     * uploads per frame (one per particle system and frame is the normal case).
+     */
+    private const SHARED_UPLOAD_ROTATION = 8;
 
     /**
      * Write $n spawned rows (raw f32 bytes, 8 floats per row — see
@@ -666,6 +691,97 @@ final class GpuParticleBaker
         }
         $state->ledger->advanceHead($n);
         return true;
+    }
+
+    /**
+     * {@see inject()} for several states at once, with ONE buffer upload: the
+     * rows of every batch go into a shared upload buffer, and each state's
+     * spawn dispatch reads its own range of it. A buffer update is the costly
+     * part of a spawn (a staging copy per call on D3D12), and every live
+     * emitter spawns every frame.
+     *
+     * Same result per batch as inject(): true on success (and for n = 0),
+     * false for a batch inject() would refuse or on a GPU error - that batch's
+     * rows are not written and its head does not move.
+     *
+     * @param list<array{0: GpuParticleState, 1: string, 2: int}> $batches [state, rows (raw f32, 8 floats each), row count]
+     * @return array<int, bool> one result per batch, under the batch's key
+     */
+    public static function injectAll(\VioContext $ctx, array $batches): array
+    {
+        $results = [];
+        $valid = [];
+        $rowBytes = GpuParticleLedger::ROW_FLOATS * 4;
+        foreach ($batches as $i => [$state, $rows, $n]) {
+            if ($n <= 0) {
+                $results[$i] = true;
+                continue;
+            }
+            $results[$i] = false;
+            if ($n <= $state->capacity && strlen($rows) >= $n * $rowBytes) {
+                $valid[] = $i;
+            }
+        }
+        if ($valid === [] || !self::isAvailable($ctx)) {
+            return $results;
+        }
+        if (count($valid) === 1) {
+            [$state, $rows, $n] = $batches[$valid[0]];
+            $results[$valid[0]] = self::inject($ctx, $state, $rows, $n);
+            return $results;
+        }
+
+        $upload = '';
+        $first = [];
+        $offset = 0;
+        foreach ($valid as $i) {
+            [, $rows, $n] = $batches[$i];
+            $upload .= strlen($rows) === $n * $rowBytes ? $rows : substr($rows, 0, $n * $rowBytes);
+            $first[$i] = $offset;
+            $offset += $n;
+        }
+        try {
+            $kernel = self::kernel($ctx, self::KERNEL_SPAWN);
+            $buffer = $kernel === null ? null : self::sharedUploadBuffer($ctx, strlen($upload));
+            if ($kernel === null || $buffer === null) {
+                return $results;
+            }
+            vio_update_buffer($buffer, $upload);
+            foreach ($valid as $i) {
+                [$state, , $n] = $batches[$i];
+                self::dispatch($ctx, $kernel, [
+                    [$state->stateBuf, 0, VIO_COMPUTE_WRITE],
+                    [$buffer,          1, VIO_COMPUTE_READ],
+                ], pack('l4', $state->ledger->head(), $n, $state->capacity, $first[$i]), intdiv($n + self::LOCAL_SIZE - 1, self::LOCAL_SIZE));
+                $state->ledger->advanceHead($n);
+                $results[$i] = true;
+            }
+        } catch (\Throwable) {
+            // Batches dispatched before the failure keep their result.
+        }
+        return $results;
+    }
+
+    /**
+     * The next upload buffer of the shared rotation, grown (replaced) when it
+     * is smaller than $bytes. Null when a buffer cannot be created.
+     */
+    private static function sharedUploadBuffer(\VioContext $ctx, int $bytes): ?\VioBuffer
+    {
+        self::useContext($ctx);
+        $slot = self::$sharedUploadNext;
+        self::$sharedUploadNext = ($slot + 1) % self::SHARED_UPLOAD_ROTATION;
+        [$buffer, $size] = self::$sharedUploads[$slot] ?? [null, 0];
+        if ($buffer === null || $size < $bytes) {
+            $size = max($bytes, 2 * $size, 4096);
+            $created = vio_storage_buffer($ctx, ['data' => str_repeat("\0", $size), 'stride' => 4]);
+            if ($created === false) {
+                return null;
+            }
+            $buffer = $created;
+            self::$sharedUploads[$slot] = [$buffer, $size];
+        }
+        return $buffer;
     }
 
     /**

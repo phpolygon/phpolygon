@@ -133,6 +133,8 @@ class ParticleSystem extends AbstractSystem
             $this->lastCamera = $cameraPos;
         }
 
+        $spawnFailed = $this->ctx !== null ? $this->injectPendingSpawns($world, $this->ctx) : null;
+
         foreach ($world->query(ParticleEmitter::class) as $entity) {
             $emitter = $entity->get(ParticleEmitter::class);
 
@@ -143,7 +145,7 @@ class ParticleSystem extends AbstractSystem
                     // stale and the next update replaces it. Nothing to draw.
                     continue;
                 }
-                if ($this->renderGpu($this->ctx, $state, $emitter, $cameraPos)) {
+                if (!isset($spawnFailed[$emitter]) && $this->renderGpu($this->ctx, $state, $emitter, $cameraPos)) {
                     continue;
                 }
                 $this->abandonGpu($emitter);
@@ -256,6 +258,49 @@ class ParticleSystem extends AbstractSystem
             indirectArgs: $args,
         ));
         return true;
+    }
+
+    /**
+     * Write the rows every tier-1 emitter spawned since the last render into
+     * its GPU ring with ONE buffer upload for all of them
+     * ({@see GpuParticleBaker::injectAll()}) - before {@see renderGpu()} steps
+     * them, which then finds nothing pending. One upload per emitter and frame
+     * was the dominant cost of a few live GPU emitters.
+     *
+     * @return \WeakMap<ParticleEmitter, true> emitters whose spawn upload failed
+     */
+    private function injectPendingSpawns(World $world, \VioContext $ctx): \WeakMap
+    {
+        /** @var \WeakMap<ParticleEmitter, true> $failed */
+        $failed = new \WeakMap();
+        $batches = [];
+        $owners = [];
+        foreach ($world->query(ParticleEmitter::class) as $entity) {
+            $emitter = $entity->get(ParticleEmitter::class);
+            $state = $this->gpuStates[$emitter] ?? null;
+            if ($state === null
+                || $state->argsBuf === null
+                || !$state->ledger->isCurrent($emitter->maxParticles, $emitter->generation)
+            ) {
+                continue;
+            }
+            $pending = $state->ledger->pendingCount();
+            if ($pending === 0) {
+                continue;
+            }
+            $g = $emitter->gravity;
+            $batches[] = [$state, $state->ledger->takePending($g->x, $g->y, $g->z), $pending];
+            $owners[] = $emitter;
+        }
+        if ($batches === []) {
+            return $failed;
+        }
+        foreach (GpuParticleBaker::injectAll($ctx, $batches) as $i => $ok) {
+            if (!$ok) {
+                $failed[$owners[$i]] = true;
+            }
+        }
+        return $failed;
     }
 
     /**

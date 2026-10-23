@@ -8,6 +8,7 @@ use PHPolygon\Component\ParticleEmitter;
 use PHPolygon\Component\ParticleRenderMode;
 use PHPolygon\Math\Vec3;
 use PHPolygon\System\GpuParticleBaker;
+use PHPolygon\System\GpuParticleState;
 use PHPolygon\System\ParticleOrientation;
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\Attributes\RequiresPhpExtension;
@@ -212,6 +213,61 @@ class GpuParticleBakerTest extends TestCase
         foreach ([2, 3, 4, 5] as $slot) {
             self::assertSame(array_fill(0, 8, 0.0), array_slice($s, $slot * 8, 8), "slot {$slot} untouched");
         }
+    }
+
+    /**
+     * injectAll(): one upload for several states, each spawn dispatch reads its
+     * own range - every ring gets its own rows at its own head, a refused batch
+     * leaves its ring and head alone.
+     */
+    public function testInjectAllWritesEveryBatchIntoItsOwnRing(): void
+    {
+        $ctx = $this->ctx;
+        self::assertNotNull($ctx);
+        self::assertTrue(GpuParticleBaker::warm($ctx));
+
+        $a = GpuParticleBaker::createState($ctx, [], 8);
+        $b = GpuParticleBaker::createState($ctx, [], 4);
+        $c = GpuParticleBaker::createState($ctx, [], 4);
+        self::assertNotNull($a);
+        self::assertNotNull($b);
+        self::assertNotNull($c);
+        $a->ledger->advanceHead(6);
+        $b->ledger->advanceHead(1);
+
+        $rows = static function (float $base, int $n): string {
+            $flat = [];
+            for ($i = 0; $i < $n; $i++) {
+                array_push($flat, $base + $i, $base + 10.0 + $i, $base + 20.0 + $i, 1.0, 2.0, 3.0, 0.25, 4.0);
+            }
+            return pack('f*', ...$flat);
+        };
+        $results = GpuParticleBaker::injectAll($ctx, [
+            [$a, $rows(100.0, 3), 3],
+            [$c, $rows(300.0, 5), 5], // larger than the ring: refused
+            [$b, $rows(200.0, 2), 2],
+            [$c, '', 0],
+        ]);
+        self::assertSame([true, false, true, true], $results);
+        self::assertSame(1, $a->ledger->head(), 'a: slots 6, 7, 0 were written');
+        self::assertSame(3, $b->ledger->head(), 'b: slots 1, 2 were written');
+        self::assertSame(0, $c->ledger->head(), 'c: refused, head unchanged');
+
+        $read = static function (\VioContext $ctx, GpuParticleState $state): array {
+            $bytes = vio_storage_buffer_read($ctx, $state->stateBuf);
+            self::assertIsString($bytes);
+            return array_values(unpack('f*', $bytes) ?: []);
+        };
+        $sa = $read($ctx, $a);
+        foreach ([6 => 0, 7 => 1, 0 => 2] as $slot => $row) {
+            self::assertSame([100.0 + $row, 110.0 + $row, 120.0 + $row, 1.0, 2.0, 3.0, 0.25, 4.0], array_slice($sa, $slot * 8, 8), "a slot {$slot}");
+        }
+        $sb = $read($ctx, $b);
+        foreach ([1 => 0, 2 => 1] as $slot => $row) {
+            self::assertSame([200.0 + $row, 210.0 + $row, 220.0 + $row, 1.0, 2.0, 3.0, 0.25, 4.0], array_slice($sb, $slot * 8, 8), "b slot {$slot}");
+        }
+        self::assertSame(array_fill(0, 8, 0.0), array_slice($sb, 0, 8), 'b slot 0 untouched');
+        self::assertSame(array_fill(0, 32, 0.0), $read($ctx, $c), 'c untouched');
     }
 
     /** @return array<string, array{ParticleRenderMode}> */

@@ -85,6 +85,32 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
     /** @var array<string, string> Cache key -> fingerprint (count + first/last matrix) of the cached batch */
     private array $staticFingerprintCache = [];
 
+    /**
+     * Cache key -> instance count and the first/last Mat4 OBJECTS of the cached
+     * batch. Mat4 is immutable, so the same objects mean the same fingerprint:
+     * a batch re-sent with the matrices it was cached with skips building the
+     * fingerprint string (32 floats stringified, more than packing a small batch).
+     *
+     * @var array<string, array{0: int, 1: Mat4, 2: Mat4}>
+     */
+    private array $staticIdentityCache = [];
+
+    /**
+     * Cache key -> the flat float array a flat static batch was cached with,
+     * compared whole on the next draw (same array: O(1)).
+     *
+     * @var array<string, array<float>>
+     */
+    private array $staticFlatCache = [];
+
+    /**
+     * Instance data resolved during the current render(): one command is read
+     * by up to three passes (shadow, G-buffer, colour) and is packed once.
+     *
+     * @var \WeakMap<DrawMeshInstanced, array{0: string, 1: int}>|null
+     */
+    private ?\WeakMap $frameInstanceData = null;
+
     private ?string $shaderOverride = null;
 
     /**
@@ -2099,6 +2125,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         // compile them now so the first 3D frame still renders (at the cost of
         // a one-time hitch on this frame). No-op once warmed.
         $this->warmShaders();
+        $this->frameInstanceData = new \WeakMap();
 
         $commands = $commandList->getCommands();
 
@@ -4975,26 +5002,68 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
      * carries a flat float[] buffer the per-Mat4 toArray() loop is
      * skipped and pack('f*', ...) consumes the floats directly.
      *
+     * A command is resolved once per render(): the shadow, G-buffer and colour
+     * passes that draw it again reuse the result.
+     *
      * @return array{0: string, 1: int}
      */
     private function resolveInstanceData(string $meshId, Material $material, DrawMeshInstanced $cmd): array
     {
+        $this->frameInstanceData ??= new \WeakMap();
+        if (isset($this->frameInstanceData[$cmd])) {
+            return $this->frameInstanceData[$cmd];
+        }
+
+        return $this->frameInstanceData[$cmd] = $this->resolveInstanceDataOnce($meshId, $material, $cmd);
+    }
+
+    /** @return array{0: string, 1: int} */
+    private function resolveInstanceDataOnce(string $meshId, Material $material, DrawMeshInstanced $cmd): array
+    {
         $isStatic = $cmd->isStatic && $cmd->packedMatrices === '';
         $cacheKey = '';
         $fingerprint = '';
+        $matrices = $cmd->matrices;
+        $flatMode = $cmd->flatMatrices !== [];
+        $identityMode = $isStatic && !$flatMode && $matrices !== [];
         if ($isStatic) {
             // The caller's key when given (two static batches may share mesh and
-            // material), else mesh + shader + material. The fingerprint catches
-            // a different batch arriving under the same key - it is re-uploaded
-            // instead of drawing the cached one's instances.
+            // material), else mesh + shader + material. A different batch
+            // arriving under the same key is re-uploaded instead of drawing the
+            // cached one's instances.
             $cacheKey = $cmd->staticKey !== null
                 ? 'k:' . $cmd->staticKey
                 : $meshId . ':' . $material->shader . ':' . spl_object_id($material);
-            $fingerprint = self::instanceFingerprint($cmd);
-            if (isset($this->staticMatrixCache[$cacheKey])
-                && $this->staticFingerprintCache[$cacheKey] === $fingerprint
-            ) {
-                return [$this->staticMatrixCache[$cacheKey], $this->staticInstanceCountCache[$cacheKey]];
+            $cached = isset($this->staticMatrixCache[$cacheKey]);
+            if ($flatMode) {
+                // A flat batch is compared whole: O(1) when the caller re-sends
+                // the same array, a C-level element compare otherwise - exact,
+                // and cheaper than stringifying a fingerprint.
+                $count = $cmd->instanceCount >= 0 ? $cmd->instanceCount : count($cmd->matrices);
+                if ($cached
+                    && isset($this->staticFlatCache[$cacheKey])
+                    && $this->staticInstanceCountCache[$cacheKey] === $count
+                    && $this->staticFlatCache[$cacheKey] === $cmd->flatMatrices
+                ) {
+                    return [$this->staticMatrixCache[$cacheKey], $count];
+                }
+            } else {
+                // Same count and the same first/last Mat4 objects as the cached
+                // batch: the fingerprint would match, skip building it.
+                if ($cached && $identityMode && isset($this->staticIdentityCache[$cacheKey])) {
+                    [$count, $first, $last] = $this->staticIdentityCache[$cacheKey];
+                    if ($count === count($matrices)
+                        && $matrices[array_key_first($matrices)] === $first
+                        && $matrices[array_key_last($matrices)] === $last
+                    ) {
+                        return [$this->staticMatrixCache[$cacheKey], $this->staticInstanceCountCache[$cacheKey]];
+                    }
+                }
+                $fingerprint = self::instanceFingerprint($cmd);
+                if ($cached && ($this->staticFingerprintCache[$cacheKey] ?? null) === $fingerprint) {
+                    $this->rememberStaticIdentity($cacheKey, $identityMode ? $matrices : []);
+                    return [$this->staticMatrixCache[$cacheKey], $this->staticInstanceCountCache[$cacheKey]];
+                }
             }
         }
 
@@ -5025,17 +5094,44 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         if ($isStatic) {
             $this->staticMatrixCache[$cacheKey] = $packed;
             $this->staticInstanceCountCache[$cacheKey] = $count;
-            $this->staticFingerprintCache[$cacheKey] = $fingerprint;
+            if ($flatMode) {
+                $this->staticFlatCache[$cacheKey] = $cmd->flatMatrices;
+                unset($this->staticFingerprintCache[$cacheKey]);
+            } else {
+                $this->staticFingerprintCache[$cacheKey] = $fingerprint;
+                unset($this->staticFlatCache[$cacheKey]);
+            }
+            $this->rememberStaticIdentity($cacheKey, $identityMode ? $matrices : []);
         }
 
         return [$packed, $count];
     }
 
     /**
+     * Remember the count and the first/last Mat4 objects a static batch was
+     * cached (or last confirmed) with; [] forgets them (flat batches).
+     *
+     * @param array<int|string, Mat4> $matrices
+     */
+    private function rememberStaticIdentity(string $cacheKey, array $matrices): void
+    {
+        if ($matrices === []) {
+            unset($this->staticIdentityCache[$cacheKey]);
+            return;
+        }
+        $this->staticIdentityCache[$cacheKey] = [
+            count($matrices),
+            $matrices[array_key_first($matrices)],
+            $matrices[array_key_last($matrices)],
+        ];
+    }
+
+    /**
      * Drop cached static instance buffers: the one stored under $staticKey
      * (DrawMeshInstanced::$staticKey), or all of them. Call it when a static
-     * batch changed in a way its fingerprint (instance count, first and last
-     * matrix) does not show, or when a scene is unloaded.
+     * Mat4 batch changed in a way its fingerprint (instance count, first and
+     * last matrix) does not show, or when a scene is unloaded. Flat batches are
+     * compared whole and need no invalidation.
      */
     public function invalidateStaticInstances(?string $staticKey = null): void
     {
@@ -5043,6 +5139,8 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             $this->staticMatrixCache = [];
             $this->staticInstanceCountCache = [];
             $this->staticFingerprintCache = [];
+            $this->staticIdentityCache = [];
+            $this->staticFlatCache = [];
             return;
         }
         $key = 'k:' . $staticKey;
@@ -5050,6 +5148,8 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             $this->staticMatrixCache[$key],
             $this->staticInstanceCountCache[$key],
             $this->staticFingerprintCache[$key],
+            $this->staticIdentityCache[$key],
+            $this->staticFlatCache[$key],
         );
     }
 

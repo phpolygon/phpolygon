@@ -202,4 +202,79 @@ class Transform3DSystemTest extends TestCase
         // Now child is root — world = local = 5
         $this->assertEqualsWithDelta(5.0, $childT->getWorldPosition()->x, 1e-5);
     }
+
+    /**
+     * A dormant subtree under an awake parent is skipped like a dormant root:
+     * it is not recomputed while it sleeps, and catches up on its first awake
+     * tick if its parent moved meanwhile - grandchildren included.
+     */
+    public function testDormantSubtreeIsSkippedAndCatchesUpOnWake(): void
+    {
+        $world = new World();
+        $world->addSystem(new Transform3DSystem());
+
+        $parent = $world->createEntity();
+        $parentT = new Transform3D(new Vec3(10.0, 0.0, 0.0));
+        $parent->attach($parentT);
+        $child = $world->createEntity();
+        $childT = new Transform3D(new Vec3(5.0, 0.0, 0.0));
+        $child->attach($childT);
+        $parentT->addChild($childT, $child->id, $parent->id);
+        $grandchild = $world->createEntity();
+        $grandT = new Transform3D(new Vec3(1.0, 0.0, 0.0));
+        $grandchild->attach($grandT);
+        $childT->addChild($grandT, $grandchild->id, $child->id);
+        $world->update(0.016);
+        $this->assertEqualsWithDelta(16.0, $grandT->getWorldPosition()->x, 1e-5);
+
+        $world->setEntitiesDormant([$child->id, $grandchild->id], true);
+        $parentT->position = new Vec3(20.0, 0.0, 0.0);
+        $childMatrix = $childT->worldMatrix;
+        $world->update(0.016);
+        $world->update(0.016);
+        $this->assertSame($childMatrix, $childT->worldMatrix, 'a sleeping child is not recomputed');
+        $this->assertEqualsWithDelta(20.0, $parentT->getWorldPosition()->x, 1e-5);
+
+        $world->setEntitiesDormant([$child->id, $grandchild->id], false);
+        $world->update(0.016);
+        $this->assertEqualsWithDelta(25.0, $childT->getWorldPosition()->x, 1e-5);
+        $this->assertEqualsWithDelta(26.0, $grandT->getWorldPosition()->x, 1e-5);
+
+        // Settled: the next tick leaves the woken subtree alone.
+        $settled = $grandT->worldMatrix;
+        $world->update(0.016);
+        $this->assertSame($settled, $grandT->worldMatrix);
+    }
+
+    /** A child that sleeps through ticks where nothing moved needs no catch-up. */
+    public function testDormantChildOfAStillParentKeepsItsMatrixOnWake(): void
+    {
+        $world = new World();
+        $world->addSystem(new Transform3DSystem());
+
+        $parent = $world->createEntity();
+        $parentT = new Transform3D(new Vec3(10.0, 0.0, 0.0));
+        $parent->attach($parentT);
+        $child = $world->createEntity();
+        $childT = new Transform3D(new Vec3(5.0, 0.0, 0.0));
+        $child->attach($childT);
+        $parentT->addChild($childT, $child->id, $parent->id);
+        $world->update(0.016);
+
+        $world->setEntityDormant($child->id, true);
+        $world->update(0.016);
+        $world->setEntityDormant($child->id, false);
+        $before = $childT->worldMatrix;
+        $world->update(0.016);
+        $this->assertSame($before, $childT->worldMatrix);
+        $this->assertEqualsWithDelta(15.0, $childT->getWorldPosition()->x, 1e-5);
+
+        // Its own local edit while asleep is still picked up on wake.
+        $world->setEntityDormant($child->id, true);
+        $childT->position = new Vec3(7.0, 0.0, 0.0);
+        $world->update(0.016);
+        $world->setEntityDormant($child->id, false);
+        $world->update(0.016);
+        $this->assertEqualsWithDelta(17.0, $childT->getWorldPosition()->x, 1e-5);
+    }
 }

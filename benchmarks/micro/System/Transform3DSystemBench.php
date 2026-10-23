@@ -80,6 +80,39 @@ final class Transform3DSystemBench
     }
 
     /**
+     * One awake root with a large parked subtree (an interior kept loaded but
+     * dormant): the dormant children are skipped, not walked.
+     */
+    public function setUpParkedSubtree(): void
+    {
+        $this->setUp();
+        $root = $this->world->createEntity();
+        $rootT = new Transform3D(new Vec3(0.0, 0.0, 0.0));
+        $root->attach($rootT);
+        $ids = [];
+        for ($i = 0; $i < 2400; $i++) {
+            $child = $this->world->createEntity();
+            $childT = new Transform3D(new Vec3((float) ($i % 40), 0.0, (float) intdiv($i, 40)));
+            $child->attach($childT);
+            $rootT->addChild($childT, $child->id, $root->id);
+            $ids[] = $child->id;
+        }
+        $this->system->update($this->world, 0.016);
+        $this->world->setEntitiesDormant($ids, true);
+        $this->system->update($this->world, 0.016);
+    }
+
+    /**
+     * @BeforeMethods("setUpParkedSubtree")
+     * @Revs(50)
+     * @Iterations(5)
+     */
+    public function benchParkedSubtreeTick(): void
+    {
+        $this->system->update($this->world, 0.016);
+    }
+
+    /**
      * A few animated roots per tick.
      *
      * @BeforeMethods("setUp")

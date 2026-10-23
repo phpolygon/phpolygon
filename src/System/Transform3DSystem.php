@@ -19,6 +19,14 @@ use PHPolygon\ECS\World;
  * thousands of static entities (terrain props, buildings, decoration), and
  * the trig inside {@see \PHPolygon\Math\Quaternion::toRotationMatrix()}
  * called for every transform every frame is the dominant CPU cost in PHP.
+ *
+ * Dormant entities ({@see World::setEntityDormant()}) are not updated: a
+ * dormant root is not in the pool, and a dormant child is skipped together
+ * with its subtree. A parked subtree of thousands of parts under an awake
+ * parent therefore costs nothing per tick. A dormant child whose ancestor moved
+ * while it was skipped is remembered and recomputed on its first awake tick,
+ * so its world matrix is current again before anything renders it. While it
+ * sleeps, its world matrix may be stale.
  */
 class Transform3DSystem extends AbstractSystem
 {
@@ -28,6 +36,14 @@ class Transform3DSystem extends AbstractSystem
      * @var array<int, array{px:float, py:float, pz:float, rx:float, ry:float, rz:float, rw:float, sx:float, sy:float, sz:float, parent:?int}>
      */
     private array $cache = [];
+
+    /**
+     * Dormant children whose ancestor moved while they were skipped; they are
+     * recomputed on their first awake tick.
+     *
+     * @var array<int, true>
+     */
+    private array $staleDormant = [];
 
     public function update(World $world, float $dt): void
     {
@@ -84,10 +100,16 @@ class Transform3DSystem extends AbstractSystem
     public function onWorldClear(World $world): void
     {
         $this->cache = [];
+        $this->staleDormant = [];
     }
 
     private function updateHierarchy(World $world, int $entityId, Transform3D $transform, bool $parentDirty): void
     {
+        if (isset($this->staleDormant[$entityId])) {
+            // An ancestor moved while this entity was dormant and skipped.
+            unset($this->staleDormant[$entityId]);
+            $parentDirty = true;
+        }
         $dirty = $parentDirty || $this->isDirty($entityId, $transform);
 
         if ($dirty) {
@@ -110,6 +132,15 @@ class Transform3DSystem extends AbstractSystem
 
         foreach ($transform->childEntityIds as $childId) {
             if (!$world->isAlive($childId)) {
+                continue;
+            }
+            // A dormant child is skipped with its subtree, like a dormant root.
+            // If this entity moved meanwhile, the child is recomputed on its
+            // first awake tick.
+            if ($world->isDormant($childId)) {
+                if ($dirty) {
+                    $this->staleDormant[$childId] = true;
+                }
                 continue;
             }
             $childTransform = $world->tryGetComponent($childId, Transform3D::class);

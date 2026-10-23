@@ -44,4 +44,47 @@ class Renderer3DSystemVisibilityTest extends TestCase
         $this->assertCount(1, $spy->draws, 'only the visible mesh is drawn');
         $this->assertSame('shown', $spy->draws[0]->meshId);
     }
+
+    /**
+     * The renderer reads the component pools directly: draws keep the order of
+     * query(MeshRenderer, Transform3D), a renderer without a Transform3D and a
+     * dormant entity draw nothing - whichever pool is the smaller one.
+     */
+    public function testDrawsFollowTheQueryOrderAndSkipIncompleteAndDormantEntities(): void
+    {
+        foreach ([false, true] as $moreTransforms) {
+            $world = new World();
+            $ids = [];
+            foreach (['a', 'b', 'c', 'd'] as $i => $name) {
+                $ids[$name] = $world->createEntity()
+                    ->attach(new Transform3D(new Vec3((float) $i, 0.0, 0.0)))
+                    ->attach(new MeshRenderer(meshId: $name, materialId: 'm'))
+                    ->id;
+            }
+            $world->createEntity()->attach(new MeshRenderer(meshId: 'no-transform', materialId: 'm'));
+            if ($moreTransforms) {
+                for ($i = 0; $i < 3; $i++) {
+                    $world->createEntity()->attach(new Transform3D(new Vec3(0.0, (float) $i, 0.0)));
+                }
+            }
+            $world->setEntityDormant($ids['c'], true);
+
+            $spy = new class extends NullRenderer3D {
+                /** @var list<DrawMesh> */
+                public array $draws = [];
+                public function render(RenderCommandList $commands): void
+                {
+                    $this->draws = $commands->ofType(DrawMesh::class);
+                }
+            };
+            (new Renderer3DSystem($spy, new RenderCommandList()))->render($world);
+
+            $expected = [];
+            foreach ($world->query(MeshRenderer::class, Transform3D::class) as $entity) {
+                $expected[] = $entity->get(MeshRenderer::class)->meshId;
+            }
+            $this->assertSame(['a', 'b', 'd'], $expected);
+            $this->assertSame($expected, array_map(static fn (DrawMesh $d): string => $d->meshId, $spy->draws));
+        }
+    }
 }
