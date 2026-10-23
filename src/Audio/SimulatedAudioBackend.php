@@ -4,6 +4,10 @@ declare(strict_types=1);
 
 namespace PHPolygon\Audio;
 
+use PHPolygon\Audio\Spatial\AudioListener;
+use PHPolygon\Audio\Spatial\SpatialSource;
+use PHPolygon\Math\Vec3;
+
 /**
  * Device-free backend that keeps every voice's state, for tests and tools.
  *
@@ -11,12 +15,18 @@ namespace PHPolygon\Audio;
  * duration ({@see setClipDuration()}) – until {@see advance()} has played them
  * to the end (time × pitch; paused and looping voices never end on their own).
  * Everything a voice was told is readable through {@see voice()}.
+ *
+ * With `new SimulatedAudioBackend(nativeSpatial: true)` it stands in for a
+ * native spatial backend (php-vio ≥ 2.36): 3D voices arrive with their world
+ * {@see SpatialSource}, the listener pose is kept ({@see listener()}), pitch
+ * and pan change live, and {@see dopplerPitch()} gives the OpenAL Doppler
+ * ratio miniaudio would apply. The default (false) is the fallback path.
  */
-final class SimulatedAudioBackend implements SpatialAudioBackendInterface
+final class SimulatedAudioBackend implements NativeSpatialAudioBackendInterface
 {
     /**
      * @var array<int, array{clip: string, volume: float, loop: bool, pitch: float, pan: float,
-     *     direction: array{float, float, float}, paused: bool, time: float}>
+     *     direction: array{float, float, float}, paused: bool, time: float, spatial: bool, source: ?SpatialSource}>
      */
     private array $voices = [];
 
@@ -34,6 +44,15 @@ final class SimulatedAudioBackend implements SpatialAudioBackendInterface
 
     private int $nextPlaybackId = 1;
     private float $masterVolume = 1.0;
+    private ?AudioListener $listener = null;
+    private float $speedOfSound = AudioManager::SPEED_OF_SOUND;
+
+    public function __construct(private readonly bool $nativeSpatial = false) {}
+
+    public function hasNativeSpatial(): bool
+    {
+        return $this->nativeSpatial;
+    }
 
     public function load(string $id, string $path): AudioClip
     {
@@ -60,6 +79,19 @@ final class SimulatedAudioBackend implements SpatialAudioBackendInterface
         float $pan = 0.0,
         ?array $direction = null,
     ): int {
+        return $this->start($clipId, $volume, $loop, $pitch, $pan, $direction, null);
+    }
+
+    public function playSource(string $clipId, float $volume, bool $loop, float $pitch, SpatialSource $source): int
+    {
+        return $this->start($clipId, $volume, $loop, $pitch, 0.0, null, $source);
+    }
+
+    /**
+     * @param array{float, float, float}|null $direction
+     */
+    private function start(string $clipId, float $volume, bool $loop, float $pitch, float $pan, ?array $direction, ?SpatialSource $source): int
+    {
         if ($this->failPlays || (!$this->playUnloaded && !isset($this->clips[$clipId]))) {
             return 0;
         }
@@ -73,8 +105,80 @@ final class SimulatedAudioBackend implements SpatialAudioBackendInterface
             'direction' => $direction ?? [0.0, 0.0, 0.0],
             'paused' => false,
             'time' => 0.0,
+            'spatial' => $source !== null || $direction !== null || !$this->nativeSpatial,
+            'source' => $source,
         ];
         return $id;
+    }
+
+    public function updateSource(int $playbackId, SpatialSource $source): void
+    {
+        if (isset($this->voices[$playbackId])) {
+            $this->voices[$playbackId]['source'] = $source;
+            $this->voices[$playbackId]['spatial'] = true;
+        }
+    }
+
+    public function setListenerPose(AudioListener $listener): void
+    {
+        $this->listener = $listener;
+    }
+
+    /** The last listener pose a native manager pushed (null = never). */
+    public function listener(): ?AudioListener
+    {
+        return $this->listener;
+    }
+
+    public function setSpeedOfSound(float $speed): void
+    {
+        $this->speedOfSound = $speed;
+    }
+
+    public function getSpeedOfSound(): float
+    {
+        return $this->speedOfSound;
+    }
+
+    public function setPitch(int $playbackId, float $pitch): void
+    {
+        if (isset($this->voices[$playbackId])) {
+            $this->voices[$playbackId]['pitch'] = $pitch;
+        }
+    }
+
+    public function setPan(int $playbackId, float $pan): void
+    {
+        if (isset($this->voices[$playbackId])) {
+            $this->voices[$playbackId]['pan'] = max(-1.0, min(1.0, $pan));
+        }
+    }
+
+    /**
+     * The Doppler pitch ratio of a 3D voice as miniaudio computes it (OpenAL:
+     * (c − f·v_listener) / (c − f·v_source), velocities projected onto the
+     * source-to-listener line, each capped at c / f; the listener at rest at
+     * the origin until a pose arrives). 1 without a source, a factor or a
+     * distance.
+     */
+    public function dopplerPitch(int $playbackId): float
+    {
+        $source = $this->voices[$playbackId]['source'] ?? null;
+        if ($source === null || $source->doppler <= 0.0) {
+            return 1.0;
+        }
+        $listener = $this->listener ?? new AudioListener();
+        $rel = $listener->position->sub($source->position);
+        $len = $rel->length();
+        if ($len <= 0.0) {
+            return 1.0;
+        }
+        $listenerVelocity = $listener->velocity ?? new Vec3();
+        $f = $source->doppler;
+        $c = $this->speedOfSound;
+        $vls = min($rel->dot($listenerVelocity) / $len, $c / $f);
+        $vss = min($rel->dot($source->velocity) / $len, $c / $f);
+        return ($c - $f * $vls) / ($c - $f * $vss);
     }
 
     /** Play every unpaused voice on by $dt seconds (scaled by its pitch). */
@@ -101,8 +205,11 @@ final class SimulatedAudioBackend implements SpatialAudioBackendInterface
     }
 
     /**
+     * spatial: false for a 2D voice on the native path (it bypasses the
+     * spatializer); source: the world placement of a native 3D voice.
+     *
      * @return array{clip: string, volume: float, loop: bool, pitch: float, pan: float,
-     *     direction: array{float, float, float}, paused: bool, time: float}|null
+     *     direction: array{float, float, float}, paused: bool, time: float, spatial: bool, source: ?SpatialSource}|null
      */
     public function voice(int $playbackId): ?array
     {

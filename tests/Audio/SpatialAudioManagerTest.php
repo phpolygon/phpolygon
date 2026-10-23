@@ -258,12 +258,17 @@ final class SpatialAudioManagerTest extends TestCase
     public function testVioDirectionCompensationRestoresTheLouderChannel(): void
     {
         $this->assertSame(1.0, VioAudioBackend::directionCompensation(0.0, 0.0, 0.0));
-        // Ahead: miniaudio gives each channel (1 + 0.7071) / 2.
-        $this->assertEqualsWithDelta(2.0 / 1.7071, VioAudioBackend::directionCompensation(0.0, 0.0, -1.0), 1e-9);
-        // Hard right: the right channel is also at (1 + 0.7071) / 2.
-        $this->assertEqualsWithDelta(2.0 / 1.7071, VioAudioBackend::directionCompensation(1.0, 0.0, 0.0), 1e-9);
-        // Behind: both channels at the 0.2 floor.
-        $this->assertEqualsWithDelta(5.0, VioAudioBackend::directionCompensation(0.0, 0.0, 1.0), 1e-9);
+        // miniaudio's spatializer pans stereo onto SIDE_LEFT/SIDE_RIGHT (±1, 0, 0),
+        // measured on php-vio 2.36's offline engine.
+        // Ahead: each channel at (1 + 0) / 2.
+        $this->assertEqualsWithDelta(2.0, VioAudioBackend::directionCompensation(0.0, 0.0, -1.0), 1e-9);
+        // Hard right: the right channel at full level.
+        $this->assertEqualsWithDelta(1.0, VioAudioBackend::directionCompensation(1.0, 0.0, 0.0), 1e-9);
+        // Behind and above: like ahead.
+        $this->assertEqualsWithDelta(2.0, VioAudioBackend::directionCompensation(0.0, 0.0, 1.0), 1e-9);
+        $this->assertEqualsWithDelta(2.0, VioAudioBackend::directionCompensation(0.0, 1.0, 0.0), 1e-9);
+        // 45° right-front: right channel at (1 + 0.7071) / 2.
+        $this->assertEqualsWithDelta(2.0 / 1.7071, VioAudioBackend::directionCompensation(1.0, 0.0, -1.0), 1e-4);
         // Length does not matter.
         $this->assertEqualsWithDelta(
             VioAudioBackend::directionCompensation(0.3, 0.1, -0.5),

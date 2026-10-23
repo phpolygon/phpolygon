@@ -448,7 +448,11 @@ function vio_text(VioContext $ctx, VioFont $font, string $text, float $x, float 
 /** @return VioSound|false */
 function vio_audio_load(string $path): VioSound|false {}
 
-/** @param array<string, mixed> $options Keys: volume (float), loop (bool), pan (float), pitch (float) */
+/**
+ * @param array<string, mixed> $options Keys: volume (float), loop (bool), pan (float), pitch (float);
+ *     since 2.36: spatial, relative (bool), position/velocity/direction (list{float, float, float}),
+ *     doppler, min_distance, max_distance, rolloff, min_gain, max_gain (float), attenuation (string)
+ */
 function vio_audio_play(VioSound $sound, array $options = []): void {}
 
 function vio_audio_stop(VioSound $sound): void {}
@@ -466,8 +470,50 @@ function vio_audio_playing(VioSound $sound): bool {}
 /** 3D position of a sound (miniaudio spatializer, absolute to the listener). */
 function vio_audio_position(VioSound $sound, float $x, float $y, float $z): void {}
 
-/** Listener position and facing direction (up is fixed to +Y). */
-function vio_audio_listener(float $x, float $y, float $z, float $fx, float $fy, float $fz): void {}
+/** Listener position, facing direction and (since 2.36, all three or none) up vector. */
+function vio_audio_listener(float $x, float $y, float $z, float $fx, float $fy, float $fz, ?float $ux = null, ?float $uy = null, ?float $uz = null): void {}
+
+// --- since 2.36: live sound parameters, listener motion, offline engine ---
+
+function vio_audio_pitch(VioSound $sound, float $pitch): void {}
+
+function vio_audio_pan(VioSound $sound, float $pan): void {}
+
+function vio_audio_spatial(VioSound $sound, bool $enabled, ?bool $relative = null): void {}
+
+/** @param 'none'|'inverse'|'linear'|'exponential' $model */
+function vio_audio_attenuation(VioSound $sound, string $model, ?float $min_distance = null, ?float $max_distance = null, ?float $rolloff = null, ?float $min_gain = null, ?float $max_gain = null): void {}
+
+function vio_audio_velocity(VioSound $sound, float $x, float $y, float $z): void {}
+
+function vio_audio_doppler(VioSound $sound, float $factor): void {}
+
+function vio_audio_direction(VioSound $sound, float $x, float $y, float $z): void {}
+
+/** Full cone angles in radians (0…2π, outer ≥ inner), outer gain 0…1. */
+function vio_audio_cone(VioSound $sound, float $inner_angle, float $outer_angle, float $outer_gain): void {}
+
+/** @return array<string, mixed> */
+function vio_audio_state(VioSound $sound): array {}
+
+function vio_audio_listener_velocity(float $x, float $y, float $z): void {}
+
+function vio_audio_speed_of_sound(float $speed): void {}
+
+/** @return array<string, mixed>|false */
+function vio_audio_listener_state(): array|false {}
+
+/** @param array<string, mixed> $options Keys: backends (list<string>), device (bool), sample_rate, channels (int) */
+function vio_audio_init(array $options = []): bool {}
+
+/** The playing backend, 'offline' for a device-less engine, false before the engine started. */
+function vio_audio_backend(): string|false {}
+
+/** @return list<string> */
+function vio_audio_backends(): array {}
+
+/** Interleaved 32-bit float PCM of the next $frames frames of an offline engine. */
+function vio_audio_render(int $frames): string|false {}
 
 /** Encoded bytes (any format vio_audio_load reads) → sound. */
 function vio_audio_load_data(string $data): VioSound|false {}

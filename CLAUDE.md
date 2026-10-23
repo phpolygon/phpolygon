@@ -1439,15 +1439,36 @@ $audio->getChannelDuck(AudioChannel::Music);   // current dB incl. ramp
 
 ## Spatial audio — 3D sources, listener, pitch, pan, pause
 
-`AudioManager` positions voices in the world itself; the backend only gets a
-final volume and a listener-space unit direction. One volume formula for all:
-`voice × channel × master × ducks × distance gain`.
+Two paths, chosen once per `AudioManager` (`hasNativeSpatial()`):
+
+- **Native** – php-vio **≥ 2.36** (`VioAudioBackend::nativeSpatialAvailable()`:
+  `vio_audio_spatial` & co. exist) or any `NativeSpatialAudioBackendInterface`
+  whose `hasNativeSpatial()` is true. The native listener follows the camera
+  (position, facing, up, velocity), a 3D voice is handed over with its world
+  `Spatial\SpatialSource` (position, velocity, roll-off, Doppler factor,
+  facing, cone) and miniaudio attenuates, pans, cones and Doppler-shifts it;
+  2D voices play with `spatial => false`, so the moving listener never touches
+  them. Pitch and pan change live. Volume: `voice × channel × master × ducks`
+  (× 0 out of range).
+- **Fallback** – older php-vio, php-glfw, `NullAudioBackend`, a game's own
+  backend: unchanged behaviour of v0.77 – the manager computes distance (and
+  now cone) gain itself and passes a listener-space unit direction; volume
+  `voice × channel × master × ducks × distance gain × cone gain`. Pitch/pan
+  are start-only (`setPlaybackPitch/Pan` remember the value but the voice keeps
+  its start value), no Doppler. Nothing breaks: php-vio stays `ext-vio: *`.
 
 ```php
 $id = $audio->playAt('pump', $pos, AudioChannel::SFX, 0.8, loop: true,
     attenuation: new Attenuation(2.0, 40.0, AttenuationCurve::Inverse), pitch: 0.9);
 $audio->playWith('blip', AudioChannel::UI, new PlaybackOptions(0.5, pitch: 1.2, pan: -0.3));
-$audio->setPlaybackPosition($id, $movedPos);       // moving source – call when it moves
+$audio->playWith('horn', AudioChannel::SFX, new PlaybackOptions(position: $p, velocity: $v,
+    doppler: 0.5, direction: $facing, cone: SoundCone::degrees(60.0, 150.0, 0.3)));
+$audio->setPlaybackPosition($id, $movedPos);       // moving source – call when it moves (velocity derived)
+$audio->setPlaybackPosition($id, $pos, $velocity); // or explicit velocity; setPlaybackVelocity($id, null) = derive again
+$audio->setPlaybackPitch($id, 1.3); $audio->setPlaybackPan($blip, 0.5); // live (native)
+$audio->setPlaybackDirection($id, $facing, $cone); $audio->setPlaybackCone($id, null);
+$audio->setPlaybackDoppler($id, 0.0);              // per voice; setDopplerEnabled(false) = all
+$audio->setSpeedOfSound(343.3);                    // world units/s (default: metres)
 $audio->setListener(AudioListener::fromActiveCamera($world)); // or add AudioListenerSystem
 $audio->setDefaultAttenuation(new Attenuation(1.0, 60.0));
 $audio->pause($id); $audio->pauseChannel(AudioChannel::Music);
@@ -1457,8 +1478,25 @@ $audio->resumeAll();                               // own pause() survives
 
 - `Spatial\Attenuation(min, max, curve, rolloff)`: 1 up to `min`, 0 from `max`;
   `Linear`, `Inverse`, `Exponential` (both tapered to reach exactly 0 at `max`),
-  `None` (pan only). `gain($d)` is pure arithmetic.
-- `Spatial\AudioListener(position, forward, up)` or `fromRotation($pos, $quat)`
+  `None` (pan only). `gain($d)` is pure arithmetic (fallback path).
+  Native path: `toNative()` → miniaudio's OpenAL clamped model (Linear exact;
+  Inverse/Exponential **untapered**, a little louder in between; None = linear
+  with rolloff 0 so it still pans; min ≥ 0.001); `nativeGain($d)` is that curve
+  with the manager's cut to 0 from `max` – what `getPlaybackDistanceGain()`
+  reports there.
+- `Spatial\SoundCone(inner, outer, outerGain)` (full angles in radians,
+  `degrees()`): 1 inside, `outerGain` outside, linear in the cosine between –
+  miniaudio's model, so both paths sound alike. Facing without a cone = no effect.
+- Doppler velocities: explicit (`PlaybackOptions::$velocity`,
+  `setPlaybackPosition(..., $velocity)`, `new AudioListener(..., velocity:)`)
+  or derived from the position change between two calls over the time
+  `AudioManager::update()` advanced (the engine ticks it). Derived velocities
+  fall back to 0 when the thing was not moved during a tick, after a gap over
+  `MAX_VELOCITY_GAP` (0.25 s) and on a jump ≥ `TELEPORT_SPEED_FRACTION` (0.5)
+  × speed of sound. OpenAL formula `(c − f·v_l) / (c − f·v_s)`;
+  `SimulatedAudioBackend::dopplerPitch()` reproduces it.
+- `Spatial\AudioListener(position, forward, up, ?velocity)` (null velocity =
+  derived by the manager; `withVelocity()`) or `fromRotation($pos, $quat)`
   (camera convention: forward = rot·(0,0,−1)); `fromActiveCamera($world)` = first
   active `Camera3DComponent` + `eyeOffset`, no render interpolation.
   `System\AudioListenerSystem($engine->audio)` does that every tick (opt-in).
@@ -1466,29 +1504,44 @@ $audio->resumeAll();                               // own pause() survives
 - `setListener()` and `setPlaybackPosition()` re-attenuate and re-pan at once;
   out of range = volume 0, the voice keeps running. `setPlaybackPosition()` on a
   2D voice makes it 3D with the default roll-off.
-- Pitch is a rate factor, fixed for the playback (php-vio sets it only at
-  start). Pan (−1…+1) is for unpositioned voices, also start-only; positioned
-  voices pan by direction.
+- Pitch is a rate factor (> 0; other values are ignored). Pan (−1…+1) is for
+  unpositioned voices; positioned voices pan by direction and ignore it. Both
+  live on the native path, start-only on the fallback path.
 - Pause reasons stack: own, channel, Master. A voice plays only when none
   holds it; voices started on a paused channel start paused (silently).
   `isPlaying()` stays true while paused – a paused voice is never swept.
 - Backends: `SpatialAudioBackendInterface` (`playVoice`, `setDirection`, `pause`,
   `resume`, `isPaused`) – implemented by `VioAudioBackend`, `NullAudioBackend`
-  and `SimulatedAudioBackend`. Other backends (php-glfw, a game's own) still
+  and `SimulatedAudioBackend`. `NativeSpatialAudioBackendInterface` extends it
+  (`hasNativeSpatial`, `playSource`, `updateSource`, `setListenerPose`,
+  `setSpeedOfSound`, `setPitch`, `setPan`) – `VioAudioBackend` and
+  `SimulatedAudioBackend`. Other backends (php-glfw, a game's own) still
   get distance attenuation through `setVolume()`; pitch/pan are dropped and
   pause is emulated by muting (the voice runs on).
 - `SimulatedAudioBackend` is the test backend: voices stay alive, `voice($id)`
-  shows volume, pitch, pan, direction, paused; `setClipDuration()` +
+  shows volume, pitch, pan, direction, paused, spatial, source; `setClipDuration()` +
   `advance($dt)` end one-shots (time × pitch, paused voices stand still);
-  `finish($id)`, `failPlays`.
-- php-vio (miniaudio) specifics, handled in `VioAudioBackend`: every sound is
-  spatialised and php-vio exposes neither min/max distance nor the attenuation
-  model, so the native listener is **never moved** (`vio_audio_listener` would
-  attenuate every 2D sound by its distance to the origin). A 3D voice is put on
-  the unit sphere around the origin in listener space – miniaudio's gain is 1
-  there, only its direction panning acts. That panning lowers both channels
-  (0.854 ahead, 0.2 floor behind); `directionCompensation()` lifts the louder
-  channel back to the voice's level. No Doppler.
+  `finish($id)`, `failPlays`. `new SimulatedAudioBackend(nativeSpatial: true)`
+  plays the native path (`listener()`, `getSpeedOfSound()`, `dopplerPitch($id)`);
+  the default is the fallback path.
+- php-vio (miniaudio) specifics, handled in `VioAudioBackend`
+  (`new VioAudioBackend(false)` forces the fallback): native path – listener
+  calls wait until the engine runs (first `vio_audio_load`), 3D voices get
+  `spatial/position/velocity/doppler/attenuation/min_distance/max_distance/rolloff`
+  at `vio_audio_play` plus `vio_audio_cone`, later changes go through the live
+  setters. Fallback path – every sound is spatialised and old php-vio exposes
+  neither min/max distance nor the attenuation model, so the native listener
+  is **never moved** (`vio_audio_listener` would attenuate every 2D sound by
+  its distance to the origin); a 3D voice is put on the unit sphere around the
+  origin in listener space – miniaudio's gain is 1 there, only its direction
+  panning acts. Both paths: for stereo miniaudio pans onto SIDE_LEFT/RIGHT
+  (±1, 0, 0) – 0.5 per channel straight ahead, the far one floored at 0.2
+  (measured; up to v0.77 the engine assumed FRONT channels at ±45° and
+  under-compensated ahead/behind); `directionCompensation()` lifts the louder
+  channel back to the voice's level.
+- Measured, not assumed: `tests/Audio/VioSpatialRenderTest.php` starts php-vio's
+  offline engine (`vio_audio_init(['device' => false])`, own process) and reads
+  levels and pitch from `vio_audio_render()`; it skips without php-vio ≥ 2.36.
 
 ## Stem player — layered music against run-time marks
 

@@ -13,6 +13,8 @@ use PHPolygon\ECS\World;
  * Puts the audio listener on the active 3D camera every update tick, so 3D
  * voices pan and fade with the view. Opt-in: a game adds it when it plays
  * positioned sounds; without an active camera the listener stays put.
+ * The camera's velocity (Doppler) is derived by AudioManager from the pose
+ * change between ticks; on php-vio ≥ 2.36 the native listener follows.
  */
 class AudioListenerSystem extends AbstractSystem
 {

@@ -16,6 +16,11 @@ use PHPolygon\Math\Vec3;
  * Listener space – what {@see toLocal()} returns and what spatial backends
  * receive as a direction – is right-handed like the camera: +X right, +Y up,
  * −Z forward.
+ *
+ * $velocity (world units per second) drives the Doppler effect on a native
+ * spatial backend. Null means "not given": AudioManager then derives it from
+ * the position change between two {@see \PHPolygon\Audio\AudioManager::setListener()}
+ * calls.
  */
 final class AudioListener
 {
@@ -23,10 +28,12 @@ final class AudioListener
     public readonly Vec3 $forward;
     public readonly Vec3 $up;
     public readonly Vec3 $right;
+    public readonly ?Vec3 $velocity;
 
-    public function __construct(?Vec3 $position = null, ?Vec3 $forward = null, ?Vec3 $up = null)
+    public function __construct(?Vec3 $position = null, ?Vec3 $forward = null, ?Vec3 $up = null, ?Vec3 $velocity = null)
     {
         $this->position = $position !== null ? new Vec3($position->x, $position->y, $position->z) : new Vec3();
+        $this->velocity = $velocity !== null ? new Vec3($velocity->x, $velocity->y, $velocity->z) : null;
 
         $f = $forward ?? new Vec3(0.0, 0.0, -1.0);
         $f = $f->lengthSquared() > 1e-12 ? $f->normalize() : new Vec3(0.0, 0.0, -1.0);
@@ -42,6 +49,12 @@ final class AudioListener
         $this->forward = $f;
         $this->right = $r;
         $this->up = $r->cross($f)->normalize();
+    }
+
+    /** The same pose moving at $velocity (null = let AudioManager derive it). */
+    public function withVelocity(?Vec3 $velocity): self
+    {
+        return new self($this->position, $this->forward, $this->up, $velocity);
     }
 
     /** Listener at $position looking along $rotation applied to −Z (the camera convention). */
