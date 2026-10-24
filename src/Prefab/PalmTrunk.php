@@ -12,6 +12,13 @@ use PHPolygon\Math\Quaternion;
 use PHPolygon\Math\Vec3;
 use PHPolygon\Scene\SceneBuilder;
 
+/**
+ * Legacy multi-entity palm part (one entity per segment / leaf, no
+ * instancing). No longer used by {@see PalmTree}.
+ *
+ * @deprecated Use PalmTree (one mesh per part) or, for many palms,
+ *             \PHPolygon\Vegetation\PlantVariant with FoliageInstances.
+ */
 class PalmTrunk
 {
     private const RING_POSITIONS = [0.22, 0.47, 0.72];

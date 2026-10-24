@@ -11,6 +11,13 @@ use PHPolygon\Math\Quaternion;
 use PHPolygon\Math\Vec3;
 use PHPolygon\Scene\SceneBuilder;
 
+/**
+ * Legacy multi-entity palm part (one entity per segment / leaf, no
+ * instancing). No longer used by {@see PalmTree}.
+ *
+ * @deprecated Use PalmTree (one mesh per part) or, for many palms,
+ *             \PHPolygon\Vegetation\PlantVariant with FoliageInstances.
+ */
 class PalmLeaf
 {
     public function __construct(
