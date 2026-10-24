@@ -446,6 +446,60 @@ slept is recomputed on its first awake tick (its world matrix may be stale while
 | `Camera3DSystem` | Updates view/projection matrices, pushes `SetCamera` command |
 | `Physics3DSystem` | Capsule vs AABB collision, gravity integration (Phase 7+) |
 | `OutlineSystem` | Emits `DrawOutline` for every enabled `Outline`; register BEFORE `Renderer3DSystem` |
+| `FoliageInstanceSystem` | Draws `FoliageInstances` as static instanced batches per (stage, LOD, tint, shadow); register after `Camera3DSystem`, BEFORE `Renderer3DSystem` |
+
+### Vegetation — the plant family (`PHPolygon\Vegetation`)
+
+One game-agnostic generator for trees, palms, bushes and hedges; the game passes presets (sizes,
+seed, materials, which stage uses which colour), the engine names nothing.
+
+- `PlantSpec` (form `Round|Umbrella|Column|Weeping|Conifer|Palm|Bush|Hedge`, height, crown radius,
+  clear trunk, lean, branch/clump/frond counts, accent count, `BareStyle`, seed; factories `tree()`,
+  `palm()`, `bush()`, `hedge()`) → `PlantGenerator::generate(spec, GrowthStage, PlantLod)` →
+  `PlantParts` (`wood`, `leaf`, `accent` MeshData + height, crown centre/radius, trunk radius/height).
+  Trunk = `LatheMesh` with root flare (sunk 0.15 m) and taper, main branches = tapered `SweepMesh`
+  tubes, crown = 5-9 deformed foliage clumps (seam-free wobble, flattened underside, normals smoothed
+  by welding), palm = ringed curved trunk sweep + fronds as folded bands. Deterministic per seed
+  (`PlantGenerator::rnd()` is crc32-based, not `mt_rand`). Every part is CCW-outward with normals
+  agreeing (`LatheMesh` / `SweepMesh` wind the other way - the builder flips them).
+- `GrowthStage` `Bare` (twigs or `BareStyle::Stump`), `Sprouting` (smaller, ~35 % foliage, stake),
+  `Half`, `Full`, `Bloom` (+ accent part). Same place, same plant, more each stage.
+- `PlantLod` budgets for a 7-clump broadleaf: Lod0 ~1300-1600, Lod1 ~600, Lod2 ~130 triangles,
+  `Impostor` ~20 (two crossed strips following the Lod2 silhouette, normals leaning outward).
+- `PlantVariant` (spec + wood/leaf/accent material ids, leaf tints, per-stage leaf material,
+  accent glow colour, collider switches) registers every stage x LOD x part lazily as
+  `{id}_s{stage}_l{lod}_{part}`; `PlantLibrary::register()` makes it known by id.
+- `FoliageInstances` (component: variant id + rows `[x, y, z, yaw, scale, stage, leafScale]`, LOD /
+  impostor / shadow / max distances, `glow`) + `FoliageInstanceSystem`: 32 m cells with frustum culling
+  (+12 m margin for shadows), LOD by camera distance, shadows only LOD0/1 within `shadowDistance`
+  (`DrawMeshInstanced::$castShadows`), batches rebuilt only when the camera moved > 2 m, a cell
+  entered/left the view, the component `version` changed or the glow level changed - otherwise the
+  same float arrays are re-sent (static-batch cache hit). Edit instances through the component's
+  methods (they bump `version`). `leafScale` scales the foliage around the crown centre (tween it after
+  a stage change). `glow` 0..1 derives `<accent>#glow<n>` materials (8 levels) with
+  `PlantVariant::$accentGlow` as full emission. Measured (micro bench, 600 trees): entities through
+  Renderer3DSystem 4.4 ms, instanced steady 0.08 ms, rebuild 0.55 ms.
+- `FoliageColliders::declare()` - slim trunk boxes (trees, palms), full-height hedge boxes only with
+  `hedgeCollider`, nothing for bushes and foliage. `PlantPlacement` - `avenue()`, `ring()` (with
+  openings), `cluster()`, `filter()` (keep-out `Zone`s + ground callable, sinks the foot).
+- `PalmTree` stays as the compatibility prefab (same constructor) but builds trunk + fronds +
+  coconuts + collider from the generator (was ~70 entities); a frond material that is not two-sided
+  is used through a `<id>_foliage` copy. `PalmSway` and the old palm part prefabs are deprecated.
+
+**Foliage materials.** `Material::$twoSided` lights an opaque thin shell from both sides: in
+`vio/mesh3d.frag` and `vio/gbuffer.frag`, a normal that faces away from the camera is mirrored through
+the triangle plane (screen-space derivative normal) - so leaf and frond backs are lit, the in-plane
+part of a smooth normal survives, and authored normals that disagree with the winding are handled
+too. (The OpenGL fallback and native Vulkan shaders always flip back faces.) `Material::$foliageWind`
++ `$windFlutter`: `foliageSway()` in `vio/mesh3d.vert`, `vio/gbuffer.vert` and the GL `mesh3d.vert`
+(kept identical, `FoliageShaderConsistencyTest`) bends the mesh by `0.0009 * h²` m per unit wind
+(h = world height above the foot, so bark and foliage of one plant stay joined), adds flutter toward
+the mesh's horizontal edge, takes the phase from the instance origin and fades out between
+`SetWind::$foliageFadeStart`/`End` (100/130 m); `SetWind::$foliageMotion` scales it (reduced motion,
+0 = still). It runs inside `animatePosition()`, so motion vectors replay it at `u_time_prev`. The
+shadow pass does not sway (static shadows). `Renderer3DSystem` now emits `SetWind` from the scene's
+`Wind` component (direction, gust intensity, `foliageMotion`, fade distances). Factories:
+`Material::foliage()`, `Material::bark()`, `withFoliage()`, `withEmission()`.
 
 ### Physics queries — rays and line of sight
 
