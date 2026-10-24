@@ -245,6 +245,7 @@ final class TransparentDrawSorter
             materialId: $cmd->materialId,
             matrices: $sorted,
             instanceCount: $cmd->instanceCount,
+            castShadows: $cmd->castShadows,
         )];
     }
 

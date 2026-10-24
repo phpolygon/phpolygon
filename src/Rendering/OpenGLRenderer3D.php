@@ -443,6 +443,9 @@ class OpenGLRenderer3D implements Renderer3DInterface, AnimationClockInterface
         $this->setUniformVec3('u_wind_direction', $this->windDirection);
         $this->setUniformFloat('u_wind_intensity', $this->windIntensity);
         $this->setUniformInt('u_cloth', 0);
+        $this->setUniformInt('u_foliage_wind', 0);
+        $this->setUniformFloat('u_foliage_motion', 1.0);
+        $this->setUniformVec2('u_foliage_fade', [100.0, 130.0]);
         $this->setUniformVec3('u_mesh_local_aabb_min', [0.0, 0.0, 0.0]);
         $this->setUniformVec3('u_mesh_local_aabb_max', [0.0, 0.0, 0.0]);
 
@@ -519,6 +522,11 @@ class OpenGLRenderer3D implements Renderer3DInterface, AnimationClockInterface
                 $this->windIntensity = $command->intensity;
                 $this->setUniformVec3('u_wind_direction', $this->windDirection);
                 $this->setUniformFloat('u_wind_intensity', $this->windIntensity);
+                $this->setUniformFloat('u_foliage_motion', max(0.0, $command->foliageMotion));
+                $this->setUniformVec2('u_foliage_fade', [
+                    $command->foliageFadeStart,
+                    max($command->foliageFadeStart + 0.01, $command->foliageFadeEnd),
+                ]);
 
             } elseif ($command instanceof Command\SetSkyColors) {
                 $this->setUniformVec3('u_sky_color', [$command->skyColor->r, $command->skyColor->g, $command->skyColor->b]);
@@ -1067,6 +1075,8 @@ class OpenGLRenderer3D implements Renderer3DInterface, AnimationClockInterface
             $this->setUniformFloat('u_cloth_frequency', $material->clothFrequency);
             $this->setUniformFloat('u_cloth_phase', $material->clothPhase);
             $this->setUniformInt('u_cloth_anchor_top', $material->clothAnchorTop ? 1 : 0);
+            $this->setUniformInt('u_foliage_wind', $material->foliageWind ? 1 : 0);
+            $this->setUniformFloat('u_wind_flutter', $material->windFlutter);
         } else {
             $this->setUniformVec3('u_albedo', [0.8, 0.8, 0.8]);
             $this->setUniformVec3('u_emission', [0.0, 0.0, 0.0]);
@@ -1091,6 +1101,8 @@ class OpenGLRenderer3D implements Renderer3DInterface, AnimationClockInterface
             $this->setUniformFloat('u_cloth_frequency', 1.0);
             $this->setUniformFloat('u_cloth_phase', 0.0);
             $this->setUniformInt('u_cloth_anchor_top', 1);
+            $this->setUniformInt('u_foliage_wind', 0);
+            $this->setUniformFloat('u_wind_flutter', 0.0);
         }
 
         // Mesh-local AABB drives the cloth anchor weighting. Computed

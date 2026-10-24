@@ -32,6 +32,13 @@ uniform float u_wind_intensity;
 uniform vec3  u_mesh_local_aabb_min;
 uniform vec3  u_mesh_local_aabb_max;
 
+// Foliage wind (Material::$foliageWind / $windFlutter, SetWind foliage fields).
+// Kept identical in gbuffer.vert so SSAO sees the swayed surface.
+uniform int   u_foliage_wind;
+uniform float u_wind_flutter;
+uniform float u_foliage_motion;   // global scale: 1 normal, 0 still (reduced motion)
+uniform vec2  u_foliage_fade;     // camera distance where the sway fades out (start, end)
+
 uniform mat4 u_light_space_matrix;
 
 out vec3 v_normal;
@@ -58,7 +65,43 @@ out vec4 v_currClip;
 out vec4 v_prevClip;
 #endif
 
-// Wave + cloth displacement of an object-space vertex at a given clock.
+// Foliage sway of an object-space vertex. The bend grows with the square of
+// the height above the plant's foot (0.09 m at 10 m per unit wind), so bark
+// and foliage of one plant move together and a trunk foot never slides; leaf
+// flutter adds motion toward the mesh's outer edge. The phase comes from the
+// instance origin (model[3]), so neighbours never sway in lockstep, and the
+// sway fades out with the camera distance.
+vec3 foliageSway(vec3 pos, mat4 model, float time) {
+    vec3 origin = model[3].xyz;
+    vec3 camPos = -(transpose(mat3(u_view)) * u_view[3].xyz);
+    float fade = 1.0 - smoothstep(u_foliage_fade.x, u_foliage_fade.y, length(origin - camPos));
+    float amp = u_wind_intensity * u_foliage_motion * fade;
+    if (amp <= 0.0) {
+        return pos;
+    }
+    vec3 wind = vec3(u_wind_direction.x, 0.0, u_wind_direction.z);
+    wind = length(wind) > 1e-4 ? normalize(wind) : vec3(0.0, 0.0, 1.0);
+    float phase = dot(origin.xz, vec2(0.173, 0.291))
+                + fract(sin(dot(origin.xz, vec2(12.9898, 78.233))) * 43758.5453) * 6.2831;
+    float s2 = max(dot(model[0].xyz, model[0].xyz), 1e-8);
+    float h = max(pos.y, 0.0) * sqrt(s2);
+    float lean = 0.65 + 0.35 * sin(time * 0.9 + phase);
+    float osc = sin(time * 1.7 + phase * 1.3) * 0.35 + sin(time * 2.9 + phase * 0.7) * 0.15;
+    vec3 d = wind * (0.0009 * h * h * amp * (lean + osc));
+    if (u_wind_flutter > 0.0) {
+        vec3 c = (u_mesh_local_aabb_min + u_mesh_local_aabb_max) * 0.5;
+        vec3 e = (u_mesh_local_aabb_max - u_mesh_local_aabb_min) * 0.5;
+        float r = clamp(length(pos.xz - c.xz) / max(max(e.x, e.z), 1e-3), 0.0, 1.0);
+        vec3 f = vec3(sin(time * 4.1 + dot(pos, vec3(1.7, 0.9, 1.3)) + phase),
+                      sin(time * 5.3 + dot(pos, vec3(0.8, 1.9, 1.1)) + phase) * 0.6,
+                      cos(time * 3.7 + dot(pos, vec3(1.2, 0.6, 1.9)) + phase));
+        d += f * (u_wind_flutter * r * amp);
+    }
+    // World offset back into object space (rotation + uniform scale).
+    return pos + (transpose(mat3(model)) * d) / s2;
+}
+
+// Wave + cloth + foliage displacement of an object-space vertex at a given clock.
 vec3 animatePosition(vec3 pos, mat4 model, float time) {
     if (u_vertex_anim == 1) {
         vec4 worldPosRaw = model * vec4(pos, 1.0);
@@ -87,6 +130,10 @@ vec3 animatePosition(vec3 pos, mat4 model, float time) {
         vec3 sway = windDir * (cwave * u_cloth_strength * u_wind_intensity * swayMask);
         sway.y *= 0.15;
         pos += sway;
+    }
+
+    if (u_foliage_wind == 1) {
+        pos = foliageSway(pos, model, time);
     }
     return pos;
 }

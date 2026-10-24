@@ -85,6 +85,8 @@ readonly class DrawMeshInstanced
      *                                instance count or first/last matrix differ;
      *                                anything subtler needs
      *                                VioRenderer3D::invalidateStaticInstances().
+     * @param bool    $castShadows    False keeps the batch out of the shadow
+     *                                pass (like DrawMesh::$castShadows).
      */
     public function __construct(
         public string $meshId,
@@ -98,13 +100,15 @@ readonly class DrawMeshInstanced
         public ?object $indirectArgs = null,
         public int $indirectMaxDraws = 1,
         public ?string $staticKey = null,
+        public bool $castShadows = true,
     ) {}
 
     /**
      * Build a flat-mode command. Use this from hot loops (particles,
      * thousands of instances) where allocating one Mat4 per instance is
      * the dominant cost. The buffer must be column-major and
-     * `$instanceCount * 16` floats long.
+     * `$instanceCount * 16` floats long. `$castShadows` false keeps the
+     * batch out of the shadow pass (distant LODs, small props).
      *
      * @param float[] $flatMatrices
      */
@@ -115,6 +119,7 @@ readonly class DrawMeshInstanced
         int $instanceCount,
         bool $isStatic = false,
         ?string $staticKey = null,
+        bool $castShadows = true,
     ): self {
         return new self(
             meshId: $meshId,
@@ -124,6 +129,7 @@ readonly class DrawMeshInstanced
             instanceCount: $instanceCount,
             flatMatrices: $flatMatrices,
             staticKey: $staticKey,
+            castShadows: $castShadows,
         );
     }
 

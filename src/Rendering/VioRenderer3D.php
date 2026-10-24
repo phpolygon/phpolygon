@@ -432,6 +432,10 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
     /** @var array{0:float,1:float,2:float} */
     private array $windDirection = [0.0, 0.0, 1.0];
     private float $windIntensity = 0.5;
+    /** Foliage-wind scale (SetWind::$foliageMotion): 1 normal, 0 still. */
+    private float $foliageMotion = 1.0;
+    /** @var array{0: float, 1: float} Foliage sway fade distances (SetWind). */
+    private array $foliageFade = [100.0, 130.0];
 
     /**
      * @var array<string, array{min: array{0:float,1:float,2:float}, max: array{0:float,1:float,2:float}}>
@@ -2222,6 +2226,8 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
                     $cmd->direction->x, $cmd->direction->y, $cmd->direction->z,
                 ];
                 $this->windIntensity = $cmd->intensity;
+                $this->foliageMotion = max(0.0, $cmd->foliageMotion);
+                $this->foliageFade = [$cmd->foliageFadeStart, max($cmd->foliageFadeStart + 0.01, $cmd->foliageFadeEnd)];
             } elseif ($cmd instanceof Command\SetFieldtracing) {
                 // Per-frame override of the settings-derived tier, capability-gated.
                 $ftMode = $this->gateFieldtracing($cmd->mode);
@@ -3336,7 +3342,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
                 // Storage-buffer draws (GPU-simulated instances) keep their
                 // matrices in GPU memory; the depth-only draw below uploads CPU
                 // instance data, so they cast no shadow.
-                if ($cmd->storageBuffer !== null) {
+                if ($cmd->storageBuffer !== null || !$cmd->castShadows) {
                     continue;
                 }
                 $mat = MaterialRegistry::get($cmd->materialId);
@@ -3582,6 +3588,8 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         vio_set_uniform($this->ctx, 'u_wave_phase', $frameState['wavePhase']);
         vio_set_uniform($this->ctx, 'u_wind_direction', $this->windDirection);
         vio_set_uniform($this->ctx, 'u_wind_intensity', $this->windIntensity);
+        vio_set_uniform($this->ctx, 'u_foliage_motion', $this->foliageMotion);
+        vio_set_uniform($this->ctx, 'u_foliage_fade', $this->foliageFade);
         // Global rain wetness feeds the G-buffer reflectivity (channel b) so wet
         // ground after rain catches the SSR reflection. Per-material wetness /
         // metallic / roughness are pushed per draw in applyGbufferVertexAnim.
@@ -4058,6 +4066,9 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         vio_set_uniform($this->ctx, 'u_cloth_frequency', $material->clothFrequency);
         vio_set_uniform($this->ctx, 'u_cloth_phase', $material->clothPhase);
         vio_set_uniform($this->ctx, 'u_cloth_anchor_top', $material->clothAnchorTop ? 1 : 0);
+        vio_set_uniform($this->ctx, 'u_foliage_wind', $material->foliageWind ? 1 : 0);
+        vio_set_uniform($this->ctx, 'u_wind_flutter', $material->windFlutter);
+        vio_set_uniform($this->ctx, 'u_two_sided', $material->twoSided && $material->alpha >= 1.0 ? 1 : 0);
 
         // SSR reflectivity inputs (gbuffer.frag combines these into channel b).
         // Water (procMode 2 / 11) is the headline reflective surface; give it a
@@ -4875,7 +4886,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             $this->lastMaterialId = $materialId;
         }
         $this->bindMaterialTextures($material);
-        if ($material->cloth && $meshId !== $this->lastMeshId) {
+        if (($material->cloth || $material->foliageWind) && $meshId !== $this->lastMeshId) {
             $this->bindMeshAabb($meshId);
             $this->lastMeshId = $meshId;
         }
@@ -4991,7 +5002,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             $this->lastMaterialId = $cmd->materialId;
         }
         $this->bindMaterialTextures($material);
-        if ($material->cloth && $cmd->meshId !== $this->lastMeshId) {
+        if (($material->cloth || $material->foliageWind) && $cmd->meshId !== $this->lastMeshId) {
             $this->bindMeshAabb($cmd->meshId);
             $this->lastMeshId = $cmd->meshId;
         }
@@ -5333,6 +5344,10 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             'u_cloth_frequency'     => $material->clothFrequency,
             'u_cloth_phase'         => $material->clothPhase,
             'u_cloth_anchor_top'    => $material->clothAnchorTop ? 1 : 0,
+            // Foliage: two-sided opaque lighting + vertex wind (see Material).
+            'u_two_sided'           => $material->twoSided && $material->alpha >= 1.0 ? 1 : 0,
+            'u_foliage_wind'        => $material->foliageWind ? 1 : 0,
+            'u_wind_flutter'        => $material->windFlutter,
             'u_proc_mode'           => $procMode,
             // Water (proc_mode 2): enable GPU vertex wave animation.
             'u_vertex_anim'         => $procMode === 2 ? 1 : 0,
@@ -5917,6 +5932,8 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             $this->windDirection[0], $this->windDirection[1], $this->windDirection[2],
         ]);
         vio_set_uniform($this->ctx, 'u_wind_intensity', $this->windIntensity);
+        vio_set_uniform($this->ctx, 'u_foliage_motion', $this->foliageMotion);
+        vio_set_uniform($this->ctx, 'u_foliage_fade', $this->foliageFade);
         vio_set_uniform($this->ctx, 'u_mesh_local_aabb_min', [0.0, 0.0, 0.0]);
         vio_set_uniform($this->ctx, 'u_mesh_local_aabb_max', [0.0, 0.0, 0.0]);
     }

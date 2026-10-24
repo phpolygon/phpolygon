@@ -40,9 +40,44 @@ uniform float u_wind_intensity;
 uniform vec3  u_mesh_local_aabb_min;
 uniform vec3  u_mesh_local_aabb_max;
 
+// Foliage wind — identical math to mesh3d.vert.glsl (foliageSway).
+uniform int   u_foliage_wind;
+uniform float u_wind_flutter;
+uniform float u_foliage_motion;
+uniform vec2  u_foliage_fade;
+
 out vec3 v_viewNormal; // surface normal in view space
 out vec3 v_viewPos;    // fragment position in view space
 out vec2 v_worldXZ;    // world-space XZ (for the ocean shoreline reflectivity fade)
+
+vec3 foliageSway(vec3 pos, mat4 model, float time) {
+    vec3 origin = model[3].xyz;
+    vec3 camPos = -(transpose(mat3(u_view)) * u_view[3].xyz);
+    float fade = 1.0 - smoothstep(u_foliage_fade.x, u_foliage_fade.y, length(origin - camPos));
+    float amp = u_wind_intensity * u_foliage_motion * fade;
+    if (amp <= 0.0) {
+        return pos;
+    }
+    vec3 wind = vec3(u_wind_direction.x, 0.0, u_wind_direction.z);
+    wind = length(wind) > 1e-4 ? normalize(wind) : vec3(0.0, 0.0, 1.0);
+    float phase = dot(origin.xz, vec2(0.173, 0.291))
+                + fract(sin(dot(origin.xz, vec2(12.9898, 78.233))) * 43758.5453) * 6.2831;
+    float s2 = max(dot(model[0].xyz, model[0].xyz), 1e-8);
+    float h = max(pos.y, 0.0) * sqrt(s2);
+    float lean = 0.65 + 0.35 * sin(time * 0.9 + phase);
+    float osc = sin(time * 1.7 + phase * 1.3) * 0.35 + sin(time * 2.9 + phase * 0.7) * 0.15;
+    vec3 d = wind * (0.0009 * h * h * amp * (lean + osc));
+    if (u_wind_flutter > 0.0) {
+        vec3 c = (u_mesh_local_aabb_min + u_mesh_local_aabb_max) * 0.5;
+        vec3 e = (u_mesh_local_aabb_max - u_mesh_local_aabb_min) * 0.5;
+        float r = clamp(length(pos.xz - c.xz) / max(max(e.x, e.z), 1e-3), 0.0, 1.0);
+        vec3 f = vec3(sin(time * 4.1 + dot(pos, vec3(1.7, 0.9, 1.3)) + phase),
+                      sin(time * 5.3 + dot(pos, vec3(0.8, 1.9, 1.1)) + phase) * 0.6,
+                      cos(time * 3.7 + dot(pos, vec3(1.2, 0.6, 1.9)) + phase));
+        d += f * (u_wind_flutter * r * amp);
+    }
+    return pos + (transpose(mat3(model)) * d) / s2;
+}
 
 void main() {
     mat4 model = u_model;
@@ -76,6 +111,10 @@ void main() {
         vec3 sway = windDir * (cwave * u_cloth_strength * u_wind_intensity * swayMask);
         sway.y *= 0.15;
         pos += sway;
+    }
+
+    if (u_foliage_wind == 1) {
+        pos = foliageSway(pos, model, u_time);
     }
 
     vec4 worldPos = model * vec4(pos, 1.0);

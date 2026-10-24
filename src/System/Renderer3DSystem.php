@@ -28,6 +28,7 @@ use PHPolygon\Rendering\Command\SetFieldtracing;
 use PHPolygon\Rendering\Command\SetGroundWetness;
 use PHPolygon\Rendering\Command\SetSnowCover;
 use PHPolygon\Rendering\Command\SetWaveAnimation;
+use PHPolygon\Rendering\Command\SetWind;
 use PHPolygon\Rendering\Frustum;
 use PHPolygon\Rendering\Quality\FieldtracingMode;
 use PHPolygon\Rendering\MaterialRegistry;
@@ -347,7 +348,18 @@ class Renderer3DSystem extends AbstractSystem
         $stormIntensity = 0.0;
         $rainWetness = 0.0;
         foreach ($world->query(Wind::class) as $entity) {
-            $windIntensity = $entity->get(Wind::class)->intensity;
+            $wind = $entity->get(Wind::class);
+            $windIntensity = $wind->intensity;
+            // The scene's wind (gusts and storm from WindSystem) drives cloth and
+            // foliage sway in the vertex shader. Without a Wind component the
+            // renderer keeps its calm-air default.
+            $this->commandList->add(new SetWind(
+                direction: $wind->direction,
+                intensity: $wind->intensity,
+                foliageMotion: $wind->foliageMotion,
+                foliageFadeStart: $wind->foliageFadeStart,
+                foliageFadeEnd: $wind->foliageFadeEnd,
+            ));
             break;
         }
         foreach ($world->query(Weather::class) as $entity) {

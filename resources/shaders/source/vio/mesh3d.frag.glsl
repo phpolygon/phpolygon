@@ -77,6 +77,7 @@ uniform float u_parallax_depth;
 uniform float u_wetness;
 uniform vec3  u_subsurface_color;
 uniform float u_subsurface_strength;
+uniform int   u_two_sided;          // Material::$twoSided
 uniform float u_ssr_intensity;
 // 1 when the real ray-marched SSR pass owns reflections this frame (VIO/D3D12,
 // HDR path). When 1 the forward wetness SURROGATE below is suppressed so the two
@@ -925,6 +926,21 @@ vec3 perturbNormalProcedural(vec3 N, vec3 worldPos, vec2 uv, vec2 sampleUv,
 
 void main() {
     vec3 N = normalize(v_normal);
+    // Two-sided opaque surfaces (foliage, fronds, flags): where the authored
+    // normal faces away from the viewer it is mirrored through the triangle's
+    // plane, so a thin shell's back is lit like its front instead of showing
+    // only sky ambient (blue-black). The mirror keeps the in-plane part of a
+    // smooth normal, so soft shading survives. Decided per fragment by the
+    // normal (not gl_FrontFacing), which also handles authored normals that
+    // disagree with the winding.
+    if (u_two_sided == 1) {
+        vec3 tsNg = cross(dFdx(v_worldPos), dFdy(v_worldPos));
+        float tsLen = length(tsNg);
+        if (dot(N, u_camera_pos - v_worldPos) < 0.0 && tsLen > 1e-12) {
+            tsNg /= tsLen;
+            N = normalize(N - 2.0 * dot(N, tsNg) * tsNg);
+        }
+    }
 #ifdef PHPOLYGON_MRT
     // Every attachment holds a defined value even when a procedural branch
     // returns early: no sun/ambient, unlit colour in o_local, geometry in the
@@ -988,7 +1004,8 @@ void main() {
     // Transparent surfaces are seen from both sides (a pane, the far wall of a
     // glass box): light them with the normal that faces the viewer, so a back
     // face is not shaded as if it pointed away (dark, unlit triangle halves).
-    // Opaque geometry keeps its authored normal. Self-shading procedural
+    // Opaque geometry keeps its authored normal (two-sided opaque materials
+    // were mirrored toward the viewer at the top of main). Self-shading procedural
     // branches (water, cloud, moon) have returned above and are unaffected.
     if (u_alpha < 1.0) {
         N = Nv;
@@ -1056,6 +1073,13 @@ void main() {
     float primaryIntensity = u_dir_light_count > 0 ? u_dir_lights[0].intensity : 0.0;
     float ambientShadow = mix(1.0, mix(0.5, 1.0, shadow), clamp(primaryIntensity, 0.0, 1.0) * cloudSh);
     vec3 F_ambient = fresnelSchlick(NdotV, F0);
+    if (u_two_sided == 1) {
+        // Rough foliage without environment reflection: plain Schlick drives the
+        // ambient Fresnel to 1 at grazing angles, which zeroes the diffuse ambient
+        // and leaves a black rim on every clump and frond silhouette. The
+        // roughness-aware form caps it at max(1 - roughness, F0).
+        F_ambient = F0 + (max(vec3(1.0 - roughness), F0) - F0) * pow(clamp(1.0 - NdotV, 0.0, 1.0), 5.0);
+    }
     vec3 kD_ambient = (1.0 - F_ambient) * (1.0 - metallic);
     // Ambient occlusion. When real depth+normal SSAO is active it OWNS the AO and
     // the cheap curvature surrogate is DROPPED: curvatureAO is a screen-space

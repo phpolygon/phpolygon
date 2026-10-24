@@ -151,6 +151,34 @@ class Material
      *                                     edges. The geometry is unchanged
      *                                     (silhouettes stay flat). Needs
      *                                     $normalPattern and mesh UVs.
+     * @param bool    $twoSided             Light an OPAQUE surface from both
+     *                                     sides: where the authored normal
+     *                                     faces away from the viewer it is
+     *                                     mirrored through the triangle's
+     *                                     plane, so the back of a thin shell
+     *                                     (a leaf, a palm frond, a flag, a
+     *                                     tarp) is lit like its front instead
+     *                                     of rendering unlit/black. Pair with
+     *                                     $subsurfaceStrength for light
+     *                                     shining through from behind.
+     *                                     Transparent materials always shade
+     *                                     with the viewer-facing normal.
+     * @param bool    $foliageWind          Sway in the vertex shader with the
+     *                                     global wind (SetWind): the mesh
+     *                                     bends with the square of its local
+     *                                     height (a trunk foot stays put, a
+     *                                     crown moves) and the phase comes
+     *                                     from the instance position, so
+     *                                     neighbours never sway in lockstep.
+     *                                     Bark and foliage of one plant both
+     *                                     set it and stay joined.
+     * @param float   $windFlutter          Extra leaf flutter in metres at the
+     *                                     outer edge of the mesh (weighted by
+     *                                     horizontal distance from the mesh
+     *                                     centre) per unit wind intensity.
+     *                                     0 for bark; 0.03-0.08 for crowns,
+     *                                     ~0.25 for palm fronds. Needs
+     *                                     $foliageWind.
      */
     public function __construct(
         public readonly Color $albedo = new Color(0.8, 0.8, 0.8),
@@ -180,7 +208,125 @@ class Material
         public readonly float $subsurfaceStrength = 0.0,
         public readonly float $cavity = 0.0,
         public readonly float $parallaxDepth = 0.0,
+        public readonly bool $twoSided = false,
+        public readonly bool $foliageWind = false,
+        public readonly float $windFlutter = 0.0,
     ) {}
+
+    /**
+     * Foliage (leaves, fronds, needles, hedges): two-sided lighting, light
+     * shining through from behind (subsurface tinted toward a brighter,
+     * yellower version of the albedo unless given), matte, no environment
+     * reflection, and foliage wind with leaf flutter.
+     */
+    public static function foliage(
+        Color $albedo,
+        float $flutter = 0.05,
+        float $translucency = 0.35,
+        ?Color $transmission = null,
+        float $roughness = 0.8,
+        bool $wind = true,
+    ): self {
+        return new self(
+            albedo: $albedo,
+            roughness: $roughness,
+            metallic: 0.0,
+            useEnvironmentMap: false,
+            subsurfaceColor: $transmission ?? new Color(
+                min(1.0, $albedo->r * 1.3 + 0.08),
+                min(1.0, $albedo->g * 1.35 + 0.12),
+                min(1.0, $albedo->b * 0.8),
+            ),
+            subsurfaceStrength: $translucency,
+            twoSided: true,
+            foliageWind: $wind,
+            windFlutter: $wind ? $flutter : 0.0,
+        );
+    }
+
+    /**
+     * Bark / wood of a plant that sways with its foliage: foliage wind on
+     * (same bend as the crown, no flutter), matte, no environment reflection.
+     */
+    public static function bark(Color $albedo, float $roughness = 0.92, bool $wind = true): self
+    {
+        return new self(
+            albedo: $albedo,
+            roughness: $roughness,
+            metallic: 0.0,
+            useEnvironmentMap: false,
+            foliageWind: $wind,
+        );
+    }
+
+    /** This material with another emission colour (e.g. a glow that fades in at night). */
+    public function withEmission(Color $emission): self
+    {
+        return $this->copy(emission: $emission);
+    }
+
+    /**
+     * This material as foliage: two-sided lighting and foliage wind with the
+     * given flutter; adds light shining through from behind when the material
+     * has none. Colours and everything else stay.
+     */
+    public function withFoliage(float $flutter = 0.05, float $translucency = 0.3): self
+    {
+        $hasSss = $this->subsurfaceStrength > 0.0;
+        return $this->copy(
+            twoSided: true,
+            foliageWind: true,
+            windFlutter: $flutter,
+            subsurfaceStrength: $hasSss ? $this->subsurfaceStrength : $translucency,
+            subsurfaceColor: $hasSss ? $this->subsurfaceColor : new Color(
+                min(1.0, $this->albedo->r * 1.3 + 0.08),
+                min(1.0, $this->albedo->g * 1.35 + 0.12),
+                min(1.0, $this->albedo->b * 0.8),
+            ),
+        );
+    }
+
+    private function copy(
+        ?Color $emission = null,
+        ?bool $twoSided = null,
+        ?bool $foliageWind = null,
+        ?float $windFlutter = null,
+        ?float $subsurfaceStrength = null,
+        ?Color $subsurfaceColor = null,
+    ): self {
+        return new self(
+            albedo: $this->albedo,
+            roughness: $this->roughness,
+            metallic: $this->metallic,
+            emission: $emission ?? $this->emission,
+            alpha: $this->alpha,
+            shader: $this->shader,
+            albedoTexture: $this->albedoTexture,
+            clearcoat: $this->clearcoat,
+            clearcoatRoughness: $this->clearcoatRoughness,
+            flakes: $this->flakes,
+            normalIntensity: $this->normalIntensity,
+            useEnvironmentMap: $this->useEnvironmentMap,
+            normalPattern: $this->normalPattern,
+            normalScale: $this->normalScale,
+            surfacePattern: $this->surfacePattern,
+            surfaceScale: $this->surfaceScale,
+            surfaceIntensity: $this->surfaceIntensity,
+            wetness: $this->wetness,
+            cloth: $this->cloth,
+            clothStrength: $this->clothStrength,
+            clothFrequency: $this->clothFrequency,
+            clothPhase: $this->clothPhase,
+            clothAnchorTop: $this->clothAnchorTop,
+            subsurfaceColor: $subsurfaceColor ?? $this->subsurfaceColor,
+            subsurfaceStrength: $subsurfaceStrength ?? $this->subsurfaceStrength,
+            cavity: $this->cavity,
+            parallaxDepth: $this->parallaxDepth,
+            twoSided: $twoSided ?? $this->twoSided,
+            foliageWind: $foliageWind ?? $this->foliageWind,
+            windFlutter: $windFlutter ?? $this->windFlutter,
+        );
+    }
 
     public static function default(): self
     {

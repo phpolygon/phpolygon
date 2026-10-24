@@ -39,6 +39,7 @@ uniform float u_roughness;     // 0 mirror .. 1 fully rough
 uniform float u_wetness;       // per-material wetness (water / wet props)
 uniform float u_rain_wetness;  // global rain wetness from the weather system
 uniform int   u_proc_mode;     // procedural surface mode (2 = ocean; see mesh3d.frag)
+uniform int   u_two_sided;     // Material::$twoSided (opaque foliage lit from both sides)
 
 out vec4 frag_color;
 
@@ -59,6 +60,17 @@ vec2 octEncode(vec3 n) {
 
 void main() {
     vec3 n = normalize(v_viewNormal);
+    // Two-sided (opaque foliage): a normal facing away from the camera is
+    // mirrored through the triangle plane, exactly like mesh3d.frag, so the AO
+    // hemisphere of a leaf's back side opens toward the viewer, not into it.
+    if (u_two_sided == 1) {
+        vec3 ng = cross(dFdx(v_viewPos), dFdy(v_viewPos));
+        float ngl = length(ng);
+        if (dot(n, -v_viewPos) < 0.0 && ngl > 1e-12) {
+            ng /= ngl;
+            n = normalize(n - 2.0 * dot(n, ng) * ng);
+        }
+    }
     float linearDepth = -v_viewPos.z; // view looks down -Z, so > 0 for real geometry
 
     // Reflectivity: smooth metals and wet/water surfaces reflect; rough matte
