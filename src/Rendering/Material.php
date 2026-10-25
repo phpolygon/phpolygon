@@ -179,6 +179,26 @@ class Material
      *                                     0 for bark; 0.03-0.08 for crowns,
      *                                     ~0.25 for palm fronds. Needs
      *                                     $foliageWind.
+     * @param bool    $grass                Grass blades (GrassTuftMesh): the
+     *                                     vertex stage bends each blade with
+     *                                     the wind and away from benders, thins
+     *                                     and shortens tufts with the camera
+     *                                     distance (SetGrass) and reads the
+     *                                     instance hash from the matrix; the
+     *                                     fragment stage blends albedo (root)
+     *                                     to $grassTip along the blade. Never
+     *                                     mapped to a proc mode. Pair with
+     *                                     $twoSided. See Material::grass().
+     * @param Color   $grassTip             Colour at the blade tip.
+     * @param float   $grassBend            Tip displacement per unit wind as a
+     *                                     fraction of the blade height.
+     * @param int     $grassBands           0 = smooth root-to-tip gradient,
+     *                                     n = n flat bands (stylised look).
+     * @param float   $grassVariation       Brightness variation per blade and
+     *                                     over the field (0..1).
+     * @param float   $grassRootShade       Darkening at the root, 0..1.
+     * @param float   $grassPatchScale      Frequency (1/m) of the field-wide
+     *                                     colour noise.
      */
     public function __construct(
         public readonly Color $albedo = new Color(0.8, 0.8, 0.8),
@@ -211,7 +231,52 @@ class Material
         public readonly bool $twoSided = false,
         public readonly bool $foliageWind = false,
         public readonly float $windFlutter = 0.0,
+        public readonly bool $grass = false,
+        public readonly Color $grassTip = new Color(0.6, 0.75, 0.3),
+        public readonly float $grassBend = 0.3,
+        public readonly int $grassBands = 0,
+        public readonly float $grassVariation = 0.2,
+        public readonly float $grassRootShade = 0.45,
+        public readonly float $grassPatchScale = 0.12,
     ) {}
+
+    /**
+     * Grass blades: root colour `$base`, tip colour `$tip`, two-sided, matte,
+     * no environment reflection, light through the blades against the sun
+     * (`$translucency`, strongest at the tips).
+     */
+    public static function grass(
+        Color $base,
+        Color $tip,
+        float $translucency = 0.3,
+        float $bend = 0.3,
+        int $bands = 0,
+        float $variation = 0.2,
+        float $rootShade = 0.45,
+        float $patchScale = 0.12,
+        float $roughness = 0.85,
+    ): self {
+        return new self(
+            albedo: $base,
+            roughness: $roughness,
+            metallic: 0.0,
+            useEnvironmentMap: false,
+            subsurfaceColor: new Color(
+                min(1.0, $tip->r * 1.15 + 0.05),
+                min(1.0, $tip->g * 1.2 + 0.08),
+                min(1.0, $tip->b * 0.7),
+            ),
+            subsurfaceStrength: max(0.0, $translucency),
+            twoSided: true,
+            grass: true,
+            grassTip: $tip,
+            grassBend: $bend,
+            grassBands: max(0, $bands),
+            grassVariation: max(0.0, $variation),
+            grassRootShade: max(0.0, min(1.0, $rootShade)),
+            grassPatchScale: max(0.0, $patchScale),
+        );
+    }
 
     /**
      * Foliage (leaves, fronds, needles, hedges): two-sided lighting, light
@@ -325,6 +390,13 @@ class Material
             twoSided: $twoSided ?? $this->twoSided,
             foliageWind: $foliageWind ?? $this->foliageWind,
             windFlutter: $windFlutter ?? $this->windFlutter,
+            grass: $this->grass,
+            grassTip: $this->grassTip,
+            grassBend: $this->grassBend,
+            grassBands: $this->grassBands,
+            grassVariation: $this->grassVariation,
+            grassRootShade: $this->grassRootShade,
+            grassPatchScale: $this->grassPatchScale,
         );
     }
 

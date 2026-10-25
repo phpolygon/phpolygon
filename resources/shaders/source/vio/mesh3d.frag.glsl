@@ -54,6 +54,13 @@ uniform SpotLight u_spot_lights[4];
 uniform int u_spot_light_count;
 
 uniform vec3 u_albedo;
+// Grass blades (Material::$grass): colour along the blade from v_uv (y = 0 root
+// .. 1 tip, x = blade random). Mirrors the other mesh fragment stage.
+uniform int   u_grass_shade;      // 1 for Material::$grass (a stage-local name: a uniform
+                                  // shared with the vertex stage is not set in both on every backend)
+uniform vec3  u_grass_tip;        // Material::$grassTip
+uniform vec4  u_grass_look;       // bands (0 = smooth), variation, root shade, patch noise scale
+uniform vec2  u_grass_far_fade;   // SetGrass full / fade range (fragment copy)
 uniform vec3 u_emission;
 uniform float u_roughness;
 uniform float u_metallic;
@@ -1001,6 +1008,27 @@ void main() {
         albedo = texAlbedo * (1.0 + (nse - 0.5) * 0.12 * noiseMask);
     }
 
+    // Grass blades: root colour (albedo) to tip colour along the blade, flat
+    // bands for the stylised look or a smooth gradient, per-blade and field-wide
+    // brightness variation, darker toward the root (contact shading).
+    if (u_grass_shade == 1) {
+        float gt = clamp(v_uv.y, 0.0, 1.0);
+        float gb = gt;
+        if (u_grass_look.x >= 1.0) {
+            gb = floor(gt * u_grass_look.x + 0.5) / u_grass_look.x;
+        }
+        vec3 gc = mix(albedo, u_grass_tip, pow(gb, 1.3));
+        float gPatch = noise(v_worldPos.xz * max(u_grass_look.w, 1e-4)) - 0.5;
+        float gBlade = fract(v_uv.x * 7.31) - 0.5;
+        gc *= max(0.0, 1.0 + (gBlade * 0.6 + gPatch) * u_grass_look.y * 2.0);
+        gc *= mix(1.0 - clamp(u_grass_look.z, 0.0, 1.0), 1.0, smoothstep(0.0, 0.45, gt));
+        // Toward the fade range the blades take the root colour - the colour of
+        // the ground they thin out into - so the field has no bright rim.
+        float gFar = smoothstep(u_grass_far_fade.x, u_grass_far_fade.y, length(v_worldPos - u_camera_pos));
+        gc = mix(gc, albedo, gFar * 0.7);
+        albedo = gc;
+    }
+
     // Transparent surfaces are seen from both sides (a pane, the far wall of a
     // glass box): light them with the normal that faces the viewer, so a back
     // face is not shaded as if it pointed away (dark, unlit triangle halves).
@@ -1177,6 +1205,12 @@ void main() {
     // Clamp the loop bound to the array size: u_*_light_count is a GPU
     // uniform and a stale/garbage value would otherwise run the loop for
     // millions of iterations (and index out of bounds) → GPU TDR / device hang.
+    // Light through thin shells against the sun (skin, foliage); grass blades
+    // let most of it through near the tip, little at the root.
+    float sssStrength = u_subsurface_strength;
+    if (u_grass_shade == 1) {
+        sssStrength *= mix(0.25, 1.0, clamp(v_uv.y, 0.0, 1.0));
+    }
     int dirCount = min(u_dir_light_count, 4);
     for (int dl = 0; dl < dirCount; dl++) {
         vec3 dL = normalize(-u_dir_lights[dl].direction);
@@ -1195,7 +1229,7 @@ void main() {
         if (dl == 0) radiance *= mix(0.1, 1.0, cloudSh);
         vec3 lit = vec3(0.0);
 
-        if (u_subsurface_strength > 0.0) {
+        if (sssStrength > 0.0) {
             // Skin path: wrap-diffuse extends light past the terminator,
             // warm subsurface tint bleeds at grazing angles, and a small
             // back-transmission term lights up thin areas viewed against
@@ -1203,7 +1237,7 @@ void main() {
             float wrap        = 0.5;
             float wrapNdotL   = clamp((rawNdotL + wrap) / (1.0 + wrap), 0.0, 1.0);
             float terminator  = (1.0 - clamp(rawNdotL, 0.0, 1.0)) * wrapNdotL;
-            vec3  scatterTint = mix(vec3(1.0), u_subsurface_color, terminator * u_subsurface_strength);
+            vec3  scatterTint = mix(vec3(1.0), u_subsurface_color, terminator * sssStrength);
             vec3  effAlbedo   = albedo * scatterTint;
             float backlight   = pow(clamp(dot(V, -dL), 0.0, 1.0), 3.0)
                               * clamp(-rawNdotL, 0.0, 1.0);
@@ -1215,7 +1249,7 @@ void main() {
                 vec3 spec = cookTorranceSpecular(N, V, dL, roughness, F0);
                 lit += spec * radiance * rawNdotL * dShadow;
             }
-            lit += u_subsurface_color * albedo * backlight * u_subsurface_strength * radiance;
+            lit += u_subsurface_color * albedo * backlight * sssStrength * radiance;
         } else {
             float dNdotL = max(rawNdotL, 0.0);
             if (dNdotL > 0.0) {

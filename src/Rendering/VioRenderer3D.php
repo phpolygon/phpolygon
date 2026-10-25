@@ -436,6 +436,10 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
     private float $foliageMotion = 1.0;
     /** @var array{0: float, 1: float} Foliage sway fade distances (SetWind). */
     private array $foliageFade = [100.0, 130.0];
+    /** @var array{0: float, 1: float, 2: float, 3: float} Grass bands + push strength (SetGrass::rangeUniform()). */
+    private array $grassRange = [25.0, 60.0, 0.55, 0.8];
+    /** @var list<array{0: float, 1: float, 2: float, 3: float}> Grass benders (SetGrass::benderSlots()). */
+    private array $grassPush = [[0.0, -10000.0, 0.0, 0.0], [0.0, -10000.0, 0.0, 0.0], [0.0, -10000.0, 0.0, 0.0], [0.0, -10000.0, 0.0, 0.0]];
 
     /**
      * @var array<string, array{min: array{0:float,1:float,2:float}, max: array{0:float,1:float,2:float}}>
@@ -2228,6 +2232,9 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
                 $this->windIntensity = $cmd->intensity;
                 $this->foliageMotion = max(0.0, $cmd->foliageMotion);
                 $this->foliageFade = [$cmd->foliageFadeStart, max($cmd->foliageFadeStart + 0.01, $cmd->foliageFadeEnd)];
+            } elseif ($cmd instanceof Command\SetGrass) {
+                $this->grassRange = $cmd->rangeUniform();
+                $this->grassPush = $cmd->benderSlots();
             } elseif ($cmd instanceof Command\SetFieldtracing) {
                 // Per-frame override of the settings-derived tier, capability-gated.
                 $ftMode = $this->gateFieldtracing($cmd->mode);
@@ -3590,6 +3597,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         vio_set_uniform($this->ctx, 'u_wind_intensity', $this->windIntensity);
         vio_set_uniform($this->ctx, 'u_foliage_motion', $this->foliageMotion);
         vio_set_uniform($this->ctx, 'u_foliage_fade', $this->foliageFade);
+        $this->uploadGrassFrameUniforms();
         // Global rain wetness feeds the G-buffer reflectivity (channel b) so wet
         // ground after rain catches the SSR reflection. Per-material wetness /
         // metallic / roughness are pushed per draw in applyGbufferVertexAnim.
@@ -4055,7 +4063,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
      */
     private function applyGbufferVertexAnim(Material $material, string $materialId): void
     {
-        $procMode = ProcModeRegistry::resolve($materialId);
+        $procMode = $material->grass ? 0 : ProcModeRegistry::resolve($materialId);
         vio_set_uniform($this->ctx, 'u_vertex_anim', $procMode === 2 ? 1 : 0);
         // gbuffer.frag uses u_proc_mode to apply the ocean's shoreline fade to
         // reflectivity (so the invisible inner ocean plane doesn't make the dry
@@ -4069,6 +4077,8 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         vio_set_uniform($this->ctx, 'u_foliage_wind', $material->foliageWind ? 1 : 0);
         vio_set_uniform($this->ctx, 'u_wind_flutter', $material->windFlutter);
         vio_set_uniform($this->ctx, 'u_two_sided', $material->twoSided && $material->alpha >= 1.0 ? 1 : 0);
+        vio_set_uniform($this->ctx, 'u_grass', $material->grass ? 1 : 0);
+        vio_set_uniform($this->ctx, 'u_grass_bend', $material->grassBend);
 
         // SSR reflectivity inputs (gbuffer.frag combines these into channel b).
         // Water (procMode 2 / 11) is the headline reflective surface; give it a
@@ -5310,7 +5320,8 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
      */
     private function applyMaterialUniforms(Material $material, string $materialId = ''): void
     {
-        $procMode = ProcModeRegistry::resolve($materialId);
+        // Grass blades shade through their own branch, never a game's proc mode.
+        $procMode = $material->grass ? 0 : ProcModeRegistry::resolve($materialId);
 
         // One batched upload of the ~28 material uniforms (was ~28 individual
         // native calls). Insertion order is irrelevant — each uniform writes its
@@ -5348,6 +5359,12 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             'u_two_sided'           => $material->twoSided && $material->alpha >= 1.0 ? 1 : 0,
             'u_foliage_wind'        => $material->foliageWind ? 1 : 0,
             'u_wind_flutter'        => $material->windFlutter,
+            // Grass blades (Material::$grass, GrassSystem).
+            'u_grass'               => $material->grass ? 1 : 0,
+            'u_grass_shade'         => $material->grass ? 1 : 0,
+            'u_grass_bend'          => $material->grassBend,
+            'u_grass_tip'           => [$material->grassTip->r, $material->grassTip->g, $material->grassTip->b],
+            'u_grass_look'          => [(float) $material->grassBands, $material->grassVariation, $material->grassRootShade, $material->grassPatchScale],
             'u_proc_mode'           => $procMode,
             // Water (proc_mode 2): enable GPU vertex wave animation.
             'u_vertex_anim'         => $procMode === 2 ? 1 : 0,
@@ -5934,8 +5951,19 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         vio_set_uniform($this->ctx, 'u_wind_intensity', $this->windIntensity);
         vio_set_uniform($this->ctx, 'u_foliage_motion', $this->foliageMotion);
         vio_set_uniform($this->ctx, 'u_foliage_fade', $this->foliageFade);
+        $this->uploadGrassFrameUniforms();
         vio_set_uniform($this->ctx, 'u_mesh_local_aabb_min', [0.0, 0.0, 0.0]);
         vio_set_uniform($this->ctx, 'u_mesh_local_aabb_max', [0.0, 0.0, 0.0]);
+    }
+
+    /** Frame-global grass state (SetGrass): distance bands and benders. */
+    private function uploadGrassFrameUniforms(): void
+    {
+        vio_set_uniform($this->ctx, 'u_grass_range', $this->grassRange);
+        vio_set_uniform($this->ctx, 'u_grass_far_fade', [$this->grassRange[0], $this->grassRange[1]]);
+        foreach ($this->grassPush as $i => $slot) {
+            vio_set_uniform($this->ctx, "u_grass_push[{$i}]", $slot);
+        }
     }
 
     private function extractCameraPosition(Mat4 $viewMatrix): Vec3

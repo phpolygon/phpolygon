@@ -331,6 +331,14 @@ MaterialRegistry::register('cobbles', new Material(
 
 `GraphicsSettings::$surfaceRelief` scales it per player: `Parallax` (default) applies both values, `Cavity` only the darkening, `Off` neither. Materials without these values render the same in every tier. The adaptive stack drops Parallax right after SSR, and Cavity after the vignette.
 
+### Grass blades (`GraphicsSettings::$grassQuality`)
+
+`GrassQuality` picks the parameter set (`GrassDetail`) a `GrassSystem` built with the
+`GraphicsSettingsManager` uses: `Off` (ground material only), `Low`, `Medium` (default), `High`,
+`Ultra` (stylised blades, more segments, density and reach per level) and `Realistic` (thin folded
+blades, smooth gradient, light through the blades). The levels share one form language; only the
+resolution changes. The setting is not part of the adaptive stack (changing it regenerates cells).
+
 ### Upscaling (`GraphicsSettings::$upscaler`)
 
 At a render scale below 1 the scene has to reach the display resolution:

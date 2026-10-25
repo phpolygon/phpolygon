@@ -596,6 +596,13 @@ class VulkanRenderer3D implements Renderer3DInterface
                 $this->uploadLightingUbo();
                 $this->drawMeshCommand($command->meshId, $command->modelMatrix);
             } elseif ($command instanceof DrawMeshInstanced) {
+                // Grass blades need the grass vertex stage (instance hash in the
+                // matrix, distance thinning) and thousands of instances; this
+                // backend draws instances one by one, so it leaves them out and
+                // the ground material carries the look.
+                if (MaterialRegistry::get($command->materialId)?->grass === true) {
+                    continue;
+                }
                 $this->resolveMaterial($command->materialId);
                 $this->uploadLightingUbo();
                 if ($command->flatMatrices !== [] || $command->packedMatrices !== '') {

@@ -14,6 +14,7 @@ use PHPolygon\Rendering\Quality\ScreenSpaceReflections;
 use PHPolygon\Rendering\Quality\ShaderQuality;
 use PHPolygon\Rendering\Quality\ShadowQuality;
 use PHPolygon\Rendering\Quality\ShadingRate;
+use PHPolygon\Rendering\Quality\GrassQuality;
 use PHPolygon\Rendering\Quality\SurfaceRelief;
 use PHPolygon\Rendering\Quality\GraphicsCapabilities;
 use PHPolygon\Rendering\Quality\TextureQuality;
@@ -111,6 +112,13 @@ final class GraphicsSettings
          * upscaler is selected - see effectiveRenderScale().
          */
         public readonly UpscaleQuality $upscaleQuality = UpscaleQuality::Custom,
+        /**
+         * Grass blades near the camera (GrassSystem): Off leaves the ground
+         * material alone; Low..Ultra are stylised blades with more density and
+         * reach per level; Realistic draws many thin folded blades with light
+         * transmission. Every level is a GrassDetail parameter set.
+         */
+        public readonly GrassQuality $grassQuality = GrassQuality::Medium,
     ) {
     }
 
@@ -150,6 +158,7 @@ final class GraphicsSettings
         ?Upscaler $upscaler = null,
         ?float $upscaleSharpness = null,
         ?UpscaleQuality $upscaleQuality = null,
+        ?GrassQuality $grassQuality = null,
     ): self {
         $nextUpscaler = $upscaler ?? $this->upscaler;
         // Leaving a temporal upscaler re-clamps a sub-half render scale.
@@ -188,6 +197,7 @@ final class GraphicsSettings
             upscaler: $nextUpscaler,
             upscaleSharpness: $upscaleSharpness !== null ? max(0.0, min(1.0, $upscaleSharpness)) : $this->upscaleSharpness,
             upscaleQuality: $upscaleQuality ?? $this->upscaleQuality,
+            grassQuality: $grassQuality ?? $this->grassQuality,
         );
     }
 
@@ -228,6 +238,7 @@ final class GraphicsSettings
             'upscaler' => $this->upscaler->value,
             'upscaleSharpness' => $this->upscaleSharpness,
             'upscaleQuality' => $this->upscaleQuality->value,
+            'grassQuality' => $this->grassQuality->value,
         ];
     }
 
@@ -270,6 +281,7 @@ final class GraphicsSettings
             upscaler: $upscaler,
             upscaleSharpness: ($v = self::asFloat($data['upscaleSharpness'] ?? null)) !== null ? max(0.0, min(1.0, $v)) : $defaults->upscaleSharpness,
             upscaleQuality: self::enumFrom(UpscaleQuality::class, $data['upscaleQuality'] ?? null) ?? $defaults->upscaleQuality,
+            grassQuality: self::enumFrom(GrassQuality::class, $data['grassQuality'] ?? null) ?? $defaults->grassQuality,
         );
     }
 

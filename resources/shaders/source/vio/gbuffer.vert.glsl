@@ -46,9 +46,66 @@ uniform float u_wind_flutter;
 uniform float u_foliage_motion;
 uniform vec2  u_foliage_fade;
 
+// Grass blades (Material::$grass, SetGrass; mirrors every mesh vertex stage,
+// GrassShaderConsistencyTest). uv.x = blade random, uv.y = 0 root .. 1 tip; the
+// tuft hash rides in the instance matrix's unused m[0].w, read and cleared in main.
+uniform int   u_grass;
+uniform float u_grass_bend;       // tip displacement per unit wind, fraction of the blade height
+uniform vec4  u_grass_range;      // full range, fade range, far height factor, push strength
+uniform vec4  u_grass_push[4];    // benders: xyz position, w radius (0 = unused)
+
 out vec3 v_viewNormal; // surface normal in view space
 out vec3 v_viewPos;    // fragment position in view space
 out vec2 v_worldXZ;    // world-space XZ (for the ocean shoreline reflectivity fade)
+
+// Grass tuft: thins out (the tuft hash against a density falling from full to
+// fade range) and shrinks into the ground instead of popping, gets shorter
+// toward the fade range, bends with the wind (gusts travel along the wind
+// direction, the tip moves most) and away from benders, and keeps roughly its
+// length (what bends sideways comes down).
+vec3 grassBlade(vec3 pos, vec2 uv, mat4 model, float hash, float time) {
+    vec3 origin = model[3].xyz;
+    vec3 camPos = -(transpose(mat3(u_view)) * u_view[3].xyz);
+    float fadeT = smoothstep(u_grass_range.x, u_grass_range.y, length(origin - camPos));
+    float keep = clamp(((1.0 - fadeT) * 1.25 - hash) * 4.0, 0.0, 1.0);
+    float k = keep * mix(1.0, u_grass_range.z, fadeT);
+    if (k <= 0.0) {
+        return vec3(pos.x, -0.05, pos.z);
+    }
+    pos.y = pos.y * k - (1.0 - keep) * 0.03;
+    float s2 = max(dot(model[0].xyz, model[0].xyz), 1e-8);
+    float t = clamp(uv.y, 0.0, 1.0);
+    float hw = max(pos.y, 0.0) * sqrt(s2);
+    vec3 d = vec3(0.0);
+    float amp = u_wind_intensity * u_foliage_motion;
+    if (amp > 0.0) {
+        vec3 wind = vec3(u_wind_direction.x, 0.0, u_wind_direction.z);
+        wind = length(wind) > 1e-4 ? normalize(wind) : vec3(0.0, 0.0, 1.0);
+        float along = dot(origin.xz, wind.xz);
+        float across = dot(origin.xz, vec2(-wind.z, wind.x));
+        float gust = 0.7 + 0.3 * sin(along * 0.35 - time * 1.9 + uv.x * 0.6)
+                   + 0.15 * sin(along * 0.9 + across * 0.4 - time * 3.1);
+        float flick = sin(time * 4.7 + uv.x * 23.0 + along * 1.3) * 0.12;
+        d += wind * (u_grass_bend * amp * hw * t * (gust + flick));
+    }
+    for (int i = 0; i < 4; i++) {
+        vec4 b = u_grass_push[i];
+        if (b.w <= 0.0) {
+            continue;
+        }
+        vec2 away = origin.xz - b.xz;
+        float dist = length(away);
+        float f = (1.0 - smoothstep(b.w * 0.3, b.w, dist)) * (1.0 - smoothstep(0.6, 2.5, abs(origin.y - b.y)));
+        if (f <= 0.0) {
+            continue;
+        }
+        vec2 dir = dist > 1e-3 ? away / dist : vec2(1.0, 0.0);
+        d.xz += dir * (f * u_grass_range.w * hw * t);
+    }
+    float lat = length(d.xz);
+    d.y -= min(lat * lat / max(2.0 * hw, 0.02), hw * 0.6);
+    return pos + (transpose(mat3(model)) * d) / s2;
+}
 
 vec3 foliageSway(vec3 pos, mat4 model, float time) {
     vec3 origin = model[3].xyz;
@@ -84,6 +141,12 @@ void main() {
     if (u_use_instancing == 1) {
         model = mat4(a_instance_col0, a_instance_col1, a_instance_col2, a_instance_col3);
     }
+    // Grass: the tuft hash rides in m[0].w (see grassBlade); clear it before use.
+    float grassHash = 0.0;
+    if (u_grass == 1) {
+        grassHash = model[0].w;
+        model[0].w = 0.0;
+    }
     vec3 pos = a_position;
 
     // Water swell — identical math to mesh3d.vert.glsl.
@@ -113,7 +176,9 @@ void main() {
         pos += sway;
     }
 
-    if (u_foliage_wind == 1) {
+    if (u_grass == 1) {
+        pos = grassBlade(pos, a_uv, model, grassHash, u_time);
+    } else if (u_foliage_wind == 1) {
         pos = foliageSway(pos, model, u_time);
     }
 

@@ -44,6 +44,13 @@ uniform SpotLight u_spot_lights[8];
 uniform int u_spot_light_count;
 
 uniform vec3 u_albedo;
+// Grass blades (Material::$grass): colour along the blade from v_uv (y = 0 root
+// .. 1 tip, x = blade random). Mirrors the other mesh fragment stage.
+uniform int   u_grass_shade;      // 1 for Material::$grass (a stage-local name: a uniform
+                                  // shared with the vertex stage is not set in both on every backend)
+uniform vec3  u_grass_tip;        // Material::$grassTip
+uniform vec4  u_grass_look;       // bands (0 = smooth), variation, root shade, patch noise scale
+uniform vec2  u_grass_far_fade;   // SetGrass full / fade range (fragment copy)
 uniform vec3 u_emission;
 uniform float u_roughness;
 uniform float u_metallic;
@@ -934,6 +941,27 @@ void main() {
         float nse = noise(v_worldPos.xz * 0.4);
         float noiseMask = smoothstep(0.3, 0.9, roughness);
         albedo = u_albedo * (1.0 + (nse - 0.5) * 0.12 * noiseMask);
+    }
+
+    // Grass blades: root colour (albedo) to tip colour along the blade, flat
+    // bands for the stylised look or a smooth gradient, per-blade and field-wide
+    // brightness variation, darker toward the root (contact shading).
+    if (u_grass_shade == 1) {
+        float gt = clamp(v_uv.y, 0.0, 1.0);
+        float gb = gt;
+        if (u_grass_look.x >= 1.0) {
+            gb = floor(gt * u_grass_look.x + 0.5) / u_grass_look.x;
+        }
+        vec3 gc = mix(albedo, u_grass_tip, pow(gb, 1.3));
+        float gPatch = noise(v_worldPos.xz * max(u_grass_look.w, 1e-4)) - 0.5;
+        float gBlade = fract(v_uv.x * 7.31) - 0.5;
+        gc *= max(0.0, 1.0 + (gBlade * 0.6 + gPatch) * u_grass_look.y * 2.0);
+        gc *= mix(1.0 - clamp(u_grass_look.z, 0.0, 1.0), 1.0, smoothstep(0.0, 0.45, gt));
+        // Toward the fade range the blades take the root colour - the colour of
+        // the ground they thin out into - so the field has no bright rim.
+        float gFar = smoothstep(u_grass_far_fade.x, u_grass_far_fade.y, length(v_worldPos - u_camera_pos));
+        gc = mix(gc, albedo, gFar * 0.7);
+        albedo = gc;
     }
 
     // Procedural normal-map pattern. Skipped for proc_modes 0 (standard)

@@ -447,6 +447,7 @@ slept is recomputed on its first awake tick (its world matrix may be stale while
 | `Physics3DSystem` | Capsule vs AABB collision, gravity integration (Phase 7+) |
 | `OutlineSystem` | Emits `DrawOutline` for every enabled `Outline`; register BEFORE `Renderer3DSystem` |
 | `FoliageInstanceSystem` | Draws `FoliageInstances` as static instanced batches per (stage, LOD, tint, shadow); register after `Camera3DSystem`, BEFORE `Renderer3DSystem` |
+| `GrassSystem` | Grass blades of every `GrassField` near the camera (`variants x 2` packed instanced draws, `SetGrass`); register after `Camera3DSystem`, BEFORE `Renderer3DSystem` |
 
 ### Vegetation — the plant family (`PHPolygon\Vegetation`)
 
@@ -500,6 +501,57 @@ the mesh's horizontal edge, takes the phase from the instance origin and fades o
 shadow pass does not sway (static shadows). `Renderer3DSystem` now emits `SetWind` from the scene's
 `Wind` component (direction, gust intensity, `foliageMotion`, fade distances). Factories:
 `Material::foliage()`, `Material::bark()`, `withFoliage()`, `withEmission()`.
+
+### Grass blades (`GrassField` + `GrassSystem`)
+
+Visible blades near the camera over any ground; beyond the fade range the ground material alone
+carries the look. Game-agnostic: bounds, ground, mask, colours and density come from the game.
+
+- `GrassField` (component): XZ bounds, `groundAt` callable (`?float`, null = no ground, no blade),
+  `GrassMask`, root/tip colour, density/height multipliers, height jitter, sink, seed. Edits via
+  `touch()` / `setGround()` / `setColors()` or the mask (own `version`) rebuild the cells.
+- `GrassMask`: include rect/circle/polygon (inward feather), exclude path (polyline + half width),
+  rect, circle, polygon, `Zone` (outward feather: fewer and shorter tufts at the edge, none inside),
+  `multiply(callable)` for anything else (ground material, trampled spots). `factor(x, z)` 0..1.
+- `GrassTuftMesh` / `GrassBladeShape`: a tuft = tapered, leaning, curving blades; `uv.x` = blade
+  random, `uv.y` = 0 root .. 1 tip; normals lean toward up by `upBias` (calm shading); optional folded
+  midrib. Blade layout depends only on seed + blade index, so `withSegments()` is a LOD with the same
+  roots and tips. `trianglesPerTuft()` = blades * (2 * segments - 1) (* 2 folded).
+- `GrassDetail`: everything that sets look and cost (shape, far-LOD segments, LOD distance, tufts/m²,
+  full / fade range, far height, variants, `maxInstances`, interaction, bend, push strength, colour
+  bands, variation, root shade, patch noise scale, translucency, generation budget).
+  `GrassQuality` (`Off | Low | Medium | High | Ultra | Realistic`, `GraphicsSettings::$grassQuality`,
+  default Medium, dropdown in `GraphicsOptionsPanel`) is only a preset of it (`GrassDetail::forQuality()`):
+  Low..Ultra stylised (2/3/4/7 segments, flat colour bands), Realistic thin folded blades, smooth
+  gradient, strong transmission.
+- `GrassSystem` (register after `Camera3DSystem`, before `Renderer3DSystem`; optional
+  `GraphicsSettingsManager` makes it follow the settings): cells (12 m) generated lazily nearest
+  first within `generateBudgetMs` (or `prewarm()`), jittered world grid (seamless, deterministic),
+  tufts packed as f32 matrices sorted by a per-tuft hash. Per frame the visible cells within the fade
+  range contribute the PREFIX of tufts whose hash is below the density at the cell's nearest point
+  minus the rebuild distance (a superset of what the shader keeps) -> one packed `DrawMeshInstanced`
+  per variant and LOD (`variants x 2` draws), `castShadows: false`. Same camera = commands re-sent
+  (~0.03 ms); rebuild only after `rebuildDistance` (1.5 m) or a change of the visible cell set.
+  Emits `SetGrass` (ranges, far height, up to 4 `GrassBender`s nearest to the camera, push strength).
+- Shader (`Material::$grass`, `Material::grass()`): the tuft hash rides in the instance matrix's
+  unused `m[0].w`; every mesh vertex stage reads and clears it (`grassBlade()` in vio `mesh3d.vert`,
+  vio `gbuffer.vert`, GL `mesh3d.vert`, identical - `GrassShaderConsistencyTest`). Thinning
+  `clamp(((1 - fadeT) * 1.25 - hash) * 4, 0, 1)` shrinks a tuft into the ground instead of popping,
+  height falls to `farHeight`, wind = `u_grass_bend * wind * height * t` with gusts travelling along
+  the wind (scaled by `SetWind::$foliageMotion`, 0 = still), benders push blades outward, length kept
+  (sideways bend comes down). Fragment: root (albedo) -> tip colour (`u_grass_tip`, bands or smooth),
+  per-blade + field noise variation, root shade, transmission strongest at the tip (vio). The
+  fragment flag is `u_grass_shade`, not `u_grass`: a uniform declared in both stages is not set in
+  both on D3D12 - give every stage its own name. Grass materials never resolve to a proc mode.
+  Native Vulkan (per-instance CPU draws) skips grass batches.
+- Measured (RTX 2080, D3D12, eye level over a meadow, SSAO medium; GPU = frame delta to the same scene
+  without grass at 1280x720 / 1920x1080): Low +0.07 / +0.11 ms (6k tufts, 0.06 M tris, 4 draws), Medium
+  +0.42 / +0.56 ms (23k, 0.73 M, 6), High +0.87 / +1.11 ms (46k, 2.1 M, 6), Ultra +2.2 / +2.6 ms (108k,
+  8.5 M, 6), Realistic +1.45 / +1.8 ms (49k, 6.2 M, 8). CPU at rest 0.03-0.06 ms, walking median
+  0.1-0.4 ms (rebuild peaks 0.9 ms Medium, ~4.5 ms Ultra). `examples/grass_catalog.php` renders the
+  review set and, with `measure`, these numbers (at the given size).
+- The fragment stage fades the blade colour toward the root colour near the fade range
+  (`u_grass_far_fade`), so a ground tinted like the root colour takes over without a bright rim.
 
 ### Physics queries — rays and line of sight
 

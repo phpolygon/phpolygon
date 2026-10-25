@@ -20,6 +20,7 @@ use PHPolygon\Rendering\Command\SetFog;
 use PHPolygon\Rendering\Command\SetShader;
 use PHPolygon\Rendering\Command\SetSkybox;
 use PHPolygon\Rendering\Command\SetWaveAnimation;
+use PHPolygon\Rendering\Command\SetGrass;
 use PHPolygon\Rendering\Command\SetWind;
 use PHPolygon\Rendering\PostProcess\OpenGLFxaaPass;
 use PHPolygon\Rendering\PostProcess\OpenGLSsrPass;
@@ -446,6 +447,9 @@ class OpenGLRenderer3D implements Renderer3DInterface, AnimationClockInterface
         $this->setUniformInt('u_foliage_wind', 0);
         $this->setUniformFloat('u_foliage_motion', 1.0);
         $this->setUniformVec2('u_foliage_fade', [100.0, 130.0]);
+        $this->setUniformInt('u_grass', 0);
+        $this->setUniformInt('u_grass_shade', 0);
+        $this->uploadGrass(new SetGrass());
         $this->setUniformVec3('u_mesh_local_aabb_min', [0.0, 0.0, 0.0]);
         $this->setUniformVec3('u_mesh_local_aabb_max', [0.0, 0.0, 0.0]);
 
@@ -527,6 +531,9 @@ class OpenGLRenderer3D implements Renderer3DInterface, AnimationClockInterface
                     $command->foliageFadeStart,
                     max($command->foliageFadeStart + 0.01, $command->foliageFadeEnd),
                 ]);
+
+            } elseif ($command instanceof SetGrass) {
+                $this->uploadGrass($command);
 
             } elseif ($command instanceof Command\SetSkyColors) {
                 $this->setUniformVec3('u_sky_color', [$command->skyColor->r, $command->skyColor->g, $command->skyColor->b]);
@@ -1025,8 +1032,9 @@ class OpenGLRenderer3D implements Renderer3DInterface, AnimationClockInterface
 
     private function applyMaterial(string $materialId): void
     {
-        // Procedural material mode — cached lookup by prefix
-        $procMode = ProcModeRegistry::resolve($materialId);
+        // Procedural material mode — cached lookup by prefix (grass blades
+        // shade through their own branch, never a game's proc mode).
+        $procMode = MaterialRegistry::get($materialId)?->grass === true ? 0 : ProcModeRegistry::resolve($materialId);
         $this->setUniformInt('u_proc_mode', $procMode);
 
         // Moon phase: encoded in roughness of moon_disc material by DayNightSystem
@@ -1077,6 +1085,11 @@ class OpenGLRenderer3D implements Renderer3DInterface, AnimationClockInterface
             $this->setUniformInt('u_cloth_anchor_top', $material->clothAnchorTop ? 1 : 0);
             $this->setUniformInt('u_foliage_wind', $material->foliageWind ? 1 : 0);
             $this->setUniformFloat('u_wind_flutter', $material->windFlutter);
+            $this->setUniformInt('u_grass', $material->grass ? 1 : 0);
+            $this->setUniformInt('u_grass_shade', $material->grass ? 1 : 0);
+            $this->setUniformFloat('u_grass_bend', $material->grassBend);
+            $this->setUniformVec3('u_grass_tip', [$material->grassTip->r, $material->grassTip->g, $material->grassTip->b]);
+            $this->setUniformVec4('u_grass_look', [(float) $material->grassBands, $material->grassVariation, $material->grassRootShade, $material->grassPatchScale]);
         } else {
             $this->setUniformVec3('u_albedo', [0.8, 0.8, 0.8]);
             $this->setUniformVec3('u_emission', [0.0, 0.0, 0.0]);
@@ -1103,6 +1116,8 @@ class OpenGLRenderer3D implements Renderer3DInterface, AnimationClockInterface
             $this->setUniformInt('u_cloth_anchor_top', 1);
             $this->setUniformInt('u_foliage_wind', 0);
             $this->setUniformFloat('u_wind_flutter', 0.0);
+            $this->setUniformInt('u_grass', 0);
+            $this->setUniformInt('u_grass_shade', 0);
         }
 
         // Mesh-local AABB drives the cloth anchor weighting. Computed
@@ -1452,6 +1467,26 @@ class OpenGLRenderer3D implements Renderer3DInterface, AnimationClockInterface
         $loc = $this->getUniformLocation($name);
         if ($loc >= 0) {
             glUniform3f($loc, $value[0], $value[1], $value[2]);
+        }
+    }
+
+    /** @param float[] $value */
+    private function setUniformVec4(string $name, array $value): void
+    {
+        $loc = $this->getUniformLocation($name);
+        if ($loc >= 0) {
+            glUniform4f($loc, $value[0], $value[1], $value[2], $value[3]);
+        }
+    }
+
+    /** Frame-global grass state (SetGrass): distance bands and benders. */
+    private function uploadGrass(SetGrass $grass): void
+    {
+        $range = $grass->rangeUniform();
+        $this->setUniformVec4('u_grass_range', $range);
+        $this->setUniformVec2('u_grass_far_fade', [$range[0], $range[1]]);
+        foreach ($grass->benderSlots() as $i => $slot) {
+            $this->setUniformVec4("u_grass_push[{$i}]", $slot);
         }
     }
 

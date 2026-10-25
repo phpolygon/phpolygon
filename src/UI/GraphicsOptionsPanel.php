@@ -16,6 +16,7 @@ use PHPolygon\Rendering\Quality\ScreenSpaceReflections;
 use PHPolygon\Rendering\Quality\ShaderQuality;
 use PHPolygon\Rendering\Quality\ShadingRate;
 use PHPolygon\Rendering\Quality\ShadowQuality;
+use PHPolygon\Rendering\Quality\GrassQuality;
 use PHPolygon\Rendering\Quality\SurfaceRelief;
 use PHPolygon\Rendering\Quality\TextureQuality;
 use PHPolygon\Rendering\Quality\UpscaleQuality;
@@ -271,6 +272,20 @@ final class GraphicsOptionsPanel
         $newIdx = $this->gated($caps->surfaceRelief, fn(): int => $this->ui->dropdown('graphics.surfaceRelief', $reliefLabels, $idx, 0.0, 0));
         if ($enabled && $caps->surfaceRelief && $newIdx !== $idx) {
             $manager->update(static fn(GraphicsSettings $g): GraphicsSettings => $g->with(surfaceRelief: $reliefs[$newIdx]));
+        }
+
+        // Grass blades (GrassSystem)
+        $grassLevels = GrassQuality::cases();
+        $grassLabels = array_map(static fn(GrassQuality $q): string => $q->label(), $grassLevels);
+        $idx = array_search($s->grassQuality, $grassLevels, true);
+        if (!is_int($idx)) {
+            $idx = 2;
+        }
+        $this->ui->label('Grass');
+        $newIdx = $this->ui->dropdown('graphics.grassQuality', $grassLabels, $idx, 0.0, 0);
+        if ($enabled && $newIdx !== $idx && isset($grassLevels[$newIdx])) {
+            $grass = $grassLevels[$newIdx];
+            $manager->update(static fn(GraphicsSettings $g): GraphicsSettings => $g->with(grassQuality: $grass));
         }
 
         // Shader quality

@@ -167,6 +167,7 @@ namespace {
     function glTexParameterfv(int $target, int $pname, \GL\Buffer\FloatBuffer $params): void {}
     function glUniform1f(int $location, float $v0): void {}
     function glUniform3f(int $location, float $v0, float $v1, float $v2): void {}
+    function glUniform4f(int $location, float $v0, float $v1, float $v2, float $v3): void {}
     function glUniformMatrix4fv(int $location, bool $transpose, \GL\Buffer\FloatBuffer $value): void {}
     function glCreateShader(int $type): int {}
     function glShaderSource(int $shader, string $source): void {}
