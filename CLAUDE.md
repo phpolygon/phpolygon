@@ -611,6 +611,32 @@ bulge), shoes, bottles, handles; turn it with a transform to loft along X/Z.
 `MeshData::mirrored(axis)` reflects a mesh and reverses the winding — a left part from
 a right one without the mesh turning inside out.
 
+**Ground-following surfaces — `ConformingSurfaceSet` / `ConformingRegionMesh`.** Paths,
+plazas, yards, borders and inlays that lie ON a terrain (no floating slab, no slab edge seen
+from the side, no gap at joints). `RegionShape` gives outlines as signed distance fields
+(`circle`, `rect` with yaw, `polygon`, `polyline(points, halfWidth)` with round caps,
+`halfDisc`, `field(bounds, fn)`). `ConformingSurfaceSet(ground, cell = 0.5, lift = 0.025,
+hemWidth = 0.35, hemSink = 0.05, uvScale)`: `add(surface, shape)` (earlier surface wins
+overlaps), `border(surface, width, name)` (strip along the union's OUTER outline – joints get
+none; the inside distance is re-measured to the real outline, `redistance()`),
+`inlay(name, shape, layer)`, `cut(shape)`, `uvScale(part, s)`; `build()` → one `MeshData` per
+part (`<surface>`, border/inlay names, `<surface>.hem`). Every top vertex = ground at exactly
+that vertex + lift; the hem outside the outline falls from the lift to `hemSink` below the
+ground and belongs to the nearest surface. All parts are exact partitions of one grid
+(complementary clip conditions) and every part is also cut along every partition line
+(`mesh(..., splits)`), so all joints share their vertices – no gap, no overlap, no T-junction.
+Triangles are CCW from above, normals smoothed, UV = world XZ × scale. No collider (a few cm –
+the ground collider carries the player); merge parts per material for few draws. The low-level
+grid (`ConformingRegionMesh`: `covering()` snaps the origin to the cell, `stamp`/`stampShape`
+with min, `derive`, `sample`, `mesh(conditions [field, ±1], height, carry, uvScale, splits)`,
+height helpers `onGround()` / `hem()`) builds other regions on the same corners.
+`SurfaceFit::measure(mesh, ground)` is the audit: lift max/min (+ position) over corners, edge
+midpoints and centroids, shares above/below thresholds, and the highest OPEN edge above the
+ground (= the visible slab edge; ≤ −hemSink when the hem closes everything). Between two grid
+corners a cell is planar: a convex 3 m hill sags ~6 mm at `cell = 0.5`; small inlays (< 1 m)
+read polygonal at 0.5 m – use a finer cell for them. `examples/conforming_surfaces.php`
+renders a review set.
+
 **Colour spaces — material albedo is LINEAR.** The lit shaders multiply light by
 `Material::$albedo` as a linear value and gamma-encode (ACES, then 1/2.2) at the end.
 A colour picked as an sRGB hex ("how it should look") therefore belongs in
