@@ -121,11 +121,15 @@ class VioWindow extends Window
             $config['frame_latency'] = $this->frameLatency;
         }
         // HDR10 output (php-vio >= 2.15, D3D11 / D3D12): a 10-bit ST 2084
-        // backbuffer when the display is in HDR mode; vio's 2D batch PQ-encodes
-        // itself, the 3D resolve reads vio_swapchain_info() and does the same.
+        // backbuffer when the display is in HDR mode. With 'hdr_composite'
+        // (php-vio >= 2.37, D3D12) the frame - 3D and 2D - blends in an SDR layer
+        // and vio_end encodes it once, so antialiased text keeps its weight;
+        // elsewhere vio's 2D batch PQ-encodes itself. The 3D resolve reads
+        // vio_swapchain_info() and encodes only when vio does not.
         if ($this->hdrOutput) {
             $config['hdr_output'] = 1;
             $config['hdr_paper_white'] = $this->hdrPaperWhite;
+            $config['hdr_composite'] = true;
         }
         // D3D12 shader model (php-vio >= 2.16): 6 = DXC / DXIL, honest fallback to FXC.
         if ($this->shaderModel > 0) {

@@ -1752,8 +1752,9 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         return [
             // HDR10 backbuffer (vio_create 'hdr_output' active): the resolve
             // PQ-encodes its display-referred result, with paperWhite nits as
-            // the luminance of display white. 0 on an sRGB backbuffer.
-            'pq'         => $this->outputIsHdr10() ? 1 : 0,
+            // the luminance of display white. 0 on an sRGB backbuffer, and 0
+            // when php-vio encodes the whole frame at vio_end (hdr_composite).
+            'pq'         => $this->outputIsHdr10() && !$this->outputIsHdrComposite() ? 1 : 0,
             'paperWhite' => $this->settings->hdrPaperWhite,
             'lift'       => $g['lift'],
             'gamma'      => $g['gamma'],
@@ -1773,6 +1774,9 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
     /** Cached vio_swapchain_info()['hdr_output'] (null = not probed yet). */
     private ?bool $hdr10Output = null;
 
+    /** Cached vio_swapchain_info()['hdr_composite'] (null = not probed yet). */
+    private ?bool $hdrComposite = null;
+
     /**
      * Whether the swapchain presents HDR10 (10-bit ST 2084) this session —
      * php-vio decided that at window creation from GraphicsSettings::$hdrOutput
@@ -1788,6 +1792,24 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             }
         }
         return $this->hdr10Output;
+    }
+
+    /**
+     * Whether php-vio draws the frame into an SDR layer and PQ-encodes it at
+     * vio_end (vio_create 'hdr_composite', php-vio >= 2.37, D3D12). The resolve
+     * then writes display-referred values like on an SDR backbuffer, and 2D
+     * blends like SDR. Older php-vio and other backends report no key / false.
+     */
+    public function outputIsHdrComposite(): bool
+    {
+        if ($this->hdrComposite === null) {
+            $this->hdrComposite = false;
+            if (function_exists('vio_swapchain_info')) {
+                $info = vio_swapchain_info($this->ctx);
+                $this->hdrComposite = (bool) ($info['hdr_composite'] ?? false);
+            }
+        }
+        return $this->hdrComposite;
     }
 
     /**
