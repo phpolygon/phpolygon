@@ -11,7 +11,8 @@
   <a href="#architecture">Architecture</a> ·
   <a href="#getting-started">Getting Started</a> ·
   <a href="#examples">Examples</a> ·
-  <a href="#roadmap">Roadmap</a>
+  <a href="#roadmap">Roadmap</a> ·
+  <a href="https://github.com/sponsors/phpolygon">Sponsor</a>
 </p>
 
 ---

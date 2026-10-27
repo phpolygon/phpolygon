@@ -2244,3 +2244,37 @@ the workflow output. Two pipelines run:
   High Performance, otherwise numbers are meaningless.
 - **Do not** run benchmarks without warm-up frames - the runner discards
   the first 30-60 frames by default; do not turn that off.
+
+---
+
+## GitHub Sponsors - obligations
+
+The `phpolygon` org has a live GitHub Sponsors profile
+(https://github.com/sponsors/phpolygon). The tiers promise concrete rewards;
+the repos must keep those promises. The public tier overview lives on the
+website at `docs/sponsors.md` in `phpolygon/phpolygon.github.io`.
+
+| Tier | Monthly | Promise | Where it has to show up |
+|---|---|---|---|
+| Supporter | $3 | Sponsor badge | Automatic (GitHub) - nothing to do |
+| Backer | $10 | Name in the README | `## Backers` section in this repo's `README.md` |
+| Insider | $25 | Early dev logs and roadmap notes | Sponsor-only updates (Sponsors dashboard -> Newsletters) before public release |
+| Studio | $100 | Logo + link in README and on the Showcase page; priority on their issues | `## Sponsors` section in `README.md`, footer of `docs/showcase.md` and the Studio list in `docs/sponsors.md` (website repo); label their issues `sponsor` and triage first |
+
+Rules:
+
+- **Before the first Backer or Studio sponsor arrives**, the README sections
+  above do not exist yet. Create them when the first sponsor in that tier
+  signs up - not later. An unkept tier promise is a bug.
+- **When a sponsor joins or leaves**, update every location in the table for
+  their tier in the same change (README here, both pages in the website repo).
+- **Insider updates are not optional.** If there are Insider sponsors, every
+  dev log or roadmap note goes to them first.
+- **Never promise more than one person can deliver.** Do not add calls,
+  office hours, guaranteed response times or private-repo access to a tier
+  without the maintainer explicitly deciding to.
+- The goal on the profile is **10 monthly sponsors** (time for php-vio's next
+  major version and SDF-based GI). When it is reached, set the next goal.
+- The sponsors sections are the one place this repo's README may list
+  companies. The "never reference a specific game" rule above still applies:
+  list sponsors by their own name, not by the game they make.
