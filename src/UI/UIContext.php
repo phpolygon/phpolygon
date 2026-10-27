@@ -1969,6 +1969,29 @@ class UIContext
     }
 
     /**
+     * Draw and read the pointer through other backends - typically a
+     * {@see \PHPolygon\Rendering\ScaledRenderer2D} and a
+     * {@see \PHPolygon\Runtime\ScaledInput} on one UIScale, so a panel lays out
+     * in logical pixels while the rest of the frame stays physical. Widget
+     * state (focus, text fields, scroll offsets) is untouched; clipboard and
+     * keyboard layout stay the ones chosen at construction. Returns the
+     * previous pair so the caller can restore it (in a finally):
+     *
+     *   [$r, $i] = $ui->useBackends($scaledRenderer, $scaledInput);
+     *   try { drawPanel(); } finally { $ui->useBackends($r, $i); }
+     *
+     * @return array{0: Renderer2DInterface, 1: InputInterface}
+     */
+    public function useBackends(Renderer2DInterface $renderer, InputInterface $input): array
+    {
+        $previous = [$this->renderer, $this->input];
+        $this->renderer = $renderer;
+        $this->input = $input;
+
+        return $previous;
+    }
+
+    /**
      * Toggle whether widgets respond to hover/click. False makes every
      * widget rendered after the call non-interactive — hover misses, button
      * release-triggers never fire, sliders/text fields can't be grabbed.

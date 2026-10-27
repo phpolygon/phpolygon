@@ -1337,6 +1337,35 @@ $row = $ui->layoutButtonRow($labels, $totalWidth, gap: 12.0, minFontSize: 16.0);
   overlong word is split between characters instead of overflowing) and
   `LabelFit::fit()` (shared-size fitting with a measuring callback).
 
+### UIContext — resolution-independent panels (`UIScale`)
+
+A panel laid out for a 1080-line screen (14–16 px text) is tiny on 4K. Instead of a
+magnifying transform (stretched glyph atlas), draw it through a scaling pair on one
+`UI\UIScale`:
+
+```php
+$scale = new UIScale();                                   // shared factor
+$renderer = new ScaledRenderer2D($engine->renderer2D, $scale);
+$input = new ScaledInput($engine->input, $scale);
+// per frame, in render():
+$scale->set(UIScale::forScreen($renderer->inner()->getHeight(), userFactor: $playerChoice));
+[$r0, $i0] = $ui->useBackends($renderer, $input);
+try { drawPanel($renderer, $ui); } finally { $ui->useBackends($r0, $i0); }
+```
+
+- `ScaledRenderer2D`: every position, size, radius, line width, font size and scissor
+  × factor, measurements ÷ factor, `getWidth()`/`getHeight()` in logical pixels;
+  transforms are conjugated (`S·M·S⁻¹`). Text is requested at the larger size (crisp).
+  Rect edges snap to whole physical pixels (neighbours share edges, a 1 px hairline
+  stays one sharp pixel at 1.375). Factor 1.0 = pass-through.
+- `ScaledInput`: the pointer ÷ factor, everything else (keys, edges, text) is the
+  wrapped input – same edges, nothing consumed twice.
+- `UIScale::forScreen(h, design = 1080, userFactor, minimum = 1, step = 0.125)`:
+  `max(minimum, h / design) × userFactor`, snapped to eighths (1440 → 1.375, 2160 → 2).
+- `UIContext::useBackends()` swaps renderer + input for a draw run and returns the old
+  pair; focus, text fields, clipboard and keyboard layout stay.
+- Test: `tests/Rendering/ScaledRenderer2DTest.php`, `tests/UI/UIScaleTest.php`.
+
 ### UIContext — dropdown overlays
 
 Dropdown option lists are rendered as deferred overlays via `flushOverlays()`.
