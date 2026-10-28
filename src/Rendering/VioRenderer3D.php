@@ -5821,6 +5821,10 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             vio_set_uniform($this->ctx, "u_dir_lights[{$i}].color", [$dl->color->r, $dl->color->g, $dl->color->b]);
             vio_set_uniform($this->ctx, "u_dir_lights[{$i}].intensity", $dl->intensity * $piScale);
         }
+        // Only the primary light scatters in the volumetric fog; uploaded as a dim
+        // so an unset uniform (0) means full scattering.
+        $volumetricScale = $dirCount > 0 ? $state['dirLights'][0]->volumetricScale : 1.0;
+        vio_set_uniform($this->ctx, 'u_volumetric_light_dim', 1.0 - max(0.0, min(1.0, $volumetricScale)));
 
         // The shader supports 8 point lights, but a scene can register many more
         // (street lamps, props, the cargo-plane interior, …). Upload the 8

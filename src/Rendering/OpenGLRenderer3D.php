@@ -94,7 +94,7 @@ class OpenGLRenderer3D implements Renderer3DInterface, AnimationClockInterface
     private array $cubemapCache = [];
 
     private int $dirLightCount = 0;
-    /** @var list<array{dir: float[], color: float[], intensity: float}> */
+    /** @var list<array{dir: float[], color: float[], intensity: float, volumetricScale: float}> */
     private array $dirLights = [];
     private int $pointLightCount = 0;
 
@@ -477,6 +477,7 @@ class OpenGLRenderer3D implements Renderer3DInterface, AnimationClockInterface
                     'dir' => [$command->direction->x, $command->direction->y, $command->direction->z],
                     'color' => [$command->color->r, $command->color->g, $command->color->b],
                     'intensity' => $command->intensity,
+                    'volumetricScale' => $command->volumetricScale,
                 ];
                 $this->dirLightCount++;
 
@@ -562,6 +563,9 @@ class OpenGLRenderer3D implements Renderer3DInterface, AnimationClockInterface
             $this->setUniformVec3("u_dir_lights[{$i}].color", $dl['color']);
             $this->setUniformFloat("u_dir_lights[{$i}].intensity", $dl['intensity']);
         }
+        // Only the primary light scatters in the volumetric fog (dim: unset = full).
+        $volumetricScale = $this->dirLightCount > 0 ? $this->dirLights[0]['volumetricScale'] : 1.0;
+        $this->setUniformFloat('u_volumetric_light_dim', 1.0 - max(0.0, min(1.0, $volumetricScale)));
 
         // Upload point lights
         $this->setUniformInt('u_point_light_count', $this->pointLightCount);

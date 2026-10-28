@@ -315,6 +315,8 @@ class DayNightSystem extends AbstractSystem
                 $light->direction = new Vec3($blendDirX, $blendDirY, $blendDirZ);
                 $light->color = new Color($blendR, $blendG, $blendB);
                 $light->intensity = $blendIntensity;
+                $moonScattering = max(0.0, min(1.0, $cycle->moonScattering));
+                $light->volumetricScale = 1.0 - $moonBlend * (1.0 - $moonScattering);
                 $isFirst = false;
             } else {
                 // Fill light: scales with sun, very dim at night

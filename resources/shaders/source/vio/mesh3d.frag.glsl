@@ -92,6 +92,10 @@ uniform float u_ssr_intensity;
 // the only reflection cue and stays active. Mirrors u_ssao_enabled.
 uniform int   u_ssr_enabled;
 uniform int   u_volumetric_fog;
+// 1 - DirectionalLight::$volumetricScale of the primary light: how much LESS that
+// light scatters in the volumetric fog (0 = full, the default when unset; the
+// moon scatters far less than its lighting intensity suggests).
+uniform float u_volumetric_light_dim;
 uniform float u_ao_strength;
 // Fieldtracing (SDF global illumination) — see PHPOLYGON_FIELDTRACING.md §7.
 // mode: 0=Off 1=ProbesOnly 2=SdfOcclusion 3=SdfBounce (float; int-in-UBO is
@@ -438,8 +442,35 @@ vec3 toneMapACES(vec3 x) {
     return clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.0, 1.0);
 }
 
+// Visibility of the primary light at a point ON the view ray (not on a surface):
+// one tap of the cascade that covers it, no normal bias. Outside every cascade
+// (beyond the shadow distance) the point counts as lit.
+float volumetricShadow(vec3 p) {
+    if (u_has_shadow_map == 0) return 1.0;
+    float dist = length(p - u_camera_pos);
+    vec4 lsp;
+    if (u_csm_count >= 2 && dist > u_csm_far_0) {
+        if (u_csm_count >= 3 && dist > u_csm_far_1) {
+            lsp = u_csm_matrix_2 * vec4(p, 1.0);
+            vec3 pc = lsp.xyz / lsp.w * 0.5 + 0.5;
+            if (pc.x < 0.0 || pc.x > 1.0 || pc.y < 0.0 || pc.y > 1.0 || pc.z > 1.0) return 1.0;
+            return texture(u_csm_map_2, vec3(pc.xy, pc.z - 0.002));
+        }
+        lsp = u_csm_matrix_1 * vec4(p, 1.0);
+        vec3 pc = lsp.xyz / lsp.w * 0.5 + 0.5;
+        if (pc.x < 0.0 || pc.x > 1.0 || pc.y < 0.0 || pc.y > 1.0 || pc.z > 1.0) return 1.0;
+        return texture(u_csm_map_1, vec3(pc.xy, pc.z - 0.002));
+    }
+    lsp = u_csm_matrix_0 * vec4(p, 1.0);
+    vec3 pc = lsp.xyz / lsp.w * 0.5 + 0.5;
+    if (pc.x < 0.0 || pc.x > 1.0 || pc.y < 0.0 || pc.y > 1.0 || pc.z > 1.0) return 1.0;
+    return texture(u_csm_map_0, vec3(pc.xy, pc.z - 0.002));
+}
+
 vec3 volumetricScatter(vec3 worldPos) {
     if (u_volumetric_fog == 0 || u_dir_light_count == 0) return vec3(0.0);
+    float lightScale = clamp(1.0 - u_volumetric_light_dim, 0.0, 1.0);
+    if (lightScale <= 0.0) return vec3(0.0);
     vec3 rayStart = u_camera_pos;
     vec3 rayEnd   = worldPos;
     vec3 rayDir   = rayEnd - rayStart;
@@ -457,19 +488,28 @@ vec3 volumetricScatter(vec3 worldPos) {
     // wash over the whole frame ("alles blass"). The high-power lobe keeps the
     // visible scattering concentrated around the sun direction.
     float phase = 0.08 + pow(max(cosTheta, 0.0), 7.0) * 4.0;
+    // Per-pixel start offset (interleaved gradient noise): 8 shadow taps along
+    // the ray would band at shadow edges; jittered, temporal AA resolves them.
+    float jitter = fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))));
     vec3 scatter = vec3(0.0);
     float transmittance = 1.0;
     for (int i = 0; i < STEPS; i++) {
-        vec3 p = rayStart + rayDir * (step * (float(i) + 0.5));
+        vec3 p = rayStart + rayDir * (step * (float(i) + jitter));
         float density = exp(-max(p.y, 0.0) * 0.08) * 0.06;
-        vec3 inscatter = u_dir_lights[0].color * u_dir_lights[0].intensity * phase * density;
+        // Only light that reaches the sample scatters: without this a wall
+        // between the camera and the sun (or the room around the camera) still
+        // glowed with the full godray, as if the light shone through it.
+        float lit = volumetricShadow(p);
+        vec3 inscatter = u_dir_lights[0].color * u_dir_lights[0].intensity * phase * density * lit;
         scatter += inscatter * transmittance * step;
         transmittance *= exp(-density * step);
     }
     // Scale + cap the integrated in-scatter. The raw march integrates to ~1+
     // (a full white wash); 0.3× brings the away-from-sun haze down to a faint
-    // tint while the cap keeps the sun-facing godray from blowing out.
-    return min(scatter * 0.3, vec3(0.25));
+    // tint while the cap keeps the sun-facing godray from blowing out. The light
+    // scale applies AFTER the cap: the march saturates long before the cap for
+    // any light of useful intensity, so a scale inside it would change nothing.
+    return min(scatter * 0.3, vec3(0.25)) * lightScale;
 }
 
 vec3 applyColorGrading(vec3 color) {

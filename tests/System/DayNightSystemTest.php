@@ -77,6 +77,35 @@ final class DayNightSystemTest extends TestCase
         return ['sky' => $skies[0], 'light' => $light, 'ambient' => $ambients[0]];
     }
 
+    /**
+     * The sun scatters fully in the volumetric fog; once the moon has taken over
+     * the primary light it scatters only DayNightCycle::$moonScattering. Its
+     * lighting intensity is kept high enough to see by - scattered at that
+     * intensity, a rising moon washed the view out like the sun.
+     */
+    public function testMoonlightScattersOnlyItsShareInTheVolumetricFog(): void
+    {
+        $scaleAt = function (float $timeOfDay, ?float $moonScattering = null): float {
+            $world = new World();
+            $cycle = new DayNightCycle(timeOfDay: $timeOfDay, paused: true, lunarCycleDays: 8.0, dayCount: 4.0);
+            if ($moonScattering !== null) {
+                $cycle->moonScattering = $moonScattering;
+            }
+            $world->createEntity()->attach($cycle);
+            $light = new DirectionalLight();
+            $world->createEntity()->attach($light)->attach(new Transform3D());
+            $system = new DayNightSystem(new RenderCommandList());
+            $system->update($world, 0.016);
+            $system->render($world);
+
+            return $light->volumetricScale;
+        };
+
+        $this->assertEqualsWithDelta(1.0, $scaleAt(0.5), 1e-6, 'noon: the sun scatters fully');
+        $this->assertEqualsWithDelta(0.1, $scaleAt(0.0), 1e-3, 'midnight: the default moon share');
+        $this->assertEqualsWithDelta(0.3, $scaleAt(0.0, 0.3), 1e-3, 'midnight: the configured moon share');
+    }
+
     public function testCelestialDiscAddedLaterIsStillPlaced(): void
     {
         $world = new World();

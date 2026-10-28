@@ -43,6 +43,17 @@ class DayNightCycle extends AbstractComponent
     #[Property]
     public float $dayCount;
 
+    /**
+     * How strongly moonlight scatters in the volumetric fog, relative to the
+     * sun (0..1). The moonlight's intensity is kept high enough to see by at
+     * night, far above its real ratio to the sun; scattered at that intensity
+     * it washed the view out like the sun. Written onto the primary
+     * DirectionalLight's volumetricScale by DayNightSystem, blended with the
+     * sun → moon hand-off.
+     */
+    #[Property]
+    public float $moonScattering = 0.1;
+
     /** Seasonal sun axis tilt in degrees (set by EnvironmentalSystem) */
     #[Hidden]
     public float $axialTilt = 0.0;

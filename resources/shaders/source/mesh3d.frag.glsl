@@ -87,6 +87,8 @@ uniform float u_surface_intensity;
 // result into the final colour. Independent from the linear distance
 // fog set by SetFog - that one stays unconditional.
 uniform int u_volumetric_fog;
+// 1 - DirectionalLight::$volumetricScale of the primary light (0 = full, default).
+uniform float u_volumetric_light_dim;
 
 // Wetness (0 = dry, 1 = soaked). Forward-renderer surrogate for SSR:
 // wet surfaces read as smoother (lower roughness), slightly darker, and
@@ -353,10 +355,26 @@ vec3 toneMapACES(vec3 x);
 // 8 samples is the sweet spot: enough to look continuous, cheap
 // enough to leave on for default-quality scenes. Skipped entirely
 // when u_volumetric_fog == 0.
+// Visibility of the primary light at a point ON the view ray: the cascade that
+// covers it; beyond the shadow distance the point counts as lit.
+float volumetricShadow(vec3 p) {
+    if (u_has_shadow_map == 0) return 1.0;
+    float dist = length(p - u_camera_pos);
+    if (u_csm_count >= 2 && dist > u_csm_far_0) {
+        if (u_csm_count >= 3 && dist > u_csm_far_1) {
+            return sampleCascade(u_csm_map_2, u_csm_matrix_2, p);
+        }
+        return sampleCascade(u_csm_map_1, u_csm_matrix_1, p);
+    }
+    return sampleCascade(u_csm_map_0, u_csm_matrix_0, p);
+}
+
 vec3 volumetricScatter(vec3 worldPos) {
     if (u_volumetric_fog == 0 || u_dir_light_count == 0) {
         return vec3(0.0);
     }
+    float lightScale = clamp(1.0 - u_volumetric_light_dim, 0.0, 1.0);
+    if (lightScale <= 0.0) return vec3(0.0);
     vec3 rayStart = u_camera_pos;
     vec3 rayEnd   = worldPos;
     vec3 rayDir   = rayEnd - rayStart;
@@ -375,19 +393,24 @@ vec3 volumetricScatter(vec3 worldPos) {
     // Henyey-Greenstein-ish forward-scatter: peaks when looking at sun.
     float phase = 0.5 + pow(max(cosTheta, 0.0), 6.0) * 4.0;
 
+    // Per-pixel start offset (interleaved gradient noise) against banding of
+    // the shadow taps along the ray.
+    float jitter = fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))));
     vec3 scatter = vec3(0.0);
     float transmittance = 1.0;
     for (int i = 0; i < STEPS; i++) {
-        vec3 p = rayStart + rayDir * (step * (float(i) + 0.5));
+        vec3 p = rayStart + rayDir * (step * (float(i) + jitter));
         // Atmospheric density: thicker near the ground, exponential
         // fall-off with altitude. Tuned for a "ground-fog" look.
         float density = exp(-max(p.y, 0.0) * 0.08) * 0.06;
-        // Sun radiance at this sample (no shadow march - cheap path).
-        vec3 inscatter = u_dir_lights[0].color * u_dir_lights[0].intensity * phase * density;
+        // Only light that reaches the sample scatters - a wall between the
+        // camera and the sun must not glow with the godray.
+        vec3 inscatter = u_dir_lights[0].color * u_dir_lights[0].intensity * phase * density
+            * volumetricShadow(p);
         scatter += inscatter * transmittance * step;
         transmittance *= exp(-density * step);
     }
-    return scatter;
+    return scatter * lightScale;
 }
 
 // Color grading: Lift / Gamma / Gain + saturation. Applied in linear

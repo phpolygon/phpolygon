@@ -515,6 +515,52 @@ final class HeadlessShaderHarness
     }
 
     /**
+     * Give the dummy shadow map defined contents (it is never cleared otherwise):
+     * cleared to the far plane (everything lit), or with $ndcZ a full-screen
+     * occluder written at that clip-space depth (z = 0 lands in the middle of
+     * the depth range on OpenGL and at the near plane on D3D/Vulkan/Metal).
+     * Call it OUTSIDE a render, before {@see renderAndRead()}; the cascades
+     * still have to be bound with {@see bindDummyShadowSamplers()}.
+     */
+    public function fillDummyShadowDepth(?float $ndcZ = null): void
+    {
+        if ($this->dummyShadowTarget === null) {
+            return;
+        }
+        vio_begin($this->ctx);
+        vio_bind_render_target($this->ctx, $this->dummyShadowTarget);
+        vio_viewport($this->ctx, 0, 0, $this->width, $this->height);
+        vio_clear($this->ctx, 0.0, 0.0, 0.0, 1.0);
+        if ($ndcZ !== null) {
+            $shader = $this->compileShaderFromSource(
+                'dummy_shadow_occluder',
+                "#version 410 core\nlayout(location = 0) in vec3 a_position;\nuniform float u_occluder_z;\n"
+                    . "void main() { gl_Position = vec4(a_position.xy, u_occluder_z, 1.0); }\n",
+                "#version 410 core\nout vec4 frag_color;\n"
+                    . "void main() { frag_color = vec4(gl_FragCoord.z, gl_FragCoord.z, gl_FragCoord.z, 1.0); }\n",
+            );
+            $key = 'dummy_shadow_occluder';
+            if (!isset($this->pipelineCache[$key])) {
+                $pipeline = vio_pipeline($this->ctx, [
+                    'shader'     => $shader,
+                    'depth_test' => true,
+                    'cull_mode'  => VIO_CULL_NONE,
+                    'blend'      => VIO_BLEND_NONE,
+                ]);
+                if ($pipeline === false) {
+                    throw new \RuntimeException('vio_pipeline failed for the shadow occluder');
+                }
+                $this->pipelineCache[$key] = $pipeline;
+            }
+            vio_bind_pipeline($this->ctx, $this->pipelineCache[$key]);
+            $this->setUniform('u_occluder_z', $ndcZ);
+            vio_draw($this->ctx, $this->fullscreenQuad());
+        }
+        vio_unbind_render_target($this->ctx);
+        vio_end($this->ctx);
+    }
+
+    /**
      * Bind the non-shadow material samplers (sampler2D / sampler3D /
      * samplerCube) to valid 1x1 dummy textures so the mesh3d fragment stage
      * does not collapse on macOS OpenGL. Split out from

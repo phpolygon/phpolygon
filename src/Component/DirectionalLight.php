@@ -26,13 +26,25 @@ class DirectionalLight extends AbstractComponent
     #[Range(min: 0, max: 10)]
     public float $intensity;
 
+    /**
+     * How strongly this light scatters in the volumetric fog, 0..1 (only the
+     * primary light scatters). 1 = as its intensity says; a night light that
+     * must stay bright enough to see by (moonlight) sets it low, or it would
+     * wash the view out like the sun.
+     */
+    #[Property(editorHint: 'slider')]
+    #[Range(min: 0, max: 1)]
+    public float $volumetricScale;
+
     public function __construct(
         ?Vec3 $direction = null,
         ?Color $color = null,
         float $intensity = 1.0,
+        float $volumetricScale = 1.0,
     ) {
         $this->direction = $direction ?? new Vec3(0.0, -1.0, 0.0);
         $this->color = $color ?? Color::white();
         $this->intensity = $intensity;
+        $this->volumetricScale = $volumetricScale;
     }
 }

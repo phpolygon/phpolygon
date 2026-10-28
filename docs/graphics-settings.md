@@ -278,6 +278,17 @@ function aligned with the primary directional light. Toggle with
 `GraphicsSettings::$volumetricFog`. Independent from the linear
 `SetFog` distance fog, which stays unconditional.
 
+- **Shadowed:** each step samples the cascade shadow map at its point on the
+  view ray (one tap, start offset jittered per pixel). Air the light does not
+  reach - a room, the shadow of a building - scatters nothing; beyond the
+  shadow distance the air counts as lit.
+- **Per light:** `DirectionalLight::$volumetricScale` (0..1, default 1) scales
+  what the primary light scatters, after the cap (`SetDirectionalLight::$volumetricScale`,
+  shader `u_volumetric_light_dim` = 1 - scale). `DayNightSystem` blends it to
+  `DayNightCycle::$moonScattering` (default 0.1) as the moon takes over: the
+  moonlight stays bright enough to see by without washing the view out like
+  the sun.
+
 ### Procedural normal maps (`NormalPattern`)
 
 Per-material analytic normal patterns: bricks, bumps, orange peel,

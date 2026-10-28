@@ -243,6 +243,7 @@ class Renderer3DSystem extends AbstractSystem
                 $light->direction,
                 $light->color,
                 $light->intensity,
+                $light->volumetricScale,
             ));
         }
         // The camera this frame renders with: the SetCamera Camera3DSystem

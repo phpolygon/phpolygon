@@ -880,7 +880,7 @@ uploads, no extra passes. All are documented in
 | `ScreenSpaceAO` | Curvature-based AO via `dFdx(N)`. Tiers `Off/Low/Medium/High`. Shader uniform `u_ao_strength`. |
 | `ColorGradingPreset` | Lift/Gamma/Gain + saturation. Six presets. Applied in linear space before ACES. |
 | `GraphicsSettings::$vignetteIntensity` | Radial darkening evaluated against `gl_FragCoord / u_viewport_size`. |
-| `GraphicsSettings::$volumetricFog` | 8-step in-shader ray-march with sun-aligned phase function. Independent from `SetFog`. |
+| `GraphicsSettings::$volumetricFog` | 8-step in-shader ray-march with sun-aligned phase function, shadowed per step (one CSM tap, jittered start - no glow through walls). `DirectionalLight::$volumetricScale` scales the primary light's share (the day/night cycle sets `DayNightCycle::$moonScattering` for the moon). Independent from `SetFog`. |
 | ACES tone mapping | Every mesh-shader exit path runs `toneMapACES()` before gamma. Vio's HDR tonemap pass uses the same curve. |
 | Camera-following shadow + texel-snap | `ShadowMapRenderer::updateLightMatrix($dir, $cameraTarget)` and the equivalent on Vio centre the shadow frustum on the camera and snap to the shadow-map grid. |
 | `AreaLightHelper` | Forward-pipeline rectangular area light = grid of point-light samples summing to total radiance. |

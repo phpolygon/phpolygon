@@ -447,6 +447,90 @@ class MeshShaderHeadlessTest extends TestCase
         }
     }
 
+    // ── Volumetric fog ─────────────────────────────────────────────────
+
+    /**
+     * The fog only scatters light that reaches it. Looking straight at the light
+     * across a lit stretch of air adds the godray; the same view with the air in
+     * shadow (a wall between camera and sun, the room around the camera) adds
+     * nothing - before, the march ignored the shadow map and the godray shone
+     * through walls.
+     */
+    public function testVolumetricFogScattersOnlyWhereTheLightReaches(): void
+    {
+        // Each against the same shadow map without fog: the map also darkens the
+        // surface itself, only the fog's share is compared.
+        $litOff = $this->renderVolumetricSum(volumetric: false, occluded: false);
+        $lit = $this->renderVolumetricSum(volumetric: true, occluded: false);
+        $shadowedOff = $this->renderVolumetricSum(volumetric: false, occluded: true);
+        $shadowed = $this->renderVolumetricSum(volumetric: true, occluded: true);
+
+        $this->assertGreaterThan($litOff + 0.15, $lit,
+            sprintf('lit air must scatter (off %.3f, on %.3f)', $litOff, $lit));
+        $this->assertEqualsWithDelta($shadowedOff, $shadowed, 0.02,
+            sprintf('air in shadow must not scatter (off %.3f, on %.3f)', $shadowedOff, $shadowed));
+    }
+
+    /**
+     * u_volumetric_light_dim (1 - DirectionalLight::$volumetricScale) scales the
+     * scattered light after the cap: a light of high intensity (moonlight kept
+     * bright enough to see by) no longer saturates the fog like the sun.
+     */
+    public function testVolumetricLightDimScalesTheScatter(): void
+    {
+        $off = $this->renderVolumetricSum(volumetric: false, occluded: false);
+        $full = $this->renderVolumetricSum(volumetric: true, occluded: false);
+        $dimmed = $this->renderVolumetricSum(volumetric: true, occluded: false, dim: 0.9);
+        $gone = $this->renderVolumetricSum(volumetric: true, occluded: false, dim: 1.0);
+
+        $this->assertGreaterThan($off + 0.005, $dimmed, 'a dimmed light still scatters a little');
+        $this->assertLessThan($off + ($full - $off) * 0.35, $dimmed,
+            sprintf('dim 0.9 must cut the scatter well down (off %.3f, full %.3f, dimmed %.3f)', $off, $full, $dimmed));
+        $this->assertEqualsWithDelta($off, $gone, 0.02, 'dim 1 = no scatter');
+    }
+
+    /**
+     * Fullscreen quad at the origin, camera at z = 5 looking at it, the light
+     * shining toward the camera (the view looks straight into it). The cascade
+     * matrix maps every point to the middle of the shadow map at depth 0.9: lit
+     * against a cleared map, in shadow behind the occluder.
+     */
+    private function renderVolumetricSum(bool $volumetric, bool $occluded, float $dim = 0.0): float
+    {
+        $h = HeadlessShaderHarness::open(64, 64);
+        $this->assertNotNull($h);
+        try {
+            $h->fillDummyShadowDepth($occluded ? 0.0 : null);
+            $shader   = $h->compileShaderFromFiles('vio/mesh3d.vert.glsl', 'vio/mesh3d.frag.glsl');
+            $pipeline = $h->createPipeline($shader);
+            $rgba     = $h->renderAndRead(
+                $pipeline,
+                $h->fullscreenQuad(),
+                function (HeadlessShaderHarness $h) use ($volumetric, $dim): void {
+                    self::setNeutralMeshUniforms($h, 64, 64);
+                    $h->setUniform('u_ambient_color', [0.2, 0.2, 0.2]);
+                    $h->setUniform('u_dir_lights[0].direction', [0.0, 0.0, 1.0]);
+                    $h->setUniform('u_dir_lights[0].intensity', 3.0);
+                    $h->setUniform('u_has_shadow_map', 1);
+                    $h->setUniform('u_csm_count', 1);
+                    $h->setUniform('u_csm_far_0', 1.0e5);
+                    $h->setUniform('u_csm_matrix_0', [
+                        0.0, 0.0, 0.0, 0.0,
+                        0.0, 0.0, 0.0, 0.0,
+                        0.0, 0.0, 0.0, 0.0,
+                        0.0, 0.0, 0.8, 1.0,
+                    ]);
+                    $h->setUniform('u_volumetric_fog', $volumetric ? 1 : 0);
+                    $h->setUniform('u_volumetric_light_dim', $dim);
+                },
+            );
+            [$r, $g, $b] = $h->samplePixel($rgba, 32, 32);
+            return $r + $g + $b;
+        } finally {
+            $h->close();
+        }
+    }
+
     /**
      * Push a sensible "neutral PBR + grading" uniform set so the shader
      * reaches its standard PBR path. Identity MVP keeps the fullscreen
