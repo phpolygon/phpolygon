@@ -20,6 +20,7 @@ use PHPolygon\Rendering\Material;
 use PHPolygon\Rendering\MaterialRegistry;
 use PHPolygon\Rendering\Quality\GrassQuality;
 use PHPolygon\Rendering\RenderCommandList;
+use PHPolygon\Runtime\FrameSpikeRecorder;
 use PHPolygon\Runtime\PerfProfiler;
 use PHPolygon\Vegetation\GrassDetail;
 use PHPolygon\Vegetation\GrassTuftMesh;
@@ -257,6 +258,7 @@ class GrassSystem extends AbstractSystem
         if ($missing !== []) {
             usort($missing, static fn(array $a, array $b): int => $a[0] <=> $b[0]);
             $t0 = hrtime(true);
+            $built = 0;
             foreach ($missing as $i => [$dh, $ix, $iz]) {
                 // Always at least the nearest cell, then within the budget.
                 if ($i > 0 && hrtime(true) > $budgetEnd) {
@@ -266,9 +268,12 @@ class GrassSystem extends AbstractSystem
                 $key = $ix . ':' . $iz;
                 $st['cells'][$key] = $this->generateCell($field, $detail, $ix, $iz);
                 $visible[$key] = $dh;
-                $this->lastGeneratedCells++;
+                $built++;
             }
-            $this->lastGenerateMs += (hrtime(true) - $t0) / 1e6;
+            $this->lastGeneratedCells += $built;
+            $elapsedNs = hrtime(true) - $t0;
+            $this->lastGenerateMs += $elapsedNs / 1e6;
+            FrameSpikeRecorder::note(FrameSpikeRecorder::NOTE_GRASS, $built, $elapsedNs);
         }
 
         // Frustum and 3D distance per cell: the visible set.

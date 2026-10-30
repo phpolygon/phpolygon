@@ -40,6 +40,7 @@ use PHPolygon\Testing\NullTextureManager;
 use PHPolygon\Runtime\Clock;
 use PHPolygon\Runtime\CrashGuard;
 use PHPolygon\Runtime\DevLogger;
+use PHPolygon\Runtime\FrameSpikeRecorder;
 use PHPolygon\Runtime\GameLoop;
 use PHPolygon\Runtime\HardwareProfile;
 use PHPolygon\Runtime\HardwareProfiler;
@@ -97,6 +98,9 @@ class Engine
     public readonly ThreadScheduler|NullThreadScheduler $scheduler;
 
     public readonly ?PerfOverlay $perfOverlay;
+
+    /** Hitch recorder, see {@see EngineConfig::$frameSpikes}. */
+    public readonly ?FrameSpikeRecorder $frameSpikes;
 
     private bool $running = false;
     private bool $headless;
@@ -193,6 +197,8 @@ class Engine
             $config->targetTickRate,
             variableTimestep: $config->variableTimestep,
         );
+        $this->frameSpikes = $this->createFrameSpikeRecorder();
+        $this->gameLoop->setSpikeRecorder($this->frameSpikes);
         $this->scenes = new SceneManager($this);
         $audioBackend = null;
         if (!$this->headless) {
@@ -951,6 +957,12 @@ class Engine
         self::log('Entering game loop');
         $this->running = true;
 
+        if ($this->frameSpikes !== null) {
+            FrameSpikeRecorder::activate($this->frameSpikes);
+            // A game that leaves through exit() or dies never reaches shutdown().
+            register_shutdown_function($this->frameSpikes->finish(...));
+        }
+
         $isPipelined = $this->scheduler instanceof ThreadScheduler
             && count($this->scheduler->getSubsystems()) > 0;
 
@@ -958,6 +970,7 @@ class Engine
             $fixedDt = $this->gameLoop->getFixedDeltaTime();
             $this->gameLoop->runPipelined(
                 prepareAndSend: function () use ($fixedDt) {
+                    $this->frameSpikes?->beginUpdate();
                     $this->scheduler->sendAll($this->world, $fixedDt);
                 },
                 update: function (float $dt) {
@@ -973,6 +986,7 @@ class Engine
                     PerfProfiler::end();
                 },
                 render: function (float $interpolation) use ($nativeBackend) {
+                    $this->frameSpikes?->enter(FrameSpikeRecorder::RENDER);
                     PerfProfiler::begin('engine.render');
                     $this->renderInterpolation = $interpolation;
                     $this->beginFrameStats();
@@ -1028,11 +1042,14 @@ class Engine
                         $this->perfOverlay->render($this->renderer2D);
                     }
 
+                    // vio_end() lives in renderer2D->endFrame(): submit, GPU and vsync wait.
+                    $this->frameSpikes?->enter(FrameSpikeRecorder::PRESENT);
                     $this->renderer2D->endFrame();
                     PerfProfiler::end();
                     if (!$nativeBackend) {
                         $this->window->swapBuffers();
                     }
+                    $this->frameSpikes?->enter(FrameSpikeRecorder::OTHER);
 
                     $this->input->endFrame();
                     $this->window->pollEvents();
@@ -1042,6 +1059,7 @@ class Engine
                 recvAndApply: function () {
                     $this->scheduler->recvAll($this->world);
                     $this->world->updatePostThread($this->gameLoop->getFixedDeltaTime());
+                    $this->frameSpikes?->enter(FrameSpikeRecorder::OTHER);
                 },
                 shouldStop: function (): bool {
                     return !$this->running || $this->window->shouldClose();
@@ -1050,6 +1068,7 @@ class Engine
         } else {
             $this->gameLoop->run(
                 update: function (float $dt) {
+                    $this->frameSpikes?->beginUpdate();
                     PerfProfiler::begin('engine.update');
                     $this->animationTime += $dt;
                     $this->world->update($dt);
@@ -1060,8 +1079,10 @@ class Engine
                     $this->audio->update($dt);
                     $this->tickEditorSync($dt);
                     PerfProfiler::end();
+                    $this->frameSpikes?->enter(FrameSpikeRecorder::OTHER);
                 },
                 render: function (float $interpolation) use ($nativeBackend) {
+                    $this->frameSpikes?->enter(FrameSpikeRecorder::RENDER);
                     PerfProfiler::begin('engine.render');
                     $this->renderInterpolation = $interpolation;
                     $this->beginFrameStats();
@@ -1117,11 +1138,14 @@ class Engine
                         $this->perfOverlay->render($this->renderer2D);
                     }
 
+                    // vio_end() lives in renderer2D->endFrame(): submit, GPU and vsync wait.
+                    $this->frameSpikes?->enter(FrameSpikeRecorder::PRESENT);
                     $this->renderer2D->endFrame();
                     PerfProfiler::end();
                     if (!$nativeBackend) {
                         $this->window->swapBuffers();
                     }
+                    $this->frameSpikes?->enter(FrameSpikeRecorder::OTHER);
 
                     $this->input->endFrame();
                     $this->window->pollEvents();
@@ -1179,10 +1203,29 @@ class Engine
      */
     private function skipRenderFrame(): void
     {
+        $this->frameSpikes?->skipFrame();
         $this->input->endFrame();
         $this->window->pollEvents();
         $this->endFrameStats();
         PerfProfiler::end(); // closes the 'engine.render' section
+    }
+
+    private function createFrameSpikeRecorder(): ?FrameSpikeRecorder
+    {
+        $configured = $this->config->frameSpikes;
+        if ($configured === false || ($configured === null && ($this->headless || $this->config->offscreen))) {
+            return null;
+        }
+        $recorder = $configured ?? new FrameSpikeRecorder();
+        if (!$recorder->hasSink()) {
+            $recorder->setSink(self::log(...));
+        }
+        // Trails the CPU by a frame or two, but tells a GPU stall from a vsync wait.
+        $recorder->addContext(function (): array {
+            $gpu = $this->renderer3D instanceof VioRenderer3D ? $this->renderer3D->gpuFrameTimeMs() : -1.0;
+            return $gpu >= 0.0 ? ['gpu_ms' => round($gpu, 2)] : [];
+        });
+        return $recorder;
     }
 
     private function beginFrameStats(): void
@@ -2120,6 +2163,7 @@ class Engine
     private function shutdown(): void
     {
         self::log('Shutting down...');
+        $this->frameSpikes?->finish();
         $this->scheduler->shutdown();
         // Load-time fork/join workers (bakes, asset rasterisation) are pooled and
         // outlive the job that spawned them, so they need joining here too.

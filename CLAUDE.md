@@ -2212,6 +2212,56 @@ Standard section names (use the same when adding new markers):
 `EngineConfig::$devMode` enables the F3 performance overlay
 (`src/UI/PerfOverlay.php`). Independent from SPX/Excimer.
 
+### Frame spike recorder — hitches from shipped games
+
+`Runtime\FrameSpikeRecorder` needs no environment variable: `$engine->frameSpikes`
+runs in every game with a visible window and writes to `game.log`. `EngineConfig::$frameSpikes`:
+`null` = that default (off in headless and offscreen runs), `false` = off, an instance =
+own thresholds or sink, in any mode (no sink given = `game.log`).
+
+```php
+$config = new EngineConfig(frameSpikes: new FrameSpikeRecorder(
+    sink: $myLog->write(...), floorMs: 33.0, medianFactor: 2.5, ringSize: 240,
+    warmupFrames: 30, minLineIntervalSeconds: 1.0, maxLines: 1000,
+));
+$engine->frameSpikes?->addContext(fn () => ['area' => $area, 'dialog' => $open]); // only runs for a written line
+FrameSpikeRecorder::note('save', 1, $elapsedNs);       // from anywhere; with time it can become the cause
+$engine->frameSpikes?->suspend(); /* load */ $engine->frameSpikes?->resume();    // nests
+```
+
+- A frame = loop start to loop start (`GameLoop` calls `frame()`), so update ticks, render,
+  present, events and the FPS cap all count. `Engine::$frameTimesMs` stays render-only.
+- Spike: ≥ max(`floorMs`, `medianFactor` × median of the ring). The median is computed only
+  for frames ≥ the floor and at most every 30 frames. Below `warmupFrames` nothing is judged
+  (the summary's `max` still shows it). Above the rate limit spikes only count (`suppressed=` on
+  the next line, totals in the summary).
+- Per frame: ~2 µs and no allocation except `gc_status()`'s array; a frame without a spike
+  writes nothing. Measured (2026-10-30, PHP 8.5.5, `benchmarks/frame-spike-onoff.php`, headless
+  `Engine::run()`, 10 × 100 000 frames, median delta on/off): 3.2 µs without OPcache, 1.6 µs with
+  tracing JIT; phpbench 2.08 µs against 0.12 µs for the empty call sites. D3D12, hardware
+  adapter, offscreen, empty scene, 3 × 2 900 frames each: 365-380 against 366-375 µs/frame, inside the noise.
+  A written line into a file: 0.25 ms median, up to 5 ms on Windows.
+
+```
+[frame-spike] #1 t=2.2s frame=64.66ms limit=33.00ms median=0.26ms cause=update update=63.98ms ticks=1 render=0.30ms present=0.33ms wait=0.00ms other=0.05ms gc=0/0.00ms collected=0 mem=+0.00MB region_change=1 gpu_ms=0.06
+[frame-session] frames=8999 played=3.6s p50=0.50ms p95=0.50ms p99=1.00ms max=273.82ms spikes=1 written=1 suppressed=0 causes=update:1 pipeline=2/1.72ms region_change=1
+```
+
+- Sections: `update` (ticks, thread send/receive in the pipelined loop), `render`, `present`
+  (`renderer2D->endFrame()` + `swapBuffers()`; on php-vio `vio_draw_2d` + `vio_end`, whose submit, GPU
+  wait and vsync wait are one call and cannot be told apart), `wait` (FPS cap), `other` (events,
+  thermal and adaptive ticks, the recorder itself, including last frame's line).
+- `cause`: GC or the largest timed note when it explains at least half of the excess over the
+  median, else the largest section. A count-only note appears in the line, never as the cause.
+- Engine notes: `shader` (`VioRenderer3D`, `OpenGLRenderer3D`), `pipeline` (lazy PSO in `VioRenderer3D`; the
+  post-process passes create theirs outside it and are not counted), `audio` (`vio_audio_load` in
+  `VioAudioBackend`), `grass` (cells built in `GrassSystem`). `gpu_ms` trails by 1-2 frames.
+- Percentiles come from a fixed histogram of every judged frame (0.25 ms to 50 ms, 5 ms to 1 s;
+  upper bucket edge). The summary is written by `finish()`, from `Engine::shutdown()` and a
+  shutdown function; a killed process leaves none. Sink and context exceptions are swallowed.
+- Test: `tests/Runtime/FrameSpikeRecorderTest.php` (real GC and `usleep` spikes, FPS cap, headless
+  `Engine::run()`). Bench: `benchmarks/micro/Runtime/`.
+
 ### Performance contract for pull requests
 
 Every PR that touches a hot-path (`src/Math`, `src/Rendering`,

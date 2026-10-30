@@ -6,6 +6,7 @@ namespace PHPolygon\Rendering;
 
 use PHPolygon\Geometry\MeshData;
 use PHPolygon\Geometry\MeshRegistry;
+use PHPolygon\Runtime\FrameSpikeRecorder;
 use PHPolygon\Runtime\PerfProfiler;
 use PHPolygon\Math\Mat4;
 use PHPolygon\Math\Vec3;
@@ -2794,17 +2795,33 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         // Metal and the screen stays at the layer's default (white).
         $format = $this->conventions()->shaderSourceFormat();
 
+        $compileStart = hrtime(true);
         $shader = vio_shader($this->ctx, [
             'vertex' => $vertSrc,
             'fragment' => $fragSrc,
             'format' => $format,
         ]);
+        FrameSpikeRecorder::note(FrameSpikeRecorder::NOTE_SHADER, 1, hrtime(true) - $compileStart);
 
         if ($shader === false) {
             throw new \RuntimeException("VioRenderer3D: Failed to compile shader '{$id}' (format={$format})");
         }
 
         $this->shaderCache[$id] = $shader;
+    }
+
+    /**
+     * Pipelines are created lazily during play, which on D3D12 and Vulkan
+     * compiles the PSO: a hitch the frame recorder has to be able to name.
+     *
+     * @param array<string, mixed> $desc
+     */
+    private function createPipeline(array $desc): \VioPipeline|false
+    {
+        $start = hrtime(true);
+        $pipeline = vio_pipeline($this->ctx, $desc);
+        FrameSpikeRecorder::note(FrameSpikeRecorder::NOTE_PIPELINE, 1, hrtime(true) - $start);
+        return $pipeline;
     }
 
     /**
@@ -2915,11 +2932,11 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
                         VIO_COLOR_RGBA, VIO_COLOR_RGBA, VIO_COLOR_RGBA, VIO_COLOR_RGBA, VIO_COLOR_RGBA, 0,
                     ];
                 }
-                $pipeline = vio_pipeline($this->ctx, $cfg);
+                $pipeline = $this->createPipeline($cfg);
             } else {
                 $shader = $this->shaderCache[$shaderId] ?? $this->shaderCache['default'];
 
-                $pipeline = vio_pipeline($this->ctx, [
+                $pipeline = $this->createPipeline([
                     'shader' => $shader,
                     'depth_test' => true,
                     'depth_write' => $pass === 'opaque',
@@ -3198,7 +3215,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
     {
         $key = 'postprocess:composite:alpha' . ($hdr ? ':hdr' : '');
         if (!isset($this->pipelineCache[$key])) {
-            $pipeline = vio_pipeline($this->ctx, [
+            $pipeline = $this->createPipeline([
                 'shader' => $this->shaderCache['composite'],
                 'depth_test' => false,
                 'cull_mode' => VIO_CULL_NONE,
@@ -3257,7 +3274,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
     {
         $key = 'postprocess:' . $shaderId . ($hdr ? ':hdr' : '');
         if (!isset($this->pipelineCache[$key])) {
-            $pipeline = vio_pipeline($this->ctx, [
+            $pipeline = $this->createPipeline([
                 'shader' => $this->shaderCache[$shaderId],
                 'depth_test' => false,
                 'cull_mode' => VIO_CULL_NONE,
@@ -3919,7 +3936,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
     {
         $key = 'postprocess:ssr_composite:hdr:alpha';
         if (!isset($this->pipelineCache[$key])) {
-            $pipeline = vio_pipeline($this->ctx, [
+            $pipeline = $this->createPipeline([
                 'shader' => $this->shaderCache['ssr_composite'],
                 'depth_test' => false,
                 'cull_mode' => VIO_CULL_NONE,
@@ -4010,7 +4027,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
     {
         $key = 'gbuffer';
         if (!isset($this->pipelineCache[$key])) {
-            $pipeline = vio_pipeline($this->ctx, [
+            $pipeline = $this->createPipeline([
                 'shader' => $this->shaderCache['gbuffer'],
                 'depth_test' => true,
                 'cull_mode' => VIO_CULL_NONE,
@@ -4376,7 +4393,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             //
             // REVERT: restore 'cull_mode' => VIO_CULL_FRONT to go back to the
             // back-face-only shadow pass (the prior baseline).
-            $pipeline = vio_pipeline($this->ctx, [
+            $pipeline = $this->createPipeline([
                 'shader' => $shader,
                 'depth_test' => true,
                 'cull_mode' => VIO_CULL_NONE,
@@ -4683,7 +4700,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
                 // at 0 and the G-buffer at its cleared "sky" value.
                 $cfg = $this->localOnlyMrtConfig($blend) + $cfg;
             }
-            $pipeline = vio_pipeline($this->ctx, $cfg);
+            $pipeline = $this->createPipeline($cfg);
             if ($pipeline === false) {
                 return;
             }
@@ -4763,7 +4780,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
                 // Local (unlit) light only — see bindSkyPipeline().
                 $cfg = $this->localOnlyMrtConfig(VIO_BLEND_NONE) + $cfg;
             }
-            $pipeline = vio_pipeline($this->ctx, $cfg);
+            $pipeline = $this->createPipeline($cfg);
 
             if ($pipeline === false) {
                 return;
@@ -5717,7 +5734,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
     {
         $key = 'outline:' . ($mask ? 'mask' : 'ring') . ($hdr ? ':hdr' : '');
         if (!isset($this->pipelineCache[$key])) {
-            $pipeline = vio_pipeline($this->ctx, [
+            $pipeline = $this->createPipeline([
                 'shader' => $this->shaderCache['outline'],
                 'depth_test' => false,
                 'depth_write' => false,

@@ -1239,6 +1239,7 @@ class OpenGLRenderer3D implements Renderer3DInterface, AnimationClockInterface
      */
     private function compileShader(string $shaderId, ShaderDefinition $definition): int
     {
+        $compileStart = hrtime(true);
         $vertSource = $this->injectVersion($this->loadShaderSource($definition->vertexPath));
 
         $fragRaw = $this->loadShaderSource($definition->fragmentPath);
@@ -1295,6 +1296,7 @@ class OpenGLRenderer3D implements Renderer3DInterface, AnimationClockInterface
         glDeleteShader($frag);
 
         $this->shaderProgramCache[$shaderId] = $program;
+        \PHPolygon\Runtime\FrameSpikeRecorder::note(\PHPolygon\Runtime\FrameSpikeRecorder::NOTE_SHADER, 1, hrtime(true) - $compileStart);
         return $program;
     }
 

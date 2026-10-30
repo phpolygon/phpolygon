@@ -437,7 +437,9 @@ class VioAudioBackend implements NativeSpatialAudioBackendInterface
         if ($path === null || !file_exists($path)) {
             return null;
         }
+        $start = hrtime(true);
         $sound = vio_audio_load($path);
+        \PHPolygon\Runtime\FrameSpikeRecorder::note(\PHPolygon\Runtime\FrameSpikeRecorder::NOTE_AUDIO, 1, hrtime(true) - $start);
         if ($sound === false) {
             return null;
         }

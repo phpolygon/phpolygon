@@ -174,5 +174,12 @@ class EngineConfig
          * Ignored unless $offscreen is set.
          */
         public readonly bool $offscreenHardware = true,
+        /**
+         * Hitch recorder of the game loop. null = on for a visible window,
+         * writing to game.log with the default thresholds, off in headless and
+         * offscreen runs. false = off. An instance = this one, with its own sink
+         * and thresholds, in any mode.
+         */
+        public readonly \PHPolygon\Runtime\FrameSpikeRecorder|false|null $frameSpikes = null,
     ) {}
 }

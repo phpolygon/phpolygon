@@ -24,6 +24,9 @@ class GameLoop
      */
     private int $minFrameTimeNs = 0;
 
+    /** Told about every frame boundary and the time the FPS cap waits. */
+    private ?FrameSpikeRecorder $spikes = null;
+
     /**
      * Largest dt (seconds) a single variable-timestep update may receive. A
      * one-off stall (asset load, window drag, debugger pause) is clamped to this
@@ -51,6 +54,11 @@ class GameLoop
             return;
         }
         $this->minFrameTimeNs = (int)(1_000_000_000.0 / max(1.0, (float)$fps));
+    }
+
+    public function setSpikeRecorder(?FrameSpikeRecorder $recorder): void
+    {
+        $this->spikes = $recorder;
     }
 
     public function getFpsCap(): int
@@ -85,6 +93,7 @@ class GameLoop
             $dtWindowSize = 8;
             while (!$shouldStop()) {
                 $frameStart = Clock::now();
+                $this->spikes?->frame($frameStart);
                 $elapsed = $frameStart - $previousTime;
                 $previousTime = $frameStart;
 
@@ -119,6 +128,7 @@ class GameLoop
 
         while (!$shouldStop()) {
             $frameStart = Clock::now();
+            $this->spikes?->frame($frameStart);
             $currentTime = $frameStart;
             $elapsed = $currentTime - $previousTime;
             $previousTime = $currentTime;
@@ -177,7 +187,9 @@ class GameLoop
             // Convert ns to us, leaving 200us headroom for usleep wake-up jitter.
             $us = (int)max(0, ($remaining / 1000) - 200);
             if ($us > 0) {
+                $this->spikes?->enter(FrameSpikeRecorder::WAIT);
                 usleep($us);
+                $this->spikes?->enter(FrameSpikeRecorder::OTHER);
             }
         }
     }
@@ -227,6 +239,7 @@ class GameLoop
 
         while (!$shouldStop()) {
             $frameStart = Clock::now();
+            $this->spikes?->frame($frameStart);
             $currentTime = $frameStart;
             $elapsed = $currentTime - $previousTime;
             $previousTime = $currentTime;
