@@ -663,6 +663,23 @@ function vio_update_buffer(VioBuffer $buffer, string $data, int $offset = 0): vo
 function vio_gpu_frame_time(VioContext $context): float {}
 
 /**
+ * php-vio >= 2.31 (VIO_FEATURE_GPU_TIMESTAMP): named GPU mark inside the open
+ * frame. It ends the section that began at the previous mark (or vio_begin).
+ * Up to 32 per frame; false outside a frame, past the limit or without
+ * timestamps. Names are 1 to 47 bytes (ValueError otherwise).
+ */
+function vio_gpu_timestamp(VioContext $context, string $name): bool {}
+
+/**
+ * php-vio >= 2.31 (VIO_FEATURE_GPU_TIMESTAMP): GPU ms of each named section of
+ * the most recently completed frame, in mark order; a name used twice adds up.
+ * [] until such a frame completed, false without timestamps.
+ *
+ * @return array<string, float>|false
+ */
+function vio_gpu_timings(VioContext $context): array|false {}
+
+/**
  * php-vio >= 2.14: on-disk shader cache statistics for vio_create(['shader_cache' => dir]).
  *
  * @return array{dir: string, hits: int, misses: int, stores: int}

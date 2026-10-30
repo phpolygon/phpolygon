@@ -93,6 +93,8 @@ Built-in section names:
 | `ecs.system.<ClassShortName>` | per-System loop in `World::update()`        |
 | `render3d.build_commands`     | `Renderer3DSystem::render()`                |
 | `render3d.flush`              | Backend `endFrame()`                        |
+| `render3d.gpu`                | GPU time of the last completed frame (vio)  |
+| `render3d.gpu.<pass>`         | GPU time per pass of that frame (`VioRenderer3D::gpuPassTimesMs()`, only with an active profiler, `VIO_FEATURE_GPU_TIMESTAMP`) |
 | `render2d.frame`              | 2D renderer frame block                     |
 | `mesh.generate.<id>`          | Procedural mesh generators                  |
 | `texture.upload`              | `TextureManager::load()`                    |

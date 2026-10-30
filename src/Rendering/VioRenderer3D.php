@@ -414,6 +414,9 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
     /** Source directory for Vio shader programs. Loaded at init time via loadShader(). */
     private const SHADER_DIR = __DIR__ . '/../../resources/shaders/source/vio/';
 
+    /** php-vio takes at most this many vio_gpu_timestamp marks per frame. */
+    private const MAX_GPU_MARKS = 32;
+
     // Skybox / cubemaps
     private ?VioMesh $skyboxMesh = null;
     /**
@@ -1137,6 +1140,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         vio_unbind_render_target($this->ctx);
 
         $this->sdfAoActiveThisFrame = true;
+        $this->gpuMark('sdfao');
     }
 
     /** Bind the SDF-AO screen map (or white fallback) for the mesh pass. */
@@ -1359,6 +1363,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             if ($resolved !== null) {
                 $sceneTex = $resolved;
                 $temporal = true;
+                $this->gpuMark($this->temporalUpscalerThisFrame === Quality\Upscaler::Taau ? 'taa' : 'upscale');
             }
         }
 
@@ -1367,6 +1372,9 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         // the offscreen colour is in shader-resource state (just unbound), and
         // leaves the swapchain bound for the present pass below.
         $bloomTex = $this->settings->bloom ? $this->renderBloom($sceneTex, $quad) : null;
+        if ($bloomTex !== null) {
+            $this->gpuMark('bloom');
+        }
         $post = $this->postFinishParams();
 
         if ($temporal) {
@@ -1951,6 +1959,8 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         }
         $this->lastFrameStart = $now;
         $this->temporalUpscalerThisFrame = null;
+        $this->gpuMarkCount = 0;
+        $this->gpuMarksThisFrame = PerfProfiler::isActive() && $this->gpuMarksSupported();
 
         // Apply any settings change queued by applySettings() since the last
         // frame. MUST run here — before beginOffscreenIfRequired() binds the
@@ -1968,11 +1978,15 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
     {
         // UI and post-processing shade every pixel; only the scene pass ran coarse.
         $this->applyShadingRate(Quality\ShadingRate::Full);
-        $this->presentOffscreenIfActive();
+        if ($this->offscreenActive) {
+            $this->presentOffscreenIfActive();
+            $this->gpuMark('post');
+        }
         $this->renderTemporalDebugView();
         $this->renderShadowMapDebug();
         vio_draw_3d($this->ctx);
         $this->sampleGpuFrameTime();
+        $this->sampleGpuPassTimes();
     }
 
     /**
@@ -2000,6 +2014,70 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         $this->lastGpuFrameMs = $ms;
         if ($ms >= 0.0) {
             PerfProfiler::record('render3d.gpu', (int) round($ms * 1_000_000.0));
+        }
+    }
+
+    /**
+     * GPU milliseconds per pass of the most recently completed frame, in pass
+     * order: frame_start (what ran before the first pass, such as compute
+     * dispatches of particle systems), shadow, envcube, gbuffer, ssao, sdfao,
+     * sky, opaque, transparent, composite, ssr, outline, taa or upscale, bloom,
+     * post. Only passes that ran appear; each is also recorded per frame as the
+     * profiler section `render3d.gpu.<pass>`. UI and present come after the
+     * last mark: they are the rest of `render3d.gpu`. Empty without an active
+     * profiler or without GPU timestamps. Like gpuFrameTimeMs() it trails the
+     * CPU by one to two frames.
+     *
+     * @return array<string, float>
+     */
+    public function gpuPassTimesMs(): array
+    {
+        return $this->lastGpuPassMs;
+    }
+
+    /** @var array<string, float> */
+    private array $lastGpuPassMs = [];
+
+    /**
+     * Marks run only for the profiler: on Metal each one ends the command
+     * buffer of its section, a cost a running game must not carry.
+     */
+    private bool $gpuMarksThisFrame = false;
+
+    private int $gpuMarkCount = 0;
+
+    private ?bool $gpuMarksAvailable = null;
+
+    private function gpuMarksSupported(): bool
+    {
+        return $this->gpuMarksAvailable ??= function_exists('vio_gpu_timestamp')
+            && function_exists('vio_gpu_timings')
+            && defined('VIO_FEATURE_GPU_TIMESTAMP')
+            && vio_supports_feature($this->ctx, VIO_FEATURE_GPU_TIMESTAMP);
+    }
+
+    /** End the GPU section of $pass: it began at the previous mark of the frame. */
+    private function gpuMark(string $pass): void
+    {
+        if (!$this->gpuMarksThisFrame || $this->gpuMarkCount >= self::MAX_GPU_MARKS) {
+            return;
+        }
+        $this->gpuMarkCount++;
+        vio_gpu_timestamp($this->ctx, $pass);
+    }
+
+    private function sampleGpuPassTimes(): void
+    {
+        if (!$this->gpuMarksThisFrame) {
+            return;
+        }
+        $timings = vio_gpu_timings($this->ctx);
+        if ($timings === false) {
+            return;
+        }
+        $this->lastGpuPassMs = $timings;
+        foreach ($timings as $pass => $ms) {
+            PerfProfiler::record('render3d.gpu.' . $pass, (int) round($ms * 1_000_000.0));
         }
     }
 
@@ -2305,10 +2383,15 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         ];
         $this->frameFtMode = $ftMode;
 
+        $this->gpuMark('frame_start');
+
         // --- Shadow pass ---
         PerfProfiler::begin('render3d.submit.shadow');
         $hasShadowMap = $this->renderShadowPass($commandList, $dirLights);
         PerfProfiler::end();
+        if ($hasShadowMap) {
+            $this->gpuMark('shadow');
+        }
         if ($this->flashDbgEnabled() && $hasShadowMap !== $this->flashDbgHadShadow) {
             fprintf(STDERR, "[flashdbg] %s  shadow pass flipped: %s -> %s\n",
                 date('H:i:s'),
@@ -2415,9 +2498,11 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         // retained between commands.
         if ($this->pendingSky !== null) {
             $this->renderAtmosphericSky($this->pendingSky);
+            $this->gpuMark('sky');
         } elseif ($this->pendingSkyboxId !== null) {
             // Legacy cubemap skybox — only when no SetSky has ever been issued.
             $this->renderSkybox($this->pendingSkyboxId);
+            $this->gpuMark('sky');
         }
 
         // --- Pass 2: Opaque geometry ---
@@ -2447,6 +2532,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             }
         }
         PerfProfiler::end();
+        $this->gpuMark('opaque');
 
         // --- Pass 3: Transparent geometry ---
         PerfProfiler::begin('render3d.submit.transparent');
@@ -2511,6 +2597,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             $this->bindPipeline($transparentPass);
         }
         PerfProfiler::end();
+        $this->gpuMark('transparent');
 
         // --- MRT resolve: AO from the G-buffer attachment, then composite ------
         // The geometry is drawn; attachment 3 now holds exactly what the forward
@@ -2533,6 +2620,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             PerfProfiler::begin('render3d.submit.composite');
             $this->compositeMrt();
             PerfProfiler::end();
+            $this->gpuMark('composite');
         }
 
         // --- Screen-space reflections (VIO/D3D12, HDR path) ---
@@ -2596,6 +2684,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
                 vio_unbind_render_target($this->ctx);
 
                 $bloomTex = vio_render_target_texture($bloomPong);
+                $this->gpuMark('bloom');
             }
 
             // Tonemap + composite
@@ -2613,6 +2702,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             }
             vio_set_uniform($this->ctx, 'u_exposure', $this->exposure);
             vio_draw($this->ctx, $quad);
+            $this->gpuMark('post');
         }
     }
 
@@ -3667,6 +3757,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             }
         }
         vio_unbind_render_target($this->ctx);
+        $this->gpuMark('gbuffer');
 
         // SSAO occlusion + blur run only when SSAO is enabled; an SSR-only frame
         // skips them (the G-buffer is enough for the SSR pass). The water-append
@@ -3744,6 +3835,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         vio_unbind_render_target($this->ctx);
 
         $this->ssaoActiveThisFrame = true;
+        $this->gpuMark('ssao');
     }
 
     /**
@@ -3819,6 +3911,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             }
         }
         vio_unbind_render_target($this->ctx);
+        $this->gpuMark('gbuffer');
     }
 
     /**
@@ -3926,6 +4019,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         vio_bind_texture($this->ctx, vio_render_target_texture($ssr), 0);
         vio_set_uniform($this->ctx, 'u_ssr', 0);
         vio_draw($this->ctx, $screenQuad);
+        $this->gpuMark('ssr');
         // Leave the offscreen target bound — render() already finished its draws
         // and presentOffscreenIfActive() will unbind + resolve it.
     }
@@ -4574,6 +4668,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         vio_unbind_render_target($this->ctx);
         vio_generate_mipmaps($this->ctx, $rt);
         $env->markRendered($sky);
+        $this->gpuMark('envcube');
     }
 
     /**
@@ -5742,6 +5837,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             // A later scene-geometry bind must re-upload its material state.
             $this->resetDrawStateCache();
         }
+        $this->gpuMark('outline');
     }
 
     /** Mask (stencil ALWAYS/REPLACE) or ring (stencil NOTEQUAL, no write) pipeline, cached per target format. */
