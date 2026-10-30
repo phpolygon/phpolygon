@@ -73,9 +73,12 @@ final class TextWrap
 
     /**
      * Like {@see lines()}, but no line is ever wider than $breakWidth: a single
-     * word that does not fit on its own is split between two characters
+     * word that does not fit on its own is split between two graphemes
      * instead of overflowing. For fixed-size boxes (buttons, chips) where an
      * overflowing word would run past the edge and truncating would lose text.
+     * Graphemes, not code points: a Thai vowel or tone mark, a combining accent
+     * and the like stay on their base character, and a single grapheme wider
+     * than the box keeps its line.
      *
      * @param  callable(string): float $lineWidth measures a candidate line
      * @return list<string>
@@ -89,7 +92,8 @@ final class TextWrap
                 continue;
             }
             $part = '';
-            foreach (preg_split('//u', $line, -1, PREG_SPLIT_NO_EMPTY) ?: [] as $char) {
+            $graphemes = preg_match_all('/\X/u', $line, $matches) > 0 ? $matches[0] : [$line];
+            foreach ($graphemes as $char) {
                 if ($part !== '' && $lineWidth($part . $char) > $breakWidth) {
                     $out[] = $part;
                     $part = '';

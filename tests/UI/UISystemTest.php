@@ -50,6 +50,31 @@ class UISystemTest extends TestCase
         $this->assertInstanceOf(UIContext::class, $system->getContext());
     }
 
+    public function testAPanelThatMissesEndScrollDoesNotBlockTheNextFrame(): void
+    {
+        $input = new \PHPolygon\Runtime\Input();
+        $input->handleCursorPosEvent(700.0, 50.0);
+        $system = new UISystem(new RecordingRenderer2D(1280, 720), $input);
+        $hovered = '';
+        $frame = 0;
+        $system->addLayer('panel', function (UIContext $ui) use (&$hovered, &$frame): void {
+            if ($frame++ === 0) {
+                $ui->beginScroll('leak', 10.0, 100.0, 300.0, 200.0, 600.0);
+
+                return;
+            }
+            $ui->begin(690.0, 40.0, 100.0);
+            $ui->button('b', 'Go');
+            $hovered = $ui->hoveredWidgetId();
+            $ui->end();
+        });
+
+        $system->render(new World());
+        $system->render(new World());
+
+        $this->assertSame('b', $hovered);
+    }
+
     private function createUISystem(): UISystem
     {
         // Use a minimal mock — UISystem only calls render methods on layers,
