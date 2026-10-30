@@ -100,30 +100,15 @@ class CollisionMath
 
         $normal = $tri->normal;
 
-        // Find the point on the capsule segment closest to the triangle plane
         $distA = $segA->sub($tri->v0)->dot($normal);
         $distB = $segB->sub($tri->v0)->dot($normal);
 
-        // Pick the capsule segment point closest to the triangle plane
-        // If both are on the same side, pick the one closest to the plane
-        if ($distA * $distB >= 0.0) {
-            // Same side — pick the closer one
-            $referencePoint = abs($distA) < abs($distB) ? $segA : $segB;
-        } else {
-            // Different sides — interpolate to the plane intersection
-            $t = $distA / ($distA - $distB);
-            $referencePoint = $segA->add($segB->sub($segA)->mul($t));
+        // Both ends out of reach on one side: nothing of the segment is in reach.
+        if (($distA >= $radius && $distB >= $radius) || ($distA <= -$radius && $distB <= -$radius)) {
+            return null;
         }
 
-        // Project reference point onto triangle plane
-        $distRef = $referencePoint->sub($tri->v0)->dot($normal);
-        $projected = $referencePoint->sub($normal->mul($distRef));
-
-        // Find closest point on the triangle to the projected point
-        $closestOnTri = self::closestPointOnTriangle($tri->v0, $tri->v1, $tri->v2, $projected);
-
-        // Find closest point on capsule segment to the triangle's closest point
-        $closestOnSeg = self::closestPointOnSegment($segA, $segB, $closestOnTri);
+        [$closestOnSeg, $closestOnTri] = self::closestSegmentTriangle($segA, $segB, $distA, $distB, $tri);
 
         // Vector from triangle closest point to capsule segment closest point
         $diff = $closestOnSeg->sub($closestOnTri);
@@ -146,6 +131,110 @@ class CollisionMath
         $penetrationDepth = $radius - $dist;
 
         return $penetrationDir->mul($penetrationDepth);
+    }
+
+    /**
+     * The pair of points that is the true distance between a segment and a
+     * triangle: [point on the segment, point on the triangle]. It lies at a segment
+     * end or between the segment and a triangle edge, unless the segment pierces
+     * the face. The answer must not hang on one reference point: a triangle of a
+     * quad would then push towards its diagonal, as if the wall were a ramp.
+     *
+     * The common cases leave early: the nearer end lies over the face, so nothing
+     * can be closer than its distance to the plane.
+     *
+     * @param float $distA signed distance of $segA to the triangle's plane
+     * @param float $distB signed distance of $segB to the triangle's plane
+     * @return array{Vec3, Vec3}
+     */
+    private static function closestSegmentTriangle(Vec3 $segA, Vec3 $segB, float $distA, float $distB, Triangle $tri): array
+    {
+        if ($distA * $distB < 0.0) {
+            $crossing = $segA->add($segB->sub($segA)->mul($distA / ($distA - $distB)));
+            $onTri = self::closestPointOnTriangle($tri->v0, $tri->v1, $tri->v2, $crossing);
+            $diff = $crossing->sub($onTri);
+            if ($diff->dot($diff) < 1e-16) {
+                return [$crossing, $onTri];
+            }
+        } else {
+            $near = abs($distA) < abs($distB) ? $segA : $segB;
+            $nearDist = min(abs($distA), abs($distB));
+            $onTri = self::closestPointOnTriangle($tri->v0, $tri->v1, $tri->v2, $near);
+            $diff = $near->sub($onTri);
+            if ($diff->dot($diff) <= $nearDist * $nearDist + 1e-12) {
+                return [$near, $onTri];
+            }
+        }
+
+        $best = [$segA, self::closestPointOnTriangle($tri->v0, $tri->v1, $tri->v2, $segA)];
+        $bestSq = self::distanceSq($best[0], $best[1]);
+
+        $onTri = self::closestPointOnTriangle($tri->v0, $tri->v1, $tri->v2, $segB);
+        $distSq = self::distanceSq($segB, $onTri);
+        if ($distSq < $bestSq) {
+            $best = [$segB, $onTri];
+            $bestSq = $distSq;
+        }
+
+        foreach ([[$tri->v0, $tri->v1], [$tri->v1, $tri->v2], [$tri->v2, $tri->v0]] as [$edgeA, $edgeB]) {
+            $pair = self::closestBetweenSegments($segA, $segB, $edgeA, $edgeB);
+            $distSq = self::distanceSq($pair[0], $pair[1]);
+            if ($distSq < $bestSq) {
+                $best = $pair;
+                $bestSq = $distSq;
+            }
+        }
+
+        return $best;
+    }
+
+    /**
+     * Closest points of segments p1→q1 and p2→q2. Parallel segments have many such
+     * pairs; this returns one.
+     *
+     * @return array{Vec3, Vec3}
+     */
+    private static function closestBetweenSegments(Vec3 $p1, Vec3 $q1, Vec3 $p2, Vec3 $q2): array
+    {
+        $d1 = $q1->sub($p1);
+        $d2 = $q2->sub($p2);
+        $r = $p1->sub($p2);
+        $a = $d1->dot($d1);
+        $e = $d2->dot($d2);
+        $f = $d2->dot($r);
+
+        if ($a < 1e-12 && $e < 1e-12) {
+            return [$p1, $p2];
+        }
+        if ($a < 1e-12) {
+            return [$p1, $p2->add($d2->mul(max(0.0, min(1.0, $f / $e))))];
+        }
+
+        $c = $d1->dot($r);
+        if ($e < 1e-12) {
+            return [$p1->add($d1->mul(max(0.0, min(1.0, -$c / $a)))), $p2];
+        }
+
+        $b = $d1->dot($d2);
+        $denom = $a * $e - $b * $b;
+        $s = $denom > 1e-12 ? max(0.0, min(1.0, ($b * $f - $c * $e) / $denom)) : 0.0;
+        $t = ($b * $s + $f) / $e;
+        if ($t < 0.0) {
+            $t = 0.0;
+            $s = max(0.0, min(1.0, -$c / $a));
+        } elseif ($t > 1.0) {
+            $t = 1.0;
+            $s = max(0.0, min(1.0, ($b - $c) / $a));
+        }
+
+        return [$p1->add($d1->mul($s)), $p2->add($d2->mul($t))];
+    }
+
+    private static function distanceSq(Vec3 $a, Vec3 $b): float
+    {
+        $diff = $a->sub($b);
+
+        return $diff->dot($diff);
     }
 
     /**

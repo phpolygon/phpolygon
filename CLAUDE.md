@@ -403,7 +403,7 @@ Components follow the same ECS discipline as 2D. 3D-specific components:
 | `MeshRenderer` | `meshId: string`, `materialId: string`, `castShadows: bool` |
 | `DirectionalLight` | `direction: Vec3`, `color: Color`, `intensity: float` |
 | `PointLight` | `color: Color`, `intensity: float`, `radius: float` |
-| `CharacterController3D` | Capsule collision, gravity, slope detection, step height |
+| `CharacterController3D` | Capsule collision, gravity, slope detection, `stepHeight` (on every collider, see "Character collision"); `groundEntityId` names what it stands on (see "Physics queries") |
 | `Outline` | `enabled`, `color`, `widthPx`, `includeChildren` — outline this entity's mesh (and its children's) |
 
 `Transform3D` replaces `Transform2D` in 3D scenes. Never mix 2D and 3D transform
@@ -573,6 +573,85 @@ carries the look. Game-agnostic: bounds, ground, mask, colours and density come 
 The segment primitives behind it are public: `CollisionMath::segmentIntersectsTriangle()`
 (double-sided Möller–Trumbore on [0, 1]) and `CollisionMath::segmentIntersectsAabb()`
 (slab test). Do not reimplement either in a game.
+
+**What a character stands on.** `CharacterController3D::$groundEntityId` is written by
+`Physics3DSystem` at every place that sets `isGrounded` (swept landing and resting probe,
+box overlap and step lift, mesh and rotated-box contact and step lift, heightmap) and
+cleared with it, so null while airborne is the same fact as `isGrounded = false`. When
+several surfaces ground a character in one tick, the one that set the final height wins.
+Triggers never ground anything, so a floor switched to `isTrigger` is gone from the next
+tick. Null while grounded = the bare ground plane, which is no entity; a floor level with
+the plane stays the ground. Game systems that set `isGrounded` themselves after the physics
+leave the id at the last tick's value until the next one.
+
+`Physics\GroundProbe::under(World, CharacterController3D): ?GroundHit` turns that id into
+`GroundHit(entityId, ?meshId, ?materialId)`: the mesh of the solid `MeshCollider3D`, else of
+the `MeshRenderer`; the material of the `MeshRenderer`. Null in the air, on the bare plane,
+and for a floor that was destroyed or became a trigger since the tick (the id can be a tick
+old, depending on where the caller runs). It searches nothing, so it costs the same in any
+world; a heightmap or an invisible box comes back with null ids and the game decides. It
+answers for characters only. A surface without a collider (a decal path on a collider plate)
+is invisible to it, as it is to the physics: the game checks those first.
+
+### Character collision – boxes, triangles, steps
+
+How `Physics3DSystem` moves a `CharacterController3D` (`Physics3DBoxCollisionTest`,
+`Physics3DStepAssistTest`, `Physics3DWalkabilityTest`, `Physics3DGroundEntityTest`,
+`CollisionMathTest`, `OrientedBoxTest`):
+
+- **Which boxes are rotated:** any box whose rotation has |x|, |y| or |z| above 0.001 (about
+  0.1 degrees) collides as a solid `Physics\OrientedBox` (centre, unit axes, half extents, cached
+  on `BoxCollider3D::$cachedOriented`); only the rest as an AABB. A slightly turned long box must
+  not collide as its hull, which is metres deeper than the box. `capsulePush()` measures the true
+  distance outside and, with the segment inside, takes the box axis that frees it soonest, so a
+  position jump past a face comes back out at any angle. `surfaceAt(x, z)` is the walkable top for
+  landings, `topNear(x, z)` the top where a capsule touching the side would step on (a tilted
+  board's near end, not its hull). The 12 triangles stay in `BoxCollider3D::$bvh` for
+  `Raycaster3D::segmentBlocked()` only. It looks at the box's OWN rotation: a box turned only
+  through a parent still collides as its world AABB.
+- **Capsule against triangle:** `CollisionMath::capsuleVsTriangle()` measures the true
+  distance between segment and triangle (`closestSegmentTriangle()`: a segment end or a triangle
+  edge, unless the segment pierces the face). It stays per triangle, so beside the diagonal of a
+  wall quad one triangle reports a slanted edge contact. `resolveMeshCollisions()` therefore works
+  each iteration deepest contact first and asks every further one again from the new position:
+  the face contact wins, nothing creeps up the wall, and the BVH order decides nothing.
+- **Box steps** lift on contact when the rise is within `stepHeight`. Before that,
+  `StepAssist::bodyFitsAt()` checks the raised capsule, from the step height above the tread up to
+  the head: a contact there refuses the lift if it would push the body down or back the way the
+  step pushes it. A side wall the capsule is still pressed into pushes neither, and whether it was
+  resolved yet depends on collider order, so it must not decide. Lower parts are further steps, so
+  box stairs work; rotated boxes do the same at `topNear()`.
+- **Beams below head height:** a contact that would push a grounded capsule down has no way out,
+  the floor is there. It becomes the level push that keeps the same contact distance
+  (`pastBeamEdge()`, for AABBs `outOfBeamSideways()`), so the capsule stops at the beam's edge. A
+  fast walker that passed the edge within one tick goes back to `settledPosition`, if it was clear
+  of the shape there. In the air the push stays as it is (a jump into a ceiling), and a character
+  already standing under a flat low ceiling is not held.
+- **Steps on meshes** (`Physics\StepAssist::climb()`): mesh collision only pushes the shortest
+  way out, so an edge blocks however low. After the tick, a character that wanted to walk and got
+  less than 45 % of it is probed for a floor within `stepHeight` along the way ahead, in 5 cm
+  steps to at least 5 cm past the capsule wall; usually no triangle lies in that band and nothing
+  further runs. It must be grounded, or wedged and not rising: between two nosings of a narrow stair
+  each edge pushes too steeply to count as floor (`MIN_WEDGE_NORMAL_Y`). A tread has
+  normal.y ≥ cos(`slopeLimit`), never below 0.5; of several in a column the lowest counts. It is
+  taken if the column has headroom, the rise counted from the real ground (under the capsule, centre
+  to leading side) stays within `stepHeight` and the body fits all the way there. That last check
+  starts one step height above the tread like `bodyFitsAt()`: lower things are further steps. A
+  floor that starts under the feet is a ramp, not an edge: only this frame's way up it. Beyond
+  `slopeLimit` the assist does nothing, but the capsule's push along the face still slides it upward
+  at cos² of the walking speed up to the 60 degrees where `isGrounded` ends. Sets `isGrounded` and
+  `groundEntityId`. `stepHeight` below 0.06 m switches it off.
+- **Steps do not make anybody faster:** the lift ends just past the edge, 1 cm of overhang, which
+  still carries the character about its radius ahead in one tick. That excess over the way it
+  wanted to walk is `CharacterController3D::$stepDebt`, taken off the next ticks' walk in that
+  direction; standing still or turning away forgives it. Over a second the distance stays within
+  1 % on single edges; on stairs narrower than the capsule it ends below that (measured up to 9 %
+  over 4 s at r = 0.4).
+- **Wanted movement** = what game code added to the position since the last tick
+  (`CharacterController3D::$settledPosition`, the end of the last tick) plus horizontal velocity × dt.
+  Under 0.5 m/s it is standing, over 1 m in a tick a warp; both stay out. Nothing runs for those, so a
+  crowd at rest costs one comparison each.
+  A wrapper calling `update()` several times per frame is fine: every call sees its own part.
 
 ### Procedural geometry — code-driven worlds
 
@@ -1767,7 +1846,7 @@ deterministic: same input, same bytes.
 
 | Class | What it is |
 |---|---|
-| `Dsp\Pcm` | Shared conventions: `SAMPLE_RATE`, `BITS_PER_SAMPLE`, `toInt16()` (rounded, ±32767), `packSample()` (truncated), `lpCoeff()`, `hz()` (MIDI → Hz), `db()` |
+| `Dsp\Pcm` | Shared conventions: `SAMPLE_RATE`, `BITS_PER_SAMPLE`, `toInt16()` (rounded, ±32767), `packSample()` (truncated), `lpCoeff()`, `belowNyquist()`, `hz()` (MIDI → Hz), `db()` |
 | `Dsp\Fft` | In-place radix-2 FFT with cached twiddles |
 | `Dsp\Resampler` | Band-limited Kaiser-sinc `convert()` (rate change) and `stretch()` (length and pitch by a factor) |
 | `Dsp\Loudness` | ITU-R BS.1770 integrated loudness (LUFS), stereo and mono |
@@ -1779,6 +1858,8 @@ deterministic: same input, same bytes.
 | `Dsp\Reverb` | Freeverb-style: 8 damped combs ∥ → 4 all-passes per channel, stereo spread; `roomSize`, `damping`, `wet`, `dry`, `width`, `preDelaySeconds`; `processMono()`/`processStereo()` with `tailSeconds` of ring-out, fresh state per call |
 | `Dsp\Envelope` | ADSR (`ar()` for attack/release) → per-sample gains: `render(gateSeconds)`, `apply(pcm, gate)`; `curve` > 1 bends segments exponentially; a short gate releases from the current level (no jump) |
 | `Dsp\BubbleGenerator` | Granular bubbles: Poisson-scattered short sine glissandi (log-uniform start Hz, glide up, exponential decay, click-free edges); density constant or `Closure(t)`; seeded (`Xoshiro256StarStar`), deterministic; `wrap` folds overflowing bubbles to the start for loops; `schedule()` lists the bubbles. Not normalised |
+| `Dsp\ImpactSynth` + `ImpactNoise` | One-shot impact: `new ImpactSynth(thumpHz, thumpGain, thumpDecaySeconds, modes, noise, strikes, detune, attackSeconds, seed)`, `render(seconds, sampleRate)`. Decaying sine thump + decaying sine modes (`[Hz, gain, decay]`, decay = time constant) + `ImpactNoise` bursts (gain, decay, delay, attack, optional band-pass / low-pass / high-pass, held below Nyquist at render time); `strikes` (`[start, gain]`) repeats thump and modes (heel, toe); `detune` moves every partial by up to ± that fraction, from the seed, without touching the noise stream, so seeds are variants of one recipe. Starts and ends at exactly 0. Not normalised |
+| `Dsp\GrainBurst` | Granular friction noise (crunch, rustle, scrape): `new GrainBurst(minHz, maxHz, minSeconds, maxSeconds, q, minGain, maxGain, decayDb, seed)`, `render(seconds, density, sampleRate)`, density constant or `Closure(t)`. Grain times, band centres, lengths and gains come from `BubbleGenerator::schedule()`; the grain itself is noise through a band-pass of bandwidth centre / q, scaled so its own peak is its gain. One grain is about ten times wider than a sine bubble (4 ms at 3 kHz, q 1: spread 2900 Hz against 270 Hz); dense textures differ less. Starts and ends at exactly 0. Not normalised |
 | `Dsp\LoopCrossfade` | Seamless loops: `make(pcm, crossfade, equalPower)` folds the last c samples over the first (loop is n − c long), `makeSeconds()`, `makeStereo()`, `seamRoughness()` (seam step ÷ largest inner step) |
 | `Codec\WavReader` | RIFF/WAVE → mono floats at a target rate: 16/24-bit PCM, 32-bit float, any channel count, `WAVE_FORMAT_EXTENSIBLE` |
 | `Codec\WavWriter` | 16-bit PCM RIFF header, stereo interleave |
@@ -1815,6 +1896,40 @@ Rules:
 - **Output stability is a contract.** A refactor here must leave rendered samples
   bit-identical (or bump `CHAIN_VERSION`); tests pin behaviour, not bytes, so compare
   renders before and after.
+
+### Footsteps – the generic pieces
+
+A game gets surface-dependent steps from four independent parts and keeps everything
+about its own world: recipes (`ImpactSynth` / `GrainBurst` parameters, usually with a filter
+or `Reverb` behind them), which material sounds like what, clip ids, levels. Render the
+clips ahead of time like any other sound.
+
+- **Which surface:** `GroundProbe::under()` (see "Physics queries"), mapped by the game. Keep
+  the last known surface for a moment: `isGrounded` can drop for single ticks. On a
+  heightmap it alternates every tick at rest (only sinking below the surface grounds there).
+- **When:** `Audio\StepCadence`, one per character, fed once a frame:
+  `update(dt, speed, grounded, verticalVelocity, enabled): ?StepEvent`. Interval
+  `referenceInterval * (referenceSpeed / v) ^ exponent`, clamped to `minInterval..maxInterval`,
+  v smoothed over `smoothingSeconds`. Below `minSpeed` for `stopGraceSeconds` it stands, the
+  next start steps after 1 − `startPhase` of an interval; slow frames inside the grace keep the
+  rhythm but fire nothing. `speed` from a frame's position change is only exact while the
+  position changes every frame: with physics slower than the render loop the frames read 0 and
+  a whole tick. The rhythm survives that (tests at 60/144/240 fps), but a single-frame spike
+  above `teleportSpeed` is a teleport, so divide by the time since the position last changed.
+  Gaps in `grounded` shorter than `minAirSeconds` keep the
+  rhythm running, a step due in the gap fires on the next grounded frame; a longer flight
+  holds it. A landing needs `minAirSeconds` and `minFallSpeed`, strength reaches 1 at
+  `fullFallSpeed`, and the next step waits `landingHoldoff` of an interval. Landings arm on a
+  grounded frame (a spawn drop is silent). `speed > teleportSpeed` or `enabled: false`
+  (swimming, riding, flying, scripted) resets everything silently. `StepEvent`: `kind`
+  (`StepEventKind::Step | Landing`), `side` (alternating ±1, 0 for a landing; use it for the
+  pan), `speed` (smoothed), `strength`. It plays nothing; dust or a camera bob can use it too.
+- **Which variant:** `Audio\VariantBag(variants, seed, pitchJitter, gainJitterDb)`, `next():
+  VariantPick(id, pitch, gain)`. Never the same variant twice in a row, jitter on every play,
+  also with one variant; the same seed gives the same sequence. Pitch and pan only sound on a
+  `SpatialAudioBackendInterface` backend.
+- **Play:** `playWith($pick->id, AudioChannel::SFX, new PlaybackOptions($volume * $pick->gain,
+  pitch: $tempoPitch * $pick->pitch, pan: $event->side * $width))`.
 
 ### Speech synthesis — spoken lines from the translation files
 

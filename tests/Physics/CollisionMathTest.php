@@ -124,6 +124,83 @@ class CollisionMathTest extends TestCase
         ));
     }
 
+    /** Both triangles of a wall quad in the plane x = 0, y 0..3, z -2..2. @return array{Triangle, Triangle} */
+    private static function wallQuad(): array
+    {
+        $a = new Vec3(0, 0, -2);
+        $b = new Vec3(0, 0, 2);
+        $c = new Vec3(0, 3, 2);
+        $d = new Vec3(0, 3, -2);
+
+        return [new Triangle($a, $b, $c), new Triangle($a, $c, $d)];
+    }
+
+    /**
+     * A vertical capsule beside a flat wall has one depth, wherever the diagonal of
+     * the quad runs: the deeper of the two triangles pushes it level. Measured from
+     * one reference point, the diagonal acted as a ramp.
+     */
+    public function testTheDeeperTriangleOfAWallQuadPushesLevel(): void
+    {
+        [$first, $second] = self::wallQuad();
+        for ($z = -1.8; $z <= 1.8; $z += 0.1) {
+            for ($y = 0.0; $y <= 1.0; $y += 0.1) {
+                $low = new Vec3(-0.25, $y + 0.3, $z);
+                $high = new Vec3(-0.25, $y + 1.5, $z);
+                $a = CollisionMath::capsuleVsTriangle($low, $high, 0.3, $first);
+                $b = CollisionMath::capsuleVsTriangle($low, $high, 0.3, $second);
+                $deeper = ($a?->length() ?? 0.0) >= ($b?->length() ?? 0.0) ? $a : $b;
+
+                $this->assertNotNull($deeper);
+                $at = "y {$y}, z {$z}";
+                $this->assertEqualsWithDelta(-0.05, $deeper->x, 1e-9, $at);
+                $this->assertEqualsWithDelta(0.0, $deeper->y, 1e-9, $at);
+                $this->assertEqualsWithDelta(0.0, $deeper->z, 1e-9, $at);
+            }
+        }
+    }
+
+    public function testASegmentReachingATriangleBetweenItsEndsIsTheCollision(): void
+    {
+        // A small triangle at mid-height of a long capsule, both ends far from it.
+        $tri = new Triangle(new Vec3(0, 4.5, -0.5), new Vec3(0, 5.5, -0.5), new Vec3(0, 5, 0.5));
+
+        $resolution = CollisionMath::capsuleVsTriangle(new Vec3(-0.2, 0, 0), new Vec3(-0.2, 10, 0), 0.3, $tri);
+
+        $this->assertNotNull($resolution);
+        $this->assertEqualsWithDelta(-0.1, $resolution->x, 1e-9);
+        $this->assertEqualsWithDelta(0.0, $resolution->y, 1e-9);
+    }
+
+    public function testASegmentPassingAnEdgeIsMeasuredToTheEdge(): void
+    {
+        // Horizontal capsule above the top edge of a wall, crossing it.
+        [, $tri] = self::wallQuad();
+
+        $resolution = CollisionMath::capsuleVsTriangle(new Vec3(-1, 3.2, 0), new Vec3(1, 3.2, 0), 0.3, $tri);
+
+        $this->assertNotNull($resolution);
+        $this->assertEqualsWithDelta(0.0, $resolution->x, 1e-9);
+        $this->assertEqualsWithDelta(0.1, $resolution->y, 1e-9);
+    }
+
+    public function testACapsuleBeyondAnEdgeIsNoCollision(): void
+    {
+        [, $tri] = self::wallQuad();
+
+        $this->assertNull(CollisionMath::capsuleVsTriangle(new Vec3(-0.25, 3.4, 0), new Vec3(-0.25, 4.5, 0), 0.3, $tri));
+    }
+
+    public function testASegmentPiercingATriangleIsPushedAlongItsNormal(): void
+    {
+        $tri = new Triangle(new Vec3(-5, -5, 0), new Vec3(5, -5, 0), new Vec3(0, 5, 0));
+
+        $resolution = CollisionMath::capsuleVsTriangle(new Vec3(0, 0, -1), new Vec3(0, 0, 1), 0.3, $tri);
+
+        $this->assertNotNull($resolution);
+        $this->assertEqualsWithDelta(0.3, abs($resolution->z), 1e-9);
+    }
+
     public function testSegmentIntersectsTriangle(): void
     {
         // Vertical wall in the plane x = 1.

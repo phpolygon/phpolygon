@@ -69,6 +69,10 @@ class BoxCollider3D extends AbstractComponent
     #[Hidden]
     public bool $cachedRotated = false;
 
+    /** The solid form of a rotated box: what characters collide with. */
+    #[Hidden]
+    public ?\PHPolygon\Physics\OrientedBox $cachedOriented = null;
+
     public function __construct(
         ?Vec3 $size = null,
         ?Vec3 $offset = null,
