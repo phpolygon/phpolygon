@@ -2212,6 +2212,22 @@ Standard section names (use the same when adding new markers):
 `EngineConfig::$devMode` enables the F3 performance overlay
 (`src/UI/PerfOverlay.php`). Independent from SPX/Excimer.
 
+**GPU time per pass.** `render3d.gpu` is the whole frame; with an active
+profiler `VioRenderer3D` also sets `vio_gpu_timestamp` marks at its pass
+boundaries and records `vio_gpu_timings` per frame as `render3d.gpu.<pass>`
+(`frame_start`, `shadow`, `envcube`, `gbuffer`, `ssao`, `sdfao`, `sky`, `opaque`,
+`transparent`, `composite`, `ssr`, `outline`, `taa` | `upscale`, `bloom`, `post`),
+also readable through `gpuPassTimesMs()`. A mark ends the section that began at
+the previous one, so a pass only marks when it really ran; `frame_start` holds
+what ran before the first pass (compute dispatches of particle systems). UI and
+present follow the last mark and are the rest of `render3d.gpu`. Without
+`PerfProfiler::isActive()` there is no mark at all: on Metal each one ends the
+command buffer of its section. Gate: `VIO_FEATURE_GPU_TIMESTAMP` plus the two
+functions (php-vio >= 2.31), at most 32 marks per frame. Like
+`vio_gpu_frame_time` the values follow the last completed frame.
+`VioRendererGpuPassTimingTest` pins it. The mid-pass marks (`sky`, `opaque`,
+`transparent`) inside one render target are untested on Metal.
+
 ### Performance contract for pull requests
 
 Every PR that touches a hot-path (`src/Math`, `src/Rendering`,
