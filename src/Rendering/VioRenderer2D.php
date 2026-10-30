@@ -13,6 +13,9 @@ use VioTexture;
 
 class VioRenderer2D implements Renderer2DInterface
 {
+    /** Frames an unregistered texture stays alive: more than php-vio ever has in flight. */
+    private const int RETIRE_FRAMES = 8;
+
     private int $width;
     private int $height;
 
@@ -79,6 +82,15 @@ class VioRenderer2D implements Renderer2DInterface
 
     /** @var array<int, VioTexture> Texture glId/objectId -> VioTexture */
     private array $vioTextures = [];
+
+    /**
+     * Textures taken out of {@see $vioTextures}, each with the frames it has
+     * left. Frames in flight may still read one, and php-vio's D3D12 backend
+     * releases a texture the moment its last PHP reference goes.
+     *
+     * @var list<array{0: VioTexture, 1: int}>
+     */
+    private array $retiredVioTextures = [];
 
     /** @var array<string, list<string>> Base font name -> list of fallback font names */
     private array $fallbackFonts = [];
@@ -205,6 +217,10 @@ class VioRenderer2D implements Renderer2DInterface
 
     public function beginFrame(): void
     {
+        if ($this->retiredVioTextures !== []) {
+            $this->sweepRetiredVioTextures();
+        }
+
         // Complete any background font loads whose worker thread has finished.
         // The GPU upload happens here, on the render thread, with a current
         // GL/Metal/D3D/Vulkan context — exactly where the engine already polls
@@ -1199,6 +1215,30 @@ class VioRenderer2D implements Renderer2DInterface
     public function registerVioTexture(int $textureId, VioTexture $vioTexture): void
     {
         $this->vioTextures[$textureId] = $vioTexture;
+    }
+
+    /**
+     * Forget a texture of {@see registerVioTexture()}. Sprites can no longer use
+     * it at once, the object is dropped after {@see RETIRE_FRAMES} frames.
+     */
+    public function unregisterVioTexture(int $textureId): void
+    {
+        $texture = $this->vioTextures[$textureId] ?? null;
+        if ($texture !== null) {
+            unset($this->vioTextures[$textureId]);
+            $this->retiredVioTextures[] = [$texture, self::RETIRE_FRAMES];
+        }
+    }
+
+    private function sweepRetiredVioTextures(): void
+    {
+        $left = [];
+        foreach ($this->retiredVioTextures as [$texture, $frames]) {
+            if ($frames > 1) {
+                $left[] = [$texture, $frames - 1];
+            }
+        }
+        $this->retiredVioTextures = $left;
     }
 
     public function getContext(): VioContext

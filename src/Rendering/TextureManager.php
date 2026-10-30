@@ -100,6 +100,16 @@ class TextureManager
         return $texture;
     }
 
+    /**
+     * A texture from raw RGBA8 pixels (top row first), no file and no GD involved.
+     * Null when this backend cannot take raw pixels; the base GL manager cannot,
+     * and its 3D renderer samples no material textures anyway.
+     */
+    public function loadRgba(string $id, int $width, int $height, string $rgba): ?Texture
+    {
+        return null;
+    }
+
     public function get(string $id): ?Texture
     {
         return $this->textures[$id] ?? null;

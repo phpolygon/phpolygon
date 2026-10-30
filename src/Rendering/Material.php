@@ -331,6 +331,21 @@ class Material
     }
 
     /**
+     * This material showing a texture (null = none) over the given albedo, or
+     * with its albedo kept.
+     */
+    public function withAlbedoTexture(?string $textureId, ?Color $albedo = null): self
+    {
+        return $this->copy(albedoTexture: $textureId, clearAlbedoTexture: $textureId === null, albedo: $albedo);
+    }
+
+    /** This material drawn by another shader. */
+    public function withShader(string $shader): self
+    {
+        return $this->copy(shader: $shader);
+    }
+
+    /**
      * This material as foliage: two-sided lighting and foliage wind with the
      * given flutter; adds light shining through from behind when the material
      * has none. Colours and everything else stay.
@@ -358,15 +373,19 @@ class Material
         ?float $windFlutter = null,
         ?float $subsurfaceStrength = null,
         ?Color $subsurfaceColor = null,
+        ?string $albedoTexture = null,
+        bool $clearAlbedoTexture = false,
+        ?Color $albedo = null,
+        ?string $shader = null,
     ): self {
         return new self(
-            albedo: $this->albedo,
+            albedo: $albedo ?? $this->albedo,
             roughness: $this->roughness,
             metallic: $this->metallic,
             emission: $emission ?? $this->emission,
             alpha: $this->alpha,
-            shader: $this->shader,
-            albedoTexture: $this->albedoTexture,
+            shader: $shader ?? $this->shader,
+            albedoTexture: $clearAlbedoTexture ? null : ($albedoTexture ?? $this->albedoTexture),
             clearcoat: $this->clearcoat,
             clearcoatRoughness: $this->clearcoatRoughness,
             flakes: $this->flakes,

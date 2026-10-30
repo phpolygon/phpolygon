@@ -43,17 +43,28 @@ class MeshRenderer extends AbstractComponent
     #[Property]
     public bool $excludeFromGbuffer = false;
 
+    /**
+     * When true, Renderer3DSystem merges this draw with every other visible
+     * batchable draw of the same mesh and material into one instanced draw after
+     * culling. For meshes that repeat with the same material and do not move;
+     * an entity that moved this frame and transparent materials stay single.
+     */
+    #[Property]
+    public bool $batchable = false;
+
     public function __construct(
         string $meshId = '',
         string $materialId = '',
         bool $castShadows = true,
         bool $visible = true,
         bool $excludeFromGbuffer = false,
+        bool $batchable = false,
     ) {
         $this->meshId = $meshId;
         $this->materialId = $materialId;
         $this->castShadows = $castShadows;
         $this->visible = $visible;
         $this->excludeFromGbuffer = $excludeFromGbuffer;
+        $this->batchable = $batchable;
     }
 }

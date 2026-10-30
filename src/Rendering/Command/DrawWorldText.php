@@ -11,6 +11,10 @@ use PHPolygon\Rendering\Color;
  *
  * The 3D system projects the world position and emits this command.
  * The 2D renderer consumes it to draw text on screen.
+ *
+ * @deprecated No renderer consumes this command. Text on an object is a
+ *             {@see \PHPolygon\Component\SurfaceText}, a marker drawn in 2D
+ *             projects itself with {@see \PHPolygon\Rendering\ScreenProjection}.
  */
 readonly class DrawWorldText
 {

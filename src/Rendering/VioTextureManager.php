@@ -34,6 +34,8 @@ class VioTextureManager extends TextureManager
     /** Whether this context can take KTX2 containers (php-vio >= 2.18); probed once. */
     private ?bool $ktx2Available = null;
 
+    private int $removals = 0;
+
     public function __construct(
         private readonly VioContext $ctx,
         string $basePath = '',
@@ -91,6 +93,32 @@ class VioTextureManager extends TextureManager
             }
 
             return $this->register($id, $vioTex, $filePath);
+        } finally {
+            PerfProfiler::end();
+        }
+    }
+
+    /**
+     * Clamped, so a mip of a plate never wraps its opposite edge in. php-vio
+     * builds the mip chain.
+     */
+    public function loadRgba(string $id, int $width, int $height, string $rgba): ?Texture
+    {
+        if (isset($this->vioManagedTextures[$id])) {
+            return $this->vioManagedTextures[$id];
+        }
+
+        PerfProfiler::begin('texture.upload');
+        try {
+            $vioTex = vio_texture($this->ctx, [
+                'data' => $rgba,
+                'width' => $width,
+                'height' => $height,
+                'wrap' => VIO_WRAP_CLAMP,
+                'mipmaps' => true,
+                'anisotropy' => $this->anisotropy,
+            ]);
+            return $vioTex === false ? null : $this->register($id, $vioTex, "rgba://{$id}");
         } finally {
             PerfProfiler::end();
         }
@@ -188,14 +216,32 @@ class VioTextureManager extends TextureManager
 
     public function unload(string $id): void
     {
+        $texture = $this->vioManagedTextures[$id] ?? null;
+        if ($texture !== null) {
+            $this->renderer?->unregisterVioTexture($texture->glId);
+        }
         unset($this->vioTextureObjects[$id]);
         unset($this->vioManagedTextures[$id]);
+        $this->removals++;
     }
 
     public function clear(): void
     {
+        foreach ($this->vioManagedTextures as $texture) {
+            $this->renderer?->unregisterVioTexture($texture->glId);
+        }
         $this->vioTextureObjects = [];
         $this->vioManagedTextures = [];
+        $this->removals++;
+    }
+
+    /**
+     * Counts removals. A holder of VioTexture objects (the 3D renderer's cache)
+     * drops them when this changed, else the GPU memory stays taken.
+     */
+    public function removals(): int
+    {
+        return $this->removals;
     }
 
     public function setBasePath(string $path): void

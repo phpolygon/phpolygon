@@ -21,6 +21,7 @@ use PHPolygon\Math\Vec3;
 use PHPolygon\Rendering\Command\AddPointLight;
 use PHPolygon\Rendering\Command\AddSpotLight;
 use PHPolygon\Rendering\Command\DrawMesh;
+use PHPolygon\Rendering\Command\DrawMeshInstanced;
 use PHPolygon\Rendering\Command\SetAmbientLight;
 use PHPolygon\Rendering\Command\SetCamera;
 use PHPolygon\Rendering\Command\SetDirectionalLight;
@@ -412,6 +413,8 @@ class Renderer3DSystem extends AbstractSystem
         // TransparentDrawSorter in render().
         /** @var list<DrawMesh> $transparentDraws */
         $transparentDraws = [];
+        /** @var array<string, array{0: MeshRenderer, 1: list<Mat4>}> $batches */
+        $batches = [];
         $drawnOpaque = 0;
         $lastDrawn = $this->lastDrawnMatrix;
         $drawnNow = [];
@@ -505,6 +508,17 @@ class Renderer3DSystem extends AbstractSystem
             $isTransparent = $material !== null && $material->alpha < 1.0;
             $prev = $lastDrawn[$entityId] ?? null;
             $drawnNow[$entityId] = $matrix;
+
+            // Batchable draws wait until culling is through: what survived of
+            // one mesh + material becomes one draw below. A mover needs its own
+            // draw for the motion vector.
+            if ($mesh->batchable && !$isTransparent && !$mesh->excludeFromGbuffer && ($prev === null || $prev === $matrix)) {
+                $key = $mesh->meshId . '|' . $mesh->materialId . '|' . ($mesh->castShadows ? '1' : '0');
+                $batches[$key][0] = $mesh;
+                $batches[$key][1][] = $matrix;
+                continue;
+            }
+
             $draw = new DrawMesh(
                 $mesh->meshId,
                 $mesh->materialId,
@@ -523,6 +537,13 @@ class Renderer3DSystem extends AbstractSystem
         }
 
         $this->lastDrawnMatrix = $drawnNow;
+
+        foreach ($batches as [$mesh, $matrices]) {
+            $this->commandList->add(count($matrices) === 1
+                ? new DrawMesh($mesh->meshId, $mesh->materialId, $matrices[0], castShadows: $mesh->castShadows)
+                : new DrawMeshInstanced($mesh->meshId, $mesh->materialId, $matrices, castShadows: $mesh->castShadows));
+            $drawnOpaque += count($matrices);
+        }
 
         foreach ($transparentDraws as $draw) {
             $this->commandList->add($draw);

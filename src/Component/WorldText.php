@@ -13,11 +13,10 @@ use PHPolygon\Rendering\Color;
 use PHPolygon\Rendering\TextAlign;
 
 /**
- * Renders text at a 3D world position.
- *
- * The WorldTextSystem projects the entity's Transform3D position
- * to screen space and draws the text via the 2D renderer.
- * Optionally billboard-faces the camera.
+ * Text at a 3D world position, for a screen-space overlay: WorldTextSystem
+ * projects the position and emits {@see \PHPolygon\Rendering\Command\DrawWorldText}.
+ * It stays flat on the screen, on top of everything, and does not turn with
+ * anything in the world. Text that belongs to a sign is a {@see SurfaceText}.
  */
 #[Serializable]
 #[Category('Rendering')]

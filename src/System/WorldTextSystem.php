@@ -8,12 +8,10 @@ use PHPolygon\Component\Transform3D;
 use PHPolygon\Component\WorldText;
 use PHPolygon\ECS\AbstractSystem;
 use PHPolygon\ECS\World;
-use PHPolygon\Math\Mat4;
-use PHPolygon\Math\Vec3;
-use PHPolygon\Math\Vec4;
 use PHPolygon\Rendering\Command\DrawWorldText;
 use PHPolygon\Rendering\Command\SetCamera;
 use PHPolygon\Rendering\RenderCommandList;
+use PHPolygon\Rendering\ScreenProjection;
 
 /**
  * Projects WorldText entities to screen space and emits DrawWorldText
@@ -38,7 +36,7 @@ class WorldTextSystem extends AbstractSystem
 
         $camera = $cameras[0];
         $vpMatrix = $camera->projectionMatrix->multiply($camera->viewMatrix);
-        $cameraPos = $this->extractCameraPosition($camera->viewMatrix);
+        $cameraPos = ScreenProjection::cameraPosition($camera->viewMatrix);
 
         foreach ($world->query(WorldText::class, Transform3D::class) as $entity) {
             $text = $entity->get(WorldText::class);
@@ -58,7 +56,7 @@ class WorldTextSystem extends AbstractSystem
             }
 
             // Project to screen space
-            $screen = $this->worldToScreen($worldPos, $vpMatrix);
+            $screen = ScreenProjection::worldToScreen($worldPos, $vpMatrix, $this->viewportWidth, $this->viewportHeight);
             if ($screen === null) {
                 continue;
             }
@@ -84,39 +82,5 @@ class WorldTextSystem extends AbstractSystem
                 textAlign: $text->textAlign,
             ));
         }
-    }
-
-    private function extractCameraPosition(Mat4 $viewMatrix): Vec3
-    {
-        $inv = $viewMatrix->inverse();
-        return new Vec3($inv->get(0, 3), $inv->get(1, 3), $inv->get(2, 3));
-    }
-
-    /**
-     * Project a world position to screen pixel coordinates.
-     *
-     * @return Vec3|null Screen position (x, y in pixels), or null if behind camera.
-     */
-    private function worldToScreen(Vec3 $worldPos, Mat4 $vpMatrix): ?Vec3
-    {
-        $clip = $vpMatrix->multiplyVec4(new Vec4($worldPos->x, $worldPos->y, $worldPos->z, 1.0));
-
-        // Behind the camera
-        if ($clip->w <= 0.0) {
-            return null;
-        }
-
-        $ndcX = $clip->x / $clip->w;
-        $ndcY = $clip->y / $clip->w;
-
-        // Clip to visible range
-        if ($ndcX < -1.0 || $ndcX > 1.0 || $ndcY < -1.0 || $ndcY > 1.0) {
-            return null;
-        }
-
-        $screenX = ($ndcX + 1.0) * 0.5 * $this->viewportWidth;
-        $screenY = (1.0 - $ndcY) * 0.5 * $this->viewportHeight;
-
-        return new Vec3($screenX, $screenY, 0.0);
     }
 }

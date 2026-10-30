@@ -11,6 +11,7 @@ class VioMesh {}
 class VioBuffer {}
 class VioTexture {}
 class VioFont {}
+class VioFontFace {}
 class VioSound {}
 class VioRenderTarget {}
 class VioCubemap {}
@@ -429,6 +430,15 @@ function vio_pop_scissor(VioContext $ctx): void {}
  * @return VioFont|false
  */
 function vio_font(VioContext $ctx, string $path, float $size = 24.0, float $scale = 1.0): VioFont|false {}
+function vio_font_face(string $path): VioFontFace|false {}
+function vio_font_face_has_glyph(VioFontFace $face, int $codepoint): bool {}
+
+/**
+ * @param VioFontFace|list<VioFontFace> $faces
+ * @param array{measure?: bool}|null $options
+ * @return array{width: int, height: int, origin_x: int, baseline: int, advance: float, data?: string}|false
+ */
+function vio_text_bitmap(VioFontFace|array $faces, string $text, float $size, ?array $options = null): array|false {}
 
 function vio_font_has_glyph(VioFont $font, int $codepoint): bool {}
 
