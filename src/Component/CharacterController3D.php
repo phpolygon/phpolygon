@@ -56,6 +56,23 @@ class CharacterController3D extends AbstractComponent
     #[Hidden]
     public ?int $groundEntityId = null;
 
+    /**
+     * Where the physics left this character at the end of its last tick. What game
+     * code added to the position since then is the movement it wanted, which
+     * {@see \PHPolygon\Physics\StepAssist} compares with what came of it. Null while
+     * physics does not drive the character.
+     */
+    #[Hidden]
+    public ?Vec3 $settledPosition = null;
+
+    /**
+     * How far a step lift carried this character ahead of the way it wanted to walk.
+     * The physics takes it off the next frames of walking in that direction, so
+     * steps do not speed anybody up; standing still or turning away forgives it.
+     */
+    #[Hidden]
+    public ?Vec3 $stepDebt = null;
+
     // --- State & coupling ---
 
     #[Hidden]

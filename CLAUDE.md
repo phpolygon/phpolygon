@@ -403,7 +403,7 @@ Components follow the same ECS discipline as 2D. 3D-specific components:
 | `MeshRenderer` | `meshId: string`, `materialId: string`, `castShadows: bool` |
 | `DirectionalLight` | `direction: Vec3`, `color: Color`, `intensity: float` |
 | `PointLight` | `color: Color`, `intensity: float`, `radius: float` |
-| `CharacterController3D` | Capsule collision, gravity, slope detection, step height; `groundEntityId` names what it stands on (see "Physics queries") |
+| `CharacterController3D` | Capsule collision, gravity, slope detection, `stepHeight` (on every collider, see "Character collision"); `groundEntityId` names what it stands on (see "Physics queries") |
 | `Outline` | `enabled`, `color`, `widthPx`, `includeChildren` — outline this entity's mesh (and its children's) |
 
 `Transform3D` replaces `Transform2D` in 3D scenes. Never mix 2D and 3D transform
@@ -582,7 +582,7 @@ several surfaces ground a character in one tick, the one that set the final heig
 Triggers never ground anything, so a floor switched to `isTrigger` is gone from the next
 tick. Null while grounded = the bare ground plane, which is no entity; a floor level with
 the plane stays the ground. Game systems that set `isGrounded` themselves after the physics
-(a step assist) leave the id at the last tick's value until the next one.
+leave the id at the last tick's value until the next one.
 
 `Physics\GroundProbe::under(World, CharacterController3D): ?GroundHit` turns that id into
 `GroundHit(entityId, ?meshId, ?materialId)`: the mesh of the solid `MeshCollider3D`, else of
@@ -592,6 +592,66 @@ old, depending on where the caller runs). It searches nothing, so it costs the s
 world; a heightmap or an invisible box comes back with null ids and the game decides. It
 answers for characters only. A surface without a collider (a decal path on a collider plate)
 is invisible to it, as it is to the physics: the game checks those first.
+
+### Character collision – boxes, triangles, steps
+
+How `Physics3DSystem` moves a `CharacterController3D` (`Physics3DBoxCollisionTest`,
+`Physics3DStepAssistTest`, `Physics3DWalkabilityTest`, `Physics3DGroundEntityTest`,
+`CollisionMathTest`, `OrientedBoxTest`):
+
+- **Which boxes are rotated:** any box whose rotation has |x|, |y| or |z| above 0.001 (about
+  0.1 degrees) collides as a solid `Physics\OrientedBox` (centre, unit axes, half extents, cached
+  on `BoxCollider3D::$cachedOriented`); only the rest as an AABB. A slightly turned long box must
+  not collide as its hull, which is metres deeper than the box. `capsulePush()` measures the true
+  distance outside and, with the segment inside, takes the box axis that frees it soonest, so a
+  position jump past a face comes back out at any angle. `surfaceAt(x, z)` is the walkable top for
+  landings, `topNear(x, z)` the top where a capsule touching the side would step on (a tilted
+  board's near end, not its hull). The 12 triangles stay in `BoxCollider3D::$bvh` for
+  `Raycaster3D::segmentBlocked()` only. It looks at the box's OWN rotation: a box turned only
+  through a parent still collides as its world AABB.
+- **Capsule against triangle:** `CollisionMath::capsuleVsTriangle()` measures the true
+  distance between segment and triangle (`closestSegmentTriangle()`: a segment end or a triangle
+  edge, unless the segment pierces the face). It stays per triangle, so beside the diagonal of a
+  wall quad one triangle reports a slanted edge contact. `resolveMeshCollisions()` therefore works
+  each iteration deepest contact first and asks every further one again from the new position:
+  the face contact wins, nothing creeps up the wall, and the BVH order decides nothing.
+- **Box steps** lift on contact when the rise is within `stepHeight`. Before that,
+  `StepAssist::bodyFitsAt()` checks the raised capsule, from the step height above the tread up to
+  the head: a contact there refuses the lift if it would push the body down or back the way the
+  step pushes it. A side wall the capsule is still pressed into pushes neither, and whether it was
+  resolved yet depends on collider order, so it must not decide. Lower parts are further steps, so
+  box stairs work; rotated boxes do the same at `topNear()`.
+- **Beams below head height:** a contact that would push a grounded capsule down has no way out,
+  the floor is there. It becomes the level push that keeps the same contact distance
+  (`pastBeamEdge()`, for AABBs `outOfBeamSideways()`), so the capsule stops at the beam's edge. A
+  fast walker that passed the edge within one tick goes back to `settledPosition`, if it was clear
+  of the shape there. In the air the push stays as it is (a jump into a ceiling), and a character
+  already standing under a flat low ceiling is not held.
+- **Steps on meshes** (`Physics\StepAssist::climb()`): mesh collision only pushes the shortest
+  way out, so an edge blocks however low. After the tick, a character that wanted to walk and got
+  less than 45 % of it is probed for a floor within `stepHeight` along the way ahead, in 5 cm
+  steps to at least 5 cm past the capsule wall; usually no triangle lies in that band and nothing
+  further runs. It must be grounded, or wedged and not rising: between two nosings of a narrow stair
+  each edge pushes too steeply to count as floor (`MIN_WEDGE_NORMAL_Y`). A tread has
+  normal.y ≥ cos(`slopeLimit`), never below 0.5; of several in a column the lowest counts. It is
+  taken if the column has headroom, the rise counted from the real ground (under the capsule, centre
+  to leading side) stays within `stepHeight` and the body fits all the way there. That last check
+  starts one step height above the tread like `bodyFitsAt()`: lower things are further steps. A
+  floor that starts under the feet is a ramp, not an edge: only this frame's way up it. Beyond
+  `slopeLimit` the assist does nothing, but the capsule's push along the face still slides it upward
+  at cos² of the walking speed up to the 60 degrees where `isGrounded` ends. Sets `isGrounded` and
+  `groundEntityId`. `stepHeight` below 0.06 m switches it off.
+- **Steps do not make anybody faster:** the lift ends just past the edge, 1 cm of overhang, which
+  still carries the character about its radius ahead in one tick. That excess over the way it
+  wanted to walk is `CharacterController3D::$stepDebt`, taken off the next ticks' walk in that
+  direction; standing still or turning away forgives it. Over a second the distance stays within
+  1 % on single edges; on stairs narrower than the capsule it ends below that (measured up to 9 %
+  over 4 s at r = 0.4).
+- **Wanted movement** = what game code added to the position since the last tick
+  (`CharacterController3D::$settledPosition`, the end of the last tick) plus horizontal velocity × dt.
+  Under 0.5 m/s it is standing, over 1 m in a tick a warp; both stay out. Nothing runs for those, so a
+  crowd at rest costs one comparison each.
+  A wrapper calling `update()` several times per frame is fine: every call sees its own part.
 
 ### Procedural geometry — code-driven worlds
 

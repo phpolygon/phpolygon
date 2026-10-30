@@ -17,6 +17,8 @@ use PHPolygon\Math\Mat4;
 use PHPolygon\Math\Vec3;
 use PHPolygon\Physics\BVH;
 use PHPolygon\Physics\CollisionMath;
+use PHPolygon\Physics\OrientedBox;
+use PHPolygon\Physics\StepAssist;
 use PHPolygon\Physics\Triangle;
 use PHPolygon\Runtime\PerfProfiler;
 
@@ -57,6 +59,20 @@ class Physics3DSystem extends AbstractSystem
     /** Surfaces steeper than this (|normal.y| below it) are walls, not floors. */
     private const float SWEEP_MIN_NORMAL_Y = 0.5;
 
+    /**
+     * A contact pushing up at least this much holds a capsule that is not grounded:
+     * between two nosings of a narrow stair each edge pushes too steeply to count as
+     * floor, yet the capsule neither falls nor walks. Such a character may step.
+     */
+    private const float MIN_WEDGE_NORMAL_Y = 0.1;
+
+    /**
+     * Characters held that way in this tick, by entity id.
+     *
+     * @var array<int, true>
+     */
+    private array $wedged = [];
+
     public function __construct(?Vec3 $gravity = null, float $groundPlaneY = 0.0)
     {
         $this->gravity = $gravity ?? new Vec3(0.0, -9.81, 0.0);
@@ -91,13 +107,14 @@ class Physics3DSystem extends AbstractSystem
             $boxData = $this->collectBoxColliders($world);
             $staticColliders = $boxData['aabbs'];
             $meshColliders = $this->collectMeshColliders($world);
-            // Merge rotated-box BVHs into mesh colliders for triangle-based resolution
-            foreach ($boxData['meshColliders'] as $mc) {
-                $meshColliders[] = $mc;
-            }
+            $rotatedBoxes = $boxData['rotated'];
         } finally {
             PerfProfiler::end();
         }
+
+        $assist = new StepAssist($staticColliders, $meshColliders, $rotatedBoxes);
+        $walkers = $this->walkers($world, $dt);
+        $this->wedged = [];
 
         // Colliders do not move between substeps (nothing else runs in between),
         // so they are collected once and only the character integration repeats.
@@ -105,11 +122,73 @@ class Physics3DSystem extends AbstractSystem
         try {
             [$steps, $stepDt] = self::substeps($dt);
             for ($i = 0; $i < $steps; $i++) {
-                $this->resolveCharacters($world, $stepDt, $staticColliders, $meshColliders, $boxData['boxTopY']);
+                $this->resolveCharacters($world, $stepDt, $staticColliders, $meshColliders, $rotatedBoxes, $assist);
+            }
+            foreach ($walkers as $walker) {
+                $controller = $walker['controller'];
+                $wedged = isset($this->wedged[$walker['entityId']]) && $controller->velocity->y <= 0.0;
+                if (($controller->isGrounded || $wedged) && $controller->isPhysicsActive()) {
+                    $assist->climb($controller, $walker['transform'], $walker['from'], $walker['x'], $walker['z'], $walker['entityId']);
+                    $controller->settledPosition = $walker['transform']->position;
+                }
             }
         } finally {
             PerfProfiler::end();
         }
+    }
+
+    /**
+     * Characters that want to walk this tick: what game code added to the position
+     * since the last tick, plus what their velocity will add. Standing ones and
+     * warps stay out, so a crowd at rest costs one comparison each.
+     *
+     * @return list<array{entityId: int, controller: CharacterController3D, transform: Transform3D, from: Vec3, x: float, z: float}>
+     */
+    private function walkers(World $world, float $dt): array
+    {
+        $walkers = [];
+        $minSq = (StepAssist::MIN_INTENT_SPEED * $dt) ** 2;
+        $maxSq = StepAssist::MAX_REACH ** 2;
+
+        /** @var array<int, CharacterController3D> $pool */
+        $pool = $world->componentPool(CharacterController3D::class);
+        foreach ($pool as $entityId => $controller) {
+            $from = $controller->settledPosition;
+            if ($from === null || $controller->stepHeight < StepAssist::MIN_RISE) {
+                continue;
+            }
+            $transform = $world->tryGetComponent($entityId, Transform3D::class);
+            if (!$transform instanceof Transform3D) {
+                continue;
+            }
+            $x = $transform->position->x - $from->x + $controller->velocity->x * $dt;
+            $z = $transform->position->z - $from->z + $controller->velocity->z * $dt;
+            $lengthSq = $x * $x + $z * $z;
+
+            $debt = $controller->stepDebt;
+            if ($debt !== null) {
+                $debtLength = $debt->length();
+                $along = $lengthSq >= $minSq ? ($x * $debt->x + $z * $debt->z) / $debtLength : 0.0;
+                if ($along <= 0.0) {
+                    $controller->stepDebt = null;
+                } else {
+                    // Paid out of this tick's walk, along the direction of the lift.
+                    $paid = min($along, $debtLength);
+                    $back = $debt->mul($paid / $debtLength);
+                    $transform->position = $transform->position->sub($back);
+                    $x -= $back->x;
+                    $z -= $back->z;
+                    $lengthSq = $x * $x + $z * $z;
+                    $controller->stepDebt = $paid < $debtLength ? $debt->sub($back) : null;
+                }
+            }
+
+            if ($lengthSq > 0.0 && $lengthSq >= $minSq && $lengthSq <= $maxSq) {
+                $walkers[] = ['entityId' => $entityId, 'controller' => $controller, 'transform' => $transform, 'from' => $from, 'x' => $x, 'z' => $z];
+            }
+        }
+
+        return $walkers;
     }
 
     /**
@@ -137,9 +216,9 @@ class Physics3DSystem extends AbstractSystem
     /**
      * @param list<array{entityId: int, min: Vec3, max: Vec3}> $staticColliders
      * @param list<array{entityId: int, bvh: BVH}> $meshColliders
-     * @param array<int, float> $boxTopY
+     * @param list<array{entityId: int, box: OrientedBox}> $rotatedBoxes
      */
-    private function resolveCharacters(World $world, float $dt, array $staticColliders, array $meshColliders, array $boxTopY): void
+    private function resolveCharacters(World $world, float $dt, array $staticColliders, array $meshColliders, array $rotatedBoxes, StepAssist $assist): void
     {
         foreach ($world->query(CharacterController3D::class, Transform3D::class) as $entity) {
             $controller = $entity->get(CharacterController3D::class);
@@ -148,6 +227,7 @@ class Physics3DSystem extends AbstractSystem
             // Handle non-physics states (coupling, animation)
             if (!$controller->isPhysicsActive()) {
                 $this->updateNonPhysicsState($world, $controller, $transform, $dt);
+                $controller->settledPosition = null;
                 continue;
             }
 
@@ -200,6 +280,7 @@ class Physics3DSystem extends AbstractSystem
                     $entity->id,
                     $staticColliders,
                     $meshColliders,
+                    $rotatedBoxes,
                     $supportEntityId,
                 );
                 if ($support !== null) {
@@ -223,6 +304,12 @@ class Physics3DSystem extends AbstractSystem
                     continue;
                 }
 
+                // A beam at head height over a character on the ground: down is no
+                // way out, the floor is there. It stops at the beam's edge instead.
+                if ($resolution->y < 0.0 && $controller->isGrounded) {
+                    $resolution = self::outOfBeamSideways($charMin, $charMax, $collider['min'], $collider['max'], $radius) ?? $resolution;
+                }
+
                 // Step-climbing: if the collision is horizontal (X or Z) and
                 // the collider top is within stepHeight of the character's feet,
                 // lift the character onto the surface instead of pushing sideways.
@@ -233,6 +320,7 @@ class Physics3DSystem extends AbstractSystem
 
                 if ($isHorizontalPush && abs($resolution->y) < 0.0001
                     && $stepUp > 0.0 && $stepUp <= $controller->stepHeight
+                    && $assist->bodyFitsAt($newPos->x, $newPos->z, $colliderTopY, $controller, $entity->id, $collider['entityId'], $resolution)
                 ) {
                     // Lift character onto the step
                     $newPos = new Vec3($newPos->x, $colliderTopY + $halfHeight, $newPos->z);
@@ -265,15 +353,16 @@ class Physics3DSystem extends AbstractSystem
 
             // Resolve mesh collider collisions (BVH-accelerated triangle tests)
             // Also pass box collider data for step-climbing on rotated boxes.
-            if (!empty($meshColliders)) {
+            if ($meshColliders !== [] || $rotatedBoxes !== []) {
                 $newPos = $this->resolveMeshCollisions(
                     $newPos,
                     $controller,
                     $halfHeight,
                     $radius,
                     $meshColliders,
+                    $rotatedBoxes,
                     $entity->id,
-                    $boxTopY,
+                    $assist,
                 );
 
                 // Final AABB update after mesh collision resolution
@@ -338,6 +427,7 @@ class Physics3DSystem extends AbstractSystem
 
             $transform->position = $newPos;
             $transform->worldMatrix = $transform->getLocalMatrix();
+            $controller->settledPosition = $newPos;
         }
     }
 
@@ -354,6 +444,7 @@ class Physics3DSystem extends AbstractSystem
      *
      * @param list<array{entityId: int, min: Vec3, max: Vec3}> $staticColliders
      * @param list<array{entityId: int, bvh: BVH}> $meshColliders
+     * @param list<array{entityId: int, box: OrientedBox}> $rotatedBoxes
      * @param-out int|null $supportEntityId owner of the returned surface
      */
     private function sweptSupportY(
@@ -364,6 +455,7 @@ class Physics3DSystem extends AbstractSystem
         int $selfId,
         array $staticColliders,
         array $meshColliders,
+        array $rotatedBoxes,
         ?int &$supportEntityId,
     ): ?float {
         $upper = $prevFeetY + self::SWEEP_SKIN;
@@ -385,6 +477,22 @@ class Physics3DSystem extends AbstractSystem
             }
             $best = $top;
             $supportEntityId = $collider['entityId'];
+        }
+
+        foreach ($rotatedBoxes as $rotated) {
+            $box = $rotated['box'];
+            if ($rotated['entityId'] === $selfId
+                || $pos->x < $box->min->x || $pos->x > $box->max->x
+                || $pos->z < $box->min->z || $pos->z > $box->max->z
+                || $lowerY > $box->max->y || $upper < $box->min->y
+            ) {
+                continue;
+            }
+            $y = $box->surfaceAt($pos->x, $pos->z);
+            if ($y !== null && $y <= $upper && $y >= $lowerY && ($best === null || $y > $best)) {
+                $best = $y;
+                $supportEntityId = $rotated['entityId'];
+            }
         }
 
         if ($meshColliders !== []) {
@@ -485,15 +593,15 @@ class Physics3DSystem extends AbstractSystem
     /**
      * Collect all BoxCollider3D as world-space data.
      * Non-rotated boxes return AABBs for fast axis-aligned resolution.
-     * Rotated boxes are converted to BVH triangles for correct surface-normal resolution.
+     * Rotated boxes return their solid form; their triangles stay cached for
+     * {@see \PHPolygon\Physics\Raycaster3D::segmentBlocked()}.
      *
-     * @return array{aabbs: list<array{entityId: int, min: Vec3, max: Vec3}>, meshColliders: list<array{entityId: int, bvh: BVH}>, boxTopY: array<int, float>}
+     * @return array{aabbs: list<array{entityId: int, min: Vec3, max: Vec3}>, rotated: list<array{entityId: int, box: OrientedBox}>}
      */
     private function collectBoxColliders(World $world): array
     {
         $aabbs = [];
-        $meshColliders = [];
-        $boxTopY = []; // Entity ID → max Y of collider (for step-climbing on rotated boxes)
+        $rotated = [];
 
         // Direct pool iteration (not query()): this runs every fixed-timestep
         // tick over every box collider in the world (~thousands on the star
@@ -517,24 +625,21 @@ class Physics3DSystem extends AbstractSystem
             // rotation probe, the matrix copy and the 16-value compare.
             $cachedAabb = $collider->cachedWorldAabb;
             if ($worldMatrix === $collider->lastWorldMatrix && $cachedAabb !== null) {
-                $cachedBvh = $collider->bvh;
                 if (!$collider->cachedRotated) {
                     $aabbs[] = ['entityId' => $entityId, 'min' => $cachedAabb['min'], 'max' => $cachedAabb['max']];
                     continue;
                 }
-                if ($cachedBvh !== null) {
-                    $meshColliders[] = ['entityId' => $entityId, 'bvh' => $cachedBvh];
-                    $boxTopY[$entityId] = $cachedAabb['max']->y;
+                if ($collider->cachedOriented !== null) {
+                    $rotated[] = ['entityId' => $entityId, 'box' => $collider->cachedOriented];
                     continue;
                 }
             }
 
-            // Check if entity has meaningful rotation (non-identity)
+            // Check if entity has meaningful rotation (non-identity). The vector
+            // part alone decides: |w| stays within 0.001 of 1 up to 5 degrees, and
+            // a long box turned that little has a hull metres deeper than itself.
             $rot = $transform->rotation;
             $isRotated = abs($rot->x) > 0.001 || abs($rot->y) > 0.001 || abs($rot->z) > 0.001;
-            if ($isRotated && abs(abs($rot->w) - 1.0) < 0.001) {
-                $isRotated = false;
-            }
 
             // Cache BVH / AABB on the collider keyed by world-matrix snapshot.
             // Without this every box rebuilds geometry every frame (8 corner
@@ -545,18 +650,15 @@ class Physics3DSystem extends AbstractSystem
                 || !self::matrixArrayEquals($worldMatrixArr, $collider->lastWorldMatrixArr);
 
             if ($isRotated) {
-                if ($matrixChanged || $collider->bvh === null || $collider->cachedWorldAabb === null) {
+                if ($matrixChanged || $collider->bvh === null || $collider->cachedWorldAabb === null || $collider->cachedOriented === null) {
                     $triangles = self::boxToWorldTriangles($collider, $worldMatrix);
                     $collider->bvh = BVH::build($triangles);
                     $collider->cachedWorldAabb = $collider->getWorldAABB($worldMatrix);
+                    $collider->cachedOriented = OrientedBox::fromCollider($collider, $worldMatrix);
                     $collider->lastWorldMatrixArr = $worldMatrixArr;
                 }
 
-                $meshColliders[] = [
-                    'entityId' => $entityId,
-                    'bvh' => $collider->bvh,
-                ];
-                $boxTopY[$entityId] = $collider->cachedWorldAabb['max']->y;
+                $rotated[] = ['entityId' => $entityId, 'box' => $collider->cachedOriented];
             } else {
                 if ($matrixChanged || $collider->cachedWorldAabb === null) {
                     $collider->cachedWorldAabb = $collider->getWorldAABB($worldMatrix);
@@ -572,7 +674,7 @@ class Physics3DSystem extends AbstractSystem
             $collider->cachedRotated = $isRotated;
         }
 
-        return ['aabbs' => $aabbs, 'meshColliders' => $meshColliders, 'boxTopY' => $boxTopY];
+        return ['aabbs' => $aabbs, 'rotated' => $rotated];
     }
 
     /**
@@ -603,7 +705,8 @@ class Physics3DSystem extends AbstractSystem
         $c = fn(int $sx, int $sy, int $sz) => $corners["{$sx}_{$sy}_{$sz}"];
 
         $triangles = [];
-        // 6 faces, each as 2 triangles (CCW winding from outside)
+        // 6 faces, each as 2 triangles, wound clockwise seen from outside: the
+        // normals point into the box. Only double-sided queries read them.
         $faces = [
             // +X face
             [$c(1,-1,1), $c(1,1,1), $c(1,1,-1), $c(1,-1,-1)],
@@ -688,7 +791,7 @@ class Physics3DSystem extends AbstractSystem
      * Iterates up to MESH_ITERATIONS times for convergence.
      *
      * @param list<array{entityId: int, bvh: BVH}> $meshColliders
-     * @param array<int, float> $boxTopY Entity ID → top Y for step-climbing
+     * @param list<array{entityId: int, box: OrientedBox}> $rotatedBoxes
      */
     private function resolveMeshCollisions(
         Vec3 $pos,
@@ -696,8 +799,9 @@ class Physics3DSystem extends AbstractSystem
         float $halfHeight,
         float $radius,
         array $meshColliders,
+        array $rotatedBoxes,
         int $characterEntityId,
-        array $boxTopY = [],
+        StepAssist $assist,
     ): Vec3 {
         // Capsule medial axis: from bottom-center+radius to top-center-radius
         // The capsule extends from pos.y - halfHeight to pos.y + halfHeight
@@ -720,8 +824,14 @@ class Physics3DSystem extends AbstractSystem
                 $pos->z + $radius,
             );
 
-            $hadCollision = false;
-
+            /** @var list<Triangle|OrientedBox> $shapes */
+            $shapes = [];
+            /** @var list<int> $owners */
+            $owners = [];
+            /** @var list<Vec3> $pushes */
+            $pushes = [];
+            /** @var array<int, float> $depths */
+            $depths = [];
             foreach ($meshColliders as $mc) {
                 if ($mc['entityId'] === $characterEntityId) {
                     continue;
@@ -729,34 +839,99 @@ class Physics3DSystem extends AbstractSystem
 
                 /** @var BVH $bvh */
                 $bvh = $mc['bvh'];
-                $candidateTriangles = $bvh->query($queryMin, $queryMax);
-
-                foreach ($candidateTriangles as $triangle) {
+                foreach ($bvh->query($queryMin, $queryMax) as $triangle) {
                     $resolution = CollisionMath::capsuleVsTriangle($segA, $segB, $radius, $triangle);
+                    if ($resolution !== null) {
+                        $shapes[] = $triangle;
+                        $owners[] = $mc['entityId'];
+                        $pushes[] = $resolution;
+                        $depths[] = $resolution->dot($resolution);
+                    }
+                }
+            }
+            foreach ($rotatedBoxes as $rotated) {
+                if ($rotated['entityId'] === $characterEntityId) {
+                    continue;
+                }
+                $resolution = $rotated['box']->capsulePush($segA, $segB, $radius);
+                if ($resolution !== null) {
+                    $shapes[] = $rotated['box'];
+                    $owners[] = $rotated['entityId'];
+                    $pushes[] = $resolution;
+                    $depths[] = $resolution->dot($resolution);
+                }
+            }
+
+            if ($shapes === []) {
+                break; // Converged — no more penetrations
+            }
+
+            // Deepest first, and each one asked again from where the one before left
+            // the capsule. A flat wall of two triangles touches beside its diagonal
+            // on both, but only one of them holds the true depth: taking the other
+            // first would push the capsule along the wall, and which came first
+            // would be a matter of BVH order.
+            if (count($depths) > 1) {
+                arsort($depths);
+            }
+
+            $moved = false;
+            foreach ($depths as $index => $depth) {
+                $shape = $shapes[$index];
+                $resolution = $pushes[$index];
+                if ($moved) {
+                    $resolution = $shape instanceof OrientedBox
+                        ? $shape->capsulePush($segA, $segB, $radius)
+                        : CollisionMath::capsuleVsTriangle($segA, $segB, $radius, $shape);
                     if ($resolution === null) {
                         continue;
                     }
+                }
+                $moved = true;
+                $entityId = $owners[$index];
 
-                    // Step-climbing for rotated box colliders:
-                    // If the collision pushes horizontally and the box top is within stepHeight,
-                    // lift the character onto the surface instead.
-                    $isHorizontalPush = abs($resolution->y) < abs($resolution->x) + abs($resolution->z);
-                    if ($isHorizontalPush && isset($boxTopY[$mc['entityId']])) {
-                        $feetY = $pos->y - $halfHeight;
-                        $topY = $boxTopY[$mc['entityId']];
-                        $stepUp = $topY - $feetY;
-                        if ($stepUp > 0.0 && $stepUp <= $controller->stepHeight) {
-                            $pos = new Vec3($pos->x, $topY + $halfHeight, $pos->z);
-                            $controller->velocity = new Vec3($controller->velocity->x, 0.0, $controller->velocity->z);
-                            $controller->isGrounded = true;
-                            $controller->groundEntityId = $mc['entityId'];
-                            $hadCollision = true;
-                            continue; // Skip normal resolution — we stepped up
+                // A beam at head height over a character on the ground: down is no
+                // way out, the floor is there. It stops at the beam's edge instead.
+                if ($resolution->y < 0.0 && $controller->isGrounded && $resolution->dot($resolution) < $radius * $radius) {
+                    $level = self::pastBeamEdge($resolution, $radius);
+                    if ($level !== null) {
+                        $resolution = $level;
+                    } elseif (($settled = $controller->settledPosition) !== null) {
+                        // Straight under it already: a fast walker that passed the
+                        // edge within one tick. Back to where it was still clear.
+                        $backA = new Vec3($settled->x, $segA->y, $settled->z);
+                        $backB = new Vec3($settled->x, $segB->y, $settled->z);
+                        $clearBehind = $shape instanceof OrientedBox
+                            ? $shape->capsulePush($backA, $backB, $radius) === null
+                            : CollisionMath::capsuleVsTriangle($backA, $backB, $radius, $shape) === null;
+                        if ($clearBehind) {
+                            $resolution = new Vec3($settled->x - $pos->x, 0.0, $settled->z - $pos->z);
                         }
                     }
+                }
 
+                // Step-climbing for rotated box colliders:
+                // If the collision pushes horizontally and the box top is within stepHeight,
+                // lift the character onto the surface instead.
+                $isHorizontalPush = abs($resolution->y) < abs($resolution->x) + abs($resolution->z);
+                $stepped = false;
+                if ($isHorizontalPush && $shape instanceof OrientedBox) {
+                    $feetY = $pos->y - $halfHeight;
+                    $topY = $shape->topNear($pos->x, $pos->z);
+                    $stepUp = $topY - $feetY;
+                    if ($stepUp > 0.0 && $stepUp <= $controller->stepHeight
+                        && $assist->bodyFitsAt($pos->x, $pos->z, $topY, $controller, $characterEntityId, $entityId, $resolution)
+                    ) {
+                        $pos = new Vec3($pos->x, $topY + $halfHeight, $pos->z);
+                        $controller->velocity = new Vec3($controller->velocity->x, 0.0, $controller->velocity->z);
+                        $controller->isGrounded = true;
+                        $controller->groundEntityId = $entityId;
+                        $stepped = true;
+                    }
+                }
+
+                if (!$stepped) {
                     $pos = $pos->add($resolution);
-                    $hadCollision = true;
 
                     // Zero velocity along collision direction
                     $resLen = $resolution->length();
@@ -770,24 +945,63 @@ class Physics3DSystem extends AbstractSystem
 
                         if ($resDir->y > 0.5) {
                             $controller->isGrounded = true;
-                            $controller->groundEntityId = $mc['entityId'];
+                            $controller->groundEntityId = $entityId;
+                        } elseif ($resDir->y > self::MIN_WEDGE_NORMAL_Y) {
+                            $this->wedged[$characterEntityId] = true;
                         }
                     }
-
-                    // Update capsule segment for next triangle test within this iteration
-                    $segA = new Vec3($pos->x, $pos->y - $capsuleHalfLen, $pos->z);
-                    $segB = new Vec3($pos->x, $pos->y + $capsuleHalfLen, $pos->z);
-                    $queryMin = new Vec3($pos->x - $radius, $pos->y - $halfHeight, $pos->z - $radius);
-                    $queryMax = new Vec3($pos->x + $radius, $pos->y + $halfHeight, $pos->z + $radius);
                 }
-            }
 
-            if (!$hadCollision) {
-                break; // Converged — no more penetrations
+                // Update capsule segment for next triangle test within this iteration
+                $segA = new Vec3($pos->x, $pos->y - $capsuleHalfLen, $pos->z);
+                $segB = new Vec3($pos->x, $pos->y + $capsuleHalfLen, $pos->z);
             }
         }
 
         return $pos;
+    }
+
+    /**
+     * A contact that would push a grounded capsule down, turned into the level push
+     * that keeps the same contact distance. Null when the contact lies straight
+     * overhead, with no side to go to.
+     */
+    private static function pastBeamEdge(Vec3 $resolution, float $radius): ?Vec3
+    {
+        $depth = $resolution->length();
+        $distance = $radius - $depth;
+        $scale = $distance / $depth;
+        $toCapsuleX = $resolution->x * $scale;
+        $toCapsuleY = $resolution->y * $scale;
+        $toCapsuleZ = $resolution->z * $scale;
+        $level = sqrt($toCapsuleX * $toCapsuleX + $toCapsuleZ * $toCapsuleZ);
+        if ($level < 1e-6) {
+            return null;
+        }
+
+        $push = sqrt(max(0.0, $radius * $radius - $toCapsuleY * $toCapsuleY)) - $level;
+
+        return new Vec3($toCapsuleX / $level * $push, 0.0, $toCapsuleZ / $level * $push);
+    }
+
+    /**
+     * The level way out of a box a grounded character has only walked a little
+     * under, or null when it is further in than its own width.
+     */
+    private static function outOfBeamSideways(Vec3 $charMin, Vec3 $charMax, Vec3 $boxMin, Vec3 $boxMax, float $radius): ?Vec3
+    {
+        $pushLeft = $boxMin->x - $charMax->x;
+        $pushRight = $boxMax->x - $charMin->x;
+        $pushBack = $boxMin->z - $charMax->z;
+        $pushFore = $boxMax->z - $charMin->z;
+
+        $x = abs($pushLeft) < abs($pushRight) ? $pushLeft : $pushRight;
+        $z = abs($pushBack) < abs($pushFore) ? $pushBack : $pushFore;
+        if (abs($x) <= abs($z)) {
+            return abs($x) <= 2.0 * $radius ? new Vec3($x, 0.0, 0.0) : null;
+        }
+
+        return abs($z) <= 2.0 * $radius ? new Vec3(0.0, 0.0, $z) : null;
     }
 
     /**
