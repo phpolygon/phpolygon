@@ -783,6 +783,9 @@ class Engine
                     $this->window->getContext(),
                     $this->window->getFramebufferWidth(),
                     $this->window->getFramebufferHeight(),
+                    upscalerProbeCachePath: $this->config->shaderCachePath !== ''
+                        ? $this->config->shaderCachePath . '/upscaler-probe.json'
+                        : '',
                 );
                 // The adaptive stack only lowers the shading rate where the backend can apply it.
                 \PHPolygon\Rendering\Quality\AdaptiveTierStack::setShadingRateAvailable($this->renderer3D->shadingRateAvailable());
@@ -1733,6 +1736,13 @@ class Engine
             $this->splashLabel = 'Compiling shaders';
             $this->renderSplashFrame();
             $renderer3D->warmShaders();
+            // A selected upscaler that initialises for seconds does it here too,
+            // not in the first game frame. Nothing runs for any other selection.
+            if ($renderer3D->upscalerProbeDue()) {
+                $this->splashLabel = 'Preparing upscaler';
+                $this->renderSplashFrame();
+                $renderer3D->settleUpscalerProbes();
+            }
         }
 
         // Phase 2: Run game init with splash fully visible

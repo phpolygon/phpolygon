@@ -46,6 +46,38 @@ final class GraphicsCapabilitiesTest extends TestCase
         $this->assertFalse($caps->supportsUpscaler(Upscaler::Fsr1));
     }
 
+    public function testAPendingUpscalerIsNotOfferedAndTheChainWalksPastIt(): void
+    {
+        $caps = new GraphicsCapabilities(
+            upscalers: [Upscaler::Off, Upscaler::Fsr1, Upscaler::Taau, Upscaler::Fsr3],
+            upscalerNotes: [Upscaler::Dlss->value => 'Checking'],
+            pendingUpscalers: [Upscaler::Dlss],
+        );
+
+        $this->assertTrue($caps->isUpscalerPending(Upscaler::Dlss));
+        $this->assertFalse($caps->isUpscalerPending(Upscaler::Fsr3));
+        $this->assertFalse($caps->supportsUpscaler(Upscaler::Dlss));
+        $this->assertSame(Upscaler::Fsr3, $caps->resolveUpscaler(Upscaler::Dlss));
+        $this->assertSame('Checking', $caps->upscalerNote(Upscaler::Dlss));
+        $this->assertSame([], GraphicsCapabilities::unknown()->pendingUpscalers);
+    }
+
+    public function testNoOtherSelectionDependsOnAPendingDlss(): void
+    {
+        $known = [Upscaler::Off, Upscaler::Fsr1, Upscaler::Taau, Upscaler::Fsr3];
+        $pending = new GraphicsCapabilities(upscalers: $known, pendingUpscalers: [Upscaler::Dlss]);
+        $supported = new GraphicsCapabilities(upscalers: [...$known, Upscaler::Dlss]);
+        $unsupported = new GraphicsCapabilities(upscalers: $known, upscalerNotes: [Upscaler::Dlss->value => 'no']);
+
+        foreach (Upscaler::cases() as $selected) {
+            if ($selected === Upscaler::Dlss) {
+                continue;
+            }
+            $this->assertSame($supported->resolveUpscaler($selected), $pending->resolveUpscaler($selected), $selected->value);
+            $this->assertSame($unsupported->resolveUpscaler($selected), $pending->resolveUpscaler($selected), $selected->value);
+        }
+    }
+
     public function testManagerWithoutRendererReportsUnknown(): void
     {
         $manager = new GraphicsSettingsManager(sys_get_temp_dir() . '/phpolygon-caps-' . getmypid() . '.json');

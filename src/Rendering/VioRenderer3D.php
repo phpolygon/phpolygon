@@ -506,6 +506,10 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
     private array $nativeUpscalerFailures = [];
     /** @var array<string, array{0: int, 1: int}|null> provider render sizes by provider:mode:display */
     private array $nativeRenderSizes = [];
+    /** The DLSS query, built on first use: its first call blocks for seconds. */
+    private ?Quality\LazyUpscalerProbe $dlssProbe = null;
+    /** A settings screen asked for the full list: {@see settleUpscalerProbes()} at the next frame. */
+    private bool $upscalerProbeRequested = false;
     /** The temporal technique that resolved the frame (Taau = the engine's own resolve). */
     private ?Quality\Upscaler $temporalUpscalerThisFrame = null;
     /** Wall-clock frame time handed to the native upscaler. */
@@ -536,6 +540,8 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         int $width = 1280,
         int $height = 720,
         ?GraphicsSettings $settings = null,
+        /** File for provider answers ({@see Quality\UpscalerProbeCache}), '' = none. */
+        private readonly string $upscalerProbeCachePath = '',
     ) {
         $this->width = $width;
         $this->height = $height;
@@ -607,8 +613,8 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         // the realloc is deferred to applyDeferredSettings() at beginFrame so the
         // format change never frees mid-frame. Any of these means the offscreen
         // target must be rebuilt (or released) at the next safe boundary.
-        if ($previous->effectiveRenderScale($this->graphicsCapabilities())
-                !== $settings->effectiveRenderScale($this->graphicsCapabilities())
+        if ($previous->effectiveRenderScale($this->knownCapabilities())
+                !== $settings->effectiveRenderScale($this->knownCapabilities())
             || $previous->antiAliasing !== $settings->antiAliasing
             || $previous->bloom !== $settings->bloom
             || $previous->hdr !== $settings->hdr
@@ -696,7 +702,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
      */
     private function nativeUpscalerSelected(): ?Quality\Upscaler
     {
-        $upscaler = $this->settings->effectiveUpscaler($this->graphicsCapabilities());
+        $upscaler = $this->settings->effectiveUpscaler($this->knownCapabilities());
         return UpscalerDispatch::providerId($upscaler) !== null ? $upscaler : null;
     }
 
@@ -709,7 +715,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
      */
     private function sceneRenderSize(): array
     {
-        $scale = $this->settings->effectiveRenderScale($this->graphicsCapabilities());
+        $scale = $this->settings->effectiveRenderScale($this->knownCapabilities());
         $size = [
             max(1, (int) round($this->backbufferWidth * $scale)),
             max(1, (int) round($this->backbufferHeight * $scale)),
@@ -756,7 +762,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             (int) UpscalerDispatch::providerId($native),
             UpscalerDispatch::qualityMode(
                 $this->settings->upscaleQuality,
-                $this->settings->effectiveRenderScale($this->graphicsCapabilities()),
+                $this->settings->effectiveRenderScale($this->knownCapabilities()),
             ),
             $target->width(),
             $target->height(),
@@ -781,7 +787,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             $message = $message !== '' ? $message : 'unknown error';
             $this->nativeUpscalerFailures[$upscaler->value] = $message;
             $this->capabilities = null;
-            $next = $this->settings->effectiveUpscaler($this->graphicsCapabilities());
+            $next = $this->settings->effectiveUpscaler($this->knownCapabilities());
             fwrite(STDERR, "[VioRenderer3D] {$upscaler->label()} failed, falling back to {$next->label()}: {$message}\n");
         }
         $this->capabilities = null;
@@ -798,7 +804,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
     private function temporalRequested(): bool
     {
         return $this->settings->antiAliasing === AntiAliasing::Taa
-            || $this->settings->effectiveUpscaler($this->graphicsCapabilities())->isTemporal();
+            || $this->settings->effectiveUpscaler($this->knownCapabilities())->isTemporal();
     }
 
     /**
@@ -1315,7 +1321,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         // offscreen path: FXAA/TAA, render-scale, or bloom (which extracts from
         // the rendered scene). Each is individually toggleable via GraphicsSettings.
         return $this->settings->antiAliasing !== AntiAliasing::Off
-            || $this->settings->effectiveRenderScale($this->graphicsCapabilities()) !== 1.0
+            || $this->settings->effectiveRenderScale($this->knownCapabilities()) !== 1.0
             || $this->settings->bloom
             || $this->temporalRequested();
     }
@@ -1561,7 +1567,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
      */
     private function fsrApplies(VioOffscreenTarget $target): bool
     {
-        return $this->settings->effectiveUpscaler($this->graphicsCapabilities()) === Quality\Upscaler::Fsr1
+        return $this->settings->effectiveUpscaler($this->knownCapabilities()) === Quality\Upscaler::Fsr1
             && ($target->width() < $this->backbufferWidth || $target->height() < $this->backbufferHeight)
             && $this->fsrShadersReady();
     }
@@ -1665,10 +1671,124 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
     }
 
     /**
-     * What this backend can apply, for settings screens
-     * ({@see GraphicsSettingsManager::capabilities()}). Probed once.
+     * What this backend can apply, complete. Blocks for the first DLSS query
+     * unless the disk cache knows the answer; a settings screen uses
+     * {@see requestGraphicsCapabilities()}.
      */
     public function graphicsCapabilities(): Quality\GraphicsCapabilities
+    {
+        $probe = $this->lazyUpscalerProbe();
+        if ($probe !== null && $probe->known() === null) {
+            $probe->settle();
+            $this->capabilities = null;
+        }
+        return $this->knownCapabilities();
+    }
+
+    /**
+     * What this backend can apply, for settings screens
+     * ({@see GraphicsSettingsManager::capabilities()}). Never blocks: while DLSS
+     * is unknown it is pending, and the query runs at the start of the next frame,
+     * so the frame that says so reaches the screen first.
+     */
+    public function requestGraphicsCapabilities(): Quality\GraphicsCapabilities
+    {
+        $probe = $this->lazyUpscalerProbe();
+        if ($probe !== null && $probe->known() === null) {
+            if ($probe->fromCache() !== null) {
+                $this->capabilities = null;
+            } else {
+                $this->upscalerProbeRequested = true;
+            }
+        }
+        return $this->knownCapabilities();
+    }
+
+    /** {@see settleUpscalerProbes()} has something to do. */
+    public function upscalerProbeDue(): bool
+    {
+        if ($this->settings->upscaler !== Quality\Upscaler::Dlss && !$this->upscalerProbeRequested) {
+            return false;
+        }
+        $probe = $this->lazyUpscalerProbe();
+        if ($probe === null) {
+            return false;
+        }
+        return $this->settings->upscaler === Quality\Upscaler::Dlss
+            ? !$probe->isSettledForUse()
+            : $probe->known() === null;
+    }
+
+    /**
+     * Run the blocking DLSS query now if the selection needs it or a settings
+     * screen asked. Only outside a frame: at the frame boundary, and from the
+     * engine behind the splash. A selected DLSS therefore never renders a frame
+     * with a stand-in: frames start after the answer, and only a "no" moves the
+     * selection along {@see Quality\Upscaler::fallbackChain()}.
+     */
+    public function settleUpscalerProbes(): void
+    {
+        $due = $this->upscalerProbeDue();
+        $this->upscalerProbeRequested = false;
+        $probe = $due ? $this->lazyUpscalerProbe() : null;
+        if ($probe === null) {
+            return;
+        }
+        $selected = $this->settings->upscaler === Quality\Upscaler::Dlss;
+        $start = hrtime(true);
+        if ($selected) {
+            $probe->settleForUse();
+            // Settings may have been applied against the stand-in.
+            $this->offscreenDirty = true;
+            $this->temporalCamera->reset('upscaler-probe');
+        } else {
+            $probe->settle();
+        }
+        $this->capabilities = null;
+        FrameSpikeRecorder::note('upscaler', 1, (int) (hrtime(true) - $start));
+    }
+
+    /**
+     * The DLSS query while it can run at all, null when that is already decided
+     * without asking the provider ({@see nativeUpscalerNote()}).
+     */
+    private function lazyUpscalerProbe(): ?Quality\LazyUpscalerProbe
+    {
+        if (!function_exists('vio_upscaler_supported') || !defined('VIO_FEATURE_UPSCALER_NATIVE')
+            || isset($this->nativeUpscalerFailures[Quality\Upscaler::Dlss->value])
+            || !$this->temporalSupported()) {
+            return null;
+        }
+        return $this->dlssProbe ??= new Quality\LazyUpscalerProbe(
+            Quality\Upscaler::Dlss->value . '@' . vio_backend_name($this->ctx),
+            fn(): Quality\UpscalerProbeResult => $this->queryUpscalerProvider(Quality\Upscaler::Dlss),
+            $this->upscalerDeviceKey(...),
+            $this->upscalerProbeCachePath !== '' ? new Quality\UpscalerProbeCache($this->upscalerProbeCachePath) : null,
+        );
+    }
+
+    /** Device, driver and php-vio version of this context; null without vio_adapters(). */
+    private function upscalerDeviceKey(): ?string
+    {
+        if (!function_exists('vio_adapters') || !function_exists('vio_gpu_info')) {
+            return null;
+        }
+        $backend = vio_backend_name($this->ctx);
+        $gpu = vio_gpu_info();
+        return Quality\UpscalerProbeCache::deviceKey(
+            $backend,
+            is_array($gpu) ? (string) $gpu['name'] : '',
+            vio_adapters($backend)[$backend] ?? [],
+            (string) phpversion('vio'),
+        );
+    }
+
+    /**
+     * What is known right now: asks no slow provider, so the render path can
+     * call it several times per frame. Only a request for DLSS depends on what
+     * is pending here - no other fallback chain contains it.
+     */
+    private function knownCapabilities(): Quality\GraphicsCapabilities
     {
         // The render path resolves the upscaler through this too; a probe taken
         // before the FSR shaders compiled must not pin the fallback for good.
@@ -1695,7 +1815,14 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         }
         // Native upscalers: only what the provider runs on this device. What is
         // not offered falls back along Upscaler::fallbackChain().
+        $pending = [];
         foreach ([Quality\Upscaler::Fsr3, Quality\Upscaler::Dlss] as $native) {
+            if ($native === Quality\Upscaler::Dlss
+                && ($probe = $this->lazyUpscalerProbe()) !== null && $probe->known() === null) {
+                $pending[] = $native;
+                $notes[$native->value] = 'Checking this device ...';
+                continue;
+            }
             $note = $this->nativeUpscalerNote($native, $temporal);
             if ($note === null) {
                 $upscalers[] = $native;
@@ -1715,6 +1842,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             surfaceRelief: true,
             upscalers: $upscalers,
             upscalerNotes: $notes,
+            pendingUpscalers: $pending,
         );
     }
 
@@ -1740,14 +1868,36 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         if (!$temporal) {
             return 'Needs motion vectors: multiple render targets and depth sampling';
         }
-        if (!vio_upscaler_supported($this->ctx, $provider)) {
-            $reason = vio_upscaler_info($this->ctx, $provider)['reason'] ?? '';
-            return is_string($reason) && $reason !== '' ? $reason : 'Not supported on this device';
+        $result = $upscaler === Quality\Upscaler::Dlss
+            ? $this->lazyUpscalerProbe()?->known()
+            : $this->queryUpscalerProvider($upscaler);
+        if ($result?->supported === true) {
+            return null;
         }
-        if (!vio_supports_feature($this->ctx, (int) constant('VIO_FEATURE_UPSCALER_NATIVE'))) {
-            return 'Not supported on this device';
-        }
-        return null;
+        return $result !== null && $result->reason !== '' ? $result->reason : 'Not supported on this device';
+    }
+
+    /**
+     * Ask php-vio about a provider. DLSS blocks here on its first call per
+     * context, whichever vio_upscaler_* function that is. The feature flag comes
+     * second: it means "any provider", so with FSR 3 missing it queries DLSS too.
+     */
+    private function queryUpscalerProvider(Quality\Upscaler $upscaler): Quality\UpscalerProbeResult
+    {
+        $provider = (int) UpscalerDispatch::providerId($upscaler);
+        $supported = vio_upscaler_supported($this->ctx, $provider);
+        $info = vio_upscaler_info($this->ctx, $provider);
+        $reason = $info['reason'] ?? '';
+        $files = array_values(array_filter(
+            [$info['plugin'] ?? '', $info['library'] ?? ''],
+            static fn(mixed $file): bool => is_string($file) && $file !== '',
+        ));
+        return new Quality\UpscalerProbeResult(
+            $supported && vio_supports_feature($this->ctx, (int) constant('VIO_FEATURE_UPSCALER_NATIVE')),
+            is_string($reason) ? $reason : '',
+            $files,
+            cacheable: count($files) === 2,
+        );
     }
 
     /**
@@ -1961,6 +2111,9 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         $this->temporalUpscalerThisFrame = null;
         $this->gpuMarkCount = 0;
         $this->gpuMarksThisFrame = PerfProfiler::isActive() && $this->gpuMarksSupported();
+
+        // Before the deferred settings: an answer can change the render size.
+        $this->settleUpscalerProbes();
 
         // Apply any settings change queued by applySettings() since the last
         // frame. MUST run here — before beginOffscreenIfRequired() binds the

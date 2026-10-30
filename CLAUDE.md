@@ -348,6 +348,34 @@ same forward and MRT. Backends without stencil (Metal) skip it; `outlineSupporte
   game - php-vio looks next to the exe first), runtime DLLs shipped by the build (`build.json` `upscalers`,
   see "Native upscaler runtimes" under Build system). Tests:
   `VioNativeUpscalerTest` (needs `'headless_hardware' => true`: WARP refuses), `UpscalerDispatchTest`.
+- **The DLSS query is lazy.** The first DLSS call per context blocks while NGX initialises, whichever
+  `vio_upscaler_*` it is (supported, info, render_size, create; `VIO_FEATURE_UPSCALER_NATIVE` too when FSR 3 is
+  missing, so that flag is read only after a provider said yes). The render path therefore resolves through
+  `knownCapabilities()`, which asks no slow provider: DLSS stays in `GraphicsCapabilities::$pendingUpscalers`
+  (not offered, note "Checking this device ...") and nothing touches the provider, the disk or `vio_adapters`.
+  Only a selected DLSS depends on that state, no other fallback chain contains it. Who asks:
+  - **DLSS selected:** `settleUpscalerProbes()` behind the splash (`Engine`, label "Preparing upscaler"), else at
+    the next `beginFrame()`. It blocks; frames start after the answer, there is never a stand-in frame. A
+    stored "no" spares the query and the chain moves on; a stored "yes" does not spare it, the provider has to
+    initialise to run. `applySettings()` never queries: it may run mid-frame.
+  - **Settings screen:** `$engine->graphics->capabilities()` -> `requestGraphicsCapabilities()`, never blocks.
+    Unknown: pending for one frame, the query runs at the next `beginFrame()`, so that frame's "checking"
+    is on screen during the freeze. A thread cannot take it: php-vio holds one device per process
+    (`vio_d3d12` is global) and a context cannot leave its thread. Call it from the screen, not at start-up.
+  - **`VioRenderer3D::graphicsCapabilities()`:** the complete answer, blocking; tools and tests.
+  - **Disk:** `Quality\UpscalerProbeCache`, `<shaderCachePath>/upscaler-probe.json` (`''` = none), one entry per
+    provider and backend, keyed by `deviceKey()` = backend, PCI ids, adapter name and driver from `vio_adapters`,
+    php-vio version; also tied to size and mtime of the plugin and the runtime library. Anything else -
+    broken file, other format, other device, changed library - is no answer and is queried again. "Plugin or
+    runtime library not found" (`UpscalerProbeResult::$cacheable`) is not stored: it takes under 1 ms and the
+    next build may ship them. Without `vio_adapters` or a listed adapter: no disk, one query per process.
+  `Quality\LazyUpscalerProbe` holds the order memory -> disk -> provider. Note `upscaler` in the frame spike
+  line. Measured 2026-10-30, RTX 2080, driver 621.01, php-vio 2.38.1: first DLSS call 4.2-5.4 s on D3D12,
+  4.0 s on Vulkan, per context; plugin or `nvngx_dlss.dll` not found 0.4-0.7 ms; `vio_backend_info` ~200 ms on D3D12 against
+  `vio_adapters` 6 ms. Start to frame 2 (`Engine`, offscreen, skipSplash, empty scene, shader cache
+  warm, median of 5, D3D12): TAA 6.67 -> 0.66 s, FSR 3 5.59 -> 0.67 s, DLSS selected 5.56 -> 5.46 s (the provider
+  has to initialise). Settings screen: 5.1 s once, then 6-10 ms for the first `capabilities()` of a process.
+  Tests: `LazyUpscalerProbeTest` (no GPU), `VioUpscalerProbeTest` (hardware, DLSS plugin).
 
 **Storage-buffer instances** (`DrawMeshInstanced::fromStorageBuffer`, e.g. GPU particles): the matrices never
 leave GPU memory, but the regular programs read instance matrices from vertex attributes. The draw
@@ -1050,7 +1078,7 @@ uploads, no extra passes. All are documented in
 | `SurfacePattern` | `Material::$surfacePattern`, 4 wear patterns that modulate albedo/roughness/metallic (worn paint, rust, brushed metal, polished rings). |
 | Surface relief | `Material::$cavity` (darkens pattern recesses) + `$parallaxDepth` (parallax occlusion, world units) over a height field per `NormalPattern` (`nh_*` in both mesh3d.frag copies - add a height function with every new pattern). Gated per player by `GraphicsSettings::$surfaceRelief` (Off/Cavity/Parallax). |
 | `Upscaler` | `GraphicsSettings::$upscaler`: `Fsr1` = AMD FSR 1 (EASU + RCAS, `fsr_easu/fsr_rcas.frag.glsl`, MIT notice kept) in the vio present when renderScale < 1; `$upscaleSharpness`. Temporal: `Taau` (engine resolve), `Fsr3` / `Dlss` (php-vio native module) with `$upscaleQuality` presets - see "Temporal AA / TAAU" and "Native upscalers" above. |
-| `GraphicsCapabilities` | `$engine->graphics->capabilities()` from the renderer's `graphicsCapabilities()`: VRS, HDR10, low latency, MSAA, TAA, SSR, SDF fieldtracing, relief, upscalers. Settings UIs disable what is unsupported (GraphicsOptionsPanel does). |
+| `GraphicsCapabilities` | `$engine->graphics->capabilities()` from the renderer: VRS, HDR10, low latency, MSAA, TAA, SSR, SDF fieldtracing, relief, upscalers. Settings UIs disable what is unsupported (GraphicsOptionsPanel does). Call it from a settings screen only: it starts the DLSS query, and `pendingUpscalers` lists what is not known yet (see "The DLSS query is lazy"). |
 | `Material::$wetness` | Forward-renderer SSR surrogate. Up-facing fragments get smoother + darker + brighter-IBL pass. |
 | `Material::$clearcoat` + `$flakes` | Carpaint extras consumed by `proc_mode == 10`. `Material::carpaint()` factory wires them in. |
 | `ScreenSpaceAO` | Curvature-based AO via `dFdx(N)`. Tiers `Off/Low/Medium/High`. Shader uniform `u_ao_strength`. |

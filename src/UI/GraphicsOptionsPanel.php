@@ -161,6 +161,9 @@ final class GraphicsOptionsPanel
         if ($hint !== null) {
             $this->ui->label($hint, $this->ui->getStyle()->disabledTextColor);
         }
+        foreach ($caps->pendingUpscalers as $pending) {
+            $this->ui->label("{$pending->label()}: {$caps->upscalerNote($pending)}", $this->ui->getStyle()->disabledTextColor);
+        }
 
         // Quality preset of the temporal upscalers (TAAU, FSR 3, DLSS).
         if ($effective->isTemporal()) {

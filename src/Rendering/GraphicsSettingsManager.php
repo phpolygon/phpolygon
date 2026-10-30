@@ -196,10 +196,17 @@ class GraphicsSettingsManager
      * What the active 3D renderer can apply, for settings screens that disable
      * options that would change nothing here. Everything counts as available while
      * no renderer reports capabilities (headless, 2D-only, before the window).
+     * Never blocks: an upscaler that takes seconds to query is reported as pending
+     * for a frame ({@see Quality\GraphicsCapabilities::isUpscalerPending()}). Call it
+     * from a settings screen, not at start-up: on a renderer with such a provider the
+     * call is what starts the query.
      */
     public function capabilities(): Quality\GraphicsCapabilities
     {
         $r3d = $this->engine?->renderer3D;
+        if ($r3d instanceof VioRenderer3D) {
+            return $r3d->requestGraphicsCapabilities();
+        }
         if ($r3d !== null && method_exists($r3d, 'graphicsCapabilities')) {
             $capabilities = $r3d->graphicsCapabilities();
             if ($capabilities instanceof Quality\GraphicsCapabilities) {

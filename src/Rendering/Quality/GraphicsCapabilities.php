@@ -27,6 +27,8 @@ final class GraphicsCapabilities
      * @param list<Upscaler> $upscalers             Upscalers this renderer implements
      * @param array<string, string> $upscalerNotes  Why an upscaler is missing, keyed by
      *                                              {@see Upscaler} value (settings tooltips)
+     * @param list<Upscaler> $pendingUpscalers      Not probed yet: not offered, the fallback
+     *                                              chain walks past them until the answer is in
      */
     public function __construct(
         public readonly bool $shadingRate = false,
@@ -39,6 +41,7 @@ final class GraphicsCapabilities
         public readonly bool $surfaceRelief = true,
         public readonly array $upscalers = [Upscaler::Off],
         public readonly array $upscalerNotes = [],
+        public readonly array $pendingUpscalers = [],
     ) {}
 
     /** No renderer to ask (headless, before the window exists): nothing is disabled. */
@@ -60,6 +63,12 @@ final class GraphicsCapabilities
     public function supportsUpscaler(Upscaler $upscaler): bool
     {
         return in_array($upscaler, $this->upscalers, true);
+    }
+
+    /** The renderer has not found out yet whether this upscaler runs here. */
+    public function isUpscalerPending(Upscaler $upscaler): bool
+    {
+        return in_array($upscaler, $this->pendingUpscalers, true);
     }
 
     /**

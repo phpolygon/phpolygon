@@ -159,6 +159,16 @@ function vio_backend_name(VioContext $ctx): string {}
 
 function vio_supports_feature(VioContext $ctx, int $feature): bool {}
 
+/**
+ * Adapters each backend can open, without a context; a backend name limits the scan.
+ *
+ * @return array<string, list<array<string, mixed>>>
+ */
+function vio_adapters(?string $backend = null): array {}
+
+/** @return array{name: string, vram_bytes: int, ram_bytes: int}|false */
+function vio_gpu_info(): array|false {}
+
 /** @return list<string> */
 function vio_backends(): array {}
 
