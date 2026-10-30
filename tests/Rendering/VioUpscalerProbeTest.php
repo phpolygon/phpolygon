@@ -6,6 +6,7 @@ namespace PHPolygon\Tests\Rendering;
 
 use PHPUnit\Framework\Attributes\Group;
 use PHPUnit\Framework\Attributes\RequiresPhpExtension;
+use PHPUnit\Framework\Attributes\RunInSeparateProcess;
 use PHPUnit\Framework\TestCase;
 use PHPolygon\Geometry\BoxMesh;
 use PHPolygon\Geometry\MeshRegistry;
@@ -179,6 +180,61 @@ final class VioUpscalerProbeTest extends TestCase
 
         $this->frame($renderer);
         $this->assertSame(Upscaler::Dlss, $renderer->temporalUpscalerThisFrame());
+    }
+
+    /** NGX refuses an id that is no GUID: a real "no" from the provider, with the driver it checked. */
+    #[RunInSeparateProcess]
+    public function testARefusalOfTheProviderIsStoredAndTheNextContextReadsIt(): void
+    {
+        ini_set('vio.dlss_project_id', 'x');
+        $caps = $this->renderer(new GraphicsSettings())->graphicsCapabilities();
+        $this->assertFalse($caps->supportsUpscaler(Upscaler::Dlss));
+        $note = $caps->upscalerNote(Upscaler::Dlss);
+        $this->assertNotNull($note);
+        $this->assertFileExists($this->cacheFile, 'a refusal took the seconds, it must not take them again');
+        self::assertNotNull($this->ctx);
+        vio_destroy($this->ctx);
+        $this->ctx = null;
+
+        $renderer = $this->renderer(new GraphicsSettings());
+        $next = null;
+        $ms = $this->clock(function () use ($renderer, &$next): void {
+            $next = $renderer->requestGraphicsCapabilities();
+        });
+
+        $this->assertLessThan(self::NO_QUERY_MS, $ms);
+        self::assertNotNull($next);
+        $this->assertFalse($next->isUpscalerPending(Upscaler::Dlss));
+        $this->assertSame($note, $next->upscalerNote(Upscaler::Dlss));
+    }
+
+    #[RunInSeparateProcess]
+    public function testARefusalDoesNotOutliveTheProjectIdItWasGivenFor(): void
+    {
+        $default = (string) ini_get('vio.dlss_project_id');
+        ini_set('vio.dlss_project_id', 'x');
+        $this->renderer(new GraphicsSettings())->graphicsCapabilities();
+        $this->assertFileExists($this->cacheFile);
+        self::assertNotNull($this->ctx);
+        vio_destroy($this->ctx);
+        $this->ctx = null;
+
+        ini_set('vio.dlss_project_id', $default);
+        $caps = $this->renderer(new GraphicsSettings())->requestGraphicsCapabilities();
+
+        $this->assertTrue($caps->isUpscalerPending(Upscaler::Dlss), 'another id can get another answer');
+    }
+
+    #[RunInSeparateProcess]
+    public function testAMissingRuntimeLibraryIsNotStored(): void
+    {
+        ini_set('vio.dlss_path', sys_get_temp_dir());
+
+        $caps = $this->renderer(new GraphicsSettings())->graphicsCapabilities();
+
+        $this->assertFalse($caps->supportsUpscaler(Upscaler::Dlss));
+        $this->assertStringContainsString('nvngx', (string) $caps->upscalerNote(Upscaler::Dlss));
+        $this->assertFileDoesNotExist($this->cacheFile, 'the next build may ship it');
     }
 
     public function testCompleteCapabilitiesMatchTheProvider(): void

@@ -1767,7 +1767,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         );
     }
 
-    /** Device, driver and php-vio version of this context; null without vio_adapters(). */
+    /** Device, driver, php-vio version and NGX project id of this context; null without vio_adapters(). */
     private function upscalerDeviceKey(): ?string
     {
         if (!function_exists('vio_adapters') || !function_exists('vio_gpu_info')) {
@@ -1780,6 +1780,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             is_array($gpu) ? (string) $gpu['name'] : '',
             vio_adapters($backend)[$backend] ?? [],
             (string) phpversion('vio'),
+            (string) ini_get('vio.dlss_project_id'),
         );
     }
 
@@ -1885,19 +1886,9 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
     private function queryUpscalerProvider(Quality\Upscaler $upscaler): Quality\UpscalerProbeResult
     {
         $provider = (int) UpscalerDispatch::providerId($upscaler);
-        $supported = vio_upscaler_supported($this->ctx, $provider);
-        $info = vio_upscaler_info($this->ctx, $provider);
-        $reason = $info['reason'] ?? '';
-        $files = array_values(array_filter(
-            [$info['plugin'] ?? '', $info['library'] ?? ''],
-            static fn(mixed $file): bool => is_string($file) && $file !== '',
-        ));
-        return new Quality\UpscalerProbeResult(
-            $supported && vio_supports_feature($this->ctx, (int) constant('VIO_FEATURE_UPSCALER_NATIVE')),
-            is_string($reason) ? $reason : '',
-            $files,
-            cacheable: count($files) === 2,
-        );
+        $supported = vio_upscaler_supported($this->ctx, $provider)
+            && vio_supports_feature($this->ctx, (int) constant('VIO_FEATURE_UPSCALER_NATIVE'));
+        return Quality\UpscalerProbeResult::fromProviderInfo($supported, vio_upscaler_info($this->ctx, $provider));
     }
 
     /**

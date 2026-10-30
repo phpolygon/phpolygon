@@ -364,11 +364,17 @@ same forward and MRT. Backends without stencil (Metal) skip it; `outlineSupporte
     (`vio_d3d12` is global) and a context cannot leave its thread. Call it from the screen, not at start-up.
   - **`VioRenderer3D::graphicsCapabilities()`:** the complete answer, blocking; tools and tests.
   - **Disk:** `Quality\UpscalerProbeCache`, `<shaderCachePath>/upscaler-probe.json` (`''` = none), one entry per
-    provider and backend, keyed by `deviceKey()` = backend, PCI ids, adapter name and driver from `vio_adapters`,
-    php-vio version; also tied to size and mtime of the plugin and the runtime library. Anything else -
-    broken file, other format, other device, changed library - is no answer and is queried again. "Plugin or
-    runtime library not found" (`UpscalerProbeResult::$cacheable`) is not stored: it takes under 1 ms and the
-    next build may ship them. Without `vio_adapters` or a listed adapter: no disk, one query per process.
+    provider and `deviceKey()` = backend, PCI ids, adapter name and driver from `vio_adapters`, php-vio version,
+    NGX project id; the newest `MAX_ENTRIES` stay, so the two GPUs of a hybrid laptop keep their own answers.
+    An entry is also tied to size and mtime of the libraries `vio_upscaler_info` named: plugin and runtime for
+    a yes, the plugin alone for a no (php-vio clears `library` on a refusal, so a patch that changes only
+    `nvngx_dlss.dll` does not reopen a stored no). Anything else - broken file, other format, other device, changed
+    library - is no answer and is queried again. Stored: a yes, and a no with `driver` set, i.e. the provider
+    looked at the device. "Plugin or runtime library not found" leaves `driver` empty
+    (`UpscalerProbeResult::fromProviderInfo()`, `$cacheable`) and is not stored: it takes under 1 ms and the next
+    build may ship them. A library that cannot be stamped (php-vio reports paths in the ANSI code page: outside
+    ASCII that is no UTF-8 and fits no JSON key) means that answer is not stored and `game.log` says so; the other
+    entries stay. Such an install path pays the query once per process until php-vio reports UTF-8. Without `vio_adapters` or a listed adapter: no disk, one query per process.
   `Quality\LazyUpscalerProbe` holds the order memory -> disk -> provider. Note `upscaler` in the frame spike
   line. Measured 2026-10-30, RTX 2080, driver 621.01, php-vio 2.38.1: first DLSS call 4.2-5.4 s on D3D12,
   4.0 s on Vulkan, per context; plugin or `nvngx_dlss.dll` not found 0.4-0.7 ms; `vio_backend_info` ~200 ms on D3D12 against

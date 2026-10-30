@@ -12,9 +12,10 @@ namespace PHPolygon\Rendering\Quality;
  *
  * Two questions, because they cost differently:
  *  - {@see settle()}: does it run here? A disk answer is enough (an options menu).
- *  - {@see settleForUse()}: it is about to run. A disk "no" is enough, a disk "yes"
- *    is not: the provider has to initialise anyway, so it does it now and the
- *    answer it gives replaces the stored one.
+ *  - {@see settleForUse()}: it is about to run. A disk "no" is enough (a refusal
+ *    the provider gave after looking at the device), a disk "yes" is not: the
+ *    provider has to initialise anyway, so it does it now and the answer it gives
+ *    replaces the stored one.
  */
 final class LazyUpscalerProbe
 {
