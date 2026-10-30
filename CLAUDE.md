@@ -405,6 +405,7 @@ Components follow the same ECS discipline as 2D. 3D-specific components:
 | `PointLight` | `color: Color`, `intensity: float`, `radius: float` |
 | `CharacterController3D` | Capsule collision, gravity, slope detection, step height |
 | `Outline` | `enabled`, `color`, `widthPx`, `includeChildren` — outline this entity's mesh (and its children's) |
+| `SurfaceText` | Text fixed on a surface in world space, by literal or translation key (see "Text on surfaces") |
 
 `Transform3D` replaces `Transform2D` in 3D scenes. Never mix 2D and 3D transform
 components on the same entity.
@@ -438,6 +439,11 @@ and the mesh AABB (read only by cloth sway, so uploaded for cloth materials only
 material uniforms - reset at every pipeline bind. The shadow pass sets `u_use_instancing` once per
 cascade.
 
+`MeshRenderer::$batchable` merges, after culling, what is left of one mesh + material + shadow flag
+into one `DrawMeshInstanced` (`Renderer3DSystemBatchingTest`); a batch of one stays a `DrawMesh`. For
+repeating static meshes: an entity that moved keeps its own draw (its motion vector), transparent
+materials stay single (sorting) and so does `excludeFromGbuffer`.
+
 `Renderer3DSystem` reads the `MeshRenderer` and `Transform3D` component pools directly (same order as
 `query(MeshRenderer, Transform3D)`): thousands of hidden renderers (parts drawn through an instanced
 batch) cost a pool lookup each, not a query step. `Transform3DSystem` skips dormant entities -
@@ -448,6 +454,7 @@ slept is recomputed on its first awake tick (its world matrix may be stale while
 | `OutlineSystem` | Emits `DrawOutline` for every enabled `Outline`; register BEFORE `Renderer3DSystem` |
 | `FoliageInstanceSystem` | Draws `FoliageInstances` as static instanced batches per (stage, LOD, tint, shadow); register after `Camera3DSystem`, BEFORE `Renderer3DSystem` |
 | `GrassSystem` | Grass blades of every `GrassField` near the camera (`variants x 2` packed instanced draws, `SetGrass`); register after `Camera3DSystem`, BEFORE `Renderer3DSystem` |
+| `SurfaceTextSystem` | Keeps every `SurfaceText` on its current text and language, the only writer of those materials; register BEFORE `Renderer3DSystem` |
 
 ### Vegetation — the plant family (`PHPolygon\Vegetation`)
 
@@ -552,6 +559,96 @@ carries the look. Game-agnostic: bounds, ground, mask, colours and density come 
   review set and, with `measure`, these numbers (at the given size).
 - The fragment stage fades the blade colour toward the root colour near the fade range
   (`u_grass_far_fade`), so a ground tinted like the root colour takes over without a bright rim.
+
+### Text on surfaces (`SurfaceText`)
+
+Text that belongs to an object: a sign, a plate, a label on a device. It sits on a quad in world
+space, so depth, perspective and light are the scene's own. `WorldText` is the other thing, a 2D
+overlay at a projected position, flat and on top of everything; `DrawWorldText` has no consumer and is
+deprecated. Markers that really belong on the screen project themselves with
+`Rendering\ScreenProjection::worldToScreen()` (`margin` lets them slide past the edge) and
+`cameraPosition()`.
+
+```php
+$world->addSystem(new SurfaceTextSystem($engine->locale, new SurfaceTextBaker($engine->locale, $engine->textures, $store)));
+
+TextPlate::place($builder, 'Exit_Sign', $faceCentre, $faceNormal, new SurfaceText(
+    textKey: 'sign.exit', width: 0.9, height: 0.26,
+    color: Color::srgb('#F2E8D5'), background: Color::srgb('#6B4A2B'),
+    baseMaterial: 'painted_wood',
+), backAt: 0.06);   // also on the back face, 6 cm behind; reads correctly from there
+```
+
+- **`SurfaceText`** (component): `text` or `textKey` (wins, follows the language), `width`/`height` in
+  metres, `color`, `background`, `fontId`, `padding`, `maxLines`, `pixelsPerMetre`, `lineHeight`,
+  `maxFontSize` (keeps a family of signs even), `minFontSize` (reported, not enforced), `unlit` (needs
+  `ProcModeRegistry::map(SurfaceTextBaker::UNLIT_MATERIAL_PREFIX, $mode)` with a mode of the game:
+  `VioRenderer3D` does not read `Material::$shader`, unmapped the surface is lit),
+  `baseMaterial` (roughness, patterns, metal of the plate). Change it at run time with `setText()`,
+  `setTextKey()` or, after any other field, `touch()`. Colours go into the texture unchanged and the
+  shader reads them as linear albedo: hand in `Color::srgb('#...')` for a hex colour, like any albedo.
+  A scene file may leave out any key: the properties have inline defaults, and the two colours, which
+  cannot, are read through `inkColor()` / `plateColor()`.
+- **`Prefab\TextPlate`**: `place(builder, name, center, normal, text, ?backAt, ?up, standoff, ?parent, blankBack)`
+  puts a quad `standoff` (2 cm) in front of a point ON the carrier's face; `Geometry\QuadMesh` (XY, normal
+  +Z, one-sided, UVs in image coordinates: u along +X, v = 0 at the top edge, so a top-row-first upload
+  stands upright on every backend) under the entity's scale, shared by all surfaces. The carrier
+  is the caller's. Shadowless and `batchable`. The back is a second entity `<name>_Back`, a quad turned
+  about up, so it is not mirrored. The opaque pass culls nothing: a quad with nothing behind it shows its
+  text mirrored from behind, so a free-standing plate needs `backAt` or `blankBack` (the plate without
+  text, no `SurfaceText` on it); on a carrier the carrier hides it. `TextPlate::facing()` is the rotation alone, for callers with
+  their own entity. The material of the entity is `SurfaceTextBaker::plainMaterial()` until the
+  system takes over.
+- **Why an opaque plate.** The mesh shaders take only `.rgb` from a texture; alpha comes from the
+  material. So the plate's background is baked in, and the surface is the visible front of the plate.
+  Base material with `alpha < 1` gives a pane with text at one alpha. No shader changes.
+- **`Rendering\Text\TextRasterizer`** (`vio_text_bitmap`, needs no GD and no GPU): each line separately
+  through bidi, shaping and the fallback chain; lines broken in logical order with `TextWrap` (CJK
+  between characters) and centred, so right-to-left text needs nothing of its own. `fit()` uses `LabelFit`
+  per line count, measures the ink (marks and descenders stay inside) from one reference measurement
+  per string, takes the largest size, and takes one more line only for > 10 % more size. Nothing is cut
+  and no word is split, it shrinks instead: a split would tear an Arabic join or a Thai cluster.
+  `TextFit::$belowMinimum` tells when the text only fits under `minFontSize`.
+  `SurfaceTextBaker::fontSizeMetres()` / `layout()` are what a game's fit test over all languages reads.
+- **`Rendering\Text\FontChain`**: primary font of the id (`regular`, `semibold`, `register()` adds more), then
+  only the Noto faces the text needs. `signature()` names the files by content hash (xxh3), not by path, so a
+  prebake from another machine matches and another font under the same name gets new textures. A Latin sign never opens a CJK face. The language picks the
+  regional Han face (`zh-TW`/`zh-HK`/`zh-Hant` -> TC, `zh` -> SC, `ja`, `ko`), a language without its own
+  takes the script of the text.
+- **`Rendering\Text\SurfaceTextBaker`**: ids hold the content (text, font files, colours, sizes,
+  `BAKE_VERSION`), so equal signs and languages that say the same with the same fonts share a texture
+  and a prebaked file can never be stale. Bump `BAKE_VERSION` when the pixels of the same input change.
+  Texture edges are multiples of 4 (block encoders), at most 2048; a surface that would pass that
+  lowers the resolution on both edges, so the text keeps its proportions. Source order: `SurfaceTextStoreInterface`
+  (`path(id)`, `store(id, rgba, w, h)`), then the rasterizer, then the plain plate in the background
+  colour (php-vio without `vio_text_bitmap`, the php-glfw renderer: `TextureManager::loadRgba()` returns
+  null there). `prebake(surfaces, locales, store)` runs on a headless world; every distinct texture once.
+  `SurfaceTextDirectoryStore` is the default store (`<id>.ktx2`, RGBA8 with a finished mip chain, zlib); a
+  game with a BC7 encoder implements the interface itself.
+- **`SurfaceTextSystem`**: a language change touches nothing else in the world. Surfaces are resolved
+  again within `bakeBudgetMs` per tick (default 4), showing the old text until the new one is there;
+  `prewarm($world)` does it all at once for a loading phase. Dormant surfaces catch up when they wake.
+  Textures no surface shows go once no surface changed for 8 rendered frames and no pass is open:
+  frames in flight may read them and php-vio's D3D12 backend releases at once. A text changing every
+  single frame keeps its old textures for as long as it does, that is an overlay's job. A dormant surface
+  whose texture went turns plain (`plainMaterial()`) until it wakes and resolves. Register the system
+  with the texture manager the 3D renderer uses. `TextureManager::unload()` is safe mid-game with a 2D
+  renderer attached: `VioRenderer2D::unregisterVioTexture()` holds the object for 8 more `beginFrame()`s;
+  `VioTextureManager::removals()` makes the 3D renderer drop its cached object too.
+- **Z-fighting.** php-vio's depth is 24 bits. Share of plate pixels where the carrier wins, facing the
+  camera, measured on hardware: `standoff` 1 cm fights from 100 m at near 0.1 (33 %) and from 150 m at near
+  0.3; 2 cm from 150 m and from 300 m; 4 cm from 200 m and from 500 m. `STANDOFF` is 2 cm. A sign read
+  from further away needs a larger `standoff`, or a carrier whose front ends behind the surface.
+- Measured 2026-10-30, RTX 2080, D3D12 (`headless_hardware`):
+  raster 2.2 ms per 512 x 104 text (median, 837 texts in 31 languages: 1.8 ms, p95 3.3, max 6.1), upload
+  with mips 2.3 ms (max 14.8), prebaked KTX2 2.6 ms. 27 textures of 512 x 104: +9.95 MB dedicated VRAM
+  (Windows counter), 7.31 MB computed; RGBA8, so a BC7 pre-bake would need about a quarter. Language pass
+  over 27 surfaces 64-75 ms in all, 0.5 ms back to a language still loaded. `SurfaceTextDirectoryStore`
+  31 ms per file (PHP mip chain, build time), 13 KB per file; 466 distinct files of 837 (27 texts x 31
+  languages) = 6 MB. 60 surfaces at 1280 x 720, `Renderer3DSystem::render()` median of 3 runs with a
+  scene of 41 draws at 1.36 ms: 27 distinct texts single draws 2.23 ms, `batchable` 2.03 ms; 8 distinct
+  texts single 2.03 ms, `batchable` 1.52 ms. GPU time stayed in its noise (0.4-0.8 ms) in all cases. Idle
+  `SurfaceTextSystem` tick over 200 surfaces 9 us (`benchmarks/micro/System/SurfaceTextBench.php`).
 
 ### Physics queries — rays and line of sight
 

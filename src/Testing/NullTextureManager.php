@@ -36,6 +36,11 @@ class NullTextureManager extends TextureManager
         return $this->register($id, 64, 64);
     }
 
+    public function loadRgba(string $id, int $width, int $height, string $rgba): ?Texture
+    {
+        return $this->textures[$id] ?? $this->register($id, $width, $height);
+    }
+
     public function get(string $id): ?Texture
     {
         return $this->textures[$id] ?? null;

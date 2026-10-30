@@ -458,6 +458,9 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
 
     private ?VioTextureManager $textureManager = null;
 
+    /** {@see VioTextureManager::removals()} the texture cache is current with. */
+    private int $textureCacheRemovals = 0;
+
     /**
      * Live graphics settings. applySettings() may be called at any time to
      * hot-swap shadow tier, view-distance clamp, fog, cloud-shadows, anisotropy
@@ -5452,6 +5455,18 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
 
     private function resolveTexture(string $textureId): ?VioTexture
     {
+        // An unloaded texture must leave this cache too, or it stays on the GPU.
+        // Only those: dropping one this frame already bound would free it mid frame.
+        $removals = $this->textureManager?->removals() ?? 0;
+        if ($removals !== $this->textureCacheRemovals) {
+            $this->textureCacheRemovals = $removals;
+            foreach ($this->textureCache as $id => $_) {
+                if ($this->textureManager?->has($id) !== true) {
+                    unset($this->textureCache[$id]);
+                }
+            }
+        }
+
         if (isset($this->textureCache[$textureId])) {
             return $this->textureCache[$textureId];
         }
