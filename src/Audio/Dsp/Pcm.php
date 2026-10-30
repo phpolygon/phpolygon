@@ -27,6 +27,15 @@ final class Pcm
         return $dt / ($rc + $dt);
     }
 
+    /**
+     * $hz, held below the Nyquist frequency of $sampleRate: for filters of a recipe
+     * written without knowing the rate it will be rendered at.
+     */
+    public static function belowNyquist(float $hz, int $sampleRate): float
+    {
+        return min($hz, 0.45 * $sampleRate);
+    }
+
     /** Clamp to ±1 and truncate to a 16-bit little-endian sample. */
     public static function packSample(float $sample): string
     {

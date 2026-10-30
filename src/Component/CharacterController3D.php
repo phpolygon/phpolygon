@@ -45,6 +45,17 @@ class CharacterController3D extends AbstractComponent
     #[Hidden]
     public bool $isGrounded;
 
+    /**
+     * Entity this character stands on: the collider or heightmap that grounded
+     * it in the last physics tick (when several did, the one that decided the
+     * final height). Written where isGrounded is, so a null here while airborne
+     * is the same fact as isGrounded = false. Null while grounded means the
+     * bare ground plane of {@see \PHPolygon\System\Physics3DSystem}, which is
+     * no entity. Triggers are never the ground.
+     */
+    #[Hidden]
+    public ?int $groundEntityId = null;
+
     // --- State & coupling ---
 
     #[Hidden]
@@ -115,6 +126,7 @@ class CharacterController3D extends AbstractComponent
         $this->state = $state;
         $this->velocity = Vec3::zero();
         $this->isGrounded = false;
+        $this->groundEntityId = null;
     }
 
     /**

@@ -176,6 +176,7 @@ class Physics3DSystem extends AbstractSystem
             // Reset grounded flag — will be set by collision response below
             $wasGrounded = $controller->isGrounded;
             $controller->isGrounded = false;
+            $controller->groundEntityId = null;
 
             // Swept landing: the overlap tests below only see where the capsule
             // ENDS. A step that carries the feet past a floor thinner than the
@@ -199,11 +200,13 @@ class Physics3DSystem extends AbstractSystem
                     $entity->id,
                     $staticColliders,
                     $meshColliders,
+                    $supportEntityId,
                 );
                 if ($support !== null) {
                     $newPos = new Vec3($newPos->x, $support + $halfHeight, $newPos->z);
                     $controller->velocity = new Vec3($controller->velocity->x, 0.0, $controller->velocity->z);
                     $controller->isGrounded = true;
+                    $controller->groundEntityId = $supportEntityId;
                     $charMin = new Vec3($newPos->x - $radius, $newPos->y - $halfHeight, $newPos->z - $radius);
                     $charMax = new Vec3($newPos->x + $radius, $newPos->y + $halfHeight, $newPos->z + $radius);
                 }
@@ -235,6 +238,7 @@ class Physics3DSystem extends AbstractSystem
                     $newPos = new Vec3($newPos->x, $colliderTopY + $halfHeight, $newPos->z);
                     $controller->velocity = new Vec3($controller->velocity->x, 0.0, $controller->velocity->z);
                     $controller->isGrounded = true;
+                    $controller->groundEntityId = $collider['entityId'];
                 } else {
                     $newPos = $newPos->add($resolution);
 
@@ -246,6 +250,7 @@ class Physics3DSystem extends AbstractSystem
                         $controller->velocity = new Vec3($controller->velocity->x, 0.0, $controller->velocity->z);
                         if ($resolution->y > 0) {
                             $controller->isGrounded = true;
+                            $controller->groundEntityId = $collider['entityId'];
                         }
                     }
                     if (abs($resolution->z) > 0.0001) {
@@ -301,10 +306,13 @@ class Physics3DSystem extends AbstractSystem
                         $controller->velocity = new Vec3($controller->velocity->x, 0.0, $controller->velocity->z);
                     }
                     $controller->isGrounded = true;
+                    $controller->groundEntityId = $hmEntity->id;
                 }
             }
 
-            // Safety net: prevent falling through the world
+            // Safety net: prevent falling through the world. The plane is no
+            // entity and groundEntityId stays as it is: a floor level with the
+            // plane puts the feet on both, and the floor is what they stand on.
             $charMinY = $newPos->y - $halfHeight;
             if ($charMinY <= $this->groundPlaneY) {
                 $newPos = new Vec3($newPos->x, $this->groundPlaneY + $halfHeight, $newPos->z);
@@ -346,6 +354,7 @@ class Physics3DSystem extends AbstractSystem
      *
      * @param list<array{entityId: int, min: Vec3, max: Vec3}> $staticColliders
      * @param list<array{entityId: int, bvh: BVH}> $meshColliders
+     * @param-out int|null $supportEntityId owner of the returned surface
      */
     private function sweptSupportY(
         Vec3 $pos,
@@ -355,9 +364,11 @@ class Physics3DSystem extends AbstractSystem
         int $selfId,
         array $staticColliders,
         array $meshColliders,
+        ?int &$supportEntityId,
     ): ?float {
         $upper = $prevFeetY + self::SWEEP_SKIN;
         $best = null;
+        $supportEntityId = null;
 
         foreach ($staticColliders as $collider) {
             if ($collider['entityId'] === $selfId) {
@@ -373,6 +384,7 @@ class Physics3DSystem extends AbstractSystem
                 continue;
             }
             $best = $top;
+            $supportEntityId = $collider['entityId'];
         }
 
         if ($meshColliders !== []) {
@@ -391,6 +403,7 @@ class Physics3DSystem extends AbstractSystem
                         continue;
                     }
                     $best = $y;
+                    $supportEntityId = $mc['entityId'];
                 }
             }
         }
@@ -736,6 +749,7 @@ class Physics3DSystem extends AbstractSystem
                             $pos = new Vec3($pos->x, $topY + $halfHeight, $pos->z);
                             $controller->velocity = new Vec3($controller->velocity->x, 0.0, $controller->velocity->z);
                             $controller->isGrounded = true;
+                            $controller->groundEntityId = $mc['entityId'];
                             $hadCollision = true;
                             continue; // Skip normal resolution — we stepped up
                         }
@@ -756,6 +770,7 @@ class Physics3DSystem extends AbstractSystem
 
                         if ($resDir->y > 0.5) {
                             $controller->isGrounded = true;
+                            $controller->groundEntityId = $mc['entityId'];
                         }
                     }
 
