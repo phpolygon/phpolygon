@@ -122,6 +122,27 @@ final class TextWrapTest extends TestCase
         self::assertSame('課題を解いて', implode('', $this->wrap('課題を解いて', 6.0)));
     }
 
+    public function testASplitWordNeverStartsALineWithACombiningMark(): void
+    {
+        // Thai vowels above/below and tone marks are separate code points that
+        // only make sense on their consonant; so are decomposed Latin accents.
+        foreach (['ที่นี่ที่นั่นกำลังสุดท้าย', "e\u{0301}e\u{0301}e\u{0301}e\u{0301}e\u{0301}"] as $word) {
+            foreach ([1.0, 2.0, 3.0, 4.0] as $width) {
+                $lines = TextWrap::linesWithin($word, $width, $this->measurer());
+
+                self::assertSame($word, implode('', $lines), 'nothing lost');
+                foreach ($lines as $line) {
+                    self::assertSame(0, preg_match('/^\p{M}/u', $line), "line starts with a mark at width $width");
+                }
+            }
+        }
+    }
+
+    public function testAGraphemeWiderThanTheBoxStaysWhole(): void
+    {
+        self::assertSame(['กำ', 'ลั', 'ง'], TextWrap::linesWithin('กำลัง', 1.0, $this->measurer()));
+    }
+
     public function testLatinSpacingSurvivesARoundTrip(): void
     {
         self::assertSame('alpha beta gamma', implode(' ', $this->wrap('alpha beta gamma', 6.0)));

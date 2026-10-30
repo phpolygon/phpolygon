@@ -85,6 +85,18 @@ class UIContext
      */
     private array $scrollStack = [];
 
+    /** Most measured layouts kept before the cache starts over. */
+    private const int TEXT_LAYOUT_LIMIT = 1024;
+
+    /** Room right of a disclosure label for the chevron (px). */
+    private const float DISCLOSURE_CHEVRON = 24.0;
+
+    /** @var array<string, DefinitionRowLayout> measured rows, see {@see clearTextLayouts()} */
+    private array $rowLayouts = [];
+
+    /** @var array<string, WrappedText> measured disclosure labels, see {@see clearTextLayouts()} */
+    private array $disclosureLabels = [];
+
     /** Whether any widget was hovered this frame */
     private bool $anyHovered = false;
 
@@ -228,6 +240,23 @@ class UIContext
     }
 
     /**
+     * Start a frame: forget regions left open by the last one. A panel that
+     * returned or threw between {@see beginScroll()} and {@see endScroll()}
+     * would otherwise keep its clip on every later hit-test for good.
+     *
+     * Call once per rendered frame before the first widget, never inside a
+     * region. {@see UISystem} does; a game that owns its context does it
+     * itself. Scroll offsets, focus and open dropdowns stay. The renderer's
+     * clip is left alone: renderers reset it in their own beginFrame(), and
+     * php-vio warns about popping the emptied stack.
+     */
+    public function beginFrame(): void
+    {
+        $this->scrollStack = [];
+        $this->layoutStack = [];
+    }
+
+    /**
      * Begin a UI layout region.
      *
      * @param string $flow 'vertical' (default) or 'horizontal'
@@ -291,6 +320,9 @@ class UIContext
      * y, so widgets flow exactly as in a normal column — call the usual widget
      * methods between begin/endScroll. A scrollbar is drawn on the right edge by
      * {@see endScroll()} when the content is taller than the region.
+     *
+     * Widgets inside only respond where they are visible: a part scrolled out of
+     * the region neither hovers nor clicks.
      *
      * Dropdowns work inside the region: their expanded overlay is deferred to
      * {@see flushOverlays()} (drawn after, on top, unclipped) and is captured at
@@ -369,6 +401,30 @@ class UIContext
         }
 
         $this->renderer->popScissor();
+    }
+
+    /**
+     * Current scroll offset (pixels from the top) of region $id; 0 for a region
+     * that was never scrolled. Clamped as of the last {@see beginScroll()}.
+     */
+    public function scrollOffset(string $id): float
+    {
+        return $this->scrollRegionOffset[$id] ?? 0.0;
+    }
+
+    /**
+     * Scroll region $id to $offset pixels from the top, for keyboard or gamepad
+     * paging and "jump to" actions. No wheel, hover or focus is involved.
+     *
+     * Takes effect at the next {@see beginScroll()} of that id, which clamps it
+     * to [0, max(0, contentHeight - height)]: called before it in the same
+     * frame the jump shows at once, called while the region is open it shows
+     * next frame. Pass the real content height there - a content height of 0
+     * (not measured yet) clamps the jump away. INF scrolls to the end.
+     */
+    public function setScrollOffset(string $id, float $offset): void
+    {
+        $this->scrollRegionOffset[$id] = $offset;
     }
 
     /**
@@ -706,6 +762,30 @@ class UIContext
     private function buttonBody(string $id, Rect $rect, bool $disabled): array
     {
         $s = $this->style;
+        [$hovered, $clicked, $pressing] = $this->pressState($id, $rect, $disabled);
+
+        // Visual state
+        if ($disabled) {
+            $bg = $s->disabledColor;
+            $textColor = $s->disabledTextColor;
+        } else {
+            $bg = $pressing ? $s->activeColor
+                : ($hovered ? $s->backgroundColor : $s->hoverColor);
+            $textColor = $s->textColor;
+        }
+
+        $this->renderer->drawRoundedRect($rect->x, $rect->y, $rect->width, $rect->height, $s->borderRadius, $bg);
+
+        return [$clicked, $textColor];
+    }
+
+    /**
+     * Hover and press-then-release click of a button-like widget.
+     *
+     * @return array{0: bool, 1: bool, 2: bool} hovered, clicked, being pressed
+     */
+    private function pressState(string $id, Rect $rect, bool $disabled): array
+    {
         $hovered = !$disabled && $this->isHovered($rect);
         $clicked = false;
         $pressing = false;
@@ -733,19 +813,215 @@ class UIContext
             }
         }
 
-        // Visual state
-        if ($disabled) {
-            $bg = $s->disabledColor;
-            $textColor = $s->disabledTextColor;
-        } else {
-            $bg = $pressing ? $s->activeColor
-                : ($hovered ? $s->backgroundColor : $s->hoverColor);
-            $textColor = $s->textColor;
+        return [$hovered, $clicked, $pressing];
+    }
+
+    // ── Disclosure and definition rows ───────────────────────────
+
+    /**
+     * A clickable header across the region: label on the left, a chevron on the
+     * right that points down while open (this click collapses) and up while
+     * closed. Returns true on the frame it was clicked; the caller keeps the
+     * open state and draws what belongs under it.
+     *
+     * Clicks work like {@see button()}'s, and like any click outside it, one
+     * here takes the focus from a {@see textArea()}. No background at rest, so
+     * it sits on whatever plate the caller draws; {@see UIStyle::$hoverColor}
+     * under the mouse, {@see UIStyle::$activeColor} while pressed. A long label
+     * wraps and the header grows from {@see rowHeight()} by one line each, see
+     * {@see disclosureHeight()}.
+     *
+     * @param ?Color $color        label colour (default: style text colour)
+     * @param string $font         label font ('' = the style's)
+     * @param ?Color $chevronColor chevron at rest (default: dimmed text colour);
+     *                             under the mouse it takes the style text colour
+     */
+    public function disclosure(
+        string $id,
+        string $label,
+        bool $open,
+        ?Color $color = null,
+        string $font = '',
+        ?Color $chevronColor = null,
+    ): bool {
+        $s = $this->style;
+        $w = $this->regionWidth;
+        $text = $this->disclosureLabel($label, $w, $font);
+        $h = $this->rowHeight() + ($text->lines - 1) * $text->pitch;
+
+        $rect = new Rect($this->cursorX, $this->cursorY, $w, $h);
+        [$hovered, $clicked, $pressing] = $this->pressState($id, $rect, false);
+        if ($hovered || $pressing) {
+            $this->renderer->drawRoundedRect($rect->x, $rect->y, $w, $h, $s->borderRadius, $pressing ? $s->activeColor : $s->hoverColor);
         }
 
-        $this->renderer->drawRoundedRect($rect->x, $rect->y, $rect->width, $rect->height, $s->borderRadius, $bg);
+        $this->renderer->setTextAlign(TextAlign::LEFT | TextAlign::TOP);
+        $this->renderer->setFont($font !== '' ? $font : $s->fontName);
+        $this->renderer->drawTextBox(
+            $text->text,
+            $rect->x + $s->padding,
+            $rect->y + ($h - $text->lines * $text->pitch) * 0.5,
+            $text->width + 1.0,
+            $s->fontSize,
+            $color ?? $s->textColor,
+        );
+        $this->renderer->setFont($s->fontName);
 
-        return [$clicked, $textColor];
+        // Two lines, not a glyph: no font has to carry it.
+        $tint = $hovered ? $s->textColor : ($chevronColor ?? $s->textColor->withAlpha($s->textColor->a * 0.6));
+        $cx = $rect->x + $w - self::DISCLOSURE_CHEVRON * 0.5;
+        $cy = $rect->y + $this->rowHeight() * 0.5;
+        $dy = $open ? 3.0 : -3.0;
+        $this->renderer->drawLine(new Vec2($cx - 5.0, $cy - $dy), new Vec2($cx, $cy + $dy), $tint, 1.5);
+        $this->renderer->drawLine(new Vec2($cx, $cy + $dy), new Vec2($cx + 5.0, $cy - $dy), $tint, 1.5);
+
+        $this->advance($this->flow === 'horizontal' ? $w : $h);
+
+        return $clicked;
+    }
+
+    /**
+     * Height of a {@see disclosure()} at $width (0 = the current region width):
+     * {@see rowHeight()} for one line of label, like that without item spacing.
+     */
+    public function disclosureHeight(string $label, float $width = 0.0, string $font = ''): float
+    {
+        $text = $this->disclosureLabel($label, $width > 0.0 ? $width : $this->regionWidth, $font);
+
+        return $this->rowHeight() + ($text->lines - 1) * $text->pitch;
+    }
+
+    /**
+     * A property list entry: term, note, tag and value on the head line, the
+     * wrapped body below. Parts give way by measurement when the region is too
+     * narrow and nothing is ever cut, see {@see DefinitionRowLayout}. Wrapping
+     * is {@see TextWrap}'s, so CJK breaks between characters.
+     *
+     * In a vertical flow the cursor moves down by exactly
+     * {@see definitionRowHeight()}: {@see UIStyle::$itemSpacing} is not added,
+     * {@see DefinitionRow::$rowGap} is the space between rows. Measuring happens
+     * once per text, width and renderer, not per frame.
+     */
+    public function definitionRow(DefinitionRow $row): void
+    {
+        $s = $this->style;
+        $layout = $this->definitionLayout($row, $this->regionWidth);
+        $this->renderer->setTextAlign(TextAlign::LEFT | TextAlign::TOP);
+        foreach ($layout->items as $item) {
+            $color = match ($item['part']) {
+                'term' => $row->termColor,
+                'note', 'valueLabel' => $row->noteColor,
+                'tag' => $row->tagColor,
+                default => null,
+            };
+            $this->renderer->setFont($item['font']);
+            // The lines are already broken; the extra pixel only keeps rounding
+            // in a scaled renderer from breaking one of them a second time.
+            $this->renderer->drawTextBox(
+                $item['text'],
+                $this->cursorX + $item['x'],
+                $this->cursorY + $item['y'],
+                $item['width'] + 1.0,
+                $item['size'],
+                $color ?? $s->textColor,
+            );
+        }
+        $this->renderer->setFont($s->fontName);
+
+        if ($this->flow === 'horizontal') {
+            $this->advance($this->regionWidth);
+        } else {
+            $this->cursorY += $layout->height;
+        }
+    }
+
+    /**
+     * Height of a {@see definitionRow()} at $width, its {@see DefinitionRow::$rowGap}
+     * included: rows stack without any further spacing. Shares the measuring
+     * with the draw, so calling it per frame costs a lookup.
+     */
+    public function definitionRowHeight(DefinitionRow $row, float $width): float
+    {
+        return $this->definitionLayout($row, $width)->height;
+    }
+
+    /**
+     * Forget measured {@see disclosure()} and {@see definitionRow()} text. New
+     * text, widths and renderers measure by themselves; call this only when
+     * the same string changes its width: a late font load or a changed
+     * fallback chain.
+     */
+    public function clearTextLayouts(): void
+    {
+        $this->rowLayouts = [];
+        $this->disclosureLabels = [];
+    }
+
+    /** Everything text measuring depends on besides the text. */
+    private function textLayoutScope(float $width): string
+    {
+        return spl_object_id($this->renderer) . '|' . $this->renderer->getHeight() . '|' . $width . '|' . $this->style->fontName;
+    }
+
+    private function definitionLayout(DefinitionRow $row, float $width): DefinitionRowLayout
+    {
+        $key = $this->textLayoutScope($width) . '|' . implode("\x1f", [
+            $row->term, $row->body, $row->note, $row->tag, $row->value, $row->valueLabel,
+            $row->termFont, $row->valueFont, $row->tagFont, $row->bodySize, $row->noteSize, $row->rowGap,
+        ]);
+        if (isset($this->rowLayouts[$key])) {
+            return $this->rowLayouts[$key];
+        }
+
+        $layout = DefinitionRowLayout::compute(
+            $row,
+            $width,
+            $this->style->fontName,
+            function (string $text, string $font, float $size): float {
+                $this->renderer->setFont($font);
+
+                return $this->renderer->measureText($text, $size)->width;
+            },
+            $this->linePitch(...),
+        );
+        $this->renderer->setFont($this->style->fontName);
+        if (count($this->rowLayouts) >= self::TEXT_LAYOUT_LIMIT) {
+            $this->rowLayouts = [];
+        }
+
+        return $this->rowLayouts[$key] = $layout;
+    }
+
+    private function disclosureLabel(string $label, float $width, string $font): WrappedText
+    {
+        $s = $this->style;
+        $key = $this->textLayoutScope($width) . '|' . $s->fontSize . '|' . $s->padding . '|' . $font . '|' . $label;
+        if (isset($this->disclosureLabels[$key])) {
+            return $this->disclosureLabels[$key];
+        }
+
+        $used = $font !== '' ? $font : $s->fontName;
+        $pitch = $this->linePitch($used, $s->fontSize);
+        $text = WrappedText::fit(
+            $label,
+            max(1.0, $width - $s->padding - self::DISCLOSURE_CHEVRON),
+            fn(string $line): float => $this->renderer->measureText($line, $s->fontSize)->width,
+            $pitch,
+        );
+        $this->renderer->setFont($s->fontName);
+        if (count($this->disclosureLabels) >= self::TEXT_LAYOUT_LIMIT) {
+            $this->disclosureLabels = [];
+        }
+
+        return $this->disclosureLabels[$key] = $text;
+    }
+
+    /** Distance between two lines of a text box; leaves $font selected. */
+    private function linePitch(string $font, float $size): float
+    {
+        $this->renderer->setFont($font);
+
+        return $this->renderer->measureTextBox('Hg', 1.0e6, $size)->height;
     }
 
     /**
@@ -1656,9 +1932,11 @@ class UIContext
             ) {
                 $listY = $fieldRect->y - $listH - 2.0;
             }
+            // The list is an overlay above any scroll region, drawn unclipped,
+            // so its hit-tests are unclipped too.
             $listRect = new Rect($fieldRect->x, $listY, $w, $listH);
 
-            $listHovered = $this->isHovered($listRect);
+            $listHovered = $this->isHoveredAnywhere($listRect);
             if ($listHovered) {
                 $this->anyHovered = true; $this->hoveredWidget = $id;
             }
@@ -1679,7 +1957,7 @@ class UIContext
                 $i = $vi + $scrollOffset;
                 if ($i >= $totalCount) break;
                 $optRect = new Rect($fieldRect->x, $listY + $vi * $rowH, $w, $rowH);
-                if ($this->isHovered($optRect)) {
+                if ($this->isHoveredAnywhere($optRect)) {
                     $this->anyHovered = true; $this->hoveredWidget = $id;
                     $hoveredItem = $vi;
                     if ($this->input->isMouseButtonReleased(0)) {
@@ -2018,12 +2296,29 @@ class UIContext
 
     // ── Internals ────────────────────────────────────────────────
 
+    /**
+     * Is the cursor over $rect where it can be seen? Inside a scroll region the
+     * pointer must also be inside the region (and every region around it): a
+     * widget scrolled out of the clip must not take the click.
+     */
     private function isHovered(Rect $rect): bool
     {
         if (!$this->interactive) {
             return false;
         }
-        return $rect->contains($this->designMouse());
+        $mouse = $this->designMouse();
+        foreach ($this->scrollStack as $region) {
+            if (!(new Rect($region['x'], $region['y'], $region['w'], $region['h']))->contains($mouse)) {
+                return false;
+            }
+        }
+        return $rect->contains($mouse);
+    }
+
+    /** {@see isHovered()} for overlays, which are drawn outside every clip. */
+    private function isHoveredAnywhere(Rect $rect): bool
+    {
+        return $this->interactive && $rect->contains($this->designMouse());
     }
 
     /** The mouse position in the layout's design space (see isHovered). */

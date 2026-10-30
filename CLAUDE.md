@@ -1337,6 +1337,60 @@ $row = $ui->layoutButtonRow($labels, $totalWidth, gap: 12.0, minFontSize: 16.0);
   overlong word is split between characters instead of overflowing) and
   `LabelFit::fit()` (shared-size fitting with a measuring callback).
 
+### UIContext — scroll position, disclosure, definition rows
+
+- `scrollOffset($id)` / `setScrollOffset($id, $offset)` read and set a `beginScroll()`
+  region from outside: paging keys, a gamepad stick, "jump to". The next `beginScroll()`
+  of that id clamps to `[0, max(0, content - height)]`, so `INF` means the end. Set it
+  before `beginScroll()` and the jump shows in the same frame. Content height 0 (not
+  measured yet) clamps the jump away.
+- **Hit clip:** inside `beginScroll()` a widget only hovers and clicks where it is
+  visible - `isHovered()` also requires the pointer inside every open scroll region.
+  Exception: the option list of a `dropdown()` is an overlay above every clip, so its
+  hit-tests go through `isHoveredAnywhere()`. New overlays do the same.
+- `beginFrame()` empties the scroll and layout stacks once per rendered frame, so a
+  panel that returned between `beginScroll()` and `endScroll()` cannot keep its clip on
+  every later hit-test. `UISystem` calls it; a game that creates its own `UIContext`
+  calls it before its first widget, never inside a region. It does not pop the
+  renderer's scissor: renderers reset it themselves and php-vio warns on underflow.
+
+```php
+if ($ui->disclosure('details', $title, $open, $titleColor, 'bold', $dimColor)) {
+    $open = !$open;                       // the caller owns the state
+}
+if ($open) {
+    foreach ($rows as $row) {             // DefinitionRow(term, body, note, tag, value, valueLabel, ...)
+        $ui->definitionRow($row);
+    }
+}
+$h = $ui->disclosureHeight($title, $w, 'bold') + $ui->getStyle()->itemSpacing;
+foreach ($rows as $row) { $h += $ui->definitionRowHeight($row, $w); }
+```
+
+- `disclosure()`: full region width, press-then-release like `button()`, true in the
+  click frame. No fill at rest, `hoverColor` / `activeColor` otherwise; the chevron is two
+  lines and points down while open, up while closed. A long label wraps and the header
+  grows, `disclosureHeight()` = `rowHeight()` for one line (without item spacing, like
+  `rowHeight()`). A click takes focus from a `textArea()` drawn before it, like any click
+  outside - a caller that wants it back restores it.
+- `definitionRow()`: term, note and tag from the left, value on the right, body below.
+  When that does not fit, by measurement: value moves below the body, then note and tag
+  under the term, then a term wider than the row wraps (`DefinitionRowLayout`). Text is
+  never cut: `WrappedText` breaks with `TextWrap::linesWithin()`, also a word without a
+  break opportunity - between graphemes, so Thai marks and combining accents stay on
+  their base character. Every part is its own draw, so keep code and translated text in
+  separate parts - BiDi cannot reorder across them. Font and size of a part come from
+  the row; use sizes the game already renders, each new one costs a glyph atlas.
+- Height: `definitionRowHeight()` is exactly what the cursor moves, `rowGap` included and
+  `itemSpacing` not added. Head line = `round(bodySize * 1.4)`, one body line = the
+  renderer's line pitch: at 14 px 20 + n × 16.8 + 6.
+- Measuring is cached per text, sizes, fonts, width and renderer, so a row costs a lookup
+  per frame and `definitionRowHeight()` needs no cache of its own in the game. Only a
+  string whose width changes under the same key needs `clearTextLayouts()`: a late font
+  load, a changed fallback chain. Colours are not part of the key.
+- Test: `tests/UI/UIContextScrollOffsetTest.php`, `UIContextDisclosureTest.php`,
+  `UIContextDefinitionRowTest.php`, `WrappedTextTest.php`.
+
 ### UIContext — resolution-independent panels (`UIScale`)
 
 A panel laid out for a 1080-line screen (14–16 px text) is tiny on 4K. Instead of a

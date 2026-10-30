@@ -75,6 +75,7 @@ class UISystem extends AbstractSystem
             $this->dirty = false;
         }
 
+        $this->ctx->beginFrame();
         foreach ($this->sortedKeys as $key) {
             ($this->layers[$key]['callback'])($this->ctx);
         }
