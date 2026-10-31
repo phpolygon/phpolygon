@@ -160,6 +160,8 @@ jobs:
             "src/System/OutlineSystem:System"
             "src/System/Transform3DSystem:System"
             "src/System/Physics3DSystem:System"
+            "src/System/GrassSystem:System"
+            "src/Vegetation/Grass:Vegetation"
             "src/Component/BoxCollider3D:System"
             "src/Component/MeshCollider3D:System"
             "src/Physics:Physics"

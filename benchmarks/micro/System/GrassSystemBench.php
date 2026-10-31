@@ -14,13 +14,16 @@ use PHPolygon\Rendering\MaterialRegistry;
 use PHPolygon\Rendering\Quality\GrassQuality;
 use PHPolygon\Rendering\RenderCommandList;
 use PHPolygon\System\GrassSystem;
+use PHPolygon\Vegetation\GrassDetail;
 use PHPolygon\Vegetation\GrassMask;
 
 /**
  * CPU cost per frame of a grass field at medium quality (cells prewarmed):
  * at rest (same camera: the batches are re-sent), turning on the spot (the
  * visible cells are re-tested), walking (a rebuild every 1.5 m) and building
- * one cell of tufts (mask with a path, ground callable).
+ * cells of tufts (mask with a path, ground callable) within the frame budget:
+ * the last one has to stay near {@see GrassDetail::$generateBudgetMs}, however
+ * long a cell takes. `benchmarks/grass-walk.php` gives the longest tick of a walk.
  *
  * Run:
  *   vendor/bin/phpbench run benchmarks/micro/System/GrassSystemBench.php --report=aggregate
@@ -30,6 +33,7 @@ final class GrassSystemBench
     private World $world;
     private RenderCommandList $list;
     private GrassSystem $system;
+    private ?GrassSystem $building = null;
     private int $frame = 0;
 
     public function setUp(): void
@@ -87,5 +91,22 @@ final class GrassSystemBench
     {
         $this->camera(-($this->frame++ % 2) * 2.0, 0.0);
         $this->system->render($this->world);
+    }
+
+    /**
+     * @BeforeMethods("setUp")
+     * @Revs(200)
+     * @Iterations(3)
+     */
+    public function benchBuildingCellsWithinTheBudget(): void
+    {
+        // A hard budget and a queue that never runs dry: every rev is a frame that
+        // spends its budget. The cells are gone with the system, not the ground.
+        $this->building ??= new GrassSystem($this->list, new GrassDetail(generateBurst: 1.0));
+        $this->camera(0.0, 0.0);
+        $this->building->render($this->world);
+        if ($this->building->lastPendingCells === 0) {
+            $this->building = null;
+        }
     }
 }
