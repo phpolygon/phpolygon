@@ -35,6 +35,13 @@ final readonly class PlantSpec
      * @param float     $depth         Hedge depth along local Z.
      * @param int       $accentCount   Blossoms / fruit of the accent part.
      * @param BareStyle $bareStyle     Look of {@see GrowthStage::Bare}.
+     * @param PlantCanopy|null $canopy Open foliage of leaf tufts on secondary
+     *                                 branches (broadleaf, bush, hedge). Null
+     *                                 keeps the closed clumps.
+     * @param bool      $compactImpostor The impostor is one mesh and one draw:
+     *                                 the trunk strip joins the foliage part
+     *                                 and takes its material. Always on with a
+     *                                 canopy.
      */
     public function __construct(
         public PlantForm $form,
@@ -53,6 +60,8 @@ final readonly class PlantSpec
         public float $depth = 0.8,
         public int $accentCount = 36,
         public BareStyle $bareStyle = BareStyle::Twigs,
+        public ?PlantCanopy $canopy = null,
+        public bool $compactImpostor = false,
     ) {
         if ($height <= 0.0 || !is_finite($height)) {
             throw new \InvalidArgumentException('PlantSpec: height must be > 0');
@@ -80,6 +89,7 @@ final readonly class PlantSpec
         int $branchCount = 5,
         int $accentCount = 36,
         BareStyle $bareStyle = BareStyle::Twigs,
+        ?PlantCanopy $canopy = null,
     ): self {
         return new self(
             form: $form,
@@ -93,6 +103,7 @@ final readonly class PlantSpec
             clumpCount: $clumpCount,
             accentCount: $accentCount,
             bareStyle: $bareStyle,
+            canopy: $canopy,
         );
     }
 
@@ -105,6 +116,7 @@ final readonly class PlantSpec
         ?float $frondLength = null,
         int $accentCount = 6,
         BareStyle $bareStyle = BareStyle::Stump,
+        bool $compactImpostor = false,
     ): self {
         $frond = $frondLength ?? max(1.2, min(4.2, $height * 0.36));
         return new self(
@@ -118,11 +130,12 @@ final readonly class PlantSpec
             frondLength: $frond,
             accentCount: $accentCount,
             bareStyle: $bareStyle,
+            compactImpostor: $compactImpostor,
         );
     }
 
     /** Free-standing bush; $width is the full diameter. */
-    public static function bush(float $height, float $width, int $seed = 1, int $clumpCount = 5, int $accentCount = 14): self
+    public static function bush(float $height, float $width, int $seed = 1, int $clumpCount = 5, int $accentCount = 14, ?PlantCanopy $canopy = null): self
     {
         return new self(
             form: PlantForm::Bush,
@@ -131,11 +144,12 @@ final readonly class PlantSpec
             seed: $seed,
             clumpCount: $clumpCount,
             accentCount: $accentCount,
+            canopy: $canopy,
         );
     }
 
     /** Hedge segment along local X. */
-    public static function hedge(float $length, float $height, float $depth = 0.8, int $seed = 1, int $accentCount = 0): self
+    public static function hedge(float $length, float $height, float $depth = 0.8, int $seed = 1, int $accentCount = 0, ?PlantCanopy $canopy = null): self
     {
         return new self(
             form: PlantForm::Hedge,
@@ -145,6 +159,7 @@ final readonly class PlantSpec
             length: $length,
             depth: $depth,
             accentCount: $accentCount,
+            canopy: $canopy,
         );
     }
 

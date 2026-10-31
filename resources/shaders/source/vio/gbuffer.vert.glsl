@@ -43,6 +43,7 @@ uniform vec3  u_mesh_local_aabb_max;
 // Foliage wind — identical math to mesh3d.vert.glsl (foliageSway).
 uniform int   u_foliage_wind;
 uniform float u_wind_flutter;
+uniform int   u_foliage_tufts;    // Material::$windTufts: the mesh carries a phase per leaf tuft
 uniform float u_foliage_motion;
 uniform vec2  u_foliage_fade;
 
@@ -128,6 +129,11 @@ vec3 foliageSway(vec3 pos, mat4 model, float time) {
         vec3 c = (u_mesh_local_aabb_min + u_mesh_local_aabb_max) * 0.5;
         vec3 e = (u_mesh_local_aabb_max - u_mesh_local_aabb_min) * 0.5;
         float r = clamp(length(pos.xz - c.xz) / max(max(e.x, e.z), 1e-3), 0.0, 1.0);
+        if (u_foliage_tufts == 1) {
+            // Tuft mesh: uv.x = phase of the tuft, uv.y = 0 centre .. 1 leaf tip.
+            r = 0.45 + 0.55 * clamp(a_uv.y, 0.0, 1.0);
+            phase += a_uv.x * 6.2831;
+        }
         vec3 f = vec3(sin(time * 4.1 + dot(pos, vec3(1.7, 0.9, 1.3)) + phase),
                       sin(time * 5.3 + dot(pos, vec3(0.8, 1.9, 1.1)) + phase) * 0.6,
                       cos(time * 3.7 + dot(pos, vec3(1.2, 0.6, 1.9)) + phase));

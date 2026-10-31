@@ -32,6 +32,9 @@ final class FoliageShaderConsistencyTest extends TestCase
         $fragments = [
             'uniform toggle' => 'uniform int   u_foliage_wind;',
             'flutter uniform' => 'uniform float u_wind_flutter;',
+            'tuft uniform' => 'uniform int   u_foliage_tufts;',
+            'tuft phase' => 'phase += a_uv.x * 6.2831;',
+            'tuft weight' => 'r = 0.45 + 0.55 * clamp(a_uv.y, 0.0, 1.0);',
             'motion scale' => 'uniform float u_foliage_motion;',
             'fade range' => 'uniform vec2  u_foliage_fade;',
             'bend with height squared' => '0.0009 * h * h * amp',
@@ -68,11 +71,11 @@ final class FoliageShaderConsistencyTest extends TestCase
     public function testRenderersUploadTheNewUniforms(): void
     {
         $vio = (string) file_get_contents(__DIR__ . '/../../src/Rendering/VioRenderer3D.php');
-        foreach (["'u_two_sided'", "'u_foliage_wind'", "'u_wind_flutter'", "'u_foliage_motion'", "'u_foliage_fade'"] as $u) {
+        foreach (["'u_two_sided'", "'u_foliage_wind'", "'u_wind_flutter'", "'u_foliage_tufts'", "'u_foliage_motion'", "'u_foliage_fade'"] as $u) {
             self::assertGreaterThanOrEqual(2, substr_count($vio, $u), "VioRenderer3D sets {$u} for forward and G-buffer");
         }
         $gl = (string) file_get_contents(__DIR__ . '/../../src/Rendering/OpenGLRenderer3D.php');
-        foreach (["'u_foliage_wind'", "'u_wind_flutter'", "'u_foliage_motion'", "'u_foliage_fade'"] as $u) {
+        foreach (["'u_foliage_wind'", "'u_wind_flutter'", "'u_foliage_tufts'", "'u_foliage_motion'", "'u_foliage_fade'"] as $u) {
             self::assertStringContainsString($u, $gl);
         }
     }

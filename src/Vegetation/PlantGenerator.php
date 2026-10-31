@@ -21,6 +21,9 @@ use PHPolygon\Runtime\PerfProfiler;
  *
  * Budgets for a default broadleaf tree (7 clumps): Lod0 about 1300-1600
  * triangles, Lod1 about 600, Lod2 about 140, impostor about 20.
+ *
+ * With a {@see PlantCanopy} the crown is open: leaf tufts in groups on
+ * secondary branches instead of closed clumps, in the same budgets.
  */
 final class PlantGenerator
 {
@@ -30,7 +33,7 @@ final class PlantGenerator
     {
         return PerfProfiler::section('mesh.generate.plant', static function () use ($spec, $stage, $lod): PlantParts {
             if ($lod === PlantLod::Impostor) {
-                return self::impostor(self::generate($spec, $stage, PlantLod::Lod2));
+                return self::impostor(self::generate($spec, $stage, PlantLod::Lod2), $spec);
             }
             return match ($spec->form) {
                 PlantForm::Round, PlantForm::Umbrella, PlantForm::Column, PlantForm::Weeping => self::broadleaf($spec, $stage, $lod->value),
@@ -86,18 +89,22 @@ final class PlantGenerator
             : max($clear + 0.3, $crownBottom + ($cy - $crownBottom) * 0.7);
         $clear = min($clear, $trunkTop - 0.2);
 
+        // A canopy has one wood mesh for LOD0 and LOD1 ({@see PlantVariant::woodLod()}).
+        $canopy = $s->canopy;
+        $woodLod = $canopy !== null && $lod === 1 ? 0 : $lod;
+
         // Trunk: lathed profile with root flare (sunk 0.15 m) and taper.
-        $profile = $lod >= 2
+        $profile = $woodLod >= 2
             ? [[$r0 * 1.5, -0.15], [$r0, 0.5], [$r0 * 0.6, $trunkTop], [0.0, $trunkTop + $r0 * 0.4]]
             : [
                 [$r0 * 1.7, -0.15], [$r0 * 1.42, 0.05], [$r0 * 1.12, 0.32], [$r0, 0.85],
                 [$r0 * 0.82, $trunkTop * 0.6], [$r0 * 0.55, $trunkTop], [0.0, $trunkTop + $r0 * 0.4],
             ];
-        $wood->addLathe($profile, [10, 7, 5][$lod]);
+        $wood->addLathe($profile, $canopy !== null ? [8, 7, 5][$woodLod] : [10, 7, 5][$lod]);
 
         // Main branches: tapered sweeps from the trunk into the crown.
         $bare = $g === GrowthStage::Bare;
-        $branchCount = $lod >= 2 ? ($bare ? min(3, $s->branchCount) : 0) : $s->branchCount;
+        $branchCount = $woodLod >= 2 ? ($bare || $canopy !== null ? min(3, $s->branchCount) : 0) : $s->branchCount;
         if ($g === GrowthStage::Sprouting) {
             $branchCount = min($branchCount, 3);
         }
@@ -107,8 +114,10 @@ final class PlantGenerator
             PlantForm::Weeping => 0.7,
             default => 0.62,
         };
-        $sides = [6, 4, 3][$lod];
+        $sides = $canopy !== null ? [4, 4, 3][$woodLod] : [6, 4, 3][$lod];
         $base = self::rnd($seed, 11) * 2.0 * M_PI;
+        /** @var list<array{0: Vec3, 1: Vec3, 2: Vec3}> $mains */
+        $mains = [];
         for ($b = 0; $b < $branchCount; $b++) {
             $a = $base + $b * self::GOLDEN + (self::rnd($seed, 20 + $b) - 0.5) * 0.5;
             $t = $branchCount > 1 ? $b / ($branchCount - 1) : 0.5;
@@ -127,14 +136,15 @@ final class PlantGenerator
             $p1 = new Vec3($ex * 0.3, $startY + $rise * 0.55, $ez * 0.3);
             $p2 = new Vec3($ex * 0.7, $startY + $rise * 0.9, $ez * 0.7);
             $end = new Vec3($ex, $endY, $ez);
-            if ($lod === 0) {
+            $mains[] = [$p1, new Vec3(($p1->x + $ex) * 0.5, ($p1->y + $endY) * 0.5, ($p1->z + $ez) * 0.5), $end];
+            if ($lod === 0 && $canopy === null) {
                 $wood->addTube([$start, $p1, $p2, $end], [$r0 * 0.45, $r0 * 0.36, $r0 * 0.25, $r0 * 0.15], $sides);
             } else {
                 $wood->addTube([$start, $p1, $end], [$r0 * 0.45, $r0 * 0.3, $r0 * 0.15], $sides);
             }
-            if ($bare && $lod <= 1) {
+            if ($bare && $woodLod <= 1) {
                 // Leafless: fine twigs make the crown readable from the first moment.
-                $twigs = $lod === 0 ? 3 : 2;
+                $twigs = $woodLod === 0 ? 3 : 2;
                 for ($tw = 0; $tw < $twigs; $tw++) {
                     $aa = $a + ($tw - ($twigs - 1) * 0.5) * 0.8;
                     $len = $R * (0.3 + 0.15 * self::rnd($seed, 100 + $b * 7 + $tw));
@@ -145,10 +155,26 @@ final class PlantGenerator
             }
         }
 
-        // Crown: deformed foliage clumps.
+        // Crown: tuft groups on secondary branches, or deformed foliage clumps.
         /** @var list<array{0: float, 1: float, 2: float, 3: float, 4: float, 5: float}> $clumps */
         $clumps = [];
-        if (!$bare) {
+        if ($canopy !== null) {
+            $full = $canopy->tuftsFor($s->form);
+            $clumps = self::crownGroups($s->form, $canopy, $full, $R, $ry, $cy, $seed);
+            if ($woodLod <= 1) {
+                self::addSecondaryBranches($wood, $mains, $clumps, $r0);
+            }
+            if (!$bare) {
+                // A slim crown hides its trunk only with larger tufts.
+                $spread = ($R * $R + 2.0 * $R * $ry) / 3.0 * ($s->form === PlantForm::Column ? 1.7 : 1.0);
+                $keep = match ($g) {
+                    GrowthStage::Sprouting => 0.4,
+                    GrowthStage::Half => 0.85,
+                    default => 1.0,
+                };
+                self::addTufts($leaf, $canopy, $clumps, [0.0, $cy, 0.0, $R, $ry, $R], $full, $keep, $spread, $lod, $seed);
+            }
+        } elseif (!$bare) {
             $full = [$s->clumpCount, max(1, min(5, (int) ceil($s->clumpCount * 0.6))), 1][$lod];
             $n = match ($g) {
                 GrowthStage::Sprouting => max(1, (int) ceil($full * 0.5)),
@@ -485,6 +511,27 @@ final class PlantGenerator
             return self::finish($wood, $leaf, $accent, new Vec3(0.0, $h * 0.5, 0.0), 0.0, 0.0);
         }
 
+        if ($s->canopy !== null) {
+            // A leafy shell around a smaller body: the body closes the view to the ground.
+            [$st, $sl] = [[5, 7], [4, 6], [4, 6]][$lod];
+            $body = new PlantMeshBuilder();
+            $body->addClump(0.0, $h * 0.42, 0.0, $w * 0.6, $h * 0.4, $w * 0.6, $st, $sl, 0.12, $seed * 0.53, -0.6);
+            $leaf->append(PlantMeshBuilder::tiltNormals($body->toMeshData(), -0.55));
+            $full = $s->canopy->tuftsFor($s->form);
+            $n = $s->canopy->groupsFor($full);
+            for ($i = 0; $i < $n; $i++) {
+                $a = $a0 + $i * self::GOLDEN;
+                $v = ($i + 0.5) / $n;
+                $ring = sqrt(max(0.0, 1.0 - $v * $v));
+                $clumps[] = [cos($a) * $ring * $w * 0.6, $h * (0.28 + 0.34 * $v), sin($a) * $ring * $w * 0.6, $w * 0.42, $h * 0.24, $w * 0.42];
+            }
+            $spread = ($w * $w + $w * $h) / 3.0;
+            $keep = $g === GrowthStage::Sprouting ? 0.6 : 1.0;
+            self::addTufts($leaf, $s->canopy, $clumps, [0.0, $h * 0.42, 0.0, $w, $h * 0.58, $w], $full, $keep, $spread, $lod, $seed);
+            self::addAccent($accent, $s, $g, $lod, $clumps, max(0.04, min(0.09, $w * 0.07)));
+            return self::finish($wood, $leaf, $accent, new Vec3(0.0, $h * 0.5, 0.0), 0.0, 0.0);
+        }
+
         if ($lod >= 2) {
             $clumps[] = [0.0, $h * 0.5, 0.0, $w * 0.95, $h * 0.5, $w * 0.95];
         } else {
@@ -548,6 +595,12 @@ final class PlantGenerator
             return self::finish($wood, $leaf, $accent, new Vec3(0.0, $h * 0.5, 0.0), 0.0, 0.0);
         }
 
+        if ($s->canopy !== null) {
+            self::hedgeCanopy($leaf, $s->canopy, $len, $h, $d, $g, $lod, $seed);
+            self::addAccent($accent, $s, $g, $lod, [[0.0, $h * 0.5, 0.0, $len * 0.5, $h * 0.5, $d * 0.5]], 0.06);
+            return self::finish($wood, $leaf, $accent, new Vec3(0.0, $h * 0.5, 0.0), 0.0, 0.0);
+        }
+
         $segLen = [1.0, 2.0, $len][$lod];
         $n = max(1, (int) round($len / $segLen));
         $cell = $len / $n;
@@ -572,6 +625,241 @@ final class PlantGenerator
     // ------------------------------------------------------------------
     //  Shared pieces
     // ------------------------------------------------------------------
+
+    /**
+     * Tuft groups over the crown envelope: a golden spiral from the top down,
+     * pushed outward (the centre stays hollow) and uneven in depth, as
+     * [x, y, z, radiusX, radiusY, radiusZ]. The underside stays open.
+     *
+     * @return list<array{0: float, 1: float, 2: float, 3: float, 4: float, 5: float}>
+     */
+    private static function crownGroups(PlantForm $form, PlantCanopy $canopy, int $tufts, float $R, float $ry, float $cy, int $seed): array
+    {
+        $n = $canopy->groupsFor($tufts);
+        [$top, $bottom] = match ($form) {
+            PlantForm::Umbrella => [0.95, -0.1],
+            PlantForm::Weeping => [0.95, -0.8],
+            PlantForm::Column => [0.95, -0.9],
+            default => [0.95, -0.45],
+        };
+        $spread = ($R * $R + 2.0 * $R * $ry) / 3.0;
+        $g = 0.5 * sqrt(4.0 * $spread / $n);
+        $gh = min($g, $R * 0.34);
+        $gv = min($g, $ry * 0.5);
+        if ($form === PlantForm::Weeping) {
+            $gv *= 1.3;
+        }
+        $a0 = self::rnd($seed, 800) * 2.0 * M_PI;
+        $groups = [];
+        for ($i = 0; $i < $n; $i++) {
+            $u = $n > 1 ? $i / ($n - 1) : 0.5;
+            $v = $top + ($bottom - $top) * $u;
+            $ring = sqrt(max(0.0, 1.0 - $v * $v));
+            $a = $a0 + $i * self::GOLDEN + (self::rnd($seed, 801 + $i) - 0.5) * 0.6;
+            $reachH = max($canopy->hollow, 1.0 - 1.25 * $gh / $R) * (0.84 + 0.16 * self::rnd($seed, 900 + $i));
+            $reachV = 1.0 - 1.2 * $gv / $ry;
+            $groups[] = [
+                cos($a) * $ring * $R * $reachH,
+                $cy + $v * $ry * $reachV,
+                sin($a) * $ring * $R * $reachH,
+                $gh,
+                $gv,
+                $gh,
+            ];
+        }
+        return $groups;
+    }
+
+    /**
+     * One thin branch per tuft group, from the nearest point of a main branch
+     * to the group, so wood runs through the crown.
+     *
+     * @param list<array{0: Vec3, 1: Vec3, 2: Vec3}> $mains
+     * @param list<array{0: float, 1: float, 2: float, 3: float, 4: float, 5: float}> $groups
+     */
+    private static function addSecondaryBranches(PlantMeshBuilder $wood, array $mains, array $groups, float $r0): void
+    {
+        if ($mains === []) {
+            return;
+        }
+        foreach ($groups as [$x, $y, $z]) {
+            $tip = new Vec3($x, $y, $z);
+            $reach = $x * $x + $z * $z;
+            $from = null;
+            $best = INF;
+            foreach ($mains as $points) {
+                foreach ($points as $p) {
+                    $d = ($p->x - $x) ** 2 + ($p->y - $y) ** 2 + ($p->z - $z) ** 2;
+                    // Branches grow outward: leaving beyond the tip would bend back.
+                    if ($p->x * $p->x + $p->z * $p->z > $reach) {
+                        $d += 4.0 * $reach + 1.0;
+                    }
+                    if ($d < $best) {
+                        $best = $d;
+                        $from = $p;
+                    }
+                }
+            }
+            if ($from !== null) {
+                $wood->addTube([$from, $tip], [$r0 * 0.2, $r0 * 0.07], 3);
+            }
+        }
+    }
+
+    /**
+     * The leaf tufts of a crown or bush: `$full * $keep` of the plant's tufts
+     * at LOD0, fewer and larger on LOD1, a few large ones on LOD2 - always the
+     * first ones of the same sequence, spread evenly over the groups, so a
+     * growth stage or a LOD only adds or removes tufts and nothing jumps.
+     *
+     * @param list<array{0: float, 1: float, 2: float, 3: float, 4: float, 5: float}> $groups
+     * @param array{0: float, 1: float, 2: float, 3: float, 4: float, 5: float} $envelope crown centre and radii
+     * @param float $spread mean squared radius of the envelope
+     */
+    private static function addTufts(PlantMeshBuilder $leaf, PlantCanopy $canopy, array $groups, array $envelope, int $full, float $keep, float $spread, int $lod, int $seed): void
+    {
+        $count = count($groups);
+        if ($count === 0) {
+            return;
+        }
+        $share = [1.0, PlantCanopy::LOD1_TUFTS, PlantCanopy::LOD2_TUFTS][$lod];
+        $base = 1.05 * sqrt(4.0 * $spread / $full) * $canopy->tuftSize;
+        // Coverage goes with count x size²; the far LODs lose some on purpose: gaps stay gaps.
+        $radius = $base * [1.0, 0.94, 0.86][$lod] / sqrt($share);
+        // A slim crown stays slim on the far LODs.
+        $radius = min($radius, max($base, $envelope[3] * 0.6));
+        $inset = ($radius - $base) * 0.6;
+        $points = [$canopy->points, max(3, $canopy->points - 1), max(3, $canopy->points - 1)][$lod];
+        $n = max(1, (int) ceil($full * $keep * $share));
+        $perGroup = max(1, (int) ceil($full / $count));
+
+        // Evenly spread order of the groups: any prefix covers the whole crown.
+        $order = range(0, $count - 1);
+        $rank = [];
+        foreach ($order as $i) {
+            $rank[$i] = fmod(($i + 1) * 0.6180339887, 1.0);
+        }
+        asort($rank);
+        $order = array_keys($rank);
+
+        [$ccx, $ccy, $ccz, $crx, $cry, $crz] = $envelope;
+        for ($k = 0; $k < $n; $k++) {
+            $gi = $order[$k % $count];
+            $j = intdiv($k, $count);
+            [$gx, $gy, $gz, $rx, $ry, $rz] = $groups[$gi];
+
+            $ox = ($gx - $ccx) / $crx;
+            $oy = ($gy - $ccy) / $cry;
+            $oz = ($gz - $ccz) / $crz;
+            $ol = max(1e-5, sqrt($ox * $ox + $oy * $oy + $oz * $oz));
+            $ox /= $ol;
+            $oy /= $ol;
+            $oz /= $ol;
+
+            // Golden spiral over the group, turned per group, leaning out of the crown.
+            $v = 1.0 - 2.0 * ($j + 0.5) / $perGroup;
+            $ring = sqrt(max(0.0, 1.0 - $v * $v));
+            $a = self::rnd($seed, 1000 + $gi) * 2.0 * M_PI + $j * self::GOLDEN;
+            $dx = cos($a) * $ring + 0.75 * $ox;
+            $dy = $v + 0.75 * $oy;
+            $dz = sin($a) * $ring + 0.75 * $oz;
+            $dl = max(1e-5, sqrt($dx * $dx + $dy * $dy + $dz * $dz));
+            $dx /= $dl;
+            $dy /= $dl;
+            $dz /= $dl;
+
+            $key = 1200 + $gi * 41 + $j * 7;
+            $depth = 0.7 + 0.3 * self::rnd($seed, $key);
+            // The larger far tufts sit further in: the outline stays the outline of LOD0.
+            $px = $gx + $dx * ($rx * $depth - $inset);
+            $py = $gy + $dy * ($ry * $depth - $inset);
+            $pz = $gz + $dz * ($rz * $depth - $inset);
+
+            $jx = self::rnd($seed, $key + 1) - 0.5;
+            $jy = self::rnd($seed, $key + 2) - 0.5;
+            $jz = self::rnd($seed, $key + 3) - 0.5;
+            $nx = $dx + 1.1 * $jx;
+            $ny = $dy + 1.1 * $jy;
+            $nz = $dz + 1.1 * $jz;
+            $nl = max(1e-5, sqrt($nx * $nx + $ny * $ny + $nz * $nz));
+
+            // Shades with the crown; a lift keeps the underside from going black.
+            $sx = ($px - $ccx) / $crx * 0.65 + $dx * 0.35;
+            $sy = ($py - $ccy) / $cry * 0.65 + $dy * 0.35 + 0.3;
+            $sz = ($pz - $ccz) / $crz * 0.65 + $dz * 0.35;
+            $sl = max(1e-5, sqrt($sx * $sx + $sy * $sy + $sz * $sz));
+
+            $leaf->addTuft(
+                $px, $py, $pz,
+                $nx / $nl, $ny / $nl, $nz / $nl,
+                $sx / $sl, $sy / $sl, $sz / $sl,
+                $radius * (0.82 + 0.36 * self::rnd($seed, $key + 4)),
+                $points,
+                self::rnd($seed, $key + 5) * 2.0 * M_PI,
+                self::rnd($seed, $key + 6),
+            );
+        }
+    }
+
+    /**
+     * Hedge with leaf structure: a slimmer box-like body along the whole
+     * segment, tufts over both flanks and the top. The body's ends meet the
+     * next segment; the tufts break its outline.
+     */
+    private static function hedgeCanopy(PlantMeshBuilder $leaf, PlantCanopy $canopy, float $len, float $h, float $d, GrowthStage $g, int $lod, int $seed): void
+    {
+        [$st, $sl] = [[4, 6], [4, 6], [4, 8]][$lod];
+        $body = new PlantMeshBuilder();
+        // Without tufts (LOD2) the body stands for the whole hedge.
+        [$fh, $fd] = $lod >= 2 ? [0.5, 0.5] : [0.44, 0.36];
+        $body->addClump(0.0, $h * $fh, 0.0, $len * 0.5, $h * $fh, $d * $fd, $st, $sl, 0.03, $seed * 0.71, -0.9, 0.3);
+        $leaf->append(PlantMeshBuilder::tiltNormals($body->toMeshData(), -0.55));
+        if ($lod >= 2) {
+            return;
+        }
+        $full = $canopy->tuftsFor(PlantForm::Hedge, $len);
+        $share = [1.0, PlantCanopy::LOD1_TUFTS][$lod];
+        $keep = $g === GrowthStage::Sprouting ? 0.6 : 1.0;
+        $n = max(2, (int) ceil($full * $share * $keep));
+        $area = (2.0 * $h + $d) * $len;
+        $radius = 0.85 * sqrt($area / ($full * M_PI)) * $canopy->tuftSize * [1.0, 0.94][$lod] / sqrt($share);
+        $points = max(3, $canopy->points - 1 - $lod);
+        for ($k = 0; $k < $n; $k++) {
+            $key = 1500 + $k * 11;
+            $along = fmod(($k + 1) * 0.6180339887, 1.0);
+            $x = -$len * 0.5 + $along * $len;
+            $face = $k % 3;
+            $w = self::rnd($seed, $key);
+            if ($face === 2) {
+                // Top: stands proud, so the crest is no straight line.
+                $y = $h * (0.88 + 0.1 * $w) - $radius * 0.2;
+                $z = (self::rnd($seed, $key + 1) - 0.5) * $d * 0.7;
+                [$nx, $ny, $nz] = [0.0, 1.0, 0.0];
+            } else {
+                $side = $face === 0 ? 1.0 : -1.0;
+                $y = $h * (0.12 + 0.76 * $w);
+                $z = $side * $d * 0.43;
+                [$nx, $ny, $nz] = [0.0, 0.25, $side];
+            }
+            $nx += (self::rnd($seed, $key + 2) - 0.5) * 1.3;
+            $ny += (self::rnd($seed, $key + 3) - 0.5) * 1.1;
+            $nz += (self::rnd($seed, $key + 4) - 0.5) * 1.1;
+            $nl = sqrt($nx * $nx + $ny * $ny + $nz * $nz);
+            $sx = 0.0;
+            $sy = $face === 2 ? 1.0 : 0.3 + 0.7 * ($y / $h - 0.5);
+            $sz = $face === 2 ? 0.0 : ($face === 0 ? 1.0 : -1.0);
+            $sl2 = sqrt($sx * $sx + $sy * $sy + $sz * $sz);
+            $leaf->addTuft(
+                $x, $y, $z,
+                $nx / $nl, $ny / $nl, $nz / $nl,
+                $sx / $sl2, $sy / $sl2, $sz / $sl2,
+                $radius * (0.85 + 0.3 * self::rnd($seed, $key + 5)),
+                $points,
+                self::rnd($seed, $key + 6) * 2.0 * M_PI,
+                self::rnd($seed, $key + 7),
+            );
+        }
+    }
 
     /** A cut stump with root flare; returns its height. */
     private static function stump(PlantMeshBuilder $wood, float $r0, int $seed, int $lod, float $hMin, float $hMax): float
@@ -690,8 +978,10 @@ final class PlantGenerator
      * over height. Normals lean outward from the crown centre so the planes
      * shade like a volume; the foliage material lights both sides.
      */
-    private static function impostor(PlantParts $p): PlantParts
+    private static function impostor(PlantParts $p, PlantSpec $spec): PlantParts
     {
+        $compact = $spec->compactImpostor || $spec->canopy !== null;
+        $stem = new PlantMeshBuilder();
         $wood = new PlantMeshBuilder();
         $leaf = new PlantMeshBuilder();
         $c = $p->crownCenter;
@@ -699,13 +989,28 @@ final class PlantGenerator
             if ($p->trunkRadius > 0.0 && $p->leaf->vertices !== []) {
                 $topY = max(0.5, self::minY($p->leaf) + 0.2);
                 $hw = $p->trunkRadius * 1.1;
-                self::crossedStrip($wood, [[-0.1, $hw * 1.3], [$topY, $hw * 0.7]], 0.0, 0.0, new Vec3(0.0, $topY * 0.5, 0.0));
+                self::crossedStrip($compact ? $stem : $wood, [[-0.1, $hw * 1.3], [$topY, $hw * 0.7]], 0.0, 0.0, new Vec3(0.0, $topY * 0.5, 0.0));
             } else {
                 self::crossedStrip($wood, self::profile($p->wood, 0.0, 0.0, 3), 0.0, 0.0, new Vec3(0.0, $p->height * 0.5, 0.0));
             }
         }
         if ($p->leaf->vertices !== []) {
-            self::crossedStrip($leaf, self::profile($p->leaf, $c->x, $c->z, 5), $c->x, $c->z, $c);
+            $rows = self::profile($p->leaf, $c->x, $c->z, $spec->canopy !== null ? 7 : 5);
+            if ($spec->canopy !== null) {
+                // Every other row pulled in: a jagged outline for the open crown.
+                foreach ($rows as $k => $row) {
+                    if (($k & 1) === 1) {
+                        $rows[$k][1] = $row[1] * 0.82;
+                        $rows[$k][2] = ($row[2] ?? $row[1]) * 0.82;
+                    }
+                }
+            }
+            self::crossedStrip($leaf, $rows, $c->x, $c->z, $c);
+            if (!$stem->isEmpty()) {
+                // In the foliage draw a stem takes the leaf colour: normals pointing
+                // down keep it out of the sun, so it reads as a darker green stem.
+                $leaf->append(PlantMeshBuilder::tiltNormals($stem->toMeshData(), -6.0));
+            }
         }
         return new PlantParts(
             wood: $wood->toMeshData(),

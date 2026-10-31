@@ -19,6 +19,12 @@ use PHPolygon\Vegetation\GrowthStage;
  * few draws per (growth stage, LOD, foliage tint, shadow) group instead of one
  * entity per plant.
  *
+ * Instances live in WORLD space: the system draws the rows as they are and
+ * ignores a Transform3D on the entity, exactly like
+ * {@see \PHPolygon\Vegetation\FoliageColliders} and placement filters. To move a
+ * group, rewrite its rows; tools that read the rows must not apply the entity
+ * transform to them.
+ *
  * Every instance has a world position (trunk foot), a yaw, a uniform scale, a
  * {@see GrowthStage} and a leaf scale (0..1+, scales the foliage around the
  * crown centre - tween it after a stage change so the crown grows visibly).
@@ -38,7 +44,7 @@ class FoliageInstances extends AbstractComponent
     public string $variant;
 
     /**
-     * One row per plant: [x, y, z, yaw, scale, stage, leafScale].
+     * One row per plant in world space: [x, y, z, yaw, scale, stage, leafScale].
      *
      * @var list<array{0: float, 1: float, 2: float, 3: float, 4: float, 5: int, 6: float}>
      */

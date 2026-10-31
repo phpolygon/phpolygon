@@ -135,6 +135,106 @@ final class VioFoliageRenderTest extends TestCase
         self::assertEqualsWithDelta($topStill, self::centroidX($calm, 6, 14), 0.5, 'no wind, no bend');
     }
 
+    public function testTuftsFlutterOutOfStepOnlyWithTheTuftFlag(): void
+    {
+        // Two thin posts, same height, carrying opposite tuft phases in their UVs.
+        $post = BoxMesh::generate(0.5, 6.0, 0.5);
+        $v = [];
+        $n = [];
+        $uv = [];
+        $idx = [];
+        foreach ([[-3.0, 0.0], [3.0, 0.5]] as $i => [$x, $phase]) {
+            $base = intdiv(count($v), 3);
+            for ($k = 0, $c = count($post->vertices); $k < $c; $k += 3) {
+                $v[] = $post->vertices[$k] + $x;
+                $v[] = $post->vertices[$k + 1] + 3.0;
+                $v[] = $post->vertices[$k + 2];
+                $n[] = $post->normals[$k];
+                $n[] = $post->normals[$k + 1];
+                $n[] = $post->normals[$k + 2];
+                $uv[] = $phase;
+                $uv[] = 1.0;
+            }
+            foreach ($post->indices as $index) {
+                $idx[] = $base + $index;
+            }
+        }
+        MeshRegistry::register('posts', new MeshData($v, $n, $uv, $idx));
+        MaterialRegistry::register('plain_flutter', new Material(albedo: new Color(0.9, 0.9, 0.9), roughness: 0.9, useEnvironmentMap: false, foliageWind: true, windFlutter: 1.0));
+        MaterialRegistry::register('tuft_flutter', new Material(albedo: new Color(0.9, 0.9, 0.9), roughness: 0.9, useEnvironmentMap: false, foliageWind: true, windFlutter: 1.0, windTufts: true));
+        $view = Mat4::lookAt(new Vec3(0.0, 3.0, 14.0), new Vec3(0.0, 3.0, 0.0), new Vec3(0.0, 1.0, 0.0));
+        $wind = new SetWind(new Vec3(1.0, 0.0, 0.0), 1.0);
+
+        $gap = function (string $material) use ($view, $wind): float {
+            $image = $this->render([new DrawMesh('posts', $material, Mat4::identity())], $view, wind: $wind, time: 1.3);
+            return self::centroidXBetween($image, 48, 96) - self::centroidXBetween($image, 0, 48);
+        };
+        $still = $this->render([new DrawMesh('posts', 'plain_flutter', Mat4::identity())], $view, wind: new SetWind(new Vec3(1.0, 0.0, 0.0), 0.0));
+        $rest = self::centroidXBetween($still, 48, 96) - self::centroidXBetween($still, 0, 48);
+
+        // The plain flutter moves both by nearly the same offset (phase from the origin),
+        // apart from the position term; the tuft phase separates them by half a period.
+        self::assertGreaterThan(abs($gap('plain_flutter') - $rest) + 1.0, abs($gap('tuft_flutter') - $rest), 'tufts flutter in their own phase');
+    }
+
+    /**
+     * A canopy tree against the sun, seen from below: backs and undersides are
+     * lit (two-sided) instead of black.
+     */
+    public function testUndersideOfACanopyIsNotBlack(): void
+    {
+        $spec = \PHPolygon\Vegetation\PlantSpec::tree(\PHPolygon\Vegetation\PlantForm::Round, 8.5, 3.0, 3, clearTrunk: 3.0, branchCount: 7, canopy: new \PHPolygon\Vegetation\PlantCanopy());
+        MeshRegistry::register('canopy_leaf', \PHPolygon\Vegetation\PlantGenerator::generate($spec)->leaf);
+        MaterialRegistry::register('canopy', Material::foliage(new Color(0.12, 0.34, 0.05), tufts: true));
+        $below = Mat4::lookAt(new Vec3(1.5, 0.5, 2.0), new Vec3(0.0, 6.5, 0.0), new Vec3(0.0, 1.0, 0.0));
+        $above = Mat4::lookAt(new Vec3(8.0, 12.0, 8.0), new Vec3(0.0, 6.0, 0.0), new Vec3(0.0, 1.0, 0.0));
+        $draw = [new DrawMesh('canopy_leaf', 'canopy', Mat4::identity())];
+        $under = self::greenStats($this->render($draw, $below, sun: new Vec3(0.2, -1.0, 0.1)));
+        $over = self::greenStats($this->render($draw, $above, sun: new Vec3(0.2, -1.0, 0.1)));
+        self::assertGreaterThan(400, $under['pixels'], 'the crown is on screen');
+        self::assertGreaterThan($over['mean'] * 0.3, $under['mean'], sprintf('underside mean %.1f, top mean %.1f', $under['mean'], $over['mean']));
+        self::assertLessThan(0.02, $under['black'] / $under['pixels'], 'no black leaves');
+    }
+
+    /** @return array{pixels: int, mean: float, black: int} */
+    private static function greenStats(string $image): array
+    {
+        $pixels = 0;
+        $sum = 0.0;
+        $black = 0;
+        for ($y = 0; $y < self::H; $y++) {
+            for ($x = 0; $x < self::W; $x++) {
+                $p = self::px($image, $x, $y);
+                $max = max($p);
+                if ($p === [0, 0, 0]) {
+                    continue; // clear colour: sky
+                }
+                $pixels++;
+                $sum += $max;
+                $black += $max < 8 ? 1 : 0;
+            }
+        }
+        return ['pixels' => $pixels, 'mean' => $pixels > 0 ? $sum / $pixels : 0.0, 'black' => $black];
+    }
+
+    /** Mean x of the lit pixels in columns [$x0, $x1). */
+    private static function centroidXBetween(string $image, int $x0, int $x1): float
+    {
+        $sum = 0.0;
+        $n = 0;
+        for ($y = 0; $y < self::H; $y++) {
+            for ($x = $x0; $x < $x1; $x++) {
+                $p = self::px($image, $x, $y);
+                if ($p[0] + $p[1] + $p[2] > 60) {
+                    $sum += $x;
+                    $n++;
+                }
+            }
+        }
+        self::assertGreaterThan(0, $n, "lit pixels in columns {$x0}-{$x1}");
+        return $sum / $n;
+    }
+
     public function testInstancedBatchWithoutShadowsCastsNone(): void
     {
         // A box floating over a floor, lit from straight above: with shadows its
