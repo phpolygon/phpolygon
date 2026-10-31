@@ -348,7 +348,8 @@ MaterialRegistry::register('cobbles', new Material(
 `GraphicsSettingsManager` uses: `Off` (ground material only), `Low`, `Medium` (default), `High`,
 `Ultra` (stylised blades, more segments, density and reach per level) and `Realistic` (thin folded
 blades, smooth gradient, light through the blades). The levels share one form language; only the
-resolution changes. The setting is not part of the adaptive stack (changing it regenerates cells).
+resolution changes. The setting is not part of the adaptive stack (changing it regenerates cells,
+spread over frames: `GrassDetail::$generateBudgetMs` is shared by all fields).
 
 ### Upscaling (`GraphicsSettings::$upscaler`)
 

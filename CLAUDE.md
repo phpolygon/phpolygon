@@ -596,6 +596,20 @@ carries the look. Game-agnostic: bounds, ground, mask, colours and density come 
 - `GrassMask`: include rect/circle/polygon (inward feather), exclude path (polyline + half width),
   rect, circle, polygon, `Zone` (outward feather: fewer and shorter tufts at the edge, none inside),
   `multiply(callable)` for anything else (ground material, trampled spots). `factor(x, z)` 0..1.
+  From 16 edges + areas `factor()` answers from lazy tiles (`new GrassMask(tileSize: 12.0)`): each holds
+  only what reaches it, polygons cut to the tile (Sutherland-Hodgman), paths reduced to the segments in
+  reach, so a query costs what is near the point and not every edge of the mask. Same values as
+  `factorExhaustive()` to 1e-9, in the feather and at path kinks too (`GrassMaskTest`). One mask per ground:
+  `$fieldMask->multiplyMask($shared)` shares its tiles, and an edit of it reaches `version` of every mask on
+  it, through any depth, so the fields rebuild. A callable is opaque, also one wrapping a mask: after a change
+  in what it returns, `GrassField::touch()`.
+- `GrassGroundRaster` (`new GrassGroundRaster(fn($x, $z) => [?height, kind])`, `::fromHeight()`, `step` 1 m):
+  for a ground that is slow per point. A grid point is measured when a corner needs it, once; `heightAt()`
+  bilinear over the corners with ground, `coverage($x, $z, $kind)` / `anyCoverage()` soft over one step
+  (`groundAt: $raster->heightAt(...)`, `$mask->multiply(...)`). One raster for all fields over a ground;
+  `clear()` after the ground changed. Points sit in blocks of 16 x 16 (16 kB), at most `maxBlocks` (4096, about
+  65 MB or 1 x 1 km at 1 m); the oldest block goes and is measured again if asked for, so memory has a limit
+  and no read pays for a growing table. Beyond 2^35 steps a read throws (`MAX_INDEX`).
 - `GrassTuftMesh` / `GrassBladeShape`: a tuft = tapered, leaning, curving blades; `uv.x` = blade
   random, `uv.y` = 0 root .. 1 tip; normals lean toward up by `upBias` (calm shading); optional folded
   midrib. Blade layout depends only on seed + blade index, so `withSegments()` is a LOD with the same
@@ -608,9 +622,22 @@ carries the look. Game-agnostic: bounds, ground, mask, colours and density come 
   Low..Ultra stylised (2/3/4/7 segments, flat colour bands), Realistic thin folded blades, smooth
   gradient, strong transmission.
 - `GrassSystem` (register after `Camera3DSystem`, before `Renderer3DSystem`; optional
-  `GraphicsSettingsManager` makes it follow the settings): cells (12 m) generated lazily nearest
-  first within `generateBudgetMs` (or `prewarm()`), jittered world grid (seamless, deterministic),
-  tufts packed as f32 matrices sorted by a per-tuft hash. Per frame the visible cells within the fade
+  `GraphicsSettingsManager` makes it follow the settings): cells (12 m), jittered world grid (seamless,
+  deterministic), tufts packed as f32 matrices sorted by a per-tuft hash. Generation is time-sliced:
+  ALL fields share one queue, nearest cell of any field first, and one `generateBudgetMs` per frame; a
+  `GrassCellBuilder` stops at the deadline and resumes next frame, one candidate being the smallest slice.
+  The result does not depend on the cut (`GrassTimeSliceTest`: same bytes at any budget). The queue reaches
+  one cell beyond the fade range, and a cell shows only when whole, at a density that is ~0 for a walking
+  camera, so nothing pops. A missing cell in sight (`lastMissingDistance` < fade range) raises the budget
+  up to `generateBurst` x at the full range: a longer frame instead of a hole; 1 = hard budget. Sight counts
+  heights: a cell not built yet is taken to span what the finished cells of its field span, so a camera far
+  above or below a field pays the plain budget (until the first cell of a field nothing is known and it
+  counts as level). A cell a camera left is dropped half-built, an edit of field or mask drops the work too,
+  and so does an exception from ground or mask, which goes on to the caller. `prewarm()` builds
+  everything in reach at once: call it wherever a loading screen ends or a camera jumps, with the spot
+  the camera will be at. It also runs what a game's ground and mask set up on first use (otherwise a
+  single candidate of the first frame). `lastPendingCells` / `lastMissingDistance` for profiles.
+  Per frame the visible cells within the fade
   range contribute the PREFIX of tufts whose hash is below the density at the cell's nearest point
   minus the rebuild distance (a superset of what the shader keeps) -> one packed `DrawMeshInstanced`
   per variant and LOD (`variants x 2` draws), `castShadows: false`. Same camera = commands re-sent
@@ -633,6 +660,14 @@ carries the look. Game-agnostic: bounds, ground, mask, colours and density come 
   8.5 M, 6), Realistic +1.45 / +1.8 ms (49k, 6.2 M, 8). CPU at rest 0.03-0.06 ms, walking median
   0.1-0.4 ms (rebuild peaks 0.9 ms Medium, ~4.5 ms Ultra). `examples/grass_catalog.php` renders the
   review set and, with `measure`, these numbers (at the given size).
+- Cell generation measured 2026-10-31 with `benchmarks/grass-walk.php` (PHP 8.5.5 CLI without OPcache,
+  Medium, headless, two fields at 5 m/s and 60 fps over a crowded synthetic mask and a slow ground, through a
+  raster and tiles, `GrassSystem::render()` per tick, ticks with a GC run left out, 3 runs): p99 2.9-3.1 ms,
+  max 3.3-4.2 ms, generation max 2.2 ms, no cell missing in sight, `prewarm()` 1.4-1.5 s. With `--plain` (mask
+  and ground read directly) the budget stays at the burst, p50 8.2 ms, and cells miss from 18.5 m: tiles and
+  raster are what makes a walk fit. A GC run costs what the heap costs, not what grass costs. Mask query
+  6.2 us against 168 us exhaustively (`GrassMaskBench`), raster read 0.57 us; a raster over 1300 x 1300 points
+  stays at 65 MB, its longest single read 190 us.
 - The fragment stage fades the blade colour toward the root colour near the fade range
   (`u_grass_far_fade`), so a ground tinted like the root colour takes over without a bright rim.
 

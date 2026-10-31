@@ -40,7 +40,11 @@ final readonly class GrassDetail
      * @param float  $rootShade              Darkening at the root (contact shadow), 0..1.
      * @param float  $patchScale             Frequency (1/m) of the field-wide colour noise.
      * @param float  $translucency           Light through the blades against the sun (0..1), strongest at the tips.
-     * @param float  $generateBudgetMs       CPU time per frame for building new cells.
+     * @param float  $generateBudgetMs       CPU time per frame for building new cells, all fields together.
+     * @param float  $generateBurst          Budget factor while a missing cell is in sight: all of it at
+     *                                       {@see $fullRange}, none at {@see $fadeRange}, by the distance
+     *                                       to the camera. A longer frame instead of a hole; 1 = the
+     *                                       budget is hard.
      */
     public function __construct(
         public GrassBladeShape $shape = new GrassBladeShape(),
@@ -61,6 +65,7 @@ final readonly class GrassDetail
         public float $patchScale = 0.12,
         public float $translucency = 0.25,
         public float $generateBudgetMs = 2.0,
+        public float $generateBurst = 4.0,
     ) {}
 
     /** The preset of a quality level; null for {@see GrassQuality::Off}. */
@@ -181,6 +186,8 @@ final readonly class GrassDetail
         ?float $translucency = null,
         ?int $colorBands = null,
         ?int $maxInstances = null,
+        ?float $generateBudgetMs = null,
+        ?float $generateBurst = null,
     ): self {
         return new self(
             shape: $shape ?? $this->shape,
@@ -200,7 +207,8 @@ final readonly class GrassDetail
             rootShade: $this->rootShade,
             patchScale: $this->patchScale,
             translucency: $translucency ?? $this->translucency,
-            generateBudgetMs: $this->generateBudgetMs,
+            generateBudgetMs: $generateBudgetMs ?? $this->generateBudgetMs,
+            generateBurst: $generateBurst ?? $this->generateBurst,
         );
     }
 }

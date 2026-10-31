@@ -22,6 +22,7 @@ use PHPolygon\Rendering\Quality\GrassQuality;
 use PHPolygon\Rendering\RenderCommandList;
 use PHPolygon\Runtime\FrameSpikeRecorder;
 use PHPolygon\Runtime\PerfProfiler;
+use PHPolygon\Vegetation\GrassCellBuilder;
 use PHPolygon\Vegetation\GrassDetail;
 use PHPolygon\Vegetation\GrassTuftMesh;
 
@@ -29,9 +30,14 @@ use PHPolygon\Vegetation\GrassTuftMesh;
  * Grass blades near the camera for every {@see GrassField}.
  *
  * Tufts ({@see GrassTuftMesh}) are generated lazily in square cells around the
- * camera - deterministic per field seed and grid position, at most
- * {@see GrassDetail::$generateBudgetMs} per frame, nearest cells first - and kept
- * as packed instance matrices sorted by a per-tuft hash. Per frame, the cells in
+ * camera - deterministic per field seed and grid position - and kept as packed
+ * instance matrices sorted by a per-tuft hash. All fields share one queue, nearest
+ * cell first, and one budget per frame ({@see GrassDetail::$generateBudgetMs});
+ * a cell that does not fit stops mid-way and goes on next frame
+ * ({@see GrassCellBuilder}). The queue reaches {@see LEAD_CELLS} beyond the fade
+ * range, so a walking camera finds its cells ready, and shows nothing of a cell
+ * before it is whole. Only a cell missing in sight, heights counted, raises the
+ * budget ({@see GrassDetail::$generateBurst}). Per frame, the cells in
  * the view frustum and within {@see GrassDetail::$fadeRange} contribute a prefix
  * of their tufts (the ones whose hash is below the density at the cell's nearest
  * point - always a superset of what the shader keeps), and all of them go out as
@@ -54,6 +60,9 @@ class GrassSystem extends AbstractSystem
     /** Bytes of one packed instance matrix. */
     private const int STRIDE = 64;
 
+    /** Cells built ahead beyond the fade range. */
+    private const int LEAD_CELLS = 1;
+
     /** Draws emitted last frame. */
     public int $lastDrawCount = 0;
 
@@ -71,6 +80,16 @@ class GrassSystem extends AbstractSystem
 
     /** Milliseconds spent generating cells last frame. */
     public float $lastGenerateMs = 0.0;
+
+    /** Cells still missing after last frame (in reach, all fields). */
+    public int $lastPendingCells = 0;
+
+    /**
+     * Metres from the camera to the nearest cell still missing after last frame, INF
+     * if none: below the fade range it is a gap in the grass. Heights are an estimate:
+     * a cell not built yet is taken to span what the field's finished cells span.
+     */
+    public float $lastMissingDistance = INF;
 
     private ?GrassDetail $detail;
 
@@ -91,10 +110,16 @@ class GrassSystem extends AbstractSystem
      *     instances: int,
      *     triangles: int,
      *     view: array<float>,
-     *     complete: bool
+     *     complete: bool,
+     *     jobs: array<string, GrassCellBuilder>,
+     *     y0: float,
+     *     y1: float
      * }>
      */
     private array $state = [];
+
+    /** @var \Closure(): int nanoseconds */
+    private \Closure $clock;
 
     public function __construct(
         private readonly RenderCommandList $commandList,
@@ -106,8 +131,11 @@ class GrassSystem extends AbstractSystem
         public bool $frustumCulling = true,
         /** Cells kept beyond the fade range before they are dropped from the cache. */
         public int $maxCachedCells = 900,
+        /** @var (\Closure(): int)|null Nanoseconds for the budget, for tests; null = hrtime. */
+        ?\Closure $clock = null,
     ) {
         $this->detail = $quality instanceof GrassQuality ? $quality->detail() : $quality;
+        $this->clock = $clock ?? static fn(): int => (int) hrtime(true);
     }
 
     public function setQuality(GrassQuality $quality): void
@@ -139,6 +167,8 @@ class GrassSystem extends AbstractSystem
         $this->lastRebuilt = false;
         $this->lastGeneratedCells = 0;
         $this->lastGenerateMs = 0.0;
+        $this->lastPendingCells = 0;
+        $this->lastMissingDistance = INF;
         $detail = $this->detail();
         if ($detail === null) {
             $this->state = [];
@@ -162,25 +192,44 @@ class GrassSystem extends AbstractSystem
             pushStrength: $detail->pushStrength,
         ));
 
-        $budgetEnd = hrtime(true) + (int) ($detail->generateBudgetMs * 1e6);
-        $alive = [];
+        // What every field shows and what all of them still miss, then the work
+        // on the shared queue, then the draws in field order.
+        /** @var array<int, GrassField> $fields */
+        $fields = [];
+        $plans = [];
+        $queue = [];
         foreach ($world->query(GrassField::class) as $entity) {
             $field = $entity->get(GrassField::class);
             $oid = spl_object_id($field);
-            $alive[$oid] = true;
-            $this->emitField($oid, $field, $detail, $eye->x, $eye->y, $eye->z, $planes, $budgetEnd, $view);
+            $fields[$oid] = $field;
+            $st = $this->fieldState($oid, $field, $detail);
+            $this->state[$oid] = $st;
+            // At rest: the very same camera, nothing changed, every cell built.
+            if (!$st['complete'] || $st['view'] !== $view || $st['signature'] === '') {
+                $plans[$oid] = $this->planField($oid, $field, $detail, $eye->x, $eye->y, $eye->z, $queue);
+            }
         }
         foreach (array_keys($this->state) as $oid) {
-            if (!isset($alive[$oid])) {
+            if (!isset($fields[$oid])) {
                 unset($this->state[$oid]);
+            }
+        }
+        $pending = $this->generate($fields, $detail, $queue, $plans);
+        foreach ($fields as $oid => $field) {
+            if (isset($plans[$oid])) {
+                $this->emitField($oid, $field, $detail, $plans[$oid], !isset($pending[$oid]), $eye->x, $eye->y, $eye->z, $planes, $view);
+            } else {
+                $this->send($this->state[$oid]);
             }
         }
         PerfProfiler::end();
     }
 
     /**
-     * Generate every cell of every field within `$radius` of (x, z) now (loading
-     * screens, teleports), ignoring the per-frame budget.
+     * Generate every cell of every field within `$radius` of (x, z) now, ignoring
+     * the per-frame budget. For a loading screen and a teleport: nothing else stops
+     * a camera that lands somewhere new from seeing the cells appear. The default
+     * radius is everything the queue would build from there.
      */
     public function prewarm(World $world, float $x, float $z, ?float $radius = null): int
     {
@@ -189,20 +238,19 @@ class GrassSystem extends AbstractSystem
             return 0;
         }
         $this->prepare($detail);
-        $radius ??= $detail->fadeRange;
+        $radius ??= $detail->fadeRange + self::LEAD_CELLS * max(1.0, $this->cellSize);
         $made = 0;
         foreach ($world->query(GrassField::class) as $entity) {
             $field = $entity->get(GrassField::class);
             $oid = spl_object_id($field);
-            $st = $this->fieldState($oid, $field, $detail);
+            $this->state[$oid] = $this->fieldState($oid, $field, $detail);
             foreach ($this->candidateCells($field, $x, $z, $radius) as [$ix, $iz]) {
                 $key = $ix . ':' . $iz;
-                if (!isset($st['cells'][$key])) {
-                    $st['cells'][$key] = $this->generateCell($field, $detail, $ix, $iz);
+                if (!isset($this->state[$oid]['cells'][$key])) {
+                    $this->advance($oid, $field, $detail, $key, $ix, $iz, PHP_INT_MAX);
                     $made++;
                 }
             }
-            $this->state[$oid] = $st;
         }
         return $made;
     }
@@ -220,61 +268,147 @@ class GrassSystem extends AbstractSystem
     // ── per field ─────────────────────────────────────────────────────────
 
     /**
-     * @param list<array{0: float, 1: float, 2: float, 3: float}> $planes
-     * @param array<float> $view view and projection matrix of the frame
+     * Sort a field's cells in reach into built ones (visible map) and missing ones
+     * (the shared queue). Half-built cells that left the reach are dropped.
+     *
+     * @param list<array{0: float, 1: int, 2: int, 3: int, 4: float}> $queue [distance to the camera, field, ix, iz, XZ distance]
+     * @return array<string, float> built cells within the fade range: key => XZ distance
      */
-    private function emitField(int $oid, GrassField $field, GrassDetail $detail, float $ex, float $ey, float $ez, array $planes, int $budgetEnd, array $view): void
+    private function planField(int $oid, GrassField $field, GrassDetail $detail, float $ex, float $ey, float $ez, array &$queue): array
     {
-        $st = $this->fieldState($oid, $field, $detail);
-        // At rest: the very same camera, nothing changed, every cell built.
-        if ($st['complete'] && $st['view'] === $view && $st['signature'] !== '') {
-            $this->send($st);
-            return;
-        }
+        $st = $this->state[$oid];
         $cs = max(1.0, $this->cellSize);
         $fade = $detail->fadeRange;
-        $tallest = $detail->shape->heightMax * $field->height * (1.0 + $field->heightJitter) + 0.2;
-
-        // Visible cells and the ones still missing (nearest first).
+        $reach = $fade + self::LEAD_CELLS * $cs;
+        // Heights of a cell not built yet: what the finished ones span. Until one
+        // is finished nothing speaks against the cell being level with the camera.
+        $dy = $st['y0'] <= $st['y1'] ? max($st['y0'] - $ey, 0.0, $ey - $st['y1'] - self::tallest($field, $detail)) : 0.0;
         $visible = [];
-        $missing = [];
-        foreach ($this->candidateCells($field, $ex, $ez, $fade) as [$ix, $iz]) {
+        $jobs = [];
+        foreach ($this->candidateCells($field, $ex, $ez, $reach) as [$ix, $iz]) {
             $key = $ix . ':' . $iz;
             $x0 = $ix * $cs;
             $z0 = $iz * $cs;
             $dx = max($x0 - $ex, 0.0, $ex - ($x0 + $cs));
             $dz = max($z0 - $ez, 0.0, $ez - ($z0 + $cs));
             $dh = sqrt($dx * $dx + $dz * $dz);
-            if ($dh > $fade) {
+            if ($dh > $reach) {
                 continue;
             }
             if (!isset($st['cells'][$key])) {
-                $missing[] = [$dh, $ix, $iz];
-                continue;
-            }
-            $visible[$key] = $dh;
-        }
-        $complete = true;
-        if ($missing !== []) {
-            usort($missing, static fn(array $a, array $b): int => $a[0] <=> $b[0]);
-            $t0 = hrtime(true);
-            $built = 0;
-            foreach ($missing as $i => [$dh, $ix, $iz]) {
-                // Always at least the nearest cell, then within the budget.
-                if ($i > 0 && hrtime(true) > $budgetEnd) {
-                    $complete = false;
-                    break;
+                $queue[] = [sqrt($dh * $dh + $dy * $dy), $oid, $ix, $iz, $dh];
+                if (isset($st['jobs'][$key])) {
+                    $jobs[$key] = $st['jobs'][$key];
                 }
-                $key = $ix . ':' . $iz;
-                $st['cells'][$key] = $this->generateCell($field, $detail, $ix, $iz);
+            } elseif ($dh <= $fade) {
                 $visible[$key] = $dh;
-                $built++;
             }
-            $this->lastGeneratedCells += $built;
-            $elapsedNs = hrtime(true) - $t0;
-            $this->lastGenerateMs += $elapsedNs / 1e6;
-            FrameSpikeRecorder::note(FrameSpikeRecorder::NOTE_GRASS, $built, $elapsedNs);
         }
+        $this->state[$oid]['jobs'] = $jobs;
+        return $visible;
+    }
+
+    /**
+     * Work the queue, nearest cell of any field first, until the budget of the
+     * frame is spent. Builders keep what they got done. The burst follows the distance
+     * to the camera, not the one on the ground: a cell far below it is no gap.
+     *
+     * @param array<int, GrassField> $fields
+     * @param list<array{0: float, 1: int, 2: int, 3: int, 4: float}> $queue
+     * @param array<int, array<string, float>> $plans gets the cells finished here
+     * @return array<int, true> fields with cells left
+     */
+    private function generate(array $fields, GrassDetail $detail, array $queue, array &$plans): array
+    {
+        if ($queue === []) {
+            return [];
+        }
+        usort($queue, static fn(array $a, array $b): int => $a[0] <=> $b[0]);
+        $clock = $this->clock;
+        $t0 = $clock();
+        $density = 1.0 - self::smoothstep($detail->fullRange, $detail->fadeRange, $queue[0][0]);
+        $budgetMs = $detail->generateBudgetMs * (1.0 + (max(1.0, $detail->generateBurst) - 1.0) * $density);
+        $deadline = $t0 + (int) ($budgetMs * 1e6);
+        $built = 0;
+        $done = 0;
+        foreach ($queue as $i => [, $oid, $ix, $iz, $dh]) {
+            if ($i > 0 && $clock() >= $deadline) {
+                break;
+            }
+            $key = $ix . ':' . $iz;
+            if (!$this->advance($oid, $fields[$oid], $detail, $key, $ix, $iz, $deadline)) {
+                break;
+            }
+            if ($dh <= $detail->fadeRange) {
+                $plans[$oid][$key] = $dh;
+            }
+            $built++;
+            $done = $i + 1;
+        }
+        $pending = [];
+        for ($i = $done, $n = count($queue); $i < $n; $i++) {
+            $pending[$queue[$i][1]] = true;
+        }
+        $this->lastPendingCells = count($queue) - $done;
+        $this->lastMissingDistance = $queue[$done][0] ?? INF;
+        $this->lastGeneratedCells = $built;
+        $elapsedNs = $clock() - $t0;
+        $this->lastGenerateMs = $elapsedNs / 1e6;
+        FrameSpikeRecorder::note(FrameSpikeRecorder::NOTE_GRASS, $built, $elapsedNs);
+        return $pending;
+    }
+
+    /**
+     * Work on one cell until the deadline: stores the cell when it is finished, the
+     * builder when it is not. A ground or mask that throws leaves the builder with
+     * half a slice nobody could resume, so it goes.
+     *
+     * @return bool whether the cell is finished
+     */
+    private function advance(int $oid, GrassField $field, GrassDetail $detail, string $key, int $ix, int $iz, int $deadline): bool
+    {
+        $job = $this->state[$oid]['jobs'][$key] ?? new GrassCellBuilder($field, $detail, $this->cellSize, $ix, $iz);
+        try {
+            if (!$job->run($deadline, $this->clock)) {
+                $this->state[$oid]['jobs'][$key] = $job;
+                return false;
+            }
+        } catch (\Throwable $e) {
+            unset($this->state[$oid]['jobs'][$key]);
+            throw $e;
+        }
+        $cell = $job->result();
+        $st = $this->state[$oid];
+        $st['cells'][$key] = $cell;
+        unset($st['jobs'][$key]);
+        if ($cell['hashes'] !== []) {
+            $st['y0'] = min($st['y0'], $cell['y0']);
+            $st['y1'] = max($st['y1'], $cell['y1']);
+        }
+        $this->state[$oid] = $st;
+        return true;
+    }
+
+    /** Height a tuft of the field can reach above its root. */
+    private static function tallest(GrassField $field, GrassDetail $detail): float
+    {
+        return $detail->shape->heightMax * $field->height * (1.0 + $field->heightJitter) + 0.2;
+    }
+
+    /**
+     * @param array<string, float> $visible built cells within the fade range
+     * @param list<array{0: float, 1: float, 2: float, 3: float}> $planes
+     * @param array<float> $view view and projection matrix of the frame
+     */
+    private function emitField(int $oid, GrassField $field, GrassDetail $detail, array $visible, bool $complete, float $ex, float $ey, float $ez, array $planes, array $view): void
+    {
+        $st = $this->state[$oid];
+        $cs = max(1.0, $this->cellSize);
+        $fade = $detail->fadeRange;
+        $tallest = self::tallest($field, $detail);
+
+        // The order must not depend on when a cell got finished.
+        ksort($visible);
 
         // Frustum and 3D distance per cell: the visible set.
         $shown = [];
@@ -410,7 +544,10 @@ class GrassSystem extends AbstractSystem
      *     instances: int,
      *     triangles: int,
      *     view: array<float>,
-     *     complete: bool
+     *     complete: bool,
+     *     jobs: array<string, GrassCellBuilder>,
+     *     y0: float,
+     *     y1: float
      * }
      */
     private function fieldState(int $oid, GrassField $field, GrassDetail $detail): array
@@ -442,6 +579,9 @@ class GrassSystem extends AbstractSystem
             'triangles' => 0,
             'view' => [],
             'complete' => false,
+            'jobs' => [],
+            'y0' => INF,
+            'y1' => -INF,
         ];
     }
 
@@ -464,87 +604,6 @@ class GrassSystem extends AbstractSystem
             }
         }
         return $out;
-    }
-
-    /**
-     * Tufts of one cell: a jittered grid on world coordinates (seamless across
-     * cells), kept by the mask and the field density, set on the ground.
-     *
-     * @return array{ix: int, iz: int, y0: float, y1: float, hashes: list<list<float>>, packed: list<string>}
-     */
-    private function generateCell(GrassField $field, GrassDetail $detail, int $ix, int $iz): array
-    {
-        $cs = max(1.0, $this->cellSize);
-        $variants = max(1, $detail->variants);
-        $tufts = $detail->tuftsPerSquareMetre * max(1.0, $field->density);
-        $keepBase = min(1.0, max(0.0, $field->density));
-        /** @var list<list<array{0: float, 1: string}>> $rows per variant: [hash, packed] */
-        $rows = array_fill(0, $variants, []);
-        $y0 = INF;
-        $y1 = -INF;
-        if ($tufts > 0.0 && $keepBase > 0.0) {
-            $a = 1.0 / sqrt($tufts);
-            $x0 = $ix * $cs;
-            $z0 = $iz * $cs;
-            $gx0 = (int) ceil(max($x0, $field->minX) / $a - 0.5);
-            $gx1 = (int) ceil(min($x0 + $cs, $field->maxX) / $a - 0.5) - 1;
-            $gz0 = (int) ceil(max($z0, $field->minZ) / $a - 0.5);
-            $gz1 = (int) ceil(min($z0 + $cs, $field->maxZ) / $a - 0.5) - 1;
-            $seed = $field->seed;
-            $height = $field->height;
-            $jitter = max(0.0, min(0.9, $field->heightJitter));
-            $sink = $field->sink;
-            $maskOpen = $field->mask->isOpen();
-            for ($gx = $gx0; $gx <= $gx1; $gx++) {
-                for ($gz = $gz0; $gz <= $gz1; $gz++) {
-                    $h = crc32($seed . ':' . $gx . ':' . $gz);
-                    $h = ($h * 1103515245 + 12345) & 0x7fffffff;
-                    $rx = $h / 2147483648.0;
-                    $h = ($h * 1103515245 + 12345) & 0x7fffffff;
-                    $rz = $h / 2147483648.0;
-                    $x = ($gx + 0.5 + ($rx - 0.5) * 0.9) * $a;
-                    $z = ($gz + 0.5 + ($rz - 0.5) * 0.9) * $a;
-                    $h = ($h * 1103515245 + 12345) & 0x7fffffff;
-                    $keep = $h / 2147483648.0;
-                    $m = $maskOpen ? 1.0 : $field->mask->factor($x, $z);
-                    if ($keep >= $m * $keepBase) {
-                        continue;
-                    }
-                    $y = $field->groundHeight($x, $z);
-                    if ($y === null) {
-                        continue;
-                    }
-                    $y -= $sink;
-                    $h = ($h * 1103515245 + 12345) & 0x7fffffff;
-                    $yaw = $h / 2147483648.0 * 2.0 * M_PI;
-                    $h = ($h * 1103515245 + 12345) & 0x7fffffff;
-                    $sc = $height * (1.0 + ($h / 2147483648.0 - 0.5) * 2.0 * $jitter) * (0.55 + 0.45 * $m);
-                    $h = ($h * 1103515245 + 12345) & 0x7fffffff;
-                    $hash = $h / 2147483648.0;
-                    $h = ($h * 1103515245 + 12345) & 0x7fffffff;
-                    $variant = $h % $variants;
-                    $c = cos($yaw) * $sc;
-                    $s = sin($yaw) * $sc;
-                    // T * Ry(yaw) * S(sc), column-major; m[3] carries the tuft hash.
-                    $rows[$variant][] = [$hash, pack('f16', $c, 0.0, -$s, $hash, 0.0, $sc, 0.0, 0.0, $s, 0.0, $c, 0.0, $x, $y, $z, 1.0)];
-                    $y0 = min($y0, $y);
-                    $y1 = max($y1, $y);
-                }
-            }
-        }
-        $hashes = [];
-        $packed = [];
-        $any = false;
-        foreach ($rows as $v => $list) {
-            usort($list, static fn(array $p, array $q): int => $p[0] <=> $q[0]);
-            $hashes[$v] = array_column($list, 0);
-            $packed[$v] = implode('', array_column($list, 1));
-            $any = $any || $list !== [];
-        }
-        if (!$any) {
-            return ['ix' => $ix, 'iz' => $iz, 'y0' => 0.0, 'y1' => 0.0, 'hashes' => [], 'packed' => []];
-        }
-        return ['ix' => $ix, 'iz' => $iz, 'y0' => $y0, 'y1' => $y1, 'hashes' => array_values($hashes), 'packed' => array_values($packed)];
     }
 
     /**

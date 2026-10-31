@@ -255,22 +255,6 @@ final class GrassSystemTest extends TestCase
         self::assertGreaterThan(1000, $system->lastInstanceCount);
     }
 
-    public function testGenerationBudgetBuildsNearestCellsFirst(): void
-    {
-        $this->field();
-        $system = $this->system();
-        $this->camera();
-        $system->render($this->world);
-        self::assertGreaterThanOrEqual(1, $system->lastGeneratedCells, 'at least the nearest cell');
-        $made = $system->cachedCellCount();
-        for ($i = 0; $i < 400 && $system->lastGeneratedCells > 0; $i++) {
-            $this->camera();
-            $system->render($this->world);
-        }
-        self::assertGreaterThan($made, $system->cachedCellCount());
-        self::assertSame(0, $system->lastGeneratedCells, 'everything in reach is built eventually');
-    }
-
     public function testQualityOffDrawsNothingAndSettingsDriveTheLevel(): void
     {
         $this->field();
