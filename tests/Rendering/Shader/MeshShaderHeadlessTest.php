@@ -465,6 +465,10 @@ class MeshShaderHeadlessTest extends TestCase
         $shadowedOff = $this->renderVolumetricSum(volumetric: false, occluded: true);
         $shadowed = $this->renderVolumetricSum(volumetric: true, occluded: true);
 
+        // Otherwise the checks below say nothing: a cascade reading an empty slot
+        // leaves the air fully lit or fully dark, whatever the map holds.
+        $this->assertLessThan($litOff - 0.15, $shadowedOff,
+            sprintf('the map must reach the cascade (lit %.3f, shadowed %.3f)', $litOff, $shadowedOff));
         $this->assertGreaterThan($litOff + 0.15, $lit,
             sprintf('lit air must scatter (off %.3f, on %.3f)', $litOff, $lit));
         $this->assertEqualsWithDelta($shadowedOff, $shadowed, 0.02,

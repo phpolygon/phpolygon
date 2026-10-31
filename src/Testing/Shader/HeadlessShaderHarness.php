@@ -489,9 +489,15 @@ final class HeadlessShaderHarness
      * mixes in real data does not clash:
      *   0/1/2 = albedo / SSAO / SDF-AO (sampler2D)
      *   3/4/5 = probe field r/g/b      (sampler3D)
-     *   6     = u_shadow_map + cascade 0 (sampler2DShadow)
-     *   7     = environment cubemap    (samplerCube)
+     *   6     = cascade 0              (sampler2DShadow)
+     *   7     = u_shadow_map           (sampler2DShadow)
      *   8/9   = cascade 1/2            (sampler2DShadow)
+     *   10    = environment cubemap    (samplerCube)
+     *
+     * u_shadow_map and cascade 0 hold the same texture on separate units, as in
+     * VioRenderer3D::uploadShadowUniforms: the typed-register backends map one
+     * unit to one sampler (the last uniform set wins), a shared unit would leave
+     * u_csm_map_0 without the depth map.
      */
     public function bindDummyShadowSamplers(): void
     {
@@ -503,13 +509,13 @@ final class HeadlessShaderHarness
         $tex = vio_render_target_texture($this->dummyShadowTarget);
         // Match the engine's texture unit choices for the cascade samplers
         // so a future test that mixes in real shadow data does not clash.
-        foreach ([6, 8, 9] as $unit) {
+        foreach ([6, 7, 8, 9] as $unit) {
             vio_bind_texture($this->ctx, $tex, $unit);
         }
         $this->setUniform('u_csm_map_0',  6);
         $this->setUniform('u_csm_map_1',  8);
         $this->setUniform('u_csm_map_2',  9);
-        $this->setUniform('u_shadow_map', 6);
+        $this->setUniform('u_shadow_map', 7);
 
         $this->bindDummyMaterialSamplers();
     }
@@ -629,8 +635,8 @@ final class HeadlessShaderHarness
             }
         }
         if ($this->dummyCubemap !== null) {
-            vio_bind_cubemap($this->ctx, $this->dummyCubemap, 7);
-            $this->setUniform('u_environment_map', 7);
+            vio_bind_cubemap($this->ctx, $this->dummyCubemap, 10);
+            $this->setUniform('u_environment_map', 10);
         }
     }
 
