@@ -87,6 +87,19 @@ final class PlantVariant
     }
 
     /**
+     * The LOD whose wood mesh a plant at `$lod` draws. A broadleaf tree with a
+     * {@see PlantSpec::$canopy} has one wood mesh for LOD0 and LOD1: the two
+     * share a wood batch, so a variant that needs both costs one foliage draw
+     * more, not a pair.
+     */
+    public function woodLod(PlantLod $lod): PlantLod
+    {
+        return $lod === PlantLod::Lod1 && $this->spec->canopy !== null && $this->spec->form->isBroadleaf()
+            ? PlantLod::Lod0
+            : $lod;
+    }
+
+    /**
      * Register every stage x LOD x part mesh lazily in the MeshRegistry
      * (generated on first upload). Called by {@see PlantLibrary::register()}.
      */

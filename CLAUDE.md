@@ -486,7 +486,7 @@ slept is recomputed on its first awake tick (its world matrix may be stale while
 | `Camera3DSystem` | Updates view/projection matrices, pushes `SetCamera` command |
 | `Physics3DSystem` | Capsule vs AABB collision, gravity integration (Phase 7+) |
 | `OutlineSystem` | Emits `DrawOutline` for every enabled `Outline`; register BEFORE `Renderer3DSystem` |
-| `FoliageInstanceSystem` | Draws `FoliageInstances` as static instanced batches per (stage, LOD, tint, shadow); register after `Camera3DSystem`, BEFORE `Renderer3DSystem` |
+| `FoliageInstanceSystem` | Draws `FoliageInstances` (rows in world space, the entity's `Transform3D` is not applied) as static instanced batches per (stage, LOD, tint, shadow); register after `Camera3DSystem`, BEFORE `Renderer3DSystem` |
 | `GrassSystem` | Grass blades of every `GrassField` near the camera (`variants x 2` packed instanced draws, `SetGrass`); register after `Camera3DSystem`, BEFORE `Renderer3DSystem` |
 | `SurfaceTextSystem` | Keeps every `SurfaceText` on its current text and language, the only writer of those materials; register BEFORE `Renderer3DSystem` |
 
@@ -496,7 +496,8 @@ One game-agnostic generator for trees, palms, bushes and hedges; the game passes
 seed, materials, which stage uses which colour), the engine names nothing.
 
 - `PlantSpec` (form `Round|Umbrella|Column|Weeping|Conifer|Palm|Bush|Hedge`, height, crown radius,
-  clear trunk, lean, branch/clump/frond counts, accent count, `BareStyle`, seed; factories `tree()`,
+  clear trunk, lean, branch/clump/frond counts, accent count, `BareStyle`, seed, `canopy`,
+  `compactImpostor`; factories `tree()`,
   `palm()`, `bush()`, `hedge()`) → `PlantGenerator::generate(spec, GrowthStage, PlantLod)` →
   `PlantParts` (`wood`, `leaf`, `accent` MeshData + height, crown centre/radius, trunk radius/height).
   Trunk = `LatheMesh` with root flare (sunk 0.15 m) and taper, main branches = tapered `SweepMesh`
@@ -504,6 +505,23 @@ seed, materials, which stage uses which colour), the engine names nothing.
   by welding), palm = ringed curved trunk sweep + fronds as folded bands. Deterministic per seed
   (`PlantGenerator::rnd()` is crc32-based, not `mt_rand`). Every part is CCW-outward with normals
   agreeing (`LatheMesh` / `SweepMesh` wind the other way - the builder flips them).
+- `PlantCanopy` (`PlantSpec::$canopy`: `tufts` 90 / bush 26 / hedge 13 per metre, `groups`, `tuftSize`,
+  `points` 5, `hollow`; null keeps the closed clumps, byte for byte): open foliage without any texture.
+  Crown = leaf tufts (`PlantMeshBuilder::addTuft()`, a shallow star, two triangles per leaf point,
+  normals follow the crown so the mass shades like a volume, lifted by 0.3 so undersides stay lit) in
+  groups on the tips of secondary branches (one per group, leaving a main branch outward). The group
+  sequence is low-discrepancy, so any prefix - a growth stage, a far LOD - covers the whole crown and
+  nothing jumps. Bush: dark body (normals tipped down, `tiltNormals()`) inside a shell of tufts.
+  Hedge: body along the segment, tufts on both flanks and the crest; LOD2 = body alone. Broadleaf,
+  bush and hedge; conifers and palms ignore it.
+  LOD chain of a canopy tree: Lod0 all tufts + wood; Lod1 the SAME wood (`PlantVariant::woodLod()`,
+  one wood batch per stage and shadow, tints included) + a third of the tufts, larger, further in;
+  Lod2 trunk, 3 branches, 14 % of the tufts; impostor jagged and one mesh (stem in the foliage part,
+  normals down, so it reads as a darker green, not as bark; `compactImpostor` gives a palm the same). So a variant with LOD0, LOD1
+  and impostor costs 4 draws, not 6 - LOD0 near costs one foliage draw, not a pair. Measured triangles
+  (8.5 m tree, radius 3, 7 branches, closed -> canopy): Lod0 1212 -> 1216, Lod1 556 -> 556, Lod2 130 ->
+  170, impostor 20 -> 28; bush 648/256/64/16 -> 316/108/68/24; hedge 1.4 m 120/64/48/16 -> 180/72/48/24.
+  Tests: `PlantCanopyTest` (gaps and visible wood by an orthographic depth-buffer raster).
 - `GrowthStage` `Bare` (twigs or `BareStyle::Stump`), `Sprouting` (smaller, ~35 % foliage, stake),
   `Half`, `Full`, `Bloom` (+ accent part). Same place, same plant, more each stage.
 - `PlantLod` budgets for a 7-clump broadleaf: Lod0 ~1300-1600, Lod1 ~600, Lod2 ~130 triangles,
@@ -511,7 +529,9 @@ seed, materials, which stage uses which colour), the engine names nothing.
 - `PlantVariant` (spec + wood/leaf/accent material ids, leaf tints, per-stage leaf material,
   accent glow colour, collider switches) registers every stage x LOD x part lazily as
   `{id}_s{stage}_l{lod}_{part}`; `PlantLibrary::register()` makes it known by id.
-- `FoliageInstances` (component: variant id + rows `[x, y, z, yaw, scale, stage, leafScale]`, LOD /
+- `FoliageInstances` (component: variant id + WORLD-space rows `[x, y, z, yaw, scale, stage, leafScale]`
+  - the system, `FoliageColliders` and placement filters read them as they are, a `Transform3D` on the
+  entity is ignored, and tools must not apply it either; LOD /
   impostor / shadow / max distances, `glow`) + `FoliageInstanceSystem`: 32 m cells with frustum culling
   (+12 m margin for shadows), LOD by camera distance, shadows only LOD0/1 within `shadowDistance`
   (`DrawMeshInstanced::$castShadows`), batches rebuilt only when the camera moved > 2 m, a cell
@@ -538,7 +558,9 @@ too. (The OpenGL fallback and native Vulkan shaders always flip back faces.) `Ma
 (h = world height above the foot, so bark and foliage of one plant stay joined), adds flutter toward
 the mesh's horizontal edge, takes the phase from the instance origin and fades out between
 `SetWind::$foliageFadeStart`/`End` (100/130 m); `SetWind::$foliageMotion` scales it (reduced motion,
-0 = still). It runs inside `animatePosition()`, so motion vectors replay it at `u_time_prev`. The
+0 = still). `Material::$windTufts` (`Material::foliage(tufts: true)`) reads flutter from the mesh of a
+`PlantCanopy`: uv.x = phase of the tuft, uv.y = 0 centre .. 1 leaf tip, so tufts flutter out of step; a
+material without it keeps the positional flutter on any mesh. It runs inside `animatePosition()`, so motion vectors replay it at `u_time_prev`. The
 shadow pass does not sway (static shadows). `Renderer3DSystem` now emits `SetWind` from the scene's
 `Wind` component (direction, gust intensity, `foliageMotion`, fade distances). Factories:
 `Material::foliage()`, `Material::bark()`, `withFoliage()`, `withEmission()`.

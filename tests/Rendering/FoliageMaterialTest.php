@@ -36,6 +36,16 @@ final class FoliageMaterialTest extends TestCase
         self::assertSame(0.0, $still->windFlutter);
     }
 
+    public function testTuftWindIsOptInAndSurvivesCopies(): void
+    {
+        self::assertFalse((new Material())->windTufts);
+        self::assertFalse(Material::foliage(Color::srgb('#5E9E3A'))->windTufts, 'other meshes keep the positional flutter');
+        $tufts = Material::foliage(Color::srgb('#5E9E3A'), tufts: true);
+        self::assertTrue($tufts->windTufts);
+        self::assertTrue($tufts->withEmission(new Color(1.0, 0.0, 0.0))->windTufts);
+        self::assertFalse(Material::foliage(Color::srgb('#5E9E3A'), wind: false, tufts: true)->windTufts, 'no wind, no tuft wind');
+    }
+
     public function testBarkSwaysWithoutFlutter(): void
     {
         $m = Material::bark(Color::srgb('#6B4A32'));

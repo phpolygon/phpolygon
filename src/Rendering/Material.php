@@ -179,6 +179,14 @@ class Material
      *                                     0 for bark; 0.03-0.08 for crowns,
      *                                     ~0.25 for palm fronds. Needs
      *                                     $foliageWind.
+     * @param bool    $windTufts            The mesh is built from leaf tufts
+     *                                     ({@see \PHPolygon\Vegetation\PlantCanopy}):
+     *                                     uv.x holds the phase of each tuft,
+     *                                     uv.y 0 at its centre .. 1 at the leaf
+     *                                     tips, so flutter moves tuft by tuft
+     *                                     instead of by the distance from the
+     *                                     mesh centre. Off: the position alone
+     *                                     sets the flutter (any other mesh).
      * @param bool    $grass                Grass blades (GrassTuftMesh): the
      *                                     vertex stage bends each blade with
      *                                     the wind and away from benders, thins
@@ -238,6 +246,7 @@ class Material
         public readonly float $grassVariation = 0.2,
         public readonly float $grassRootShade = 0.45,
         public readonly float $grassPatchScale = 0.12,
+        public readonly bool $windTufts = false,
     ) {}
 
     /**
@@ -282,7 +291,8 @@ class Material
      * Foliage (leaves, fronds, needles, hedges): two-sided lighting, light
      * shining through from behind (subsurface tinted toward a brighter,
      * yellower version of the albedo unless given), matte, no environment
-     * reflection, and foliage wind with leaf flutter.
+     * reflection, and foliage wind with leaf flutter. `$tufts` for meshes with a
+     * {@see \PHPolygon\Vegetation\PlantCanopy}: flutter shifted per leaf tuft.
      */
     public static function foliage(
         Color $albedo,
@@ -291,6 +301,7 @@ class Material
         ?Color $transmission = null,
         float $roughness = 0.8,
         bool $wind = true,
+        bool $tufts = false,
     ): self {
         return new self(
             albedo: $albedo,
@@ -306,6 +317,7 @@ class Material
             twoSided: true,
             foliageWind: $wind,
             windFlutter: $wind ? $flutter : 0.0,
+            windTufts: $wind && $tufts,
         );
     }
 
@@ -416,6 +428,7 @@ class Material
             grassVariation: $this->grassVariation,
             grassRootShade: $this->grassRootShade,
             grassPatchScale: $this->grassPatchScale,
+            windTufts: $this->windTufts,
         );
     }
 

@@ -6,6 +6,7 @@ namespace PHPolygon\Tests\System;
 
 use PHPUnit\Framework\TestCase;
 use PHPolygon\Component\FoliageInstances;
+use PHPolygon\Component\Transform3D;
 use PHPolygon\Component\Wind;
 use PHPolygon\ECS\World;
 use PHPolygon\Geometry\MeshRegistry;
@@ -22,6 +23,7 @@ use PHPolygon\Rendering\RenderCommandList;
 use PHPolygon\System\FoliageInstanceSystem;
 use PHPolygon\System\Renderer3DSystem;
 use PHPolygon\Vegetation\GrowthStage;
+use PHPolygon\Vegetation\PlantCanopy;
 use PHPolygon\Vegetation\PlantForm;
 use PHPolygon\Vegetation\PlantLibrary;
 use PHPolygon\Vegetation\PlantLod;
@@ -309,6 +311,98 @@ final class FoliageInstanceSystemTest extends TestCase
         self::assertArrayHasKey('test_leaf', $materials);
         self::assertArrayHasKey('test_leaf_b', $materials);
         self::assertSame(40, $materials['test_leaf'] + $materials['test_leaf_b']);
+    }
+
+    /** @return array{0: list<DrawMeshInstanced>, 1: PlantVariant} */
+    private function canopyDraws(?PlantCanopy $canopy, array $tints = []): array
+    {
+        PlantLibrary::register(new PlantVariant(
+            id: 'test_open',
+            spec: PlantSpec::tree(PlantForm::Round, 9.0, 3.2, 4, canopy: $canopy),
+            woodMaterial: 'test_bark',
+            leafMaterial: 'test_leaf',
+            leafTints: $tints,
+        ));
+        $f = new FoliageInstances('test_open');
+        $this->world->createEntity()->attach($f);
+        $f->add(new Vec3(0.0, 0.0, -10.0));   // LOD0
+        $f->add(new Vec3(3.0, 0.0, -20.0));   // LOD0
+        $f->add(new Vec3(-3.0, 0.0, -60.0));  // LOD1
+        $f->add(new Vec3(4.0, 0.0, -70.0));   // LOD1
+        $f->add(new Vec3(0.0, 0.0, -400.0));  // impostor
+        $f->shadowDistance = 500.0;
+        $this->camera();
+        $v = PlantLibrary::get('test_open');
+        self::assertNotNull($v);
+        return [$this->draws(), $v];
+    }
+
+    public function testCanopyTreeDrawsLod0AndLod1FromOneWoodBatch(): void
+    {
+        [$draws, $v] = $this->canopyDraws(new PlantCanopy());
+        $wood = array_values(array_filter($draws, static fn (DrawMeshInstanced $d): bool => $d->materialId === 'test_bark'));
+        self::assertCount(1, $wood, 'one wood batch for LOD0 and LOD1, none for the impostor');
+        self::assertSame(4, $wood[0]->instanceCount);
+        self::assertCount(16 * 4, $wood[0]->flatMatrices);
+        self::assertSame($v->meshId(GrowthStage::Full, PlantLod::Lod0, PlantPart::Wood), $wood[0]->meshId);
+        self::assertCount(4, $draws, 'wood + LOD0, LOD1 and impostor foliage');
+
+        $leaf = [];
+        foreach ($draws as $d) {
+            if ($d->materialId === 'test_leaf') {
+                $leaf[$d->meshId] = $d->instanceCount;
+            }
+        }
+        self::assertSame([
+            $v->meshId(GrowthStage::Full, PlantLod::Lod0, PlantPart::Leaf) => 2,
+            $v->meshId(GrowthStage::Full, PlantLod::Lod1, PlantPart::Leaf) => 2,
+            $v->meshId(GrowthStage::Full, PlantLod::Impostor, PlantPart::Leaf) => 1,
+        ], $leaf);
+    }
+
+    public function testClosedTreeKeepsItsDrawsPerLod(): void
+    {
+        [$draws] = $this->canopyDraws(null);
+        self::assertCount(6, $draws, 'wood and foliage per LOD, as before');
+    }
+
+    public function testSharedWoodBatchIgnoresTintsAndSplitsByShadow(): void
+    {
+        [$draws] = $this->canopyDraws(new PlantCanopy(), ['test_leaf_b']);
+        $wood = array_values(array_filter($draws, static fn (DrawMeshInstanced $d): bool => $d->materialId === 'test_bark'));
+        self::assertCount(1, $wood, 'tints reach foliage only');
+        self::assertSame(4, $wood[0]->instanceCount);
+
+        $this->list->clear();
+        $this->world = new World();
+        $this->system = new FoliageInstanceSystem($this->list);
+        $f = new FoliageInstances('test_open');
+        $this->world->createEntity()->attach($f);
+        $f->add(new Vec3(0.0, 0.0, -10.0));
+        $f->add(new Vec3(3.0, 0.0, -100.0)); // beyond the shadow distance
+        $this->camera();
+        $wood = array_values(array_filter($this->draws(), static fn (DrawMeshInstanced $d): bool => $d->materialId === 'test_bark'));
+        self::assertCount(2, $wood);
+        $keys = array_map(static fn (DrawMeshInstanced $d): string => (string) $d->staticKey, $wood);
+        self::assertNotSame($keys[0], $keys[1]);
+    }
+
+    public function testRowsAreWorldSpaceWhateverTheTransform(): void
+    {
+        $f = $this->foliage();
+        $f->add(new Vec3(4.0, 0.5, -12.0));
+        $entity = $this->world->createEntity();
+        $moved = new FoliageInstances('test_tree');
+        $moved->add(new Vec3(4.0, 0.5, -12.0));
+        $entity->attach($moved);
+        $entity->attach(new Transform3D(position: new Vec3(100.0, 50.0, 0.0)));
+        $this->camera();
+        $draws = $this->draws();
+        self::assertCount(4, $draws, 'wood and foliage of both groups');
+        foreach ($draws as $d) {
+            self::assertEqualsWithDelta(4.0, $d->flatMatrices[12], 1e-9, 'x as in the row');
+            self::assertEqualsWithDelta(-12.0, $d->flatMatrices[14], 1e-9, 'z as in the row');
+        }
     }
 
     public function testNoCameraNoDraws(): void
