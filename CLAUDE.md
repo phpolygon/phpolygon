@@ -349,26 +349,41 @@ same forward and MRT. Backends without stencil (Metal) skip it; `outlineSupporte
   see "Native upscaler runtimes" under Build system). Tests:
   `VioNativeUpscalerTest` (needs `'headless_hardware' => true`: WARP refuses), `UpscalerDispatchTest`.
 - **The DLSS query is lazy.** The first DLSS call per context blocks while NGX initialises, whichever
-  `vio_upscaler_*` it is (supported, info, render_size, create; `VIO_FEATURE_UPSCALER_NATIVE` too when FSR 3 is
-  missing, so that flag is read only after a provider said yes). The render path therefore resolves through
+  `vio_upscaler_*` it is (supported, info, render_size, create). `VIO_FEATURE_UPSCALER_NATIVE` means "any provider":
+  on a php-vio without `vio_upscaler_prepare` it initialises NGX too when FSR 3 is missing, on a newer one it can be
+  true on NVIDIA without DLSS until the worker failed, so it is read only after a provider said yes. The render path therefore resolves through
   `knownCapabilities()`, which asks no slow provider: DLSS stays in `GraphicsCapabilities::$pendingUpscalers`
   (not offered, note "Checking this device ...") and nothing touches the provider, the disk or `vio_adapters`.
-  Only a selected DLSS depends on that state, no other fallback chain contains it. Who asks:
-  - **DLSS selected:** `settleUpscalerProbes()` behind the splash (`Engine`, label "Preparing upscaler"), else at
-    the next `beginFrame()`. It blocks; frames start after the answer, there is never a stand-in frame. A
-    stored "no" spares the query and the chain moves on; a stored "yes" does not spare it, the provider has to
-    initialise to run. `applySettings()` never queries: it may run mid-frame.
+  Only a selected DLSS depends on that state, no other fallback chain contains it. How it is asked depends on
+  php-vio: `function_exists('vio_upscaler_prepare')` gives the worker-thread path, `state` `idle` after
+  `vio_upscaler_prepare` (a plugin without the slots) or an older php-vio the blocking one.
+  - **Worker thread** (`Quality\UpscalerPreparation`, advanced from `settleUpscalerProbes()`, so from the splash and
+    every `beginFrame()`; `state` is read every 0.3 s with `$probe = false`, not per frame). A selected DLSS is
+    `pending` and the frames run on the next entry of the chain, FSR 3 or TAAU. `ready`: a stored setting waits for
+    a cut (`upscalerCutPoint()`: `$engine->graphics->upscalerCutPoint()` for a game's loading screen or pause,
+    `SceneLoaded` and `SetCamera::$cut` count by themselves, a cut during `preparing` is not saved; note "Ready,
+    starts at the next scene change"), one the player chose in a running game (`applySettings()` after the first
+    frame) or with no temporal frame on screen yet goes at once. The switch sets `offscreenDirty` and resets the
+    history; `syncNativeUpscaler()` then destroys FSR, creates DLSS, the render size comes from the provider and the
+    first dispatch has `'reset' => true`. A game with one scene and no cut stays on the stand-in for the session.
+    `failed`: stays on the stand-in, `reason` becomes the note and goes to `game.log`, not stored (with `$probe =
+    false` php-vio names no driver; the next process prepares in the background again). A stored "no" starts nothing.
+    While `preparing` php-vio answers `supported` / `render_size` with false: `graphicsCapabilities()` waits for
+    the worker rather than taking that for an answer.
+  - **Blocking:** `settleUpscalerProbes()` behind the splash (`Engine`, label "Preparing upscaler"), else at the next
+    `beginFrame()`. Frames start after the answer, there is never a stand-in frame. A stored "no" spares the
+    query and the chain moves on; a stored "yes" does not, the provider has to initialise to run.
+    `applySettings()` never queries on either path: it may run mid-frame.
   - **Settings screen:** `$engine->graphics->capabilities()` -> `requestGraphicsCapabilities()`, never blocks.
-    Unknown: pending for one frame, the query runs at the next `beginFrame()`, so that frame's "checking"
-    is on screen during the freeze. A thread cannot take it: php-vio holds one device per process
-    (`vio_d3d12` is global) and a context cannot leave its thread. Call it from the screen, not at start-up.
+    Disk first, then the worker; without one the query runs at the next `beginFrame()`, so that frame's
+    "checking" is on screen during the freeze. Call it from the screen, not at start-up.
   - **`VioRenderer3D::graphicsCapabilities()`:** the complete answer, blocking; tools and tests.
   - **Disk:** `Quality\UpscalerProbeCache`, `<shaderCachePath>/upscaler-probe.json` (`''` = none), one entry per
     provider and `deviceKey()` = backend, PCI ids, adapter name and driver from `vio_adapters`, php-vio version,
     NGX project id; the newest `MAX_ENTRIES` stay, so the two GPUs of a hybrid laptop keep their own answers.
     An entry is also tied to size and mtime of the libraries `vio_upscaler_info` named: plugin and runtime for
-    a yes, the plugin alone for a no (php-vio clears `library` on a refusal, so a patch that changes only
-    `nvngx_dlss.dll` does not reopen a stored no). Anything else - broken file, other format, other device, changed
+    a yes, the plugin alone for a no up to php-vio 2.38.1 (it clears `library` on a refusal, so a patch that changes
+    only `nvngx_dlss.dll` does not reopen that no). Anything else - broken file, other format, other device, changed
     library - is no answer and is queried again. Stored: a yes, and a no with `driver` set, i.e. the provider
     looked at the device. "Plugin or runtime library not found" leaves `driver` empty
     (`UpscalerProbeResult::fromProviderInfo()`, `$cacheable`) and is not stored: it takes under 1 ms and the next
@@ -381,7 +396,12 @@ same forward and MRT. Backends without stencil (Metal) skip it; `outlineSupporte
   `vio_adapters` 6 ms. Start to frame 2 (`Engine`, offscreen, skipSplash, empty scene, shader cache
   warm, median of 5, D3D12): TAA 6.67 -> 0.66 s, FSR 3 5.59 -> 0.67 s, DLSS selected 5.56 -> 5.46 s (the provider
   has to initialise). Settings screen: 5.1 s once, then 6-10 ms for the first `capabilities()` of a process.
-  Tests: `LazyUpscalerProbeTest` (no GPU), `VioUpscalerProbeTest` (hardware, DLSS plugin).
+  Worker path, 2026-10-31, unreleased php-vio build with `vio_upscaler_prepare`, real 1920x1080 window, D3D12, 576
+  boxes, stored DLSS, 5 runs: first frame 1.51-1.56 s after process start with a 0.2 s splash, DLSS ready 3.4-3.7 s
+  later; frame p50 4.7-5.0 ms while preparing against 4.0-4.1 ms on FSR 3 alone (2 runs), p99 8.4-11.9 against 5.1-6.5,
+  max 9.9-16.7 against 7.0-11.6; the switch frame 67-79 ms, the next 9.5-18 ms, then normal. Not measured in a shipped game.
+  Tests: `LazyUpscalerProbeTest`, `UpscalerPreparationTest` (no GPU), `VioUpscalerProbeTest` (hardware, DLSS plugin),
+  `VioUpscalerPrepareTest` (php-vio's test plugin through `PHPOLYGON_TEST_UPSCALER_PLUGIN`).
 
 **Storage-buffer instances** (`DrawMeshInstanced::fromStorageBuffer`, e.g. GPU particles): the matrices never
 leave GPU memory, but the regular programs read instance matrices from vertex attributes. The draw
@@ -486,7 +506,7 @@ slept is recomputed on its first awake tick (its world matrix may be stale while
 | `Camera3DSystem` | Updates view/projection matrices, pushes `SetCamera` command |
 | `Physics3DSystem` | Capsule vs AABB collision, gravity integration (Phase 7+) |
 | `OutlineSystem` | Emits `DrawOutline` for every enabled `Outline`; register BEFORE `Renderer3DSystem` |
-| `FoliageInstanceSystem` | Draws `FoliageInstances` as static instanced batches per (stage, LOD, tint, shadow); register after `Camera3DSystem`, BEFORE `Renderer3DSystem` |
+| `FoliageInstanceSystem` | Draws `FoliageInstances` (rows in world space, the entity's `Transform3D` is not applied) as static instanced batches per (stage, LOD, tint, shadow); register after `Camera3DSystem`, BEFORE `Renderer3DSystem` |
 | `GrassSystem` | Grass blades of every `GrassField` near the camera (`variants x 2` packed instanced draws, `SetGrass`); register after `Camera3DSystem`, BEFORE `Renderer3DSystem` |
 | `SurfaceTextSystem` | Keeps every `SurfaceText` on its current text and language, the only writer of those materials; register BEFORE `Renderer3DSystem` |
 
@@ -496,7 +516,8 @@ One game-agnostic generator for trees, palms, bushes and hedges; the game passes
 seed, materials, which stage uses which colour), the engine names nothing.
 
 - `PlantSpec` (form `Round|Umbrella|Column|Weeping|Conifer|Palm|Bush|Hedge`, height, crown radius,
-  clear trunk, lean, branch/clump/frond counts, accent count, `BareStyle`, seed; factories `tree()`,
+  clear trunk, lean, branch/clump/frond counts, accent count, `BareStyle`, seed, `canopy`,
+  `compactImpostor`; factories `tree()`,
   `palm()`, `bush()`, `hedge()`) → `PlantGenerator::generate(spec, GrowthStage, PlantLod)` →
   `PlantParts` (`wood`, `leaf`, `accent` MeshData + height, crown centre/radius, trunk radius/height).
   Trunk = `LatheMesh` with root flare (sunk 0.15 m) and taper, main branches = tapered `SweepMesh`
@@ -504,6 +525,23 @@ seed, materials, which stage uses which colour), the engine names nothing.
   by welding), palm = ringed curved trunk sweep + fronds as folded bands. Deterministic per seed
   (`PlantGenerator::rnd()` is crc32-based, not `mt_rand`). Every part is CCW-outward with normals
   agreeing (`LatheMesh` / `SweepMesh` wind the other way - the builder flips them).
+- `PlantCanopy` (`PlantSpec::$canopy`: `tufts` 90 / bush 26 / hedge 13 per metre, `groups`, `tuftSize`,
+  `points` 5, `hollow`; null keeps the closed clumps, byte for byte): open foliage without any texture.
+  Crown = leaf tufts (`PlantMeshBuilder::addTuft()`, a shallow star, two triangles per leaf point,
+  normals follow the crown so the mass shades like a volume, lifted by 0.3 so undersides stay lit) in
+  groups on the tips of secondary branches (one per group, leaving a main branch outward). The group
+  sequence is low-discrepancy, so any prefix - a growth stage, a far LOD - covers the whole crown and
+  nothing jumps. Bush: dark body (normals tipped down, `tiltNormals()`) inside a shell of tufts.
+  Hedge: body along the segment, tufts on both flanks and the crest; LOD2 = body alone. Broadleaf,
+  bush and hedge; conifers and palms ignore it.
+  LOD chain of a canopy tree: Lod0 all tufts + wood; Lod1 the SAME wood (`PlantVariant::woodLod()`,
+  one wood batch per stage and shadow, tints included) + a third of the tufts, larger, further in;
+  Lod2 trunk, 3 branches, 14 % of the tufts; impostor jagged and one mesh (stem in the foliage part,
+  normals down, so it reads as a darker green, not as bark; `compactImpostor` gives a palm the same). So a variant with LOD0, LOD1
+  and impostor costs 4 draws, not 6 - LOD0 near costs one foliage draw, not a pair. Measured triangles
+  (8.5 m tree, radius 3, 7 branches, closed -> canopy): Lod0 1212 -> 1216, Lod1 556 -> 556, Lod2 130 ->
+  170, impostor 20 -> 28; bush 648/256/64/16 -> 316/108/68/24; hedge 1.4 m 120/64/48/16 -> 180/72/48/24.
+  Tests: `PlantCanopyTest` (gaps and visible wood by an orthographic depth-buffer raster).
 - `GrowthStage` `Bare` (twigs or `BareStyle::Stump`), `Sprouting` (smaller, ~35 % foliage, stake),
   `Half`, `Full`, `Bloom` (+ accent part). Same place, same plant, more each stage.
 - `PlantLod` budgets for a 7-clump broadleaf: Lod0 ~1300-1600, Lod1 ~600, Lod2 ~130 triangles,
@@ -511,7 +549,9 @@ seed, materials, which stage uses which colour), the engine names nothing.
 - `PlantVariant` (spec + wood/leaf/accent material ids, leaf tints, per-stage leaf material,
   accent glow colour, collider switches) registers every stage x LOD x part lazily as
   `{id}_s{stage}_l{lod}_{part}`; `PlantLibrary::register()` makes it known by id.
-- `FoliageInstances` (component: variant id + rows `[x, y, z, yaw, scale, stage, leafScale]`, LOD /
+- `FoliageInstances` (component: variant id + WORLD-space rows `[x, y, z, yaw, scale, stage, leafScale]`
+  - the system, `FoliageColliders` and placement filters read them as they are, a `Transform3D` on the
+  entity is ignored, and tools must not apply it either; LOD /
   impostor / shadow / max distances, `glow`) + `FoliageInstanceSystem`: 32 m cells with frustum culling
   (+12 m margin for shadows), LOD by camera distance, shadows only LOD0/1 within `shadowDistance`
   (`DrawMeshInstanced::$castShadows`), batches rebuilt only when the camera moved > 2 m, a cell
@@ -538,7 +578,9 @@ too. (The OpenGL fallback and native Vulkan shaders always flip back faces.) `Ma
 (h = world height above the foot, so bark and foliage of one plant stay joined), adds flutter toward
 the mesh's horizontal edge, takes the phase from the instance origin and fades out between
 `SetWind::$foliageFadeStart`/`End` (100/130 m); `SetWind::$foliageMotion` scales it (reduced motion,
-0 = still). It runs inside `animatePosition()`, so motion vectors replay it at `u_time_prev`. The
+0 = still). `Material::$windTufts` (`Material::foliage(tufts: true)`) reads flutter from the mesh of a
+`PlantCanopy`: uv.x = phase of the tuft, uv.y = 0 centre .. 1 leaf tip, so tufts flutter out of step; a
+material without it keeps the positional flutter on any mesh. It runs inside `animatePosition()`, so motion vectors replay it at `u_time_prev`. The
 shadow pass does not sway (static shadows). `Renderer3DSystem` now emits `SetWind` from the scene's
 `Wind` component (direction, gust intensity, `foliageMotion`, fade distances). Factories:
 `Material::foliage()`, `Material::bark()`, `withFoliage()`, `withEmission()`.

@@ -690,17 +690,19 @@ function vio_gpu_timestamp(VioContext $context, string $name): bool {}
 function vio_gpu_timings(VioContext $context): array|false {}
 
 /**
- * php-vio >= 2.14: on-disk shader cache statistics for vio_create(['shader_cache' => dir]).
+ * php-vio >= 2.14: on-disk shader cache statistics for vio_create(['shader_cache' => dir]),
+ * cumulative for the process.
  *
- * @return array{dir: string, hits: int, misses: int, stores: int}
+ * @return array{dir: ?string, hits: int, misses: int, stores: int}
  */
-function vio_shader_cache_stats(VioContext $context): array {}
+function vio_shader_cache_stats(): array {}
 
 /**
  * php-vio >= 2.14: swapchain facts (buffer count, frame latency, waitable object,
- * HDR output, backbuffer format, shader model).
+ * HDR output, backbuffer format, shader model). Newer php-vio adds
+ * shader_model_version and agility_sdk (>= 2.31) and hdr_composite (>= 2.37).
  *
- * @return array{buffer_count: int, frame_latency: int, waitable: bool, hdr_output: bool, format: int, shader_model: int}
+ * @return array{buffer_count: int, frame_latency: int, waitable: bool, hdr_output: bool, format: int, shader_model: int, hdr_composite?: bool, shader_model_version?: int, agility_sdk?: int}
  */
 function vio_swapchain_info(VioContext $context): array {}
 
@@ -751,7 +753,10 @@ function vio_upscaler_supported(VioContext $context, int $provider = 1): bool {}
  *
  * @return array<string, mixed>
  */
-function vio_upscaler_info(VioContext $context, VioUpscaler|int $which = 1): array {}
+function vio_upscaler_info(VioContext $context, VioUpscaler|int $which = 1, bool $probe = true): array {}
+
+/** Starts a provider's first-use work on a worker thread and returns at once; info()['state'] follows it. */
+function vio_upscaler_prepare(VioContext $context, int $provider): bool {}
 
 /**
  * Options: display_width, display_height (required), provider, quality, render_width,

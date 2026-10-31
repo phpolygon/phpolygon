@@ -79,6 +79,26 @@ final class VioUpscalerProbeTest extends TestCase
         $this->assertGreaterThan(self::NO_QUERY_MS, $first, "two frames took {$ms} ms");
     }
 
+    /**
+     * VIO_FEATURE_UPSCALER_NATIVE means "any provider": without FSR 3 asking for it
+     * initialises DLSS on this thread. The capabilities must not get there.
+     */
+    #[RunInSeparateProcess]
+    public function testWithoutFsrNoFrameInitialisesDlss(): void
+    {
+        ini_set('vio.ffx_path', sys_get_temp_dir());
+        $renderer = $this->renderer(new GraphicsSettings(antiAliasing: AntiAliasing::Taa, upscaler: Upscaler::Fsr3));
+        $renderer->warmShaders();
+        $this->frame($renderer);
+        $caps = $renderer->requestGraphicsCapabilities();
+        $this->assertFalse($caps->supportsUpscaler(Upscaler::Fsr3), 'FSR 3 really is missing');
+
+        $ctx = $this->ctx;
+        self::assertNotNull($ctx);
+        $first = $this->clock(static fn() => vio_upscaler_supported($ctx, (int) UpscalerDispatch::providerId(Upscaler::Dlss)));
+        $this->assertGreaterThan(self::NO_QUERY_MS, $first, 'the first query is still ahead');
+    }
+
     public function testASettingsScreenIsAnsweredAtOnceAndTheQueryWaitsForTheNextFrame(): void
     {
         $renderer = $this->renderer(new GraphicsSettings());
@@ -94,7 +114,7 @@ final class VioUpscalerProbeTest extends TestCase
         $this->assertNotNull($caps->upscalerNote(Upscaler::Dlss));
         $this->assertTrue($renderer->upscalerProbeDue());
 
-        $this->frame($renderer);
+        $this->untilSettled($renderer);
 
         $after = $renderer->requestGraphicsCapabilities();
         $this->assertFalse($after->isUpscalerPending(Upscaler::Dlss));
@@ -134,8 +154,43 @@ final class VioUpscalerProbeTest extends TestCase
         $this->assertIsArray(json_decode((string) file_get_contents($this->cacheFile), true));
     }
 
+    public function testARealProviderPreparesBehindItsStandIn(): void
+    {
+        if (!function_exists('vio_upscaler_prepare')) {
+            $this->markTestSkipped('php-vio without vio_upscaler_prepare');
+        }
+        $renderer = $this->renderer(new GraphicsSettings(
+            shadowQuality: ShadowQuality::Off,
+            bloom: false,
+            hdr: false,
+            antiAliasing: AntiAliasing::Off,
+            upscaler: Upscaler::Dlss,
+            upscaleQuality: UpscaleQuality::Quality,
+        ));
+        $renderer->warmShaders();
+        // Compiles the temporal pipelines, seconds on a cold process.
+        $this->frame($renderer);
+        $worst = 0.0;
+        $end = hrtime(true) + (int) 20e9;
+        do {
+            $worst = max($worst, $this->clock(fn() => $this->frame($renderer)));
+            $this->assertNotSame(Upscaler::Dlss, $renderer->temporalUpscalerThisFrame());
+            usleep(10000);
+        } while (!str_contains((string) $renderer->requestGraphicsCapabilities()->upscalerNote(Upscaler::Dlss), 'Ready') && hrtime(true) < $end);
+        $this->assertLessThan(self::NO_QUERY_MS, $worst, 'no frame waited for NGX');
+
+        $renderer->upscalerCutPoint();
+        $this->frame($renderer);
+
+        $this->assertSame(Upscaler::Dlss, $renderer->temporalUpscalerThisFrame());
+        $this->assertFileExists($this->cacheFile);
+    }
+
     public function testASelectedDlssRendersItsFirstFrameWithDlss(): void
     {
+        if (function_exists('vio_upscaler_prepare')) {
+            $this->markTestSkipped('with vio_upscaler_prepare a stand-in renders first');
+        }
         $settings = new GraphicsSettings(
             shadowQuality: ShadowQuality::Off,
             bloom: false,
@@ -178,7 +233,7 @@ final class VioUpscalerProbeTest extends TestCase
         $this->assertLessThan(self::NO_QUERY_MS, $ms, 'applySettings may run mid-frame');
         $this->assertTrue($renderer->upscalerProbeDue());
 
-        $this->frame($renderer);
+        $this->untilSettled($renderer);
         $this->assertSame(Upscaler::Dlss, $renderer->temporalUpscalerThisFrame());
     }
 
@@ -253,6 +308,17 @@ final class VioUpscalerProbeTest extends TestCase
                 $upscaler->value,
             );
         }
+    }
+
+    /** One frame blocks for the query; with vio_upscaler_prepare the worker takes its seconds behind them. */
+    private function untilSettled(VioRenderer3D $renderer): void
+    {
+        $end = hrtime(true) + (int) 20e9;
+        do {
+            $this->frame($renderer);
+            usleep(10000);
+        } while ($renderer->upscalerProbeDue() && hrtime(true) < $end);
+        $this->frame($renderer);
     }
 
     private function frame(VioRenderer3D $renderer): void

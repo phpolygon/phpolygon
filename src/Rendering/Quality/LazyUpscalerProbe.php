@@ -66,6 +66,13 @@ final class LazyUpscalerProbe
         return $this->ask();
     }
 
+    /** The provider's answer from another way of asking (its worker thread). Stored like {@see settle()}'s. */
+    public function accept(UpscalerProbeResult $result): void
+    {
+        $this->fromCache();
+        $this->store($result);
+    }
+
     /** {@see settleForUse()} would return at once. */
     public function isSettledForUse(): bool
     {
@@ -75,11 +82,16 @@ final class LazyUpscalerProbe
     private function ask(): UpscalerProbeResult
     {
         $result = ($this->probe)();
+        $this->store($result);
+        return $result;
+    }
+
+    private function store(UpscalerProbeResult $result): void
+    {
         $this->result = $result;
         $this->live = true;
         if ($this->cache !== null && $this->device !== null && $result->cacheable) {
             $this->cache->write($this->id, $this->device, $result);
         }
-        return $result;
     }
 }

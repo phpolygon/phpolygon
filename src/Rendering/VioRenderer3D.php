@@ -510,6 +510,16 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
     private ?Quality\LazyUpscalerProbe $dlssProbe = null;
     /** A settings screen asked for the full list: {@see settleUpscalerProbes()} at the next frame. */
     private bool $upscalerProbeRequested = false;
+    /** DLSS on php-vio's worker thread, where php-vio offers that. */
+    private ?Quality\UpscalerPreparation $dlssPreparation = null;
+    /** The plugin cannot prepare in the background: the blocking way. */
+    private bool $dlssPrepareUnavailable = false;
+    /** The selected DLSS took over from its stand-in. */
+    private bool $dlssSwitched = false;
+    /** The player chose it just now: the switch waits for nothing but the provider. */
+    private bool $dlssSwitchNow = false;
+    /** A cut since the last frame ({@see upscalerCutPoint()}). */
+    private bool $upscalerCutSeen = false;
     /** The temporal technique that resolved the frame (Taau = the engine's own resolve). */
     private ?Quality\Upscaler $temporalUpscalerThisFrame = null;
     /** Wall-clock frame time handed to the native upscaler. */
@@ -583,6 +593,11 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
     {
         $previous = $this->settings;
         $this->settings = $settings;
+        if ($previous->upscaler !== $settings->upscaler) {
+            $this->capabilities = null;
+            // Before the first frame this is the stored setting, not a choice.
+            $this->dlssSwitchNow = $this->lastFrameStart > 0.0;
+        }
 
         // Bloom toggle is read live from $this->settings during render.
         $this->enableHdr = $this->enableHdr && $settings->bloom;
@@ -1678,11 +1693,27 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
     public function graphicsCapabilities(): Quality\GraphicsCapabilities
     {
         $probe = $this->lazyUpscalerProbe();
+        if ($this->dlssPreparation?->isRunning() === true) {
+            // php-vio answers "no" until the worker is done: that is no answer.
+            $this->dlssPreparation->wait();
+            $this->settleUpscalerProbes();
+        }
         if ($probe !== null && $probe->known() === null) {
             $probe->settle();
             $this->capabilities = null;
         }
         return $this->knownCapabilities();
+    }
+
+    /**
+     * Tell the renderer the picture may jump now: a loading screen, a scene change,
+     * a pause. A stored DLSS that got ready behind its stand-in takes over here,
+     * at the next frame. The engine reports {@see \PHPolygon\Event\SceneLoaded}, and
+     * a camera cut counts by itself.
+     */
+    public function upscalerCutPoint(): void
+    {
+        $this->upscalerCutSeen = true;
     }
 
     /**
@@ -1707,34 +1738,55 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
     /** {@see settleUpscalerProbes()} has something to do. */
     public function upscalerProbeDue(): bool
     {
-        if ($this->settings->upscaler !== Quality\Upscaler::Dlss && !$this->upscalerProbeRequested) {
+        $selected = $this->settings->upscaler === Quality\Upscaler::Dlss;
+        $running = $this->dlssPreparation?->isRunning() === true;
+        if (!$selected && !$this->upscalerProbeRequested && !$running) {
             return false;
         }
         $probe = $this->lazyUpscalerProbe();
         if ($probe === null) {
             return false;
         }
-        return $this->settings->upscaler === Quality\Upscaler::Dlss
-            ? !$probe->isSettledForUse()
+        if ($running) {
+            return true;
+        }
+        return $selected
+            ? !$probe->isSettledForUse() || $this->dlssHeldBack()
             : $probe->known() === null;
     }
 
     /**
-     * Run the blocking DLSS query now if the selection needs it or a settings
-     * screen asked. Only outside a frame: at the frame boundary, and from the
-     * engine behind the splash. A selected DLSS therefore never renders a frame
-     * with a stand-in: frames start after the answer, and only a "no" moves the
-     * selection along {@see Quality\Upscaler::fallbackChain()}.
+     * Move the DLSS question on. Only outside a frame: at the frame boundary, and
+     * from the engine behind the splash.
+     *
+     * With vio_upscaler_prepare this never blocks: the provider initialises on a
+     * worker thread, a selected DLSS renders through the next entry of
+     * {@see Quality\Upscaler::fallbackChain()} meanwhile and takes over when it is
+     * ready - at the next cut for a stored setting, at once for one the player
+     * just chose. A provider that fails leaves the stand-in in place.
+     *
+     * Without it (older php-vio, older plugin) the query blocks here: frames start
+     * after the answer, and only a "no" moves the selection along the chain.
      */
     public function settleUpscalerProbes(): void
     {
         $due = $this->upscalerProbeDue();
-        $this->upscalerProbeRequested = false;
+        $cut = $this->upscalerCutSeen;
+        $this->upscalerCutSeen = false;
         $probe = $due ? $this->lazyUpscalerProbe() : null;
         if ($probe === null) {
+            $this->upscalerProbeRequested = false;
             return;
         }
         $selected = $this->settings->upscaler === Quality\Upscaler::Dlss;
+        if ($this->preparesDlssInBackground()) {
+            $this->advanceDlssPreparation($probe, $selected, $cut);
+            if ($this->preparesDlssInBackground()) {
+                $this->upscalerProbeRequested = false;
+                return;
+            }
+        }
+        $this->upscalerProbeRequested = false;
         $start = hrtime(true);
         if ($selected) {
             $probe->settleForUse();
@@ -1746,6 +1798,61 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         }
         $this->capabilities = null;
         FrameSpikeRecorder::note('upscaler', 1, (int) (hrtime(true) - $start));
+    }
+
+    private function preparesDlssInBackground(): bool
+    {
+        return !$this->dlssPrepareUnavailable && function_exists('vio_upscaler_prepare');
+    }
+
+    /** A selected DLSS that runs here but has not taken over from its stand-in yet. */
+    private function dlssHeldBack(): bool
+    {
+        return $this->settings->upscaler === Quality\Upscaler::Dlss
+            && !$this->dlssSwitched
+            && $this->preparesDlssInBackground()
+            && $this->dlssProbe?->known()?->supported === true;
+    }
+
+    /** One step of the worker-thread path; see {@see settleUpscalerProbes()}. */
+    private function advanceDlssPreparation(Quality\LazyUpscalerProbe $probe, bool $selected, bool $cut): void
+    {
+        $known = $probe->fromCache();
+        if ($selected && $known !== null && !$known->supported) {
+            $this->capabilities = null;
+            return;
+        }
+        $provider = (int) UpscalerDispatch::providerId(Quality\Upscaler::Dlss);
+        $preparation = $this->dlssPreparation ??= new Quality\UpscalerPreparation(
+            fn(): bool => vio_upscaler_prepare($this->ctx, $provider),
+            fn(): array => vio_upscaler_info($this->ctx, $provider, false),
+        );
+        $state = $preparation->started() ? $preparation->poll() : $preparation->start();
+        if ($state === 'idle') {
+            $this->dlssPrepareUnavailable = true;
+            $this->capabilities = null;
+            return;
+        }
+        if ($state === 'preparing') {
+            return;
+        }
+        if (!$probe->isSettledForUse()) {
+            // Without the probe: a 'failed' one would be asked again and lose its reason.
+            $info = vio_upscaler_info($this->ctx, $provider, false);
+            $result = Quality\UpscalerProbeResult::fromProviderInfo($state === 'ready' && $info['supported'] === true, $info);
+            $probe->accept($result);
+            $this->capabilities = null;
+            if (!$result->supported) {
+                \PHPolygon\Engine::log("VioRenderer3D: DLSS is not available here: {$result->reason}");
+            }
+        }
+        if ($this->dlssHeldBack() && ($this->dlssSwitchNow || $cut || $this->temporalFrame === null)) {
+            $this->dlssSwitched = true;
+            $this->dlssSwitchNow = false;
+            $this->capabilities = null;
+            $this->offscreenDirty = true;
+            $this->temporalCamera->reset('upscaler-switch');
+        }
     }
 
     /**
@@ -1824,6 +1931,13 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
                 $notes[$native->value] = 'Checking this device ...';
                 continue;
             }
+            if ($native === Quality\Upscaler::Dlss && $this->dlssHeldBack()) {
+                $pending[] = $native;
+                $notes[$native->value] = $this->dlssPreparation?->state() === 'ready'
+                    ? 'Ready, starts at the next scene change'
+                    : 'Preparing ...';
+                continue;
+            }
             $note = $this->nativeUpscalerNote($native, $temporal);
             if ($note === null) {
                 $upscalers[] = $native;
@@ -1881,7 +1995,8 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
     /**
      * Ask php-vio about a provider. DLSS blocks here on its first call per
      * context, whichever vio_upscaler_* function that is. The feature flag comes
-     * second: it means "any provider", so with FSR 3 missing it queries DLSS too.
+     * second: it means "any provider", so it says nothing about this one, and
+     * before vio_upscaler_prepare it queries DLSS too when FSR 3 is missing.
      */
     private function queryUpscalerProvider(Quality\Upscaler $upscaler): Quality\UpscalerProbeResult
     {
@@ -2436,6 +2551,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
                 $this->currentViewMatrix = $cmd->viewMatrix;
                 $this->cameraProjectionMatrix = $cmd->projectionMatrix;
                 $this->cameraCutThisFrame = $this->cameraCutThisFrame || $cmd->cut;
+                $this->upscalerCutSeen = $this->upscalerCutSeen || $cmd->cut;
                 $this->cameraPosition = $this->extractCameraPosition($cmd->viewMatrix);
             } elseif ($cmd instanceof SetAmbientLight) {
                 $ambientColor = $cmd->color;
@@ -4356,6 +4472,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         vio_set_uniform($this->ctx, 'u_cloth_anchor_top', $material->clothAnchorTop ? 1 : 0);
         vio_set_uniform($this->ctx, 'u_foliage_wind', $material->foliageWind ? 1 : 0);
         vio_set_uniform($this->ctx, 'u_wind_flutter', $material->windFlutter);
+        vio_set_uniform($this->ctx, 'u_foliage_tufts', $material->windTufts ? 1 : 0);
         vio_set_uniform($this->ctx, 'u_two_sided', $material->twoSided && $material->alpha >= 1.0 ? 1 : 0);
         vio_set_uniform($this->ctx, 'u_grass', $material->grass ? 1 : 0);
         vio_set_uniform($this->ctx, 'u_grass_bend', $material->grassBend);
@@ -5640,6 +5757,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             'u_two_sided'           => $material->twoSided && $material->alpha >= 1.0 ? 1 : 0,
             'u_foliage_wind'        => $material->foliageWind ? 1 : 0,
             'u_wind_flutter'        => $material->windFlutter,
+            'u_foliage_tufts'       => $material->windTufts ? 1 : 0,
             // Grass blades (Material::$grass, GrassSystem).
             'u_grass'               => $material->grass ? 1 : 0,
             'u_grass_shade'         => $material->grass ? 1 : 0,

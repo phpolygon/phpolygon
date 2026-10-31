@@ -197,9 +197,9 @@ class GraphicsSettingsManager
      * options that would change nothing here. Everything counts as available while
      * no renderer reports capabilities (headless, 2D-only, before the window).
      * Never blocks: an upscaler that takes seconds to query is reported as pending
-     * for a frame ({@see Quality\GraphicsCapabilities::isUpscalerPending()}). Call it
-     * from a settings screen, not at start-up: on a renderer with such a provider the
-     * call is what starts the query.
+     * until the answer is in ({@see Quality\GraphicsCapabilities::isUpscalerPending()}).
+     * Call it from a settings screen, not at start-up: on a renderer with such a
+     * provider the call is what starts the query.
      */
     public function capabilities(): Quality\GraphicsCapabilities
     {
@@ -214,6 +214,19 @@ class GraphicsSettingsManager
             }
         }
         return Quality\GraphicsCapabilities::unknown();
+    }
+
+    /**
+     * The picture may jump now: a loading screen, a pause. A stored upscaler that
+     * got ready behind its stand-in takes over at the next frame. The engine reports
+     * scene changes itself; call this for the cuts it cannot see.
+     */
+    public function upscalerCutPoint(): void
+    {
+        $r3d = $this->engine?->renderer3D;
+        if ($r3d instanceof VioRenderer3D) {
+            $r3d->upscalerCutPoint();
+        }
     }
 
     public function isRecalibrationRecommended(): bool

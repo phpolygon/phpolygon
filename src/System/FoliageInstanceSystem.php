@@ -26,7 +26,9 @@ use PHPolygon\Vegetation\PlantVariant;
  * batches: instances are grouped by (growth stage, LOD by camera distance,
  * foliage tint, shadow) and each group becomes one DrawMeshInstanced per
  * plant part (wood, leaf, accent). LOD0/LOD1 within the shadow distance cast
- * shadows, everything else does not.
+ * shadows, everything else does not. Plants whose LOD0 and LOD1 share a wood
+ * mesh ({@see PlantVariant::woodLod()}) share one wood batch per (stage, shadow).
+ * Rows are world coordinates; the entity's Transform3D is not applied.
  *
  * Cost control: instances are binned into square cells; cells whose bounding
  * sphere lies outside the view frustum are skipped, and the batches are only
@@ -169,6 +171,9 @@ class FoliageInstanceSystem extends AbstractSystem
         ksort($groups);
 
         $commands = [];
+        $sharesWood = $variant->woodLod(PlantLod::Lod1) === PlantLod::Lod0;
+        /** @var array<int, list<int>> $sharedWood */
+        $sharedWood = [];
         foreach ($groups as $gkey => $members) {
             $stage = GrowthStage::from(intdiv($gkey, 1000));
             $lod = PlantLod::from(intdiv($gkey % 1000, 100));
@@ -176,6 +181,13 @@ class FoliageInstanceSystem extends AbstractSystem
             $shadow = ($gkey % 2) === 1;
             foreach (PlantPart::cases() as $part) {
                 if (!$variant->hasPart($stage, $lod, $part)) {
+                    continue;
+                }
+                if ($part === PlantPart::Wood && $sharesWood && $lod->value <= 1) {
+                    // Tints never reach wood: one batch whatever the LOD and tint.
+                    foreach ($members as $i) {
+                        $sharedWood[$stage->value * 1000 + ($shadow ? 1 : 0)][] = $i;
+                    }
                     continue;
                 }
                 $material = $variant->partMaterial($part, $stage, $tint);
@@ -200,6 +212,22 @@ class FoliageInstanceSystem extends AbstractSystem
                     castShadows: $shadow,
                 );
             }
+        }
+        foreach ($sharedWood as $gkey => $members) {
+            $stage = GrowthStage::from(intdiv($gkey, 1000));
+            $flat = [];
+            foreach ($members as $i) {
+                array_push($flat, ...$st['base'][$i]);
+            }
+            $commands[] = DrawMeshInstanced::flat(
+                $variant->meshId($stage, PlantLod::Lod0, PlantPart::Wood),
+                $variant->woodMaterial,
+                $flat,
+                count($members),
+                isStatic: true,
+                staticKey: "foliage:{$oid}:{$gkey}:wood-shared",
+                castShadows: ($gkey % 2) === 1,
+            );
         }
 
         $st['signature'] = $signature;

@@ -165,6 +165,27 @@ final class PlantMeshBuilder
     }
 
     /**
+     * The mesh with its normals tipped by `$y` and renormalised: a leafy body
+     * behind tufts turns away from the light and reads as the shade inside.
+     */
+    public static function tiltNormals(MeshData $mesh, float $y): MeshData
+    {
+        $n = $mesh->normals;
+        for ($i = 0, $c = count($n); $i + 2 < $c; $i += 3) {
+            $nx = (float) $n[$i];
+            $ny = (float) $n[$i + 1] + $y;
+            $nz = (float) $n[$i + 2];
+            $len = sqrt($nx * $nx + $ny * $ny + $nz * $nz);
+            if ($len > 1e-6) {
+                $n[$i] = $nx / $len;
+                $n[$i + 1] = $ny / $len;
+                $n[$i + 2] = $nz / $len;
+            }
+        }
+        return new MeshData($mesh->vertices, $n, $mesh->uvs, $mesh->indices);
+    }
+
+    /**
      * Apply a position deformation to every vertex (normals untouched - meant
      * for gentle bends such as a trunk lean).
      *
@@ -252,6 +273,98 @@ final class PlantMeshBuilder
             }
         }
         $this->append(self::smoothNormals($part->toMeshData()));
+    }
+
+    /**
+     * A leaf tuft: a shallow star around a raised centre, seen as a bunch of
+     * leaves. `$points` leaf tips alternate with valleys at half the radius
+     * (two triangles per point), the tips sag by a quarter of the radius. The
+     * triangles wind counter-clockwise seen from the `$p*` side. Vertex normals
+     * follow `$s*`, the direction the tuft should shade as (usually out of the
+     * crown), tipped toward the plate and the leaf direction, so a mass of tufts
+     * lights like a volume but every tuft keeps its own facets.
+     *
+     * UVs carry the wind: u = `$phase`, v = 0 centre .. 1 tip
+     * ({@see \PHPolygon\Rendering\Material::$windTufts}).
+     *
+     * @param float $px Plate normal, unit length (also $py, $pz).
+     * @param float $sx Shading direction, unit length (also $sy, $sz).
+     */
+    public function addTuft(
+        float $cx,
+        float $cy,
+        float $cz,
+        float $px,
+        float $py,
+        float $pz,
+        float $sx,
+        float $sy,
+        float $sz,
+        float $radius,
+        int $points,
+        float $spin,
+        float $phase,
+    ): void {
+        // Plate frame: t x b = p, so increasing angle runs counter-clockwise seen from +p.
+        [$rx, $ry, $rz] = abs($py) < 0.9 ? [0.0, 1.0, 0.0] : [1.0, 0.0, 0.0];
+        $tx = $ry * $pz - $rz * $py;
+        $ty = $rz * $px - $rx * $pz;
+        $tz = $rx * $py - $ry * $px;
+        $len = sqrt($tx * $tx + $ty * $ty + $tz * $tz);
+        $tx /= $len;
+        $ty /= $len;
+        $tz /= $len;
+        $bx = $py * $tz - $pz * $ty;
+        $by = $pz * $tx - $px * $tz;
+        $bz = $px * $ty - $py * $tx;
+
+        $lift = 0.18 * $radius;
+        $nx = $sx + 0.6 * $px;
+        $ny = $sy + 0.6 * $py;
+        $nz = $sz + 0.6 * $pz;
+        $nl = sqrt($nx * $nx + $ny * $ny + $nz * $nz);
+        $centre = $this->addVertex(
+            $cx + $px * $lift,
+            $cy + $py * $lift,
+            $cz + $pz * $lift,
+            $nx / $nl,
+            $ny / $nl,
+            $nz / $nl,
+            $phase,
+            0.0,
+        );
+
+        $ring = [];
+        $steps = $points * 2;
+        for ($i = 0; $i < $steps; $i++) {
+            $tip = ($i & 1) === 0;
+            $a = $spin + M_PI * $i / $points;
+            $ca = cos($a);
+            $sa = sin($a);
+            // Uneven leaf lengths, stable for a phase (each tuft differs).
+            $r = $tip ? $radius * (0.84 + 0.16 * sin($phase * 37.0 + $i * 1.9)) : $radius * (0.5 + 0.08 * sin($phase * 53.0 + $i * 2.3));
+            $h = $tip ? -0.25 * $radius : 0.0;
+            $dx = $tx * $ca + $bx * $sa;
+            $dy = $ty * $ca + $by * $sa;
+            $dz = $tz * $ca + $bz * $sa;
+            $mx = $nx + 0.45 * $dx;
+            $my = $ny + 0.45 * $dy;
+            $mz = $nz + 0.45 * $dz;
+            $ml = sqrt($mx * $mx + $my * $my + $mz * $mz);
+            $ring[] = $this->addVertex(
+                $cx + $dx * $r + $px * $h,
+                $cy + $dy * $r + $py * $h,
+                $cz + $dz * $r + $pz * $h,
+                $mx / $ml,
+                $my / $ml,
+                $mz / $ml,
+                $phase,
+                $tip ? 1.0 : 0.6,
+            );
+        }
+        for ($i = 0; $i < $steps; $i++) {
+            $this->addTriangle($centre, $ring[$i], $ring[($i + 1) % $steps]);
+        }
     }
 
     /**
