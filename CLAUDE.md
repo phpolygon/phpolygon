@@ -636,7 +636,11 @@ carries the look. Game-agnostic: bounds, ground, mask, colours and density come 
   and so does an exception from ground or mask, which goes on to the caller. `prewarm()` builds
   everything in reach at once: call it wherever a loading screen ends or a camera jumps, with the spot
   the camera will be at. It also runs what a game's ground and mask set up on first use (otherwise a
-  single candidate of the first frame). `lastPendingCells` / `lastMissingDistance` for profiles.
+  single candidate of the first frame). `prewarmRadii($steps, ?$radius)` spreads it over frames: growing
+  radii, each step the same area, the last the end radius, empty while grass is off; call `prewarm()` once
+  per frame with each (`LoadingSequence` counts the frames). Dormant fields are not in any query: `prewarm()`
+  builds nothing for them, and `render()` drops the state of a field it does not see, so a field stays awake
+  from `prewarm()` to the frame that shows it. `lastPendingCells` / `lastMissingDistance` for profiles.
   Per frame the visible cells within the fade
   range contribute the PREFIX of tufts whose hash is below the density at the cell's nearest point
   minus the rebuild distance (a superset of what the shader keeps) -> one packed `DrawMeshInstanced`
@@ -2414,6 +2418,30 @@ would otherwise block the main thread for >5 s, so Linux compositors
 (Mutter/KWin) don't flag the window as "not responding" during heavy
 startup work (font atlas pre-warming, large content generation, Steam
 runtime handshake, etc.) on slow GPUs (e.g. Intel HD 3000 + Mesa).
+
+### Loading screens of a game (`Runtime\LoadingSequence`)
+
+The splash above belongs to `onInit`. For a loading screen of the game's own (entering a level, loading a
+save) `LoadingSequence` is the course of it without the drawing, testable without a GPU: lines of
+`['step' => …, 'label' => …, 'ticks' => n]`, `next()` once per frame shown (`{step, tick}`, null when the
+work is done), `fraction()` for the bar (every line weighs the same, the running one by its ticks; only moves
+forward), `labels()` / `currentLine()` for the list, `finished()` = work done and `minSeconds` over (an early
+end leaves the screen standing, long work is never stretched or cut). `setTicks($step, $n)` fits a line not
+begun to what the work before it found, 0 drops it. `doneLabels` keeps lines of work that ran on the same
+screen before. The clock is a `\Closure(): float` of seconds (hrtime by default). Steps and labels are opaque:
+what a step does, the drawing and the texts are the game's. Do one piece of `next()` per frame shown, so the
+frame between is part of the work and the cold first frames are paid behind the screen.
+
+```php
+$loading = new LoadingSequence([
+    ['step' => 'restore', 'label' => 'loading.restore', 'ticks' => 1],
+    ['step' => 'grass', 'label' => 'loading.surroundings', 'ticks' => 4],
+], minSeconds: 0.8);
+$radii = $grass->prewarmRadii(4);
+$loading->setTicks('grass', count($radii));   // 0 with grass off: the line goes
+```
+
+Tests: `LoadingSequenceTest`.
 
 ### Warm rendering — off-screen pre-rasterisation
 

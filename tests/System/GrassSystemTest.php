@@ -318,4 +318,93 @@ final class GrassSystemTest extends TestCase
         self::assertTrue($system->lastRebuilt);
         self::assertLessThan($before / 10, $system->lastInstanceCount, 'the excluded half in front of the camera is gone');
     }
+
+    public function testPrewarmRadiiGrowByEqualAreaAndEndOnTheDefault(): void
+    {
+        $detail = GrassQuality::Medium->detail();
+        self::assertNotNull($detail);
+        $system = $this->system();
+        $end = $detail->fadeRange + $system->cellSize;
+
+        $radii = $system->prewarmRadii(4);
+
+        self::assertCount(4, $radii);
+        self::assertEqualsWithDelta($end * 0.5, $radii[0], 1e-9);
+        self::assertEqualsWithDelta($end * sqrt(0.5), $radii[1], 1e-9);
+        self::assertEqualsWithDelta($end * sqrt(0.75), $radii[2], 1e-9);
+        self::assertSame($end, $radii[3], 'exactly the default, not a rounded neighbour');
+        self::assertSame([50.0], $system->prewarmRadii(1, 50.0), 'one step is the end radius');
+        self::assertEqualsWithDelta(25.0, $system->prewarmRadii(4, 50.0)[0], 1e-9);
+    }
+
+    public function testPrewarmRadiiFollowTheQualityAndAreEmptyWhenGrassIsOff(): void
+    {
+        self::assertSame([], $this->system(GrassQuality::Off)->prewarmRadii(4));
+
+        $low = GrassQuality::Low->detail();
+        self::assertNotNull($low);
+        $system = $this->system(GrassQuality::Low);
+        self::assertSame($low->fadeRange + $system->cellSize, $system->prewarmRadii(2)[1]);
+    }
+
+    public function testPrewarmRadiiNeedAStep(): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+        $this->system()->prewarmRadii(0);
+    }
+
+    public function testSteppedPrewarmBuildsWhatOneCallBuildsWithoutAQueueLeft(): void
+    {
+        $this->field();
+        $once = $this->system();
+        $total = $once->prewarm($this->world, 3.0, -7.0);
+        $this->camera(3.0, -7.0);
+        $once->render($this->world);
+        $expected = array_map(static fn(DrawMeshInstanced $d): string => $d->packedMatrices, $this->draws());
+        self::assertSame(0, $once->lastPendingCells);
+
+        $stepped = $this->system();
+        $made = [];
+        foreach ($stepped->prewarmRadii(4) as $radius) {
+            $made[] = $stepped->prewarm($this->world, 3.0, -7.0, $radius);
+        }
+        self::assertSame($total, array_sum($made));
+        self::assertCount(4, array_filter($made), 'every step has work');
+        self::assertLessThan(0.5 * $total, max($made), 'no step carries most of it');
+
+        $this->camera(3.0, -7.0);
+        $stepped->render($this->world);
+        self::assertSame(0, $stepped->lastPendingCells);
+        self::assertSame($expected, array_map(static fn(DrawMeshInstanced $d): string => $d->packedMatrices, $this->draws()));
+    }
+
+    public function testPrewarmDoesNotSeeASleepingField(): void
+    {
+        $entity = $this->world->createEntity();
+        $entity->attach(new GrassField(-20.0, -20.0, 20.0, 20.0));
+        $system = $this->system();
+        $this->world->setEntityDormant($entity->id, true);
+
+        self::assertSame(0, $system->prewarm($this->world, 0.0, 0.0), 'nothing is built for a sleeping field');
+        self::assertSame(0, $system->cachedCellCount());
+
+        $this->world->setEntityDormant($entity->id, false);
+        self::assertGreaterThan(0, $system->prewarm($this->world, 0.0, 0.0), 'awake it builds');
+    }
+
+    public function testAFieldThatFallsAsleepLosesItsPrewarmedCellsAtTheNextFrame(): void
+    {
+        $entity = $this->world->createEntity();
+        $entity->attach(new GrassField(-20.0, -20.0, 20.0, 20.0));
+        $system = $this->system();
+        $system->prewarm($this->world, 0.0, 0.0);
+        self::assertGreaterThan(0, $system->cachedCellCount());
+
+        $this->world->setEntityDormant($entity->id, true);
+        self::assertGreaterThan(0, $system->cachedCellCount(), 'still there until a frame runs');
+        $this->camera();
+        $system->render($this->world);
+
+        self::assertSame(0, $system->cachedCellCount());
+    }
 }

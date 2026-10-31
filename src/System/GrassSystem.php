@@ -229,7 +229,15 @@ class GrassSystem extends AbstractSystem
      * Generate every cell of every field within `$radius` of (x, z) now, ignoring
      * the per-frame budget. For a loading screen and a teleport: nothing else stops
      * a camera that lands somewhere new from seeing the cells appear. The default
-     * radius is everything the queue would build from there.
+     * radius is everything the queue would build from there. To spread it over the
+     * frames of a loading screen, call it with {@see prewarmRadii()}.
+     *
+     * Dormant fields are not in the query: this builds nothing for them, so wake a
+     * region first. And what is built for a field is lost when it sleeps: the next
+     * {@see render()} drops the state of every field it does not see, so a field has
+     * to stay awake between this call and the frame that shows it.
+     *
+     * @return int cells built
      */
     public function prewarm(World $world, float $x, float $z, ?float $radius = null): int
     {
@@ -238,7 +246,7 @@ class GrassSystem extends AbstractSystem
             return 0;
         }
         $this->prepare($detail);
-        $radius ??= $detail->fadeRange + self::LEAD_CELLS * max(1.0, $this->cellSize);
+        $radius ??= $this->prewarmRadius($detail);
         $made = 0;
         foreach ($world->query(GrassField::class) as $entity) {
             $field = $entity->get(GrassField::class);
@@ -253,6 +261,47 @@ class GrassSystem extends AbstractSystem
             }
         }
         return $made;
+    }
+
+    /**
+     * Radii for one {@see prewarm()} per frame of a loading screen, so that it never
+     * freezes: growing, each step adding the same area and so about the same work,
+     * the last one the end radius. The steps build on each other, together they
+     * build what one call with the end radius builds. The dormancy rules of
+     * {@see prewarm()} hold for every step.
+     *
+     * ```php
+     * foreach ($grass->prewarmRadii(4) as $radius) {
+     *     $grass->prewarm($world, $x, $z, $radius);
+     *     yield; // a frame of the loading screen
+     * }
+     * ```
+     *
+     * @param int $steps at least 1
+     * @param float|null $radius end radius; null = the default of {@see prewarm()}
+     * @return list<float> empty while grass is off: there is nothing to load
+     */
+    public function prewarmRadii(int $steps, ?float $radius = null): array
+    {
+        if ($steps < 1) {
+            throw new \InvalidArgumentException('Prewarming takes at least one step.');
+        }
+        $detail = $this->detail();
+        if ($detail === null) {
+            return [];
+        }
+        $radius ??= $this->prewarmRadius($detail);
+        $radii = [];
+        for ($i = 1; $i <= $steps; $i++) {
+            $radii[] = $radius * sqrt($i / $steps);
+        }
+        return $radii;
+    }
+
+    /** Everything the queue would build around a point. */
+    private function prewarmRadius(GrassDetail $detail): float
+    {
+        return $detail->fadeRange + self::LEAD_CELLS * max(1.0, $this->cellSize);
     }
 
     /** Cells currently cached for all fields (for tests and profiling). */
@@ -279,7 +328,7 @@ class GrassSystem extends AbstractSystem
         $st = $this->state[$oid];
         $cs = max(1.0, $this->cellSize);
         $fade = $detail->fadeRange;
-        $reach = $fade + self::LEAD_CELLS * $cs;
+        $reach = $this->prewarmRadius($detail);
         // Heights of a cell not built yet: what the finished ones span. Until one
         // is finished nothing speaks against the cell being level with the camera.
         $dy = $st['y0'] <= $st['y1'] ? max($st['y0'] - $ey, 0.0, $ey - $st['y1'] - self::tallest($field, $detail)) : 0.0;
