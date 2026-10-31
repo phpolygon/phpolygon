@@ -75,6 +75,33 @@ final class Physics3DBoxCollisionTest extends TestCase
         $this->assertLessThan(-0.2, $this->player->position->x);
     }
 
+    /** @return iterable<string, array{float, float}> */
+    public static function thinWallStrides(): iterable
+    {
+        yield '5 m/s at 60 Hz' => [5.0, 60.0];
+        yield '5 m/s at 30 Hz' => [5.0, 30.0];
+        yield '8.5 m/s at 60 Hz' => [8.5, 60.0];
+        yield '8.5 m/s at 30 Hz' => [8.5, 30.0];
+    }
+
+    /**
+     * A sliding door leaf: 6 cm thick and thinner than a frame's stride, but the
+     * stride stays below the radius, so the centre of the capsule never passes it.
+     */
+    #[DataProvider('thinWallStrides')]
+    public function testAStrideLongerThanAThinWallDoesNotPassIt(float $speed, float $hz): void
+    {
+        $this->box(new Vec3(0.0, 1.5, 0.0), new Vec3(0.06, 3.0, 40.0));
+
+        $dt = 1.0 / $hz;
+        for ($i = 0, $n = (int) (1.0 * $hz); $i < $n; $i++) {
+            $this->player->position = $this->player->position->add(new Vec3($speed * $dt, 0.0, 0.0));
+            $this->world->update($dt);
+        }
+
+        $this->assertEqualsWithDelta(-0.33, $this->player->position->x, 1e-6);
+    }
+
     public function testAnUnrotatedBoxStaysAnAabb(): void
     {
         $box = $this->box(new Vec3(0.0, 1.5, 0.0), new Vec3(0.4, 3.0, 40.0));

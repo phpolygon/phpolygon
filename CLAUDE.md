@@ -827,6 +827,10 @@ How `Physics3DSystem` moves a `CharacterController3D` (`Physics3DBoxCollisionTes
   wall quad one triangle reports a slanted edge contact. `resolveMeshCollisions()` therefore works
   each iteration deepest contact first and asks every further one again from the new position:
   the face contact wins, nothing creeps up the wall, and the BVH order decides nothing.
+- **Boxes thinner than a stride:** `resolveAABB()` pushes the whole way out on the side of the
+  capsule's centre, not by the size of the intersection (at most the box's thickness: a 6 cm door
+  leaf gave back 6 cm per tick, and 8 cm per tick walked through it). The centre has to stay on its
+  side, so a stride must stay below the capsule's radius; a game with long ticks splits them.
 - **Box steps** lift on contact when the rise is within `stepHeight`. Before that,
   `StepAssist::bodyFitsAt()` checks the raised capsule, from the step height above the tread up to
   the head: a contact there refuses the lift if it would push the body down or back the way the

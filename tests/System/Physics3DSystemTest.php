@@ -88,6 +88,33 @@ class Physics3DSystemTest extends TestCase
         $this->assertEqualsWithDelta(0.0, $resolution->z, 0.001);
     }
 
+    public function testAABBPushLeavesABoxThinnerThanThePenetration(): void
+    {
+        // A's front is 0.2 past a 0.06 thick wall: the overlap is the wall's
+        // thickness, the way out is the whole 0.26.
+        $resolution = Physics3DSystem::resolveAABB(
+            new Vec3(-0.6, 0.0, -0.3), new Vec3(0.0, 1.8, 0.3),
+            new Vec3(-0.2, 0.0, -5.0), new Vec3(-0.14, 3.0, 5.0),
+        );
+
+        $this->assertNotNull($resolution);
+        $this->assertEqualsWithDelta(-0.2, $resolution->x, 1e-9);
+        $this->assertSame(0.0, $resolution->y);
+        $this->assertSame(0.0, $resolution->z);
+    }
+
+    public function testAABBPushGoesTheWayTheCentreIsOnAndFarEnough(): void
+    {
+        // Centre of A already behind the middle of the wall: out the far side.
+        $resolution = Physics3DSystem::resolveAABB(
+            new Vec3(-0.5, 0.0, -0.3), new Vec3(0.1, 1.8, 0.3),
+            new Vec3(-0.25, 0.0, -5.0), new Vec3(-0.19, 3.0, 5.0),
+        );
+
+        $this->assertNotNull($resolution);
+        $this->assertEqualsWithDelta(0.31, $resolution->x, 1e-9);
+    }
+
     public function testCharacterBlockedByStaticCollider(): void
     {
         $world = new World();

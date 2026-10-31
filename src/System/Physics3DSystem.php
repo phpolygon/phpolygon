@@ -1068,34 +1068,37 @@ class Physics3DSystem extends AbstractSystem
     /**
      * Test AABB overlap and return the minimum penetration resolution vector.
      * Returns null if no overlap.
+     *
+     * The push on an axis is the whole way out on the side of A's centre, not the
+     * size of the intersection: a box thinner than the penetration would otherwise
+     * give back only its own thickness per tick, and a stride longer than that
+     * walks through it. A's centre has to stay on its side, so a stride must stay
+     * below A's half width.
      */
     public static function resolveAABB(Vec3 $aMin, Vec3 $aMax, Vec3 $bMin, Vec3 $bMax): ?Vec3
     {
-        $overlapX = min($aMax->x, $bMax->x) - max($aMin->x, $bMin->x);
-        $overlapY = min($aMax->y, $bMax->y) - max($aMin->y, $bMin->y);
-        $overlapZ = min($aMax->z, $bMax->z) - max($aMin->z, $bMin->z);
-
-        if ($overlapX <= 0 || $overlapY <= 0 || $overlapZ <= 0) {
+        if (min($aMax->x, $bMax->x) - max($aMin->x, $bMin->x) <= 0
+            || min($aMax->y, $bMax->y) - max($aMin->y, $bMin->y) <= 0
+            || min($aMax->z, $bMax->z) - max($aMin->z, $bMin->z) <= 0
+        ) {
             return null;
         }
 
-        // Push out along axis of minimum penetration
-        $centerAx = ($aMin->x + $aMax->x) * 0.5;
-        $centerBx = ($bMin->x + $bMax->x) * 0.5;
-        $centerAy = ($aMin->y + $aMax->y) * 0.5;
-        $centerBy = ($bMin->y + $bMax->y) * 0.5;
-        $centerAz = ($aMin->z + $aMax->z) * 0.5;
-        $centerBz = ($bMin->z + $bMax->z) * 0.5;
+        $pushX = $aMin->x + $aMax->x < $bMin->x + $bMax->x ? $bMin->x - $aMax->x : $bMax->x - $aMin->x;
+        $pushY = $aMin->y + $aMax->y < $bMin->y + $bMax->y ? $bMin->y - $aMax->y : $bMax->y - $aMin->y;
+        $pushZ = $aMin->z + $aMax->z < $bMin->z + $bMax->z ? $bMin->z - $aMax->z : $bMax->z - $aMin->z;
 
-        if ($overlapX <= $overlapY && $overlapX <= $overlapZ) {
-            $sign = $centerAx < $centerBx ? -1.0 : 1.0;
-            return new Vec3($sign * $overlapX, 0.0, 0.0);
+        // Push out along axis of minimum penetration
+        $depthX = abs($pushX);
+        $depthY = abs($pushY);
+        $depthZ = abs($pushZ);
+
+        if ($depthX <= $depthY && $depthX <= $depthZ) {
+            return new Vec3($pushX, 0.0, 0.0);
         }
-        if ($overlapY <= $overlapX && $overlapY <= $overlapZ) {
-            $sign = $centerAy < $centerBy ? -1.0 : 1.0;
-            return new Vec3(0.0, $sign * $overlapY, 0.0);
+        if ($depthY <= $depthX && $depthY <= $depthZ) {
+            return new Vec3(0.0, $pushY, 0.0);
         }
-        $sign = $centerAz < $centerBz ? -1.0 : 1.0;
-        return new Vec3(0.0, 0.0, $sign * $overlapZ);
+        return new Vec3(0.0, 0.0, $pushZ);
     }
 }
