@@ -690,17 +690,19 @@ function vio_gpu_timestamp(VioContext $context, string $name): bool {}
 function vio_gpu_timings(VioContext $context): array|false {}
 
 /**
- * php-vio >= 2.14: on-disk shader cache statistics for vio_create(['shader_cache' => dir]).
+ * php-vio >= 2.14: on-disk shader cache statistics for vio_create(['shader_cache' => dir]),
+ * cumulative for the process.
  *
- * @return array{dir: string, hits: int, misses: int, stores: int}
+ * @return array{dir: ?string, hits: int, misses: int, stores: int}
  */
-function vio_shader_cache_stats(VioContext $context): array {}
+function vio_shader_cache_stats(): array {}
 
 /**
  * php-vio >= 2.14: swapchain facts (buffer count, frame latency, waitable object,
- * HDR output, backbuffer format, shader model).
+ * HDR output, backbuffer format, shader model). Newer php-vio adds
+ * shader_model_version and agility_sdk (>= 2.31) and hdr_composite (>= 2.37).
  *
- * @return array{buffer_count: int, frame_latency: int, waitable: bool, hdr_output: bool, format: int, shader_model: int}
+ * @return array{buffer_count: int, frame_latency: int, waitable: bool, hdr_output: bool, format: int, shader_model: int, hdr_composite?: bool, shader_model_version?: int, agility_sdk?: int}
  */
 function vio_swapchain_info(VioContext $context): array {}
 
