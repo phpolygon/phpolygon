@@ -835,6 +835,7 @@ class Engine
         // old scene's history.
         $this->events->listen(\PHPolygon\Event\SceneLoaded::class, function () {
             $this->adaptiveQuality?->resetWarmup();
+            $this->graphics->upscalerCutPoint();
         });
 
         // Create Renderer2D after window is initialized (needs GL/vio context)

@@ -25,9 +25,9 @@ final class UpscalerProbeResult
 
     /**
      * From vio_upscaler_info(). The provider looked at the device when it said yes
-     * or names the driver it checked. A refusal carries no 'library' (php-vio clears
-     * it), so such an entry rests on the plugin alone; 'driver' stays empty when the
-     * plugin or the runtime library was not found.
+     * or names the driver it checked. Up to php-vio 2.38.1 a refusal carries no
+     * 'library', and such an entry rests on the plugin alone; 'driver' stays empty
+     * when the plugin or the runtime library was not found.
      *
      * @param array<string, mixed> $info
      */

@@ -349,26 +349,41 @@ same forward and MRT. Backends without stencil (Metal) skip it; `outlineSupporte
   see "Native upscaler runtimes" under Build system). Tests:
   `VioNativeUpscalerTest` (needs `'headless_hardware' => true`: WARP refuses), `UpscalerDispatchTest`.
 - **The DLSS query is lazy.** The first DLSS call per context blocks while NGX initialises, whichever
-  `vio_upscaler_*` it is (supported, info, render_size, create; `VIO_FEATURE_UPSCALER_NATIVE` too when FSR 3 is
-  missing, so that flag is read only after a provider said yes). The render path therefore resolves through
+  `vio_upscaler_*` it is (supported, info, render_size, create). `VIO_FEATURE_UPSCALER_NATIVE` means "any provider":
+  on a php-vio without `vio_upscaler_prepare` it initialises NGX too when FSR 3 is missing, on a newer one it can be
+  true on NVIDIA without DLSS until the worker failed, so it is read only after a provider said yes. The render path therefore resolves through
   `knownCapabilities()`, which asks no slow provider: DLSS stays in `GraphicsCapabilities::$pendingUpscalers`
   (not offered, note "Checking this device ...") and nothing touches the provider, the disk or `vio_adapters`.
-  Only a selected DLSS depends on that state, no other fallback chain contains it. Who asks:
-  - **DLSS selected:** `settleUpscalerProbes()` behind the splash (`Engine`, label "Preparing upscaler"), else at
-    the next `beginFrame()`. It blocks; frames start after the answer, there is never a stand-in frame. A
-    stored "no" spares the query and the chain moves on; a stored "yes" does not spare it, the provider has to
-    initialise to run. `applySettings()` never queries: it may run mid-frame.
+  Only a selected DLSS depends on that state, no other fallback chain contains it. How it is asked depends on
+  php-vio: `function_exists('vio_upscaler_prepare')` gives the worker-thread path, `state` `idle` after
+  `vio_upscaler_prepare` (a plugin without the slots) or an older php-vio the blocking one.
+  - **Worker thread** (`Quality\UpscalerPreparation`, advanced from `settleUpscalerProbes()`, so from the splash and
+    every `beginFrame()`; `state` is read every 0.3 s with `$probe = false`, not per frame). A selected DLSS is
+    `pending` and the frames run on the next entry of the chain, FSR 3 or TAAU. `ready`: a stored setting waits for
+    a cut (`upscalerCutPoint()`: `$engine->graphics->upscalerCutPoint()` for a game's loading screen or pause,
+    `SceneLoaded` and `SetCamera::$cut` count by themselves, a cut during `preparing` is not saved; note "Ready,
+    starts at the next scene change"), one the player chose in a running game (`applySettings()` after the first
+    frame) or with no temporal frame on screen yet goes at once. The switch sets `offscreenDirty` and resets the
+    history; `syncNativeUpscaler()` then destroys FSR, creates DLSS, the render size comes from the provider and the
+    first dispatch has `'reset' => true`. A game with one scene and no cut stays on the stand-in for the session.
+    `failed`: stays on the stand-in, `reason` becomes the note and goes to `game.log`, not stored (with `$probe =
+    false` php-vio names no driver; the next process prepares in the background again). A stored "no" starts nothing.
+    While `preparing` php-vio answers `supported` / `render_size` with false: `graphicsCapabilities()` waits for
+    the worker rather than taking that for an answer.
+  - **Blocking:** `settleUpscalerProbes()` behind the splash (`Engine`, label "Preparing upscaler"), else at the next
+    `beginFrame()`. Frames start after the answer, there is never a stand-in frame. A stored "no" spares the
+    query and the chain moves on; a stored "yes" does not, the provider has to initialise to run.
+    `applySettings()` never queries on either path: it may run mid-frame.
   - **Settings screen:** `$engine->graphics->capabilities()` -> `requestGraphicsCapabilities()`, never blocks.
-    Unknown: pending for one frame, the query runs at the next `beginFrame()`, so that frame's "checking"
-    is on screen during the freeze. A thread cannot take it: php-vio holds one device per process
-    (`vio_d3d12` is global) and a context cannot leave its thread. Call it from the screen, not at start-up.
+    Disk first, then the worker; without one the query runs at the next `beginFrame()`, so that frame's
+    "checking" is on screen during the freeze. Call it from the screen, not at start-up.
   - **`VioRenderer3D::graphicsCapabilities()`:** the complete answer, blocking; tools and tests.
   - **Disk:** `Quality\UpscalerProbeCache`, `<shaderCachePath>/upscaler-probe.json` (`''` = none), one entry per
     provider and `deviceKey()` = backend, PCI ids, adapter name and driver from `vio_adapters`, php-vio version,
     NGX project id; the newest `MAX_ENTRIES` stay, so the two GPUs of a hybrid laptop keep their own answers.
     An entry is also tied to size and mtime of the libraries `vio_upscaler_info` named: plugin and runtime for
-    a yes, the plugin alone for a no (php-vio clears `library` on a refusal, so a patch that changes only
-    `nvngx_dlss.dll` does not reopen a stored no). Anything else - broken file, other format, other device, changed
+    a yes, the plugin alone for a no up to php-vio 2.38.1 (it clears `library` on a refusal, so a patch that changes
+    only `nvngx_dlss.dll` does not reopen that no). Anything else - broken file, other format, other device, changed
     library - is no answer and is queried again. Stored: a yes, and a no with `driver` set, i.e. the provider
     looked at the device. "Plugin or runtime library not found" leaves `driver` empty
     (`UpscalerProbeResult::fromProviderInfo()`, `$cacheable`) and is not stored: it takes under 1 ms and the next
@@ -381,7 +396,12 @@ same forward and MRT. Backends without stencil (Metal) skip it; `outlineSupporte
   `vio_adapters` 6 ms. Start to frame 2 (`Engine`, offscreen, skipSplash, empty scene, shader cache
   warm, median of 5, D3D12): TAA 6.67 -> 0.66 s, FSR 3 5.59 -> 0.67 s, DLSS selected 5.56 -> 5.46 s (the provider
   has to initialise). Settings screen: 5.1 s once, then 6-10 ms for the first `capabilities()` of a process.
-  Tests: `LazyUpscalerProbeTest` (no GPU), `VioUpscalerProbeTest` (hardware, DLSS plugin).
+  Worker path, 2026-10-31, unreleased php-vio build with `vio_upscaler_prepare`, real 1920x1080 window, D3D12, 576
+  boxes, stored DLSS, 5 runs: first frame 1.51-1.56 s after process start with a 0.2 s splash, DLSS ready 3.4-3.7 s
+  later; frame p50 4.7-5.0 ms while preparing against 4.0-4.1 ms on FSR 3 alone (2 runs), p99 8.4-11.9 against 5.1-6.5,
+  max 9.9-16.7 against 7.0-11.6; the switch frame 67-79 ms, the next 9.5-18 ms, then normal. Not measured in a shipped game.
+  Tests: `LazyUpscalerProbeTest`, `UpscalerPreparationTest` (no GPU), `VioUpscalerProbeTest` (hardware, DLSS plugin),
+  `VioUpscalerPrepareTest` (php-vio's test plugin through `PHPOLYGON_TEST_UPSCALER_PLUGIN`).
 
 **Storage-buffer instances** (`DrawMeshInstanced::fromStorageBuffer`, e.g. GPU particles): the matrices never
 leave GPU memory, but the regular programs read instance matrices from vertex attributes. The draw

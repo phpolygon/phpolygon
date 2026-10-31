@@ -751,7 +751,10 @@ function vio_upscaler_supported(VioContext $context, int $provider = 1): bool {}
  *
  * @return array<string, mixed>
  */
-function vio_upscaler_info(VioContext $context, VioUpscaler|int $which = 1): array {}
+function vio_upscaler_info(VioContext $context, VioUpscaler|int $which = 1, bool $probe = true): array {}
+
+/** Starts a provider's first-use work on a worker thread and returns at once; info()['state'] follows it. */
+function vio_upscaler_prepare(VioContext $context, int $provider): bool {}
 
 /**
  * Options: display_width, display_height (required), provider, quality, render_width,
