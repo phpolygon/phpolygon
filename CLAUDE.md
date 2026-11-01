@@ -465,6 +465,27 @@ program and frame. No declaration, no upload.
   `sampler2D`, resolved through the texture manager. The GL family gets the uniforms (set at the command, like `SetFog`)
   but no samplers: a look that samples one registers a GL branch without it. Native Vulkan ignores both commands.
 
+**Fullscreen pass chain** (`PostProcess\FullscreenPass`, `FullscreenPassRegistry`, `PostStage`; `FullscreenPassRegistryTest`,
+`VioFullscreenPassTest`). A game adds passes to the image chain without touching the renderer. Vio backend only: the GL and
+native Vulkan renderers do not run them, and a pass that is off, misses a feature, cannot compile or needs a depth the frame
+does not have leaves the frame as if it did not exist (same bytes, no target, `fullscreenPassAvailable($name)` for a settings UI).
+```php
+FullscreenPassRegistry::register(new FullscreenPass('film_grain', PostStage::Final, $path, order: 10,
+    features: ['VIO_FEATURE_RENDER_TARGET_DEPTH_SAMPLE'], depth: true, samplers: ['u_grain_noise']));
+AdaptiveTierStack::registerStep(new AdaptiveStep('film_grain', AdaptiveSlot::AfterBloom));
+$engine->graphics->update(fn (GraphicsSettings $s) => $s->with(effects: ['film_grain' => false]));
+```
+- Stages: `Scene` (render size, scene colour, before the temporal resolve; its result is written back into the scene
+  target, so a native upscaler sees it), `Display` (after the resolve, before bloom), `Final` (finished sRGB-encoded image,
+  before the HDR10 encoding and the UI; the present is redirected into an RGBA8 target, `fullscreen_blit` encodes afterwards).
+- A pass is a fragment file on `postprocess.vert`: `u_source` (slot 0), `v_uv`, from the renderer `u_resolution` and `u_time`,
+  with `$depth` the raw depth in `u_scene_depth_raw` (slot 1), the samplers it names (slots 2-7) from `SetShaderTexture`, every
+  `SetShaderParameter` value it declares. Linear scene colour in the first two stages on an HDR target.
+- It costs the offscreen path and three targets per size and format, only while a pass runs; GPU mark `post.<name>`, profiler
+  section `render3d.post.<name>`. `renderToImage()` draws straight into the caller's target and runs no pass, like bloom.
+- `GraphicsSettings::$effects` holds on/off by name; a save file without it stays as it was. `AdaptiveStep` places an effect at an
+  `AdaptiveSlot` of the stack. Compiled at first use: register before `warmShaders()` does not pre-compile it, the first frame does.
+
 ### Shaders
 - Authoring language: **GLSL** (human- and AI-readable plaintext)
 - 2D: used directly by NanoVG / OpenGL at runtime

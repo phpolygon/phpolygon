@@ -30,6 +30,9 @@ use PHPolygon\Rendering\Quality\ScreenSpaceReflections;
  *  11. ShaderQuality   Full -> Unlit (last because it is highly visible)
  *  12. Anisotropy      16 -> 8 -> 4 -> 2 -> 1
  *
+ * A game places its own effects with {@see registerStep()} at an {@see AdaptiveSlot}
+ * between these steps; with none registered the stack is exactly this list.
+ *
  * TextureQuality, MeshLodTier and ColorGradingPreset are deliberately
  * excluded - the first two have hot-swap cost (texture re-upload, mesh
  * regeneration) that far outweighs any one frame's saving; ColorGrading
@@ -52,6 +55,41 @@ final class AdaptiveTierStack
      */
     private static bool $shadingRateAvailable = false;
 
+    /** @var array<string, AdaptiveStep> */
+    private static array $steps = [];
+
+    public static function registerStep(AdaptiveStep $step): void
+    {
+        self::$steps[$step->name] = $step;
+    }
+
+    public static function clearSteps(): void
+    {
+        self::$steps = [];
+    }
+
+    /** One registered effect of $slot switched off, or null when all of them are. */
+    private static function stepDown(GraphicsSettings $current, AdaptiveSlot $slot): ?GraphicsSettings
+    {
+        foreach (self::$steps as $step) {
+            if ($step->slot === $slot && $current->effectEnabled($step->name, $step->default)) {
+                return $current->with(effects: [$step->name => false]);
+            }
+        }
+        return null;
+    }
+
+    /** The reverse of {@see stepDown()}: the effect switched off last comes back first. */
+    private static function stepUp(GraphicsSettings $current, AdaptiveSlot $slot): ?GraphicsSettings
+    {
+        foreach (array_reverse(self::$steps) as $step) {
+            if ($step->slot === $slot && !$current->effectEnabled($step->name, $step->default)) {
+                return $current->with(effects: [$step->name => true]);
+            }
+        }
+        return null;
+    }
+
     public static function setShadingRateAvailable(bool $available): void
     {
         self::$shadingRateAvailable = $available;
@@ -64,6 +102,11 @@ final class AdaptiveTierStack
 
     public static function downgrade(GraphicsSettings $current): ?GraphicsSettings
     {
+        $step = self::stepDown($current, AdaptiveSlot::First);
+        if ($step !== null) {
+            return $step;
+        }
+
         // 1. VolumetricFog (8-step raymarch is the most expensive per-fragment cost in the stack)
         if ($current->volumetricFog) {
             return $current->with(volumetricFog: false);
@@ -84,6 +127,11 @@ final class AdaptiveTierStack
             return $current->with(surfaceRelief: SurfaceRelief::Cavity);
         }
 
+        $step = self::stepDown($current, AdaptiveSlot::AfterReflections);
+        if ($step !== null) {
+            return $step;
+        }
+
         // 3. Shading rate 2x2: a quarter of the fragment work at full geometry and
         // UI resolution, no upscaling blur - cheaper than the first render-scale step.
         if (self::$shadingRateAvailable && $current->shadingRate === ShadingRate::Full) {
@@ -94,6 +142,11 @@ final class AdaptiveTierStack
         $idx = self::indexFloat(self::RENDER_SCALE_LEVELS, $current->renderScale);
         if ($idx !== null && $idx + 1 < count(self::RENDER_SCALE_LEVELS)) {
             return $current->with(renderScale: self::RENDER_SCALE_LEVELS[$idx + 1]);
+        }
+
+        $step = self::stepDown($current, AdaptiveSlot::AfterRenderScale);
+        if ($step !== null) {
+            return $step;
         }
 
         // 5. Shading rate 4x4, once the render scale has bottomed out.
@@ -121,6 +174,11 @@ final class AdaptiveTierStack
         };
         if ($next !== null) {
             return $current->with(shadowQuality: $next);
+        }
+
+        $step = self::stepDown($current, AdaptiveSlot::AfterShadows);
+        if ($step !== null) {
+            return $step;
         }
 
         // 5. ViewDistance
@@ -151,6 +209,11 @@ final class AdaptiveTierStack
             return $current->with(bloom: false);
         }
 
+        $step = self::stepDown($current, AdaptiveSlot::AfterBloom);
+        if ($step !== null) {
+            return $step;
+        }
+
         // 9. Vignette (cheap, but visible - dropped after the heavy hitters)
         if ($current->vignetteIntensity > 0.0) {
             return $current->with(vignetteIntensity: 0.0);
@@ -159,6 +222,11 @@ final class AdaptiveTierStack
         // 9b. Cavity relief (one height lookup, but visible)
         if ($current->surfaceRelief === SurfaceRelief::Cavity) {
             return $current->with(surfaceRelief: SurfaceRelief::Off);
+        }
+
+        $step = self::stepDown($current, AdaptiveSlot::BeforeUnlit);
+        if ($step !== null) {
+            return $step;
         }
 
         // 10. ShaderQuality
@@ -188,6 +256,11 @@ final class AdaptiveTierStack
             return $current->with(shaderQuality: ShaderQuality::Full);
         }
 
+        $step = self::stepUp($current, AdaptiveSlot::BeforeUnlit);
+        if ($step !== null) {
+            return $step;
+        }
+
         if ($current->surfaceRelief === SurfaceRelief::Off) {
             return $current->with(surfaceRelief: SurfaceRelief::Cavity);
         }
@@ -197,6 +270,11 @@ final class AdaptiveTierStack
         // GraphicsSettings to honour. Games that want the controller to
         // raise the vignette back should call $manager->update() with the
         // preferred value when they detect the upgrade signal.
+
+        $step = self::stepUp($current, AdaptiveSlot::AfterBloom);
+        if ($step !== null) {
+            return $step;
+        }
 
         if (!$current->bloom) {
             return $current->with(bloom: true);
@@ -219,6 +297,11 @@ final class AdaptiveTierStack
         $idx = self::indexFloat(self::VIEW_DISTANCE_LEVELS, $current->viewDistance);
         if ($idx !== null && $idx > 0) {
             return $current->with(viewDistance: self::VIEW_DISTANCE_LEVELS[$idx - 1]);
+        }
+
+        $step = self::stepUp($current, AdaptiveSlot::AfterShadows);
+        if ($step !== null) {
+            return $step;
         }
 
         $next = match ($current->shadowQuality) {
@@ -245,6 +328,11 @@ final class AdaptiveTierStack
             return $current->with(shadingRate: ShadingRate::Half);
         }
 
+        $step = self::stepUp($current, AdaptiveSlot::AfterRenderScale);
+        if ($step !== null) {
+            return $step;
+        }
+
         $idx = self::indexFloat(self::RENDER_SCALE_LEVELS, $current->renderScale);
         if ($idx !== null && $idx > 0) {
             return $current->with(renderScale: self::RENDER_SCALE_LEVELS[$idx - 1]);
@@ -252,6 +340,11 @@ final class AdaptiveTierStack
 
         if ($current->shadingRate === ShadingRate::Half) {
             return $current->with(shadingRate: ShadingRate::Full);
+        }
+
+        $step = self::stepUp($current, AdaptiveSlot::AfterReflections);
+        if ($step !== null) {
+            return $step;
         }
 
         if ($current->surfaceRelief === SurfaceRelief::Cavity) {
@@ -271,7 +364,7 @@ final class AdaptiveTierStack
             return $current->with(volumetricFog: true);
         }
 
-        return null;
+        return self::stepUp($current, AdaptiveSlot::First);
     }
 
     /**

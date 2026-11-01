@@ -119,12 +119,28 @@ final class GraphicsSettings
          * transmission. Every level is a GrassDetail parameter set.
          */
         public readonly GrassQuality $grassQuality = GrassQuality::Medium,
+        /**
+         * On/off state of a game's effects by name (a fullscreen pass, an
+         * AdaptiveStep). An effect absent from here is in its default state, and the
+         * saved settings hold nothing for it.
+         *
+         * @var array<string, bool>
+         */
+        public readonly array $effects = [],
     ) {
+    }
+
+    public function effectEnabled(string $name, bool $default = true): bool
+    {
+        return $this->effects[$name] ?? $default;
     }
 
     /**
      * Produce a new GraphicsSettings with selected fields overridden.
-     * Pass null (or omit) to keep the existing value for any field.
+     * Pass null (or omit) to keep the existing value for any field. $effects is
+     * merged into the existing states, name by name.
+     *
+     * @param array<string, bool>|null $effects
      */
     public function with(
         ?QualityMode $mode = null,
@@ -159,6 +175,7 @@ final class GraphicsSettings
         ?float $upscaleSharpness = null,
         ?UpscaleQuality $upscaleQuality = null,
         ?GrassQuality $grassQuality = null,
+        ?array $effects = null,
     ): self {
         $nextUpscaler = $upscaler ?? $this->upscaler;
         // Leaving a temporal upscaler re-clamps a sub-half render scale.
@@ -198,6 +215,7 @@ final class GraphicsSettings
             upscaleSharpness: $upscaleSharpness !== null ? max(0.0, min(1.0, $upscaleSharpness)) : $this->upscaleSharpness,
             upscaleQuality: $upscaleQuality ?? $this->upscaleQuality,
             grassQuality: $grassQuality ?? $this->grassQuality,
+            effects: $effects !== null ? [...$this->effects, ...$effects] : $this->effects,
         );
     }
 
@@ -206,7 +224,7 @@ final class GraphicsSettings
      */
     public function toJson(): array
     {
-        return [
+        $json = [
             'mode' => $this->mode->value,
             'targetFps' => $this->targetFps,
             'renderScale' => $this->renderScale,
@@ -240,6 +258,10 @@ final class GraphicsSettings
             'upscaleQuality' => $this->upscaleQuality->value,
             'grassQuality' => $this->grassQuality->value,
         ];
+        if ($this->effects !== []) {
+            $json['effects'] = $this->effects;
+        }
+        return $json;
     }
 
     /**
@@ -282,7 +304,23 @@ final class GraphicsSettings
             upscaleSharpness: ($v = self::asFloat($data['upscaleSharpness'] ?? null)) !== null ? max(0.0, min(1.0, $v)) : $defaults->upscaleSharpness,
             upscaleQuality: self::enumFrom(UpscaleQuality::class, $data['upscaleQuality'] ?? null) ?? $defaults->upscaleQuality,
             grassQuality: self::enumFrom(GrassQuality::class, $data['grassQuality'] ?? null) ?? $defaults->grassQuality,
+            effects: self::effectStates($data['effects'] ?? null),
         );
+    }
+
+    /** @return array<string, bool> */
+    private static function effectStates(mixed $value): array
+    {
+        if (!is_array($value)) {
+            return [];
+        }
+        $states = [];
+        foreach ($value as $name => $state) {
+            if (is_string($name) && is_bool($state)) {
+                $states[$name] = $state;
+            }
+        }
+        return $states;
     }
 
     /**

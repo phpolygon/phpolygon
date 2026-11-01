@@ -24,6 +24,9 @@ use PHPolygon\Rendering\Command\SetSky;
 use PHPolygon\Rendering\Command\SetSkybox;
 use PHPolygon\Rendering\Command\SetWaveAnimation;
 use PHPolygon\Rendering\Command\SetWind;
+use PHPolygon\Rendering\PostProcess\FullscreenPass;
+use PHPolygon\Rendering\PostProcess\FullscreenPassRegistry;
+use PHPolygon\Rendering\PostProcess\PostStage;
 use PHPolygon\Rendering\PostProcess\VioFxaaPass;
 use PHPolygon\Rendering\PostProcess\VioMotionDebugPass;
 use PHPolygon\Rendering\PostProcess\VioNativeUpscalerPass;
@@ -1338,7 +1341,8 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         return $this->settings->antiAliasing !== AntiAliasing::Off
             || $this->settings->effectiveRenderScale($this->knownCapabilities()) !== 1.0
             || $this->settings->bloom
-            || $this->temporalRequested();
+            || $this->temporalRequested()
+            || $this->fullscreenPassWanted();
     }
 
     /**
@@ -1357,6 +1361,46 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             return;
         }
 
+        // Final-stage passes read the finished image: everything below draws into
+        // an RGBA8 target instead of the swapchain, without the HDR10 encoding.
+        $final = $this->enabledFullscreenPasses(PostStage::Final);
+        $w = max(1, $this->backbufferWidth);
+        $h = max(1, $this->backbufferHeight);
+        if ($final !== [] && $this->screenQuad !== null) {
+            $this->presentRedirect = $this->fullscreenPassTargets($w, $h, false)[2];
+        }
+        $pq = $this->postFinishParams();
+
+        $this->presentScene();
+
+        $redirect = $this->presentRedirect;
+        $quad = $this->screenQuad;
+        if ($redirect === null || $quad === null) {
+            return;
+        }
+        $this->presentRedirect = null;
+        vio_unbind_render_target($this->ctx);
+        $image = $this->runFullscreenPasses(PostStage::Final, vio_render_target_texture($redirect), $w, $h, false, $quad);
+        vio_viewport($this->ctx, 0, 0, $w, $h);
+        $this->bindPostProcessPipeline('fullscreen_blit');
+        vio_bind_texture($this->ctx, $image, 0);
+        vio_set_uniform($this->ctx, 'u_source', 0);
+        vio_set_uniform($this->ctx, 'u_output_pq', $pq['pq']);
+        vio_set_uniform($this->ctx, 'u_paper_white', $pq['paperWhite']);
+        vio_draw($this->ctx, $quad);
+    }
+
+    /** Bind where the last present pass of the frame draws: the swapchain, or the Final stage's input. */
+    private function bindPresentOutput(int $w, int $h): void
+    {
+        if ($this->presentRedirect !== null) {
+            vio_bind_render_target($this->ctx, $this->presentRedirect);
+        }
+        vio_viewport($this->ctx, 0, 0, $w, $h);
+    }
+
+    private function presentScene(): void
+    {
         $target = $this->offscreenTarget;
         $quad   = $this->screenQuad;
         if ($target === null || $quad === null) {
@@ -1373,6 +1417,20 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         // Unbind the offscreen target so subsequent draws hit the swapchain.
         $target->unbind();
 
+        // Scene stage: what it produces goes back into the scene target, so every
+        // reader after it - a native upscaler reads the target itself - gets it.
+        if ($this->enabledFullscreenPasses(PostStage::Scene) !== []) {
+            $image = $this->runFullscreenPasses(PostStage::Scene, $sceneTex, $target->width(), $target->height(), $target->isHdr(), $quad);
+            $target->bindForDraw();
+            vio_viewport($this->ctx, 0, 0, $target->width(), $target->height());
+            $this->bindPostProcessPipeline('fullscreen_blit', $target->isHdr());
+            vio_bind_texture($this->ctx, $image, 0);
+            vio_set_uniform($this->ctx, 'u_source', 0);
+            vio_set_uniform($this->ctx, 'u_output_pq', 0);
+            vio_draw($this->ctx, $quad);
+            $target->unbind();
+        }
+
         // Temporal resolve (TAA / TAAU): after composite, SSR and outlines -
         // the finished scene colour - and before bloom, at display resolution.
         // From here on the resolve's output stands in for the scene colour.
@@ -1388,6 +1446,15 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             }
         }
 
+        $sceneTex = $this->runFullscreenPasses(
+            PostStage::Display,
+            $sceneTex,
+            $temporal ? max(1, $this->backbufferWidth) : $target->width(),
+            $temporal ? max(1, $this->backbufferHeight) : $target->height(),
+            $temporal || $target->isHdr(),
+            $quad,
+        );
+
         // Bloom (GraphicsSettings::$bloom): extract + blur the bright pixels of
         // the rendered scene; the present shader adds the glow back. Runs while
         // the offscreen colour is in shader-resource state (just unbound), and
@@ -1397,6 +1464,9 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             $this->gpuMark('bloom');
         }
         $post = $this->postFinishParams();
+        if ($this->presentRedirect !== null) {
+            $post['pq'] = 0; // the blit behind the Final stage encodes
+        }
 
         if ($temporal) {
             $this->presentTemporal($sceneTex, $quad, $bloomTex, $post);
@@ -1409,12 +1479,12 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             return;
         }
 
-        vio_viewport($this->ctx, 0, 0, $this->backbufferWidth, $this->backbufferHeight);
+        $this->bindPresentOutput($this->backbufferWidth, $this->backbufferHeight);
 
         if ($this->fxaaSelected() && $this->fxaaPass !== null) {
             $this->fxaaPass->apply(
                 $sceneTex, $target->width(), $target->height(), $quad,
-                $bloomTex, $this->bloomIntensity, $post,
+                $bloomTex, $this->bloomIntensity, $post, $this->fullscreenPassWanted(),
             );
         } else {
             $this->drawPassthrough($sceneTex, $quad, $bloomTex, $post);
@@ -1424,6 +1494,180 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
     }
 
     /**
+     * Whether a registered pass will run; such a frame needs the offscreen scene
+     * target. One that is off or cannot run leaves the frame as if it did not exist.
+     */
+    private function fullscreenPassWanted(): bool
+    {
+        foreach (FullscreenPassRegistry::all() as $pass) {
+            if ($pass->enabledBy($this->settings) && $this->fullscreenPassReady($pass)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * The passes of a stage that run this frame. Empty, and free, without a
+     * registered pass.
+     *
+     * @return list<FullscreenPass>
+     */
+    private function enabledFullscreenPasses(PostStage $stage): array
+    {
+        if (FullscreenPassRegistry::isEmpty()) {
+            return [];
+        }
+        $enabled = [];
+        foreach (FullscreenPassRegistry::forStage($stage) as $pass) {
+            if ($pass->enabledBy($this->settings) && $this->fullscreenPassReady($pass) && (!$pass->depth || $this->sceneDepthTexture() !== null)) {
+                $enabled[] = $pass;
+            }
+        }
+        return $enabled;
+    }
+
+    /** Whether a registered pass can run on this context; a settings screen greys out the rest. */
+    public function fullscreenPassAvailable(string $name): bool
+    {
+        $pass = FullscreenPassRegistry::get($name);
+        return $pass !== null && $this->fullscreenPassReady($pass);
+    }
+
+    /** Capability gate and compile of a pass, once. A shader that fails is logged and the chain goes on without it. */
+    private function fullscreenPassReady(FullscreenPass $pass): bool
+    {
+        if (isset($this->fullscreenPassState[$pass->name])) {
+            return $this->fullscreenPassState[$pass->name];
+        }
+        if ($this->screenQuad === null) {
+            return false; // before initPostProcess(), or a backend without its targets
+        }
+        $ready = true;
+        foreach ($pass->features as $feature) {
+            $ready = $ready && defined($feature) && vio_supports_feature($this->ctx, (int) constant($feature));
+        }
+        if ($ready) {
+            try {
+                $fragment = @file_get_contents($pass->fragmentPath);
+                if ($fragment === false) {
+                    throw new \RuntimeException("cannot read {$pass->fragmentPath}");
+                }
+                $this->compileShader('pass_' . $pass->name, $this->loadShader('postprocess.vert.glsl'), $fragment);
+                if (!isset($this->shaderCache['fullscreen_blit'])) {
+                    $this->compileShaderFromFiles('fullscreen_blit', 'postprocess.vert.glsl', 'fullscreen_blit.frag.glsl');
+                }
+            } catch (\RuntimeException $e) {
+                fwrite(STDERR, "[VioRenderer3D] fullscreen pass '{$pass->name}' unavailable: {$e->getMessage()}\n");
+                $ready = false;
+            }
+        }
+        return $this->fullscreenPassState[$pass->name] = $ready;
+    }
+
+    /**
+     * The chain's work targets of a size and format: two to ping-pong, a third that
+     * holds the finished image in front of the Final stage.
+     *
+     * @return array{0: VioRenderTarget, 1: VioRenderTarget, 2: VioRenderTarget}
+     */
+    private function fullscreenPassTargets(int $w, int $h, bool $hdr): array
+    {
+        $key = "{$w}x{$h}" . ($hdr ? ':hdr' : '');
+        if (!isset($this->fullscreenPassTargets[$key])) {
+            // A resize leaves nothing to reuse: a chain runs at one or two sizes.
+            $config = ['width' => $w, 'height' => $h, 'hdr' => $hdr];
+            $this->fullscreenPassTargets[$key] = [
+                vio_render_target($this->ctx, $config) ?: throw new \RuntimeException('fullscreen pass target refused'),
+                vio_render_target($this->ctx, $config) ?: throw new \RuntimeException('fullscreen pass target refused'),
+                vio_render_target($this->ctx, $config) ?: throw new \RuntimeException('fullscreen pass target refused'),
+            ];
+        }
+        return $this->fullscreenPassTargets[$key];
+    }
+
+    /**
+     * Run a stage's passes over $source, each reading what the one before wrote.
+     * Returns $source itself when none runs. Leaves no target bound.
+     */
+    private function runFullscreenPasses(PostStage $stage, VioTexture $source, int $w, int $h, bool $hdr, VioMesh $quad): VioTexture
+    {
+        $passes = $this->enabledFullscreenPasses($stage);
+        if ($passes === []) {
+            return $source;
+        }
+        [$write, $spare] = $this->fullscreenPassTargets($w, $h, $hdr);
+        $image = $source;
+        foreach ($passes as $pass) {
+            PerfProfiler::begin('render3d.post.' . $pass->name);
+            vio_bind_render_target($this->ctx, $write);
+            vio_viewport($this->ctx, 0, 0, $w, $h);
+            $this->bindPostProcessPipeline('pass_' . $pass->name, $hdr);
+            vio_bind_texture($this->ctx, $image, 0);
+            vio_set_uniform($this->ctx, 'u_source', 0);
+            vio_set_uniform($this->ctx, 'u_resolution', [(float) $w, (float) $h]);
+            vio_set_uniform($this->ctx, 'u_time', $this->globalTime);
+            if ($pass->depth) {
+                vio_bind_texture($this->ctx, $this->sceneDepthTexture() ?? $image, 1);
+                vio_set_uniform($this->ctx, 'u_scene_depth_raw', 1);
+            }
+            foreach ($pass->samplers as $i => $name) {
+                $slot = FullscreenPass::FIRST_SAMPLER_SLOT + $i;
+                $id = $this->snippetTextures[$name] ?? null;
+                $texture = $id !== null ? $this->resolveTexture($id) : null;
+                if ($texture === null) {
+                    $this->ensureWhiteTexture();
+                    $texture = $this->whiteTexture;
+                }
+                if ($texture !== null) {
+                    vio_bind_texture($this->ctx, $texture, $slot);
+                    vio_set_uniform($this->ctx, $name, $slot);
+                }
+            }
+            if ($this->snippetParameters !== []) {
+                $this->setUniforms($this->snippetParameters);
+            }
+            vio_draw($this->ctx, $quad);
+            vio_unbind_render_target($this->ctx);
+            PerfProfiler::end();
+            $this->gpuMark('post.' . $pass->name);
+            $image = vio_render_target_texture($write);
+            [$write, $spare] = [$spare, $write];
+        }
+        return $image;
+    }
+
+    /**
+     * Depth of the frame's scene as a sampled texture, null where the frame has none
+     * that can be read: the swapchain, a multisampled target, a backend without
+     * VIO_FEATURE_RENDER_TARGET_DEPTH_SAMPLE. It is the depth buffer itself: not
+     * while the target it belongs to is bound.
+     */
+    private function sceneDepthTexture(): ?VioTexture
+    {
+        $feature = defined('VIO_FEATURE_RENDER_TARGET_DEPTH_SAMPLE') && defined('VIO_RT_DEPTH')
+            && vio_supports_feature($this->ctx, (int) constant('VIO_FEATURE_RENDER_TARGET_DEPTH_SAMPLE'));
+        if (!$feature) {
+            return null;
+        }
+        $source = null;
+        if ($this->mrtThisFrame) {
+            $source = $this->mrtTarget;
+        } elseif ($this->offscreenTarget !== null && $this->offscreenTarget->samples() === 1) {
+            $source = $this->offscreenTarget->renderTarget();
+        }
+        if ($source === null) {
+            return null;
+        }
+        if ($this->sceneDepthOf !== $source) {
+            $this->sceneDepthOf = $source;
+            $this->sceneDepthView = vio_render_target_texture($source, (int) constant('VIO_RT_DEPTH')) ?: null;
+        }
+        return $this->sceneDepthView;
+    }
+
+    /**
+     * FXAA runs in the present: selected, or TAA selected on a backend without    /**
      * FXAA runs in the present: selected, or TAA selected on a backend without
      * the temporal path ({@see AntiAliasing::fallback()}). A frame that went
      * through the temporal resolve never reaches it.
@@ -1547,7 +1791,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             $sharpenTarget = $this->temporalSharpenTarget;
         }
         if ($sharpenTarget === null) {
-            vio_viewport($this->ctx, 0, 0, $w, $h);
+            $this->bindPresentOutput($w, $h);
             $this->drawPassthrough($sceneTex, $quad, $bloomTex, $post);
             return;
         }
@@ -1563,7 +1807,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         vio_unbind_render_target($this->ctx);
 
         // 2. RCAS into the swapchain.
-        vio_viewport($this->ctx, 0, 0, $w, $h);
+        $this->bindPresentOutput($w, $h);
         $this->bindPostProcessPipeline('fsr_rcas');
         vio_bind_texture($this->ctx, vio_render_target_texture($sharpenTarget), 0);
         vio_set_uniform($this->ctx, 'u_source', 0);
@@ -1627,7 +1871,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         vio_viewport($this->ctx, 0, 0, $lowW, $lowH);
         vio_clear($this->ctx, 0, 0, 0, 1);
         if ($this->fxaaSelected() && $this->fxaaPass !== null) {
-            $this->fxaaPass->apply($sceneTex, $lowW, $lowH, $quad, $bloomTex, $this->bloomIntensity, $lowPost);
+            $this->fxaaPass->apply($sceneTex, $lowW, $lowH, $quad, $bloomTex, $this->bloomIntensity, $lowPost, $this->fullscreenPassWanted());
         } else {
             $this->bindPostProcessPipeline('passthrough_blit');
             vio_bind_texture($this->ctx, $sceneTex, 0);
@@ -1656,7 +1900,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         vio_unbind_render_target($this->ctx);
 
         // 3. RCAS into the swapchain.
-        vio_viewport($this->ctx, 0, 0, $this->backbufferWidth, $this->backbufferHeight);
+        $this->bindPresentOutput($this->backbufferWidth, $this->backbufferHeight);
         $this->bindPostProcessPipeline('fsr_rcas');
         vio_bind_texture($this->ctx, vio_render_target_texture($upscaled), 0);
         vio_set_uniform($this->ctx, 'u_source', 0);
@@ -5445,6 +5689,19 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
     }
 
     private ?bool $indirectDrawAvailable = null;
+
+    /** The Final stage's input while the present draws into it instead of the swapchain. */
+    private ?VioRenderTarget $presentRedirect = null;
+
+    /** @var array<string, bool> fullscreen pass name → runs on this context */
+    private array $fullscreenPassState = [];
+
+    /** @var array<string, array{0: VioRenderTarget, 1: VioRenderTarget, 2: VioRenderTarget}> */
+    private array $fullscreenPassTargets = [];
+
+    private ?VioRenderTarget $sceneDepthOf = null;
+
+    private ?VioTexture $sceneDepthView = null;
 
     /** @var array<string, int|float|array<float>> SetShaderParameter values, sticky */
     private array $snippetParameters = [];
