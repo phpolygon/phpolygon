@@ -17,6 +17,7 @@ use PHPolygon\Rendering\Command\SetAmbientLight;
 use PHPolygon\Rendering\Command\SetCamera;
 use PHPolygon\Rendering\Command\SetDirectionalLight;
 use PHPolygon\Rendering\Command\SetFog;
+use PHPolygon\Rendering\Command\SetShaderParameter;
 use PHPolygon\Rendering\Command\SetShader;
 use PHPolygon\Rendering\Command\SetSkybox;
 use PHPolygon\Rendering\Command\SetWaveAnimation;
@@ -502,6 +503,9 @@ class OpenGLRenderer3D implements Renderer3DInterface, AnimationClockInterface
                     'penumbra'  => $command->penumbra,
                 ];
                 $this->spotLightCount++;
+
+            } elseif ($command instanceof SetShaderParameter) {
+                $this->setSnippetUniform($command->name, $command->value);
 
             } elseif ($command instanceof SetFog) {
                 if ($this->settings->fog) {
@@ -1460,6 +1464,28 @@ class OpenGLRenderer3D implements Renderer3DInterface, AnimationClockInterface
         $loc = glGetUniformLocation($program, $name);
         $this->uniformLocationCache[$program][$name] = $loc;
         return $loc;
+    }
+
+    /**
+     * A uniform declared with ProcModeShaderRegistry::declareUniform(). SetFog-style:
+     * set when the command runs, on the one program this renderer has. The GL family
+     * has no snippet samplers.
+     *
+     * @param int|float|list<float> $value
+     */
+    private function setSnippetUniform(string $name, int|float|array $value): void
+    {
+        if (is_int($value)) {
+            $this->setUniformInt($name, $value);
+        } elseif (is_float($value)) {
+            $this->setUniformFloat($name, $value);
+        } elseif (count($value) === 2) {
+            $this->setUniformVec2($name, $value);
+        } elseif (count($value) === 3) {
+            $this->setUniformVec3($name, $value);
+        } elseif (count($value) === 4) {
+            $this->setUniformVec4($name, $value);
+        }
     }
 
     private function setUniformMat4(string $name, Mat4 $matrix): void

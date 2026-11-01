@@ -194,6 +194,9 @@ final class ShaderVariantRegistryTest extends TestCase
         $out = [];
         $stack = [];
         foreach (explode("\n", $source) as $line) {
+            if (trim($line) === '// PHPOLYGON:SNIPPET_UNIFORMS') {
+                continue;
+            }
             if (preg_match('/^\s*#ifndef PHPOLYGON_OMIT_/', $line) === 1) {
                 $stack[] = 'keep';
                 continue;

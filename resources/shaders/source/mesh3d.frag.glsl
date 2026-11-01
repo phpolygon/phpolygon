@@ -445,6 +445,8 @@ vec3 finalize(vec3 color) {
     return applyVignette(color);
 }
 
+// PHPOLYGON:SNIPPET_UNIFORMS
+
 // PHPOLYGON:POSTCOLOR_HELPERS
 
 // Curvature-based ambient occlusion approximation. Real screen-space AO

@@ -115,9 +115,11 @@ uniform float u_env_mip_max;
 // [-u_probe_range, +u_probe_range]. Per channel: E = c0 + c1*n.x + c2*n.y + c3*n.z.
 // u_probe_enabled 0 => fall back to the analytic hemisphere.
 uniform float u_probe_enabled;
+#ifndef PHPOLYGON_OMIT_PROBE_GI
 uniform sampler3D u_probe_field_r;
 uniform sampler3D u_probe_field_g;
 uniform sampler3D u_probe_field_b;
+#endif // PHPOLYGON_OMIT_PROBE_GI
 uniform vec3  u_probe_origin;
 uniform vec3  u_probe_size;
 uniform float u_probe_range;
@@ -187,6 +189,8 @@ uniform float u_ssao_uv_flip_y;
 // or non-D3D backend); a 1x1 white texture is bound then so the sampler is valid.
 uniform float     u_sdf_ao_enabled;   // float: int-in-UBO is unreliable across SPIRV-Cross targets
 uniform sampler2D u_sdf_ao_map;
+
+// PHPOLYGON:SNIPPET_UNIFORMS
 
 #ifdef PHPOLYGON_MRT
 // Deferred-composite path (engine RFC docs/rfcs/mrt-gbuffer.md). The lit result is

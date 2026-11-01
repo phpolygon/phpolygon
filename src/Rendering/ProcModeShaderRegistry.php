@@ -47,6 +47,12 @@ namespace PHPolygon\Rendering;
  * mode can be left out or moved: the first arm opens with `if`, the others with
  * `} else if`, and the ladder closes with the `} else` of the mode-0 arm wherever
  * the registered snippets put them.
+ *
+ * SNIPPET UNIFORMS: {@see declareUniform()} and {@see declareSampler()} add file-scope
+ * declarations to every mesh program (forward, MRT, motion, storage, each variant).
+ * Values travel as {@see Command\SetShaderParameter} / {@see Command\SetShaderTexture}.
+ * Uniforms live in the fragment stage, where snippets run, and a name must not exist
+ * in the engine's stages: a uniform declared in two stages is not set in both on D3D12.
  */
 final class ProcModeShaderRegistry
 {
@@ -73,6 +79,29 @@ final class ProcModeShaderRegistry
     public const POSTCOLOR_HELPERS_SENTINEL = '// PHPOLYGON:POSTCOLOR_HELPERS';
     public const POSTCOLOR_SENTINEL = '// PHPOLYGON:POSTCOLOR';
 
+    /** File scope of the fragment stage, where the generated declarations land. */
+    public const UNIFORMS_SENTINEL = '// PHPOLYGON:SNIPPET_UNIFORMS';
+
+    /** First texture slot of snippet samplers; the engine's mesh programs use 0-10. */
+    public const FIRST_SAMPLER_SLOT = 12;
+
+    /** Slots above FIRST_SAMPLER_SLOT for declared samplers. */
+    public const MAX_SAMPLERS = 4;
+
+    /**
+     * Ordinary samplers one program can hold: php-vio's D3D12 path numbers them t0..t7
+     * in declaration order, comparison samplers start at t8.
+     */
+    public const SAMPLER_REGISTERS = 8;
+
+    /** Ordinary samplers of mesh3d.frag: environment, 3 probe fields, albedo, SSAO, SDF AO. */
+    private const ENGINE_SAMPLERS = 7;
+
+    /** Of those, the ones {@see ShaderPath::ProbeGi} takes out of a program. */
+    private const PROBE_SAMPLERS = 3;
+
+    private const UNIFORM_TYPES = ['float', 'int', 'vec2', 'vec3', 'vec4', 'mat4'];
+
     public const FAMILY_VIO = 'vio';
     public const FAMILY_GL = 'gl';
 
@@ -98,6 +127,12 @@ final class ProcModeShaderRegistry
     private static array $modeVariant = [];
     /** @var list<ShaderPath> paths the base program leaves out */
     private static array $baseOmissions = [];
+    /** @var array<string, string> uniform name → GLSL type */
+    private static array $uniforms = [];
+    /** @var array<string, int> sampler name → texture slot */
+    private static array $samplers = [];
+    /** @var array<string, list<string>|null> sampler name → the programs that declare it, null = all */
+    private static array $samplerPrograms = [];
 
     /**
      * Register the GLSL for one proc_mode.
@@ -194,6 +229,129 @@ final class ProcModeShaderRegistry
     public static function omitFromBase(array $paths): void
     {
         self::$baseOmissions = $paths;
+    }
+
+    /**
+     * Declare a fragment-stage uniform for snippets, set per frame with
+     * {@see Command\SetShaderParameter}. Until a command names it, it holds zero.
+     */
+    public static function declareUniform(string $name, string $type): void
+    {
+        self::assertName($name);
+        if (isset(self::$samplers[$name])) {
+            throw new \InvalidArgumentException("Snippet uniform '{$name}' is already a sampler");
+        }
+        if (!in_array($type, self::UNIFORM_TYPES, true)) {
+            throw new \InvalidArgumentException("Snippet uniform '{$name}': type '{$type}' is not one of " . implode(', ', self::UNIFORM_TYPES));
+        }
+        self::$uniforms[$name] = $type;
+    }
+
+    /**
+     * Declare a sampler2D for snippets, bound with {@see Command\SetShaderTexture};
+     * until then it reads white. Vio family only: the native-GL renderer binds no
+     * snippet textures, so a look that samples one registers a GL branch without it.
+     *
+     * A program holds few samplers ({@see samplerBudget()}): the base program has room
+     * for one. $programs limits the declaration to some programs (variant names,
+     * BASE_VARIANT for the base one); a variant without {@see ShaderPath::ProbeGi} has
+     * room for four.
+     *
+     * @param list<string>|null $programs null = every program
+     * @return int the texture slot
+     */
+    public static function declareSampler(string $name, ?array $programs = null): int
+    {
+        self::assertName($name);
+        if (isset(self::$uniforms[$name])) {
+            throw new \InvalidArgumentException("Snippet sampler '{$name}' is already a uniform");
+        }
+        if (isset(self::$samplers[$name])) {
+            return self::$samplers[$name];
+        }
+        if (count(self::$samplers) >= self::MAX_SAMPLERS) {
+            throw new \InvalidArgumentException('Snippets can declare at most ' . self::MAX_SAMPLERS . ' samplers');
+        }
+        self::$samplerPrograms[$name] = $programs;
+
+        return self::$samplers[$name] = self::FIRST_SAMPLER_SLOT + count(self::$samplers);
+    }
+
+    /** Ordinary samplers a program has left for snippets. */
+    public static function samplerBudget(string $variant = self::BASE_VARIANT): int
+    {
+        $omit = $variant === self::BASE_VARIANT ? self::$baseOmissions : (self::$variants[$variant]['omit'] ?? []);
+        $engine = self::ENGINE_SAMPLERS - (in_array(ShaderPath::ProbeGi, $omit, true) ? self::PROBE_SAMPLERS : 0);
+
+        return self::SAMPLER_REGISTERS - $engine;
+    }
+
+    /**
+     * Whether a sampler is declared in a program.
+     */
+    private static function samplerIn(string $name, ?string $variant): bool
+    {
+        $programs = self::$samplerPrograms[$name] ?? null;
+
+        return $programs === null || $variant === null || in_array($variant, $programs, true);
+    }
+
+    /** Refuse a declaration no D3D12 compile would take (error X4610, overlapping SRV ranges). */
+    public static function assertSamplerBudget(): void
+    {
+        foreach ([self::BASE_VARIANT, ...self::variants()] as $variant) {
+            $declared = count(array_filter(array_keys(self::$samplers), static fn (string $n): bool => self::samplerIn($n, $variant)));
+            $budget = self::samplerBudget($variant);
+            if ($declared > $budget) {
+                $program = $variant === self::BASE_VARIANT ? 'the base program' : "variant '{$variant}'";
+                throw new \InvalidArgumentException("Snippets declare {$declared} samplers in {$program}, it has room for {$budget}");
+            }
+        }
+    }
+
+    /** @return array<string, int> sampler name → texture slot */
+    public static function samplers(): array
+    {
+        return self::$samplers;
+    }
+
+    /** The generated declarations of a family. */
+    public static function uniformDeclarations(string $family = self::FAMILY_VIO, ?string $variant = null): string
+    {
+        $out = '';
+        foreach (self::$uniforms as $name => $type) {
+            $out .= "uniform {$type} {$name};\n";
+        }
+        if ($family === self::FAMILY_VIO) {
+            foreach (self::$samplers as $name => $_) {
+                if (self::samplerIn($name, $variant)) {
+                    $out .= "uniform sampler2D {$name};\n";
+                }
+            }
+        }
+
+        return $out;
+    }
+
+    /**
+     * Refuse a snippet name the engine's stages already use: on D3D12 it would be set
+     * in one stage only, or in the wrong cbuffer slot, without any error.
+     */
+    public static function assertUniqueUniforms(string $vertexSource, string $fragmentSource): void
+    {
+        foreach ([...array_keys(self::$uniforms), ...array_keys(self::$samplers)] as $name) {
+            $pattern = '/^\s*uniform\s+\w+\s+' . preg_quote($name, '/') . '\b/m';
+            if (preg_match($pattern, $vertexSource) === 1 || preg_match($pattern, $fragmentSource) === 1) {
+                throw new \InvalidArgumentException("Snippet uniform '{$name}' is already a uniform of the engine's mesh shader");
+            }
+        }
+    }
+
+    private static function assertName(string $name): void
+    {
+        if (preg_match('/^u_[a-z0-9_]+$/', $name) !== 1) {
+            throw new \InvalidArgumentException("Snippet uniform name '{$name}' must look like u_snake_case");
+        }
     }
 
     public static function hasVariants(): bool
@@ -369,6 +527,7 @@ final class ProcModeShaderRegistry
      */
     public static function spliceGlsl(string $source, string $family = self::FAMILY_VIO, ?string $variant = null): string
     {
+        $source = str_replace(self::UNIFORMS_SENTINEL, self::uniformDeclarations($family, $variant), $source);
         $source = str_replace(self::HELPERS_SENTINEL, self::glslHelpers($family, $variant), $source);
         $source = str_replace(self::BRANCHES_SENTINEL, self::glslBranches($family, $variant), $source);
         $source = str_replace(self::POSTCOLOR_HELPERS_SENTINEL, self::postColorHelpers($family), $source);
@@ -388,5 +547,8 @@ final class ProcModeShaderRegistry
         self::$variants = [];
         self::$modeVariant = [];
         self::$baseOmissions = [];
+        self::$uniforms = [];
+        self::$samplers = [];
+        self::$samplerPrograms = [];
     }
 }

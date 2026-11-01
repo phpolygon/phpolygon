@@ -2580,6 +2580,10 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
                 $this->pendingSky = $cmd;
             } elseif ($cmd instanceof SetShader) {
                 $this->shaderOverride = $cmd->shaderId;
+            } elseif ($cmd instanceof Command\SetShaderParameter) {
+                $this->snippetParameters[$cmd->name] = $cmd->value;
+            } elseif ($cmd instanceof Command\SetShaderTexture) {
+                $this->snippetTextures[$cmd->name] = $cmd->textureId;
             } elseif ($cmd instanceof Command\SetSnowCover) {
                 $this->snowCover = $cmd->cover;
             } elseif ($cmd instanceof Command\SetGroundWetness) {
@@ -2775,6 +2779,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         $this->uploadShadowUniforms($hasShadowMap, $dirLights);
         $this->uploadSsaoUniforms();
         $this->uploadSdfAoUniforms();
+        $this->uploadSnippetInputs();
         $this->frameUniformsShaderId = $this->activeShaderId();
         $this->sceneUniformInputs = [$frameState, $hasShadowMap, $dirLights];
 
@@ -2811,6 +2816,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             $this->uploadShadowUniforms($hasShadowMap, $dirLights);
             $this->uploadSsaoUniforms();
             $this->uploadSdfAoUniforms();
+            $this->uploadSnippetInputs();
             $this->uploadMotionUniforms();
             $this->frameUniformsShaderId = $transparentShaderId;
         }
@@ -2995,6 +3001,8 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
 
     private function initShaders(): void
     {
+        ProcModeShaderRegistry::assertUniqueUniforms($this->loadShader('mesh3d.vert.glsl'), $this->loadShader('mesh3d.frag.glsl'));
+        ProcModeShaderRegistry::assertSamplerBudget();
         $this->compileShaderFromFiles('default',    'mesh3d.vert.glsl',     'mesh3d.frag.glsl');
         $this->compileShaderFromFiles('unlit',      'unlit.vert.glsl',      'unlit.frag.glsl');
         $this->compileShaderFromFiles('shadow',     'shadow.vert.glsl',     'shadow.frag.glsl');
@@ -3232,6 +3240,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         $this->uploadShadowUniforms($hasShadowMap, $dirLights);
         $this->uploadSsaoUniforms();
         $this->uploadSdfAoUniforms();
+        $this->uploadSnippetInputs();
         $this->uploadMotionUniforms();
     }
 
@@ -5437,6 +5446,12 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
 
     private ?bool $indirectDrawAvailable = null;
 
+    /** @var array<string, int|float|array<float>> SetShaderParameter values, sticky */
+    private array $snippetParameters = [];
+
+    /** @var array<string, string|null> SetShaderTexture ids, sticky */
+    private array $snippetTextures = [];
+
     /** Program the scene pass draws with right now (ProcModeShaderRegistry::defineVariant). */
     private string $sceneVariant = ProcModeShaderRegistry::BASE_VARIANT;
 
@@ -6031,6 +6046,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         $this->uploadShadowUniforms($hasShadowMap, $dirLights);
         $this->uploadSsaoUniforms();
         $this->uploadSdfAoUniforms();
+        $this->uploadSnippetInputs();
         $this->uploadMotionUniforms();
         $this->applyMaterialUniforms($material, $cmd->materialId);
         $this->bindMaterialTextures($material);
@@ -6524,6 +6540,29 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
     }
 
     /** Frame-global grass state (SetGrass): distance bands and benders. */
+    /**
+     * Snippet uniforms and samplers on the bound mesh program. A declared sampler is
+     * always bound, white without a texture: an unbound one reads an empty SRV on D3D12.
+     */
+    private function uploadSnippetInputs(): void
+    {
+        if ($this->snippetParameters !== []) {
+            $this->setUniforms($this->snippetParameters);
+        }
+        foreach (ProcModeShaderRegistry::samplers() as $name => $slot) {
+            $id = $this->snippetTextures[$name] ?? null;
+            $texture = $id !== null ? $this->resolveTexture($id) : null;
+            if ($texture === null) {
+                $this->ensureWhiteTexture();
+                $texture = $this->whiteTexture;
+            }
+            if ($texture !== null) {
+                vio_bind_texture($this->ctx, $texture, $slot);
+                vio_set_uniform($this->ctx, $name, $slot);
+            }
+        }
+    }
+
     private function uploadGrassFrameUniforms(): void
     {
         vio_set_uniform($this->ctx, 'u_grass_range', $this->grassRange);

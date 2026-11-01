@@ -143,6 +143,8 @@ All commands are plain PHP value objects (no methods, only constructor propertie
 | `SetSkybox` | `cubemapId: string` |
 | `SetFog` | `color: Color`, `near: float`, `far: float` |
 | `SetShader` | `shaderId: ?string` — override active shader for subsequent draws; `null` resets to material-driven |
+| `SetShaderParameter` | `name: string`, `value: int\|float\|float[]` — a uniform declared with `ProcModeShaderRegistry::declareUniform()`; also reaches fullscreen passes; sticky |
+| `SetShaderTexture` | `name: string`, `textureId: ?string` — a sampler declared with `ProcModeShaderRegistry::declareSampler()` or named by a fullscreen pass; sticky |
 | `DrawOutline` | `meshId: string`, `modelMatrix: Mat4`, `color: Color`, `widthPx: float` — screen-space outline, drawn after the scene (see "Outline pass") |
 
 Commands are appended to `RenderCommandList` during the scene tick. The
@@ -447,6 +449,21 @@ without a definition the program is the v0.92.0 shader (the test pins its hash w
   `NormalPatterns` halves a program (9.9 -> 4.7 s, 3 runs); no other single path moves it by more than 2 s. Metal
   and Vulkan on an Apple M5 (php-vio 2.35.0): repeat compiles 16-52 ms and 25-95 ms; a first compile on Metal took 1.1-1.6 s,
   one sample per case, so nothing to compare. Compile time is a D3D12 problem.
+
+**Snippet uniforms and samplers** (`SnippetUniformRegistryTest`, `VioSnippetUniformTest`). `ProcModeShaderRegistry::declareUniform('u_fx_level', 'float')`
+and `declareSampler('u_fx_map', $programs)` add file-scope declarations at `// PHPOLYGON:SNIPPET_UNIFORMS` (both `mesh3d.frag` copies)
+to every mesh program: forward, MRT, motion, storage, each variant. Values travel in the command list, `SetShaderParameter(name,
+value)` and `SetShaderTexture(name, textureId)`; both are sticky, like the rest of the frame state, and uploaded once per
+program and frame. No declaration, no upload.
+- Names are `u_snake_case`, fragment stage only, and may not repeat a uniform of the engine's stages: `assertUniqueUniforms()`
+  refuses it at `warmShaders()`. A uniform in two stages is not set in both on D3D12, a uniform that is never set holds zero.
+- **A program holds few samplers.** php-vio's D3D12 path numbers ordinary samplers t0..t7 in declaration order and starts
+  comparison samplers at t8; `mesh3d.frag` already declares 7. Nine in one program fail with error X4610. So the base
+  program has room for 1 (`samplerBudget()`), a program without `ShaderPath::ProbeGi` for 4; `declareSampler()` takes
+  the programs that should have it, `assertSamplerBudget()` checks at `warmShaders()`. Slots 12..15 (`FIRST_SAMPLER_SLOT`).
+- A declared sampler is always bound: white without a texture, because an unbound one reads an empty SRV on D3D12. Only
+  `sampler2D`, resolved through the texture manager. The GL family gets the uniforms (set at the command, like `SetFog`)
+  but no samplers: a look that samples one registers a GL branch without it. Native Vulkan ignores both commands.
 
 ### Shaders
 - Authoring language: **GLSL** (human- and AI-readable plaintext)
