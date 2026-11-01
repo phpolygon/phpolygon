@@ -76,14 +76,21 @@ final class VoiceChain
      * @param VoiceReference|null $match base voice to steer the recording toward
      *        first (e.g. a synthetic line onto a recorded voice), before the profile
      * @param bool $trimTailBreath remove a breath behind the last word ({@see TailBreathTrimmer})
+     * @param float|null $tailCutSeconds cut $pcm here instead of searching for a breath
+     *        ({@see TailBreathTrimmer::cutAt()}), whatever $trimTailBreath says. It changes the
+     *        output, so a render cache keys on it as well
      * @return list<float>
      */
-    public function render(array $pcm, VoiceProfile $profile, ?VoiceReference $match = null, bool $trimTailBreath = true): array
+    public function render(array $pcm, VoiceProfile $profile, ?VoiceReference $match = null, bool $trimTailBreath = true, ?float $tailCutSeconds = null): array
     {
         if ($pcm === []) {
             return [];
         }
-        $y = $trimTailBreath ? $this->tailTrimmer->trim($pcm) : $pcm;
+        if ($tailCutSeconds !== null) {
+            $y = $this->tailTrimmer->cutAt($pcm, $tailCutSeconds);
+        } else {
+            $y = $trimTailBreath ? $this->tailTrimmer->trim($pcm) : $pcm;
+        }
         $y = $match === null ? $y : $this->matcher->match($y, $match);
         $y = $this->shaper->shape($y, $profile);
         if ($profile->crush > 0.0) {

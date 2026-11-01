@@ -83,6 +83,32 @@ final class VoiceChainTest extends TestCase
         );
     }
 
+    public function testAnExplicitCutReplacesTheDetection(): void
+    {
+        $x = self::vowelThenBreath();
+        $chain = new VoiceChain();
+        $seconds = 0.9;
+
+        $y = $chain->render($x, new VoiceProfile(), tailCutSeconds: $seconds);
+
+        self::assertSame(
+            $chain->render((new TailBreathTrimmer())->cutAt($x, $seconds), new VoiceProfile(), trimTailBreath: false),
+            $y,
+        );
+        self::assertNotSame($chain->render($x, new VoiceProfile()), $y);
+    }
+
+    public function testAnExplicitCutHoldsWithTheDetectionSwitchedOff(): void
+    {
+        $x = self::vowelThenBreath();
+        $chain = new VoiceChain();
+
+        self::assertSame(
+            $chain->render($x, new VoiceProfile(), tailCutSeconds: 0.9),
+            $chain->render($x, new VoiceProfile(), trimTailBreath: false, tailCutSeconds: 0.9),
+        );
+    }
+
     public function testATrimmerOfAnotherRateIsRefused(): void
     {
         $this->expectException(\InvalidArgumentException::class);

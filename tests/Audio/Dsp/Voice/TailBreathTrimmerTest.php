@@ -257,6 +257,54 @@ final class TailBreathTrimmerTest extends TestCase
         self::assertEqualsWithDelta($full / 44100, $low / $sr, 0.02);
     }
 
+    public function testCutAtCutsWhereItIsToldWithTheFadeOfTrim(): void
+    {
+        $x = self::join(self::word(), self::silence(0.15), self::breath());
+        $trimmer = new TailBreathTrimmer();
+        $cut = $trimmer->analyse($x)->cut;
+        self::assertNotNull($cut);
+
+        self::assertSame($trimmer->trim($x), $trimmer->cutAt($x, $cut / Pcm::SAMPLE_RATE));
+    }
+
+    public function testCutAtCutsWhatTheDetectionLeavesAlone(): void
+    {
+        // A sound the measures may not touch: the caller knows better.
+        $word = self::word();
+        $x = self::join($word, self::silence(0.1), self::shaped(0.3, 0.08, 0.05, 0.1, 150.0, 900.0));
+        $trimmer = new TailBreathTrimmer();
+        self::assertSame($x, $trimmer->trim($x));
+
+        $y = $trimmer->cutAt($x, (count($word) + 2000) / Pcm::SAMPLE_RATE);
+
+        self::assertCount(count($word) + 2000, $y);
+        self::assertSame(array_slice($x, 0, count($word)), array_slice($y, 0, count($word)));
+        self::assertLessThan(1e-3, abs($y[count($y) - 1]));
+    }
+
+    public function testCutAtBehindTheEndChangesNothing(): void
+    {
+        $x = self::word();
+        $seconds = count($x) / Pcm::SAMPLE_RATE;
+
+        self::assertSame($x, (new TailBreathTrimmer())->cutAt($x, $seconds));
+        self::assertSame($x, (new TailBreathTrimmer())->cutAt($x, $seconds + 1.0));
+    }
+
+    public function testCutAtFollowsTheSampleRate(): void
+    {
+        $x = Signals::noise(1.0, 0.1);
+
+        self::assertCount(11025, (new TailBreathTrimmer(22050))->cutAt($x, 0.5));
+    }
+
+    public function testCutAtRefusesAPositionThatIsNone(): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+
+        (new TailBreathTrimmer())->cutAt(self::word(), -0.1);
+    }
+
     public function testIsDeterministic(): void
     {
         $x = self::join(self::word(), self::silence(0.15), self::breath());

@@ -91,13 +91,40 @@ final class TailBreathTrimmer
     public function trim(array $pcm): array
     {
         $cut = $this->analyse($pcm)->cut;
-        if ($cut === null) {
-            return $pcm;
+        return $cut === null ? $pcm : self::fadeOut(array_slice($pcm, 0, $cut), $this->fadeSamples($cut));
+    }
+
+    /**
+     * Cuts at a position decided elsewhere, with the fade of {@see trim()} and without
+     * any analysis: for a line checked against its text, where the measures here stay unsure.
+     *
+     * @param list<float> $pcm mono at {@see $sampleRate}
+     * @param float $seconds new length; at or past the end of $pcm nothing is cut
+     * @return list<float> $pcm itself when nothing is cut, else the kept start with a fade at its end
+     */
+    public function cutAt(array $pcm, float $seconds): array
+    {
+        if (!is_finite($seconds) || $seconds <= 0.0) {
+            throw new \InvalidArgumentException("invalid cut position $seconds s");
         }
-        $kept = array_slice($pcm, 0, $cut);
-        $fade = min($cut, (int) round($this->sampleRate * self::FADE_MS / 1000.0));
+        $cut = (int) round($seconds * $this->sampleRate);
+        return $cut >= count($pcm) ? $pcm : self::fadeOut(array_slice($pcm, 0, $cut), $this->fadeSamples($cut));
+    }
+
+    private function fadeSamples(int $length): int
+    {
+        return min($length, (int) round($this->sampleRate * self::FADE_MS / 1000.0));
+    }
+
+    /**
+     * @param list<float> $kept
+     * @return list<float>
+     */
+    private static function fadeOut(array $kept, int $fade): array
+    {
+        $end = count($kept) - 1;
         for ($i = 0; $i < $fade; $i++) {
-            $kept[$cut - 1 - $i] *= 0.5 - 0.5 * cos(M_PI * ($i + 0.5) / $fade);
+            $kept[$end - $i] *= 0.5 - 0.5 * cos(M_PI * ($i + 0.5) / $fade);
         }
         return array_values($kept);
     }
