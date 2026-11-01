@@ -10,8 +10,11 @@ use PHPolygon\Audio\Dsp\Pcm;
 /**
  * The whole voice path from a base recording to a game-ready line:
  *
- *   [match to a reference voice] → shaper (pitch, formant, tempo, tilt, breath)
- *   → crush → vocoder → −16 LUFS
+ *   [trim the breath behind the last word] → [match to a reference voice]
+ *   → shaper (pitch, formant, tempo, tilt, breath) → crush → vocoder → −16 LUFS
+ *
+ * The trim comes first ({@see TailBreathTrimmer}): nothing behind it measures
+ * or levels a breath that will not be heard.
  *
  * Loudness after BS.1770 ({@see Loudness::integratedMono()}); the gain is
  * capped so no sample exceeds {@see PEAK_CEILING} (−1 dBFS) – very peaky clips
@@ -26,13 +29,17 @@ use PHPolygon\Audio\Dsp\Pcm;
  */
 final class VoiceChain
 {
-    public const int CHAIN_VERSION = 1;
+    /**
+     * 2: {@see TailBreathTrimmer} before the matcher.
+     */
+    public const int CHAIN_VERSION = 2;
     public const float TARGET_LUFS = -16.0;
     public const float PEAK_CEILING = 0.891; // −1 dBFS
 
     private readonly VoiceShaper $shaper;
     private readonly Crusher $crusher;
     private readonly VoiceMatcher $matcher;
+    private readonly TailBreathTrimmer $tailTrimmer;
 
     /**
      * Parts left out are built at $sampleRate; parts passed in must run at it.
@@ -45,12 +52,14 @@ final class VoiceChain
         ?VoiceMatcher $matcher = null,
         private readonly ?VocoderCarrier $carrier = null,
         private readonly int $sampleRate = Pcm::SAMPLE_RATE,
+        ?TailBreathTrimmer $tailTrimmer = null,
     ) {
         $detector = new PitchDetector(sampleRate: $sampleRate);
         $this->shaper = $shaper ?? new VoiceShaper($detector);
         $this->crusher = $crusher ?? new Crusher(sampleRate: $sampleRate);
         $this->matcher = $matcher ?? new VoiceMatcher(new VoiceShaper($detector), $detector);
-        foreach (['shaper' => $this->shaper->sampleRate(), 'crusher' => $this->crusher->sampleRate, 'matcher' => $this->matcher->sampleRate()] as $part => $rate) {
+        $this->tailTrimmer = $tailTrimmer ?? new TailBreathTrimmer($sampleRate);
+        foreach (['shaper' => $this->shaper->sampleRate(), 'crusher' => $this->crusher->sampleRate, 'matcher' => $this->matcher->sampleRate(), 'tail trimmer' => $this->tailTrimmer->sampleRate] as $part => $rate) {
             if ($rate !== $sampleRate) {
                 throw new \InvalidArgumentException("voice chain at $sampleRate Hz, $part at $rate Hz");
             }
@@ -66,14 +75,16 @@ final class VoiceChain
      * @param list<float> $pcm mono at {@see sampleRate()}
      * @param VoiceReference|null $match base voice to steer the recording toward
      *        first (e.g. a synthetic line onto a recorded voice), before the profile
+     * @param bool $trimTailBreath remove a breath behind the last word ({@see TailBreathTrimmer})
      * @return list<float>
      */
-    public function render(array $pcm, VoiceProfile $profile, ?VoiceReference $match = null): array
+    public function render(array $pcm, VoiceProfile $profile, ?VoiceReference $match = null, bool $trimTailBreath = true): array
     {
         if ($pcm === []) {
             return [];
         }
-        $y = $match === null ? $pcm : $this->matcher->match($pcm, $match);
+        $y = $trimTailBreath ? $this->tailTrimmer->trim($pcm) : $pcm;
+        $y = $match === null ? $y : $this->matcher->match($y, $match);
         $y = $this->shaper->shape($y, $profile);
         if ($profile->crush > 0.0) {
             $y = $this->crusher->apply($y, $profile->crush);

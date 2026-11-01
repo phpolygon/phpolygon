@@ -4,10 +4,12 @@ declare(strict_types=1);
 
 namespace PHPolygon\Tests\Audio\Dsp\Voice;
 
+use PHPolygon\Audio\Dsp\Biquad;
 use PHPolygon\Audio\Dsp\Loudness;
 use PHPolygon\Audio\Dsp\Voice\Crusher;
 use PHPolygon\Audio\Dsp\Voice\PitchDetector;
 use PHPolygon\Audio\Dsp\Voice\SawChordCarrier;
+use PHPolygon\Audio\Dsp\Voice\TailBreathTrimmer;
 use PHPolygon\Audio\Dsp\Voice\Vocoder;
 use PHPolygon\Audio\Dsp\Voice\VoiceChain;
 use PHPolygon\Audio\Dsp\Voice\VoiceProfile;
@@ -42,7 +44,50 @@ final class VoiceChainTest extends TestCase
 
     public function testHasAVersionForRenderCaches(): void
     {
-        self::assertGreaterThanOrEqual(1, VoiceChain::CHAIN_VERSION);
+        self::assertGreaterThanOrEqual(2, VoiceChain::CHAIN_VERSION);
+    }
+
+    /** @return list<float> the vowel, a pause and an inhalation fading in */
+    private static function vowelThenBreath(): array
+    {
+        $x = array_merge(Signals::vowel(190.0, 0.7, amp: 0.25), array_fill(0, 7000, 0.0));
+        $noise = Biquad::highPass(600.0)->process(Signals::noise(0.5, 0.008));
+        $n = count($noise);
+        foreach ($noise as $i => $v) {
+            $x[] = $v * min(1.0, $i / 6000.0, ($n - $i) / 3000.0);
+        }
+        return $x;
+    }
+
+    public function testTheBreathBehindTheLastWordDoesNotReachTheOutput(): void
+    {
+        $x = self::vowelThenBreath();
+        $chain = new VoiceChain();
+
+        $trimmed = $chain->render($x, new VoiceProfile());
+        $kept = $chain->render($x, new VoiceProfile(), trimTailBreath: false);
+
+        self::assertLessThan(count($kept) - 20000, count($trimmed));
+    }
+
+    public function testTheBreathDoesNotCountForTheLoudness(): void
+    {
+        $x = self::vowelThenBreath();
+
+        $y = (new VoiceChain())->render($x, new VoiceProfile());
+
+        self::assertEqualsWithDelta(VoiceChain::TARGET_LUFS, Loudness::integratedMono($y), 0.3);
+        self::assertSame(
+            (new VoiceChain())->render((new TailBreathTrimmer())->trim($x), new VoiceProfile(), trimTailBreath: false),
+            $y,
+        );
+    }
+
+    public function testATrimmerOfAnotherRateIsRefused(): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+
+        new VoiceChain(tailTrimmer: new TailBreathTrimmer(22050));
     }
 
     public function testNormalisesToMinusSixteenLufsUnderTheCeiling(): void

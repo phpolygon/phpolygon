@@ -2146,7 +2146,8 @@ deterministic: same input, same bytes.
 | `Dsp\Voice\Crusher` | Sample-and-hold, bit reduction and faded dropouts ("broken machine") |
 | `Dsp\Voice\Vocoder` + `VocoderCarrier` | Channel vocoder; the carrier is pluggable (`SawChordCarrier` default) so a game can let speech play its own synthesiser |
 | `Dsp\Voice\VoiceProfile` | Value object: pitch, formant, tempo, tilt, breath, vocoder, crush; `withOverrides()`, `fingerprint()` |
-| `Dsp\Voice\VoiceChain` | match → shape → crush → vocode → −16 LUFS (peak ≤ −1 dBFS) |
+| `Dsp\Voice\TailBreathTrimmer` + `TailAnalysis` / `TailEvent` | Cuts the breath a speech synthesiser leaves behind the last word: `trim()` (nothing to cut = the same array, else the kept start with a 12 ms fade), `analyse()` for the measurements. Finds the last voiced speech, splits what follows at quiet gaps and cuts before the earliest breath; sounds attached to the voice stay. Levels relative to the speech level, times in ms, deterministic. Unsure = no cut: a loud or dark or suddenly starting sound behind the voice may be a devoiced last syllable or the s of ts/ks. Measured 2026-11-01 on 21,510 synthesised lines in 30 languages: 2,476 cut (15 % of one synthesiser's lines, none of two others), median 577 ms, longest 2.6 s; a breath with no gap to the voice stays |
+| `Dsp\Voice\VoiceChain` | trim the tail breath → match → shape → crush → vocode → −16 LUFS (peak ≤ −1 dBFS); `render(..., trimTailBreath: false)` keeps the tail |
 
 Compressed formats (Opus/Vorbis):
 - php-vio decodes and encodes them from the release that has `vio_audio_formats()`; `AudioFormats::detect()` is the feature test. Older php-vio or php-glfw audio: WAV/FLAC/MP3 only.
