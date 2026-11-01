@@ -303,6 +303,7 @@ float cloudDensityAt(vec3 p) {
 
 // Sun transmittance through the cloud slab from a world point (1 = unshadowed,
 // → 0 fully under a cloud). Marches a few steps toward the directional light.
+#ifndef PHPOLYGON_OMIT_CLOUD_SHADOW
 float cloudShadow(vec3 worldPos) {
     if (u_cloud_cover <= 0.0) return 1.0;
     vec3 L = normalize(-u_dir_light_direction); // toward the light source
@@ -324,6 +325,9 @@ float cloudShadow(vec3 worldPos) {
     // even thin clouds register as a visible dimming sweep.
     return clamp(exp(-dens * stepLen * 1.2), 0.0, 1.0);
 }
+#else
+float cloudShadow(vec3 worldPos) { return 1.0; }
+#endif // PHPOLYGON_OMIT_CLOUD_SHADOW
 
 // ================================================================
 //  Shadow
@@ -442,6 +446,7 @@ vec3 toneMapACES(vec3 x) {
     return clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.0, 1.0);
 }
 
+#ifndef PHPOLYGON_OMIT_VOLUMETRIC
 // Visibility of the primary light at a point ON the view ray (not on a surface):
 // one tap of the cascade that covers it, no normal bias. Outside every cascade
 // (beyond the shadow distance) the point counts as lit.
@@ -511,6 +516,9 @@ vec3 volumetricScatter(vec3 worldPos) {
     // any light of useful intensity, so a scale inside it would change nothing.
     return min(scatter * 0.3, vec3(0.25)) * lightScale;
 }
+#else
+vec3 volumetricScatter(vec3 worldPos) { return vec3(0.0); }
+#endif // PHPOLYGON_OMIT_VOLUMETRIC
 
 vec3 applyColorGrading(vec3 color) {
     color = color + u_grade_lift;
@@ -620,6 +628,7 @@ vec4 gbufferValue(vec3 worldN) {
 
 // PHPOLYGON:PROCMODE_HELPERS
 
+#ifndef PHPOLYGON_OMIT_NORMAL_PATTERNS
 // ================================================================
 //  Procedural Normal Maps (mirrors mesh3d.frag.glsl)
 // ================================================================
@@ -753,7 +762,9 @@ vec3 dispatchProceduralNormal(int code, vec2 uv) {
     if (code == 10) return np_skin(uv);
     return vec3(0.0, 0.0, 1.0);
 }
+#endif // PHPOLYGON_OMIT_NORMAL_PATTERNS
 
+#ifndef PHPOLYGON_OMIT_SURFACE_PATTERNS
 // ── Procedural Surface-Wear (mirrors mesh3d.frag.glsl) ────────────────────────
 
 vec3 sp_worn_paint(vec2 uv) {
@@ -808,7 +819,9 @@ vec3 dispatchSurfacePattern(int code, vec2 uv) {
     if (code == 5) return sp_skin(uv);
     return vec3(0.5, 0.0, 0.0);
 }
+#endif // PHPOLYGON_OMIT_SURFACE_PATTERNS
 
+#ifndef PHPOLYGON_OMIT_NORMAL_PATTERNS
 // ── Procedural height fields (mirrors mesh3d.frag.glsl) ─────────────────────
 // One per normal pattern, over the same pattern UV: 1 = the surface, 0 = the
 // deepest recess. They drive cavity darkening and parallax occlusion; lighting
@@ -966,6 +979,7 @@ vec3 perturbNormalProcedural(vec3 N, vec3 worldPos, vec2 uv, vec2 sampleUv,
     nMap = mix(vec3(0.0, 0.0, 1.0), nMap, clamp(intensity, 0.0, 4.0));
     return normalize(TBN * nMap);
 }
+#endif // PHPOLYGON_OMIT_NORMAL_PATTERNS
 
 // ================================================================
 //  Main
@@ -1024,10 +1038,12 @@ void main() {
     vec2 uvDx = dFdx(v_uv);
     vec2 uvDy = dFdy(v_uv);
     vec2 patternUv = v_uv;
+#ifndef PHPOLYGON_OMIT_NORMAL_PATTERNS
     if (u_normal_pattern != 0 && u_parallax_depth > 0.0) {
         patternUv = parallaxProceduralUv(Nv, V, v_uv, posDx, posDy, uvDx, uvDy,
                                          u_normal_pattern, u_normal_scale, u_parallax_depth);
     }
+#endif // PHPOLYGON_OMIT_NORMAL_PATTERNS
 
     vec3 texAlbedo = u_albedo;
     if (u_has_albedo_texture == 1) {
@@ -1048,6 +1064,7 @@ void main() {
         albedo = texAlbedo * (1.0 + (nse - 0.5) * 0.12 * noiseMask);
     }
 
+#ifndef PHPOLYGON_OMIT_GRASS
     // Grass blades: root colour (albedo) to tip colour along the blade, flat
     // bands for the stylised look or a smooth gradient, per-blade and field-wide
     // brightness variation, darker toward the root (contact shading).
@@ -1068,6 +1085,7 @@ void main() {
         gc = mix(gc, albedo, gFar * 0.7);
         albedo = gc;
     }
+#endif // PHPOLYGON_OMIT_GRASS
 
     // Transparent surfaces are seen from both sides (a pane, the far wall of a
     // glass box): light them with the normal that faces the viewer, so a back
@@ -1082,10 +1100,13 @@ void main() {
     // Procedural normal-map pattern (mirrors mesh3d.frag.glsl). Self-shading
     // procedural materials (water, cloud, moon) have early-returned above so
     // this only affects standard, sand, rock, palm, wood, thatch, carpaint.
+#ifndef PHPOLYGON_OMIT_NORMAL_PATTERNS
     N = perturbNormalProcedural(N, v_worldPos, v_uv, patternUv,
                                 u_normal_pattern, u_normal_scale,
                                 u_normal_intensity);
+#endif // PHPOLYGON_OMIT_NORMAL_PATTERNS
 
+#ifndef PHPOLYGON_OMIT_SURFACE_PATTERNS
     if (u_surface_pattern > 0 && u_surface_intensity > 0.0) {
         vec3 wear = dispatchSurfacePattern(u_surface_pattern, patternUv * u_surface_scale);
         float t = clamp(u_surface_intensity, 0.0, 4.0);
@@ -1094,15 +1115,18 @@ void main() {
         roughness = clamp(roughness + wear.y * t, 0.04, 1.0);
         metallic  = clamp(metallic  + wear.z * t, 0.0,  1.0);
     }
+#endif // PHPOLYGON_OMIT_SURFACE_PATTERNS
 
     // Cavity: the recesses of the pattern's height field catch less light. The
     // ambient terms take the full factor (through `ao` below), direct light half.
     float patternCavity = 1.0;
+#ifndef PHPOLYGON_OMIT_NORMAL_PATTERNS
     if (u_normal_pattern != 0 && u_cavity > 0.0) {
         float cavityHeight = dispatchProceduralHeight(u_normal_pattern, patternUv * u_normal_scale);
         patternCavity = 1.0 - clamp(u_cavity, 0.0, 1.0) * (1.0 - cavityHeight);
         albedo *= mix(1.0, patternCavity, 0.5);
     }
+#endif // PHPOLYGON_OMIT_NORMAL_PATTERNS
 
     // Per-material wetness (SSR SURROGATE). Up-facing fragments get a smoother +
     // darker + brighter-IBL pass to read as wet/polished. This is the FALLBACK:
@@ -1117,6 +1141,7 @@ void main() {
         albedo    = mix(albedo,    albedo * 0.7,                 w);
     }
 
+#ifndef PHPOLYGON_OMIT_SNOW
     // ---- Snow cover: upward-facing surfaces turn white ----
     if (u_snow_cover > 0.01 && u_proc_mode != 2 && u_proc_mode != 6) {
         float upFacing = max(dot(N, vec3(0.0, 1.0, 0.0)), 0.0);
@@ -1128,6 +1153,7 @@ void main() {
         albedo = mix(albedo, vec3(0.92, 0.93, 0.97), snowMask);
         roughness = mix(roughness, 0.8, snowMask); // snow is matte
     }
+#endif // PHPOLYGON_OMIT_SNOW
 
     // ---- PBR Lighting (Cook-Torrance GGX) ----
     roughness = clamp(roughness, 0.04, 1.0);
@@ -1219,6 +1245,7 @@ void main() {
     // SDF soft sun-shadow is applied to the directional term further down.
     if (u_ft_mode >= 0.5) {
         vec3 ftProbe;
+#ifndef PHPOLYGON_OMIT_PROBE_GI
         if (u_probe_enabled > 0.5) {
             // Baked COLOURED directional GI: reconstruct RGB SH-L1 irradiance for
             // N (per channel: E = c0 + c1*N.x + c2*N.y + c3*N.z). The colour (sky
@@ -1233,7 +1260,9 @@ void main() {
             vec3 E = max(vec3(dot(cr, nd), dot(cg, nd), dot(cb, nd)), vec3(0.0));
             float bounceGain = u_ft_mode >= 2.5 ? 1.0 : 0.7;
             ftProbe = E * (0.45 * bounceGain) * u_ambient_intensity;
-        } else {
+        } else
+#endif // PHPOLYGON_OMIT_PROBE_GI
+        {
             float ftHemi  = N.y * 0.5 + 0.5;
             vec3  ftSky   = u_ambient_color * 1.2 + vec3(0.015, 0.03, 0.06);
             vec3  ftGround = u_ambient_color * 0.6;
@@ -1248,9 +1277,11 @@ void main() {
     // Light through thin shells against the sun (skin, foliage); grass blades
     // let most of it through near the tip, little at the root.
     float sssStrength = u_subsurface_strength;
+#ifndef PHPOLYGON_OMIT_GRASS
     if (u_grass_shade == 1) {
         sssStrength *= mix(0.25, 1.0, clamp(v_uv.y, 0.0, 1.0));
     }
+#endif // PHPOLYGON_OMIT_GRASS
     int dirCount = min(u_dir_light_count, 4);
     for (int dl = 0; dl < dirCount; dl++) {
         vec3 dL = normalize(-u_dir_lights[dl].direction);
@@ -1269,6 +1300,7 @@ void main() {
         if (dl == 0) radiance *= mix(0.1, 1.0, cloudSh);
         vec3 lit = vec3(0.0);
 
+#ifndef PHPOLYGON_OMIT_SUBSURFACE
         if (sssStrength > 0.0) {
             // Skin path: wrap-diffuse extends light past the terminator,
             // warm subsurface tint bleeds at grazing angles, and a small
@@ -1290,7 +1322,9 @@ void main() {
                 lit += spec * radiance * rawNdotL * dShadow;
             }
             lit += u_subsurface_color * albedo * backlight * sssStrength * radiance;
-        } else {
+        } else
+#endif // PHPOLYGON_OMIT_SUBSURFACE
+        {
             float dNdotL = max(rawNdotL, 0.0);
             if (dNdotL > 0.0) {
                 vec3 spec = cookTorranceSpecular(N, V, dL, roughness, F0);
@@ -1360,6 +1394,7 @@ void main() {
         localAcc += envColor * F_ibl * iblWeight * shadow;
     }
 
+#ifndef PHPOLYGON_OMIT_CLEARCOAT
     // ---- Clearcoat lobe (carpaint, dielectric F0 ≈ 0.04) ----
     if (u_clearcoat > 0.0 && u_dir_light_count > 0) {
         float ccRough = clamp(u_clearcoat_roughness, 0.02, 1.0);
@@ -1382,6 +1417,7 @@ void main() {
             localAcc += ccEnv * ccFres * u_clearcoat * (1.0 - ccRough * 0.5) * 0.4;
         }
     }
+#endif // PHPOLYGON_OMIT_CLEARCOAT
 
     localAcc += u_emission;
 

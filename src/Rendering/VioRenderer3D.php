@@ -2642,6 +2642,9 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             'ftAoRadius' => $ftAoRadius,
         ];
         $this->frameFtMode = $ftMode;
+        $this->sceneVariant = ProcModeShaderRegistry::BASE_VARIANT;
+        $this->variantsThisFrame = ProcModeShaderRegistry::hasVariants() && $this->activeShaderId() === 'default';
+        $this->variantUniformsUploaded = [];
 
         $this->gpuMark('frame_start');
 
@@ -2784,7 +2787,8 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         // draw). Opaque is depth-buffer order-independent (VIO_BLEND_NONE), so
         // reordering cannot change the image.
         $opaque = OpaqueDrawOrder::sort($commands, $this->motionThisFrame);
-        foreach ($opaque as [, , $cmd, $material]) {
+        foreach ($opaque as [$materialId, , $cmd, $material]) {
+            $this->selectVariant($material, $materialId);
             if ($cmd instanceof DrawMesh) {
                 $this->drawMeshCommand($cmd->meshId, $material, $cmd->modelMatrix, $cmd->materialId, $cmd->excludeFromGbuffer, $cmd->prevModelMatrix);
             } else {
@@ -2796,6 +2800,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
 
         // --- Pass 3: Transparent geometry ---
         PerfProfiler::begin('render3d.submit.transparent');
+        $this->sceneVariant = ProcModeShaderRegistry::BASE_VARIANT;
         $this->bindPipeline('transparent');
         // The opaque pass already uploaded the frame uniforms (+ probe/ssao/sdfao
         // texture binds) into this same shader object's sticky cbuffer; re-upload
@@ -2825,6 +2830,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             if ($material === null || $material->alpha >= 1.0) {
                 continue;
             }
+            $this->selectVariant($material, $cmd->materialId);
             if ($waterToGbuffer) {
                 $pass = $this->isReflectiveTransparent($cmd->materialId) ? 'transparent_water' : 'transparent';
                 if ($pass !== $transparentPass) {
@@ -3049,6 +3055,12 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
                 fwrite(STDERR, "[VioRenderer3D] MRT shaders unavailable, using the forward path: {$e->getMessage()}\n");
             }
         }
+
+        foreach (ProcModeShaderRegistry::variants() as $variant) {
+            if (!ProcModeShaderRegistry::isLazyVariant($variant)) {
+                $this->ensureVariantCompiled($variant);
+            }
+        }
     }
 
     private function initPostProcess(): void
@@ -3116,7 +3128,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         // registered this is a no-op (sentinels resolve to empty). The other
         // programs have no sentinels.
         if ($id === 'default' || $id === 'default_mrt' || $id === 'default_mrt_mv') {
-            $fragSrc = ProcModeShaderRegistry::spliceGlsl($fragSrc, ProcModeShaderRegistry::FAMILY_VIO);
+            $fragSrc = $this->meshFragmentSource();
         }
         if ($motion) {
             // Motion vectors ride on the MRT outputs: both stages need the define.
@@ -3128,6 +3140,99 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         }
 
         $this->compileShader($id, $vertSrc, $fragSrc);
+    }
+
+    /** mesh3d.frag of one program: its snippets, without the paths it leaves out. */
+    private function meshFragmentSource(string $variant = ProcModeShaderRegistry::BASE_VARIANT): string
+    {
+        $source = ProcModeShaderRegistry::spliceGlsl(
+            $this->loadShader('mesh3d.frag.glsl'),
+            ProcModeShaderRegistry::FAMILY_VIO,
+            $variant,
+        );
+        foreach (ProcModeShaderRegistry::variantDefines($variant) as $define) {
+            $source = self::withDefine($source, $define);
+        }
+        return $source;
+    }
+
+    /**
+     * Compile the programs of a shader variant for the frame path in use. A variant
+     * that does not compile is logged and dropped: its materials then draw with the
+     * base program, as standard PBR, rather than not at all.
+     */
+    private function ensureVariantCompiled(string $variant): bool
+    {
+        if ($variant === ProcModeShaderRegistry::BASE_VARIANT) {
+            return true;
+        }
+        if (isset($this->failedVariants[$variant])) {
+            return false;
+        }
+        $programs = ['default' => [false, false]];
+        if ($this->mrtSupported()) {
+            $programs['default_mrt'] = [true, false];
+            if (isset($this->shaderCache['default_mrt_mv'])) {
+                $programs['default_mrt_mv'] = [true, true];
+            }
+        }
+        foreach ($programs as $program => [$mrt, $motion]) {
+            $id = $program . '@' . $variant;
+            if (isset($this->shaderCache[$id])) {
+                continue;
+            }
+            try {
+                $vert = $this->loadShader('mesh3d.vert.glsl');
+                $frag = $this->meshFragmentSource($variant);
+                if ($motion) {
+                    $vert = self::withDefine($vert, 'PHPOLYGON_MOTION');
+                    $frag = self::withDefine($frag, 'PHPOLYGON_MOTION');
+                }
+                $this->compileShader($id, $vert, $mrt ? self::withMrtDefine($frag) : $frag);
+            } catch (\RuntimeException $e) {
+                $this->failedVariants[$variant] = true;
+                fwrite(STDERR, "[VioRenderer3D] shader variant '{$variant}' unavailable, its materials draw as standard PBR: {$e->getMessage()}\n");
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * Switch the scene pass to the program $materialId draws with. A program has its
+     * own sticky cbuffer, so it takes the frame uniforms the first time a frame uses
+     * it; textures stay bound across pipelines, as the storage-instance path relies on.
+     * Costs one bool test per draw on a frame without variants.
+     */
+    private function selectVariant(Material $material, string $materialId): void
+    {
+        if (!$this->variantsThisFrame) {
+            return;
+        }
+        $variant = $material->grass
+            ? ProcModeShaderRegistry::BASE_VARIANT
+            : ProcModeShaderRegistry::variantOf(ProcModeRegistry::resolve($materialId));
+        if ($variant === $this->sceneVariant) {
+            return;
+        }
+        if (!$this->ensureVariantCompiled($variant)) {
+            $variant = ProcModeShaderRegistry::BASE_VARIANT;
+            if ($variant === $this->sceneVariant) {
+                return;
+            }
+        }
+        $this->sceneVariant = $variant;
+        $this->bindPipeline($this->currentScenePass, cull: $this->currentSceneCull);
+        if (isset($this->variantUniformsUploaded[$variant]) || $this->sceneUniformInputs === null) {
+            return;
+        }
+        $this->variantUniformsUploaded[$variant] = true;
+        [$frameState, $hasShadowMap, $dirLights] = $this->sceneUniformInputs;
+        $this->uploadFrameUniforms($frameState);
+        $this->uploadShadowUniforms($hasShadowMap, $dirLights);
+        $this->uploadSsaoUniforms();
+        $this->uploadSdfAoUniforms();
+        $this->uploadMotionUniforms();
     }
 
     private function loadShader(string $relativeFile): string
@@ -3238,13 +3343,14 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
     private function bindPipeline(string $pass, bool $storageInstances = false, int $cull = VIO_CULL_NONE, bool $keepDrawState = false): void
     {
         $shaderId = $storageInstances ? 'default_storage' : $this->activeShaderId();
+        $variantSuffix = $this->sceneVariant === ProcModeShaderRegistry::BASE_VARIANT ? '' : '@' . $this->sceneVariant;
         $hdr = $this->sceneTargetIsHdr();
         $mrt = $this->mrtThisFrame;
         $mv = $mrt && $this->motionThisFrame;
         // Cache LDR, HDR and MRT pipeline variants under distinct keys: on D3D12
         // the PSO RTV formats (R8 vs FP16, 1 vs 4 vs 6 attachments) are baked in
         // and must match the bound target.
-        $key = $pass . ':' . $shaderId . ($mrt ? ':mrt' . ($mv ? ':mv' : '') : ($hdr ? ':hdr' : ''));
+        $key = $pass . ':' . $shaderId . $variantSuffix . ($mrt ? ':mrt' . ($mv ? ':mv' : '') : ($hdr ? ':hdr' : ''));
         if ($cull !== VIO_CULL_NONE) {
             $key .= ':cull' . $cull;
         }
@@ -3258,7 +3364,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
                 // With motion, attachment 4 (vectors) is written by opaque
                 // geometry only and attachment 5 (reactive) by transparent
                 // geometry only, additively.
-                $program = ($storageInstances ? 'default_storage_mrt' : 'default_mrt') . ($mv ? '_mv' : '');
+                $program = ($storageInstances ? 'default_storage_mrt' : 'default_mrt') . ($mv ? '_mv' : '') . $variantSuffix;
                 $cfg = [
                     'shader' => $this->shaderCache[$program],
                     'depth_test' => true,
@@ -3287,7 +3393,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
                 }
                 $pipeline = $this->createPipeline($cfg);
             } else {
-                $shader = $this->shaderCache[$shaderId] ?? $this->shaderCache['default'];
+                $shader = $this->shaderCache[$shaderId . $variantSuffix] ?? $this->shaderCache['default'];
 
                 $pipeline = $this->createPipeline([
                     'shader' => $shader,
@@ -5331,6 +5437,17 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
 
     private ?bool $indirectDrawAvailable = null;
 
+    /** Program the scene pass draws with right now (ProcModeShaderRegistry::defineVariant). */
+    private string $sceneVariant = ProcModeShaderRegistry::BASE_VARIANT;
+
+    private bool $variantsThisFrame = false;
+
+    /** @var array<string, true> variants whose program holds this frame's uniforms */
+    private array $variantUniformsUploaded = [];
+
+    /** @var array<string, true> */
+    private array $failedVariants = [];
+
     /**
      * u_model / u_normal_matrix per model matrix object. Mat4 is immutable and a
      * static entity hands the renderer the same world matrix object every frame,
@@ -5904,6 +6021,9 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         if ($this->motionThisFrame && !$this->ensureStorageMotionShader()) {
             return;
         }
+        if (!$this->ensureStorageVariant($this->sceneVariant)) {
+            return;
+        }
         $cull = $this->currentSceneCull;
         $this->bindPipeline($pass, storageInstances: true, cull: $cull);
         [$frameState, $hasShadowMap, $dirLights] = $inputs;
@@ -5956,10 +6076,41 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
                 self::storageInstancingVertexSource($this->loadShader('mesh3d.vert.glsl')),
                 'PHPOLYGON_MOTION',
             );
-            $frag = ProcModeShaderRegistry::spliceGlsl($this->loadShader('mesh3d.frag.glsl'), ProcModeShaderRegistry::FAMILY_VIO);
+            $frag = $this->meshFragmentSource();
             $this->compileShader('default_storage_mrt_mv', $vert, self::withMrtDefine(self::withDefine($frag, 'PHPOLYGON_MOTION')));
         } catch (\RuntimeException $e) {
             fwrite(STDERR, "[VioRenderer3D] storage-instance motion shader unavailable: {$e->getMessage()}\n");
+            return false;
+        }
+        return true;
+    }
+
+    /** The storage-instance programs of a shader variant, compiled at first use. */
+    private function ensureStorageVariant(string $variant): bool
+    {
+        if ($variant === ProcModeShaderRegistry::BASE_VARIANT) {
+            return true;
+        }
+        $id = 'default_storage@' . $variant;
+        if ($this->motionThisFrame ? isset($this->shaderCache['default_storage_mrt_mv@' . $variant]) : isset($this->shaderCache[$id])) {
+            return true;
+        }
+        try {
+            $vert = self::storageInstancingVertexSource($this->loadShader('mesh3d.vert.glsl'));
+            $frag = $this->meshFragmentSource($variant);
+            $this->compileShader($id, $vert, $frag);
+            if ($this->mrtSupported()) {
+                $this->compileShader('default_storage_mrt@' . $variant, $vert, self::withMrtDefine($frag));
+            }
+            if ($this->motionThisFrame) {
+                $this->compileShader(
+                    'default_storage_mrt_mv@' . $variant,
+                    self::withDefine($vert, 'PHPOLYGON_MOTION'),
+                    self::withMrtDefine(self::withDefine($frag, 'PHPOLYGON_MOTION')),
+                );
+            }
+        } catch (\RuntimeException $e) {
+            fwrite(STDERR, "[VioRenderer3D] storage-instance programs of variant '{$variant}' unavailable: {$e->getMessage()}\n");
             return false;
         }
         return true;
@@ -5979,7 +6130,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         }
         try {
             $vert = self::storageInstancingVertexSource($this->loadShader('mesh3d.vert.glsl'));
-            $frag = ProcModeShaderRegistry::spliceGlsl($this->loadShader('mesh3d.frag.glsl'), ProcModeShaderRegistry::FAMILY_VIO);
+            $frag = $this->meshFragmentSource();
             $this->compileShader('default_storage', $vert, $frag);
             if ($this->mrtSupported()) {
                 $this->compileShader('default_storage_mrt', $vert, self::withMrtDefine($frag));

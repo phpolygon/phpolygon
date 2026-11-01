@@ -422,6 +422,32 @@ php-vio only takes plain containers, so `loadKtx2()` runs `Ktx2Container::inflat
 shipped runtimes have zlib (the gzip PHAR needs it), not zstd. Measured on 329 BC7 hologram
 textures: 144.5 MB -> 18.0 MB, inflating all of them +0.3 s (~1 ms per texture).
 
+**Mesh shader programs and variants** (`ProcModeShaderRegistry`, `ShaderPath`; `ShaderVariantRegistryTest`,
+`VioShaderVariantRenderTest`). The mesh shader is not meant to grow with every look. Nothing here is on by default:
+without a definition the program is the v0.92.0 shader (the test pins its hash with the guards removed).
+- `defineVariant($name, $modes, $omit = [], $lazy = false)` moves proc modes into a program of their own. `$omit`
+  lists `ShaderPath`s it is compiled without (`#ifndef PHPOLYGON_OMIT_*` in `vio/mesh3d.frag`): a mode that returns
+  early reaches no lighting pattern. `$lazy` compiles at first use instead of behind the splash.
+  `omitFromBase($paths)` does the same for the base program. `omissionViolations()` lists materials drawn with a
+  program that lacks a path they need; call it in a game's test suite.
+- A variant holds only its own helpers: one mode calling a helper of a mode outside the variant does not compile.
+  A variant that fails is logged, and its materials draw as standard PBR.
+- Each program needs its forward, MRT and motion twin plus storage twins; cache keys and shader ids carry `@<variant>`.
+  `selectVariant()` switches per material, the first draw of a program in a frame uploads its frame uniforms
+  (cbuffers are per program), textures stay bound. `OpaqueDrawOrder` groups by program, the transparent pass keeps its
+  order and pays one bind per change. Without variants it is one bool test per draw.
+- The GL renderer has one program: `spliceGlsl()` without a variant takes every mode.
+- The branch ladder is assembled per program (`glslBranches()`), so modes can be left out or moved: the first arm
+  opens with `if`, others with `} else if`, the `} else` of the mode-0 arm lands at the end wherever a snippet carried
+  it. A complete ladder comes back byte for byte. A helper order or branch order may simply omit modes.
+- Measured 2026-11-02, php-vio 2.39.0, D3D12 on WARP (CPU; compile runs on the CPU either way), cold `vio_shader`,
+  median of 5 per program, a real game's 14 modes and post-colour hook as snippets, the machine busy with another
+  process: engine alone 6.9 s, all 14 modes 14.1 s, the 7 modes in use 9.9 s; split into base (3 surface looks) 6.8 s,
+  water looks without every `ShaderPath` 1.4 s, one unlit look 0.6 s (8.8 s together, the forward programs alone). Leaving out
+  `NormalPatterns` halves a program (9.9 -> 4.7 s, 3 runs); no other single path moves it by more than 2 s. Metal
+  and Vulkan on an Apple M5 (php-vio 2.35.0): repeat compiles 16-52 ms and 25-95 ms; a first compile on Metal took 1.1-1.6 s,
+  one sample per case, so nothing to compare. Compile time is a D3D12 problem.
+
 ### Shaders
 - Authoring language: **GLSL** (human- and AI-readable plaintext)
 - 2D: used directly by NanoVG / OpenGL at runtime

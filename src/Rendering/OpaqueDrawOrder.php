@@ -20,6 +20,9 @@ use PHPolygon\Rendering\Command\DrawMeshInstanced;
  * field-by-field compare. `<=>` compares two NUMERIC strings by value, not by
  * bytes; a frame with a numeric material or mesh id therefore keeps the
  * comparator sort, so the order never differs.
+ *
+ * With shader variants registered, the program comes first in the key: every
+ * program change costs a pipeline bind. Opaque draws are order-independent.
  */
 final class OpaqueDrawOrder
 {
@@ -40,6 +43,7 @@ final class OpaqueDrawOrder
         $materials = [];
         /** @var array<string, true> $checked ids already tested for being numeric */
         $checked = [];
+        $variants = ProcModeShaderRegistry::hasVariants();
         foreach ($commands as $cmd) {
             if (!$cmd instanceof DrawMesh && !$cmd instanceof DrawMeshInstanced) {
                 continue;
@@ -57,7 +61,11 @@ final class OpaqueDrawOrder
             // Moved entities last within their material + mesh run: the
             // sticky u_has_prev then flips once per run, not per draw.
             $moved = $motion && $cmd instanceof DrawMesh && $cmd->prevModelMatrix !== null ? 1 : 0;
-            $keys[] = $materialId . "\0" . $meshId . "\0" . $moved;
+            $key = $materialId . "\0" . $meshId . "\0" . $moved;
+            if ($variants) {
+                $key = ProcModeShaderRegistry::variantOf(ProcModeRegistry::resolve($materialId)) . "\0" . $key;
+            }
+            $keys[] = $key;
             $opaque[] = [$materialId, $meshId, $cmd, $material, $moved];
             if (!isset($checked[$materialId])) {
                 $checked[$materialId] = true;
