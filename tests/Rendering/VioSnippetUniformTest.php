@@ -46,11 +46,8 @@ final class VioSnippetUniformTest extends TestCase
 
     protected function setUp(): void
     {
-        $ctx = @vio_create('auto', [
-            'width' => self::SIZE, 'height' => self::SIZE, 'headless' => true, 'vsync' => false,
-            'shader_cache' => sys_get_temp_dir() . '/phpolygon-test-shader-cache',
-        ]);
-        if ($ctx === false) {
+        $ctx = VioTestContext::create(self::SIZE, self::SIZE, ['shader_cache' => sys_get_temp_dir() . '/phpolygon-test-shader-cache']);
+        if ($ctx === null) {
             $this->markTestSkipped('vio_create(headless) unavailable');
         }
         $this->ctx = $ctx;

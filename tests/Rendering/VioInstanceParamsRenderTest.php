@@ -46,11 +46,8 @@ final class VioInstanceParamsRenderTest extends TestCase
 
     protected function setUp(): void
     {
-        $ctx = @vio_create('auto', [
-            'width' => self::W, 'height' => self::H, 'headless' => true, 'vsync' => false,
-            'shader_cache' => sys_get_temp_dir() . '/phpolygon-test-shader-cache',
-        ]);
-        if ($ctx === false) {
+        $ctx = VioTestContext::create(self::W, self::H, ['shader_cache' => sys_get_temp_dir() . '/phpolygon-test-shader-cache']);
+        if ($ctx === null) {
             $this->markTestSkipped('vio_create(headless) unavailable');
         }
         $this->ctx = $ctx;
