@@ -7,6 +7,10 @@ in vec4 v_lightSpacePos;
 in vec3 v_localPos;
 in vec3 v_localNormal;
 in vec3 v_objectScale;
+#ifdef PHPOLYGON_INSTANCE_PARAMS
+// Three free floats per draw or instance (ProcModeShaderRegistry::enableInstanceParams).
+flat in vec3 v_instance_params;
+#endif // PHPOLYGON_INSTANCE_PARAMS
 
 uniform vec3 u_ambient_color;
 uniform float u_ambient_intensity;

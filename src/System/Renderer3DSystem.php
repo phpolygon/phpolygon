@@ -32,6 +32,7 @@ use PHPolygon\Rendering\Command\SetWaveAnimation;
 use PHPolygon\Rendering\Command\SetWind;
 use PHPolygon\Rendering\Frustum;
 use PHPolygon\Rendering\Quality\FieldtracingMode;
+use PHPolygon\Rendering\InstanceParams;
 use PHPolygon\Rendering\MaterialRegistry;
 use PHPolygon\Rendering\RenderCommandList;
 use PHPolygon\Rendering\Renderer3DInterface;
@@ -516,6 +517,9 @@ class Renderer3DSystem extends AbstractSystem
                 $key = $mesh->meshId . '|' . $mesh->materialId . '|' . ($mesh->castShadows ? '1' : '0');
                 $batches[$key][0] = $mesh;
                 $batches[$key][1][] = $matrix;
+                if ($mesh->shaderParams !== null) {
+                    $batches[$key][2][count($batches[$key][1]) - 1] = $mesh->shaderParams;
+                }
                 continue;
             }
 
@@ -526,6 +530,7 @@ class Renderer3DSystem extends AbstractSystem
                 $mesh->excludeFromGbuffer,
                 $prev !== $matrix ? $prev : null,
                 $mesh->castShadows,
+                $mesh->shaderParams,
             );
 
             if ($isTransparent) {
@@ -538,9 +543,16 @@ class Renderer3DSystem extends AbstractSystem
 
         $this->lastDrawnMatrix = $drawnNow;
 
-        foreach ($batches as [$mesh, $matrices]) {
+        foreach ($batches as $batch) {
+            [$mesh, $matrices] = $batch;
+            $params = $batch[2] ?? [];
+            if ($params !== [] && count($matrices) > 1) {
+                foreach ($params as $i => $p) {
+                    $matrices[$i] = InstanceParams::matrix($matrices[$i], $p[0], $p[1], $p[2]);
+                }
+            }
             $this->commandList->add(count($matrices) === 1
-                ? new DrawMesh($mesh->meshId, $mesh->materialId, $matrices[0], castShadows: $mesh->castShadows)
+                ? new DrawMesh($mesh->meshId, $mesh->materialId, $matrices[0], castShadows: $mesh->castShadows, params: $params[0] ?? null)
                 : new DrawMeshInstanced($mesh->meshId, $mesh->materialId, $matrices, castShadows: $mesh->castShadows));
             $drawnOpaque += count($matrices);
         }

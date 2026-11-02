@@ -247,6 +247,13 @@ class Material
         public readonly float $grassRootShade = 0.45,
         public readonly float $grassPatchScale = 0.12,
         public readonly bool $windTufts = false,
+        /**
+         * Values of uniforms declared with ProcModeShaderRegistry::declareMaterialParameter(),
+         * by uniform name. Parameters of a look that need no id of their own.
+         *
+         * @var array<string, int|float|list<float>>
+         */
+        public readonly array $params = [],
     ) {}
 
     /**
@@ -351,6 +358,16 @@ class Material
         return $this->copy(albedoTexture: $textureId, clearAlbedoTexture: $textureId === null, albedo: $albedo);
     }
 
+    /**
+     * This material with further parameter values, merged by name.
+     *
+     * @param array<string, int|float|list<float>> $params
+     */
+    public function withParams(array $params): self
+    {
+        return $this->copy(params: [...$this->params, ...$params]);
+    }
+
     /** This material drawn by another shader. */
     public function withShader(string $shader): self
     {
@@ -389,6 +406,7 @@ class Material
         bool $clearAlbedoTexture = false,
         ?Color $albedo = null,
         ?string $shader = null,
+        ?array $params = null,
     ): self {
         return new self(
             albedo: $albedo ?? $this->albedo,
@@ -429,6 +447,7 @@ class Material
             grassRootShade: $this->grassRootShade,
             grassPatchScale: $this->grassPatchScale,
             windTufts: $this->windTufts,
+            params: $params ?? $this->params,
         );
     }
 

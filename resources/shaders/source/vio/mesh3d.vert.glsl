@@ -58,6 +58,13 @@ out vec3 v_localPos;
 out vec3 v_localNormal;
 out vec3 v_objectScale;
 
+#ifdef PHPOLYGON_INSTANCE_PARAMS
+// Three free floats for the fragment stage. A single draw takes them from u_draw_params,
+// an instance from the unused m[0..2].w of its matrix (m[0].w is the tuft hash of grass).
+uniform vec3 u_draw_params;
+flat out vec3 v_instance_params;
+#endif // PHPOLYGON_INSTANCE_PARAMS
+
 #ifdef PHPOLYGON_MOTION
 // Motion vectors (temporal AA / upscaling). Both clip positions are UNJITTERED:
 // the surface point projected with this frame's and with last frame's camera,
@@ -214,6 +221,15 @@ void main() {
         grassHash = model[0].w;
         model[0].w = 0.0;
     }
+#ifdef PHPOLYGON_INSTANCE_PARAMS
+    v_instance_params = u_draw_params;
+    if (u_use_instancing == 1) {
+        v_instance_params = vec3(model[0].w, model[1].w, model[2].w);
+        model[0].w = 0.0;
+        model[1].w = 0.0;
+        model[2].w = 0.0;
+    }
+#endif // PHPOLYGON_INSTANCE_PARAMS
     vec3 pos = animatePosition(a_position, model, u_time, grassHash);
 
     vec4 worldPos = model * vec4(pos, 1.0);

@@ -138,7 +138,7 @@ All commands are plain PHP value objects (no methods, only constructor propertie
 | `SetAmbientLight` | `color: Color`, `intensity: float` |
 | `SetDirectionalLight` | `direction: Vec3`, `color: Color`, `intensity: float` |
 | `AddPointLight` | `position: Vec3`, `color: Color`, `intensity: float`, `radius: float` |
-| `DrawMesh` | `meshId: string`, `materialId: string`, `modelMatrix: Mat4`, `prevModelMatrix: ?Mat4` (last frame's matrix when the entity moved, else null; set by `Renderer3DSystem`) |
+| `DrawMesh` | `meshId: string`, `materialId: string`, `modelMatrix: Mat4`, `prevModelMatrix: ?Mat4` (last frame's matrix when the entity moved, else null; set by `Renderer3DSystem`), `params: ?float[]` (three floats, see "Parameters without new material ids") |
 | `DrawMeshInstanced` | `meshId: string`, `materialId: string`, `matrices: Mat4[]` |
 | `SetSkybox` | `cubemapId: string` |
 | `SetFog` | `color: Color`, `near: float`, `far: float` |
@@ -494,6 +494,18 @@ marks `scene_depth`; opaque draws see the copy as absent. Snippets in the listed
 A frame without a readable depth (MSAA, no `VIO_FEATURE_RENDER_TARGET_DEPTH_SAMPLE`) answers 60000, i.e. no soft edge: snippets
 need no branch of their own. A consumer forces the offscreen path. It takes one sampler of the program's budget, slot 11. Vio family
 only. Without `requireSceneDepth()` no copy, no target, no sampler, no uniform. `depthZeroToOne` plays no part: stored depth is (ndcZ + 1) / 2 on every backend.
+
+**Parameters without new material ids** (`InstanceParamsTest`, `VioInstanceParamsRenderTest`).
+- Per material: `ProcModeShaderRegistry::declareMaterialParameter('u_fx_wear', 'float', 0.0)`, values in `Material::$params` by uniform
+  name (`withParams()` merges; copies keep them). Uploaded with the material's other uniforms, so a material without a value
+  gets the default, never the last material's. The GL family gets these too.
+- Per draw or instance: `enableInstanceParams()` gives the fragment stage `v_instance_params`, a flat vec3, in every mesh program. From
+  `DrawMesh::$params` (`u_draw_params`) or, for instances, the unused `m[0..2].w` of the matrix: `InstanceParams::matrix()` /
+  `write()` for flat buffers. No new vertex layout, works with storage-buffer instances, a batch that changes stays one draw. Every
+  vertex stage reading instance matrices clears the three (`mesh3d`, `gbuffer`, `shadow`, `depth`; compiled with
+  `PHPOLYGON_INSTANCE_PARAMS`). Such a matrix only works in an instanced draw: a single draw would multiply by it unchanged.
+  Grass has its hash in `m[0].w`, its x reads 0. `MeshRenderer::$shaderParams` (not serialized) is the entity's way in, batched
+  or not. Vio family only. Without it the shader and the vertex stages are the old ones and a draw pays one bool test.
 
 ### Shaders
 - Authoring language: **GLSL** (human- and AI-readable plaintext)

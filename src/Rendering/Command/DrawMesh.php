@@ -25,5 +25,12 @@ readonly class DrawMesh
          * and receives shadows). Set from MeshRenderer::$castShadows.
          */
         public bool $castShadows = true,
+        /**
+         * Three floats for `v_instance_params`, null = zeros; for a draw of many
+         * instances see InstanceParams. Needs ProcModeShaderRegistry::enableInstanceParams().
+         *
+         * @var list<float>|null
+         */
+        public ?array $params = null,
     ) {}
 }

@@ -52,6 +52,14 @@ class MeshRenderer extends AbstractComponent
     #[Property]
     public bool $batchable = false;
 
+    /**
+     * Three floats for `v_instance_params` of this entity's draw, whether it draws
+     * alone or in a batch. Runtime state (a stage, a random value): set by a system, not saved.
+     *
+     * @var list<float>|null
+     */
+    public ?array $shaderParams = null;
+
     public function __construct(
         string $meshId = '',
         string $materialId = '',

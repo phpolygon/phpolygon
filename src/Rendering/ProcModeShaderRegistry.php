@@ -56,6 +56,10 @@ namespace PHPolygon\Rendering;
  *
  * SCENE DEPTH: {@see requireSceneDepth()} gives programs the opaque scene's depth for
  * transparent surfaces and particles. It costs a copy per frame, only with a consumer.
+ *
+ * PARAMETERS WITHOUT NEW MATERIAL IDS: {@see declareMaterialParameter()} adds a uniform
+ * filled from {@see Material::$params}, {@see enableInstanceParams()} three floats per
+ * draw or instance.
  */
 final class ProcModeShaderRegistry
 {
@@ -136,6 +140,9 @@ final class ProcModeShaderRegistry
     private static array $samplers = [];
     /** @var array<string, list<string>|null> sampler name → the programs that declare it, null = all */
     private static array $samplerPrograms = [];
+    /** @var array<string, int|float|list<float>> material parameter uniform → default */
+    private static array $materialParameters = [];
+    private static bool $instanceParams = false;
     /** @var list<string>|null programs that read the scene depth, null = all of them */
     private static ?array $sceneDepthPrograms = [];
 
@@ -364,6 +371,40 @@ final class ProcModeShaderRegistry
     }
 
     /**
+     * Declare a uniform that each material fills from {@see Material::$params}; a
+     * material without a value gets $default, so a draw never sees another
+     * material's value. Uploaded with the material's other uniforms.
+     *
+     * @param int|float|list<float> $default
+     */
+    public static function declareMaterialParameter(string $name, string $type, int|float|array $default): void
+    {
+        self::declareUniform($name, $type);
+        self::$materialParameters[$name] = $default;
+    }
+
+    /** @return array<string, int|float|list<float>> uniform → default */
+    public static function materialParameters(): array
+    {
+        return self::$materialParameters;
+    }
+
+    /**
+     * Give every mesh program `v_instance_params`, a flat vec3 of the fragment stage,
+     * from {@see Command\DrawMesh::$params} or {@see InstanceParams}. Grass keeps
+     * m[0].w for its hash: its x reads 0. Vio family only.
+     */
+    public static function enableInstanceParams(): void
+    {
+        self::$instanceParams = true;
+    }
+
+    public static function instanceParamsEnabled(): bool
+    {
+        return self::$instanceParams;
+    }
+
+    /**
      * Refuse a snippet name the engine's stages already use: on D3D12 it would be set
      * in one stage only, or in the wrong cbuffer slot, without any error.
      */
@@ -418,6 +459,9 @@ final class ProcModeShaderRegistry
         $defines = array_map(static fn (ShaderPath $path): string => $path->define(), $omit);
         if (self::readsSceneDepth($variant)) {
             $defines[] = 'PHPOLYGON_SCENE_DEPTH';
+        }
+        if (self::$instanceParams) {
+            $defines[] = 'PHPOLYGON_INSTANCE_PARAMS';
         }
 
         return $defines;
@@ -586,5 +630,7 @@ final class ProcModeShaderRegistry
         self::$samplers = [];
         self::$samplerPrograms = [];
         self::$sceneDepthPrograms = [];
+        self::$materialParameters = [];
+        self::$instanceParams = false;
     }
 }

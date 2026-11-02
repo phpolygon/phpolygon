@@ -1045,6 +1045,10 @@ class OpenGLRenderer3D implements Renderer3DInterface, AnimationClockInterface
         // shade through their own branch, never a game's proc mode).
         $procMode = MaterialRegistry::get($materialId)?->grass === true ? 0 : ProcModeRegistry::resolve($materialId);
         $this->setUniformInt('u_proc_mode', $procMode);
+        $params = MaterialRegistry::get($materialId)?->params ?? [];
+        foreach (ProcModeShaderRegistry::materialParameters() as $name => $default) {
+            $this->setSnippetUniform($name, $params[$name] ?? $default);
+        }
 
         // Moon phase: encoded in roughness of moon_disc material by DayNightSystem
         if ($procMode === 9) {

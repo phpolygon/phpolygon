@@ -2942,6 +2942,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         ];
         $this->frameFtMode = $ftMode;
         $this->sceneDepthCopied = false;
+        $this->instanceParamsThisFrame = ProcModeShaderRegistry::instanceParamsEnabled();
         $this->sceneVariant = ProcModeShaderRegistry::BASE_VARIANT;
         $this->variantsThisFrame = ProcModeShaderRegistry::hasVariants() && $this->activeShaderId() === 'default';
         $this->variantUniformsUploaded = [];
@@ -3091,7 +3092,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         foreach ($opaque as [$materialId, , $cmd, $material]) {
             $this->selectVariant($material, $materialId);
             if ($cmd instanceof DrawMesh) {
-                $this->drawMeshCommand($cmd->meshId, $material, $cmd->modelMatrix, $cmd->materialId, $cmd->excludeFromGbuffer, $cmd->prevModelMatrix);
+                $this->drawMeshCommand($cmd->meshId, $material, $cmd->modelMatrix, $cmd->materialId, $cmd->excludeFromGbuffer, $cmd->prevModelMatrix, $cmd->params);
             } else {
                 $this->drawMeshInstancedCommand($cmd, $material);
             }
@@ -3441,6 +3442,10 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         if ($id === 'default' || $id === 'default_mrt' || $id === 'default_mrt_mv') {
             $fragSrc = $this->meshFragmentSource();
         }
+        if (ProcModeShaderRegistry::instanceParamsEnabled()
+            && in_array($id, ['default', 'default_mrt', 'default_mrt_mv', 'shadow', 'gbuffer', 'depth'], true)) {
+            $vertSrc = self::withDefine($vertSrc, 'PHPOLYGON_INSTANCE_PARAMS');
+        }
         if ($motion) {
             // Motion vectors ride on the MRT outputs: both stages need the define.
             $vertSrc = self::withDefine($vertSrc, 'PHPOLYGON_MOTION');
@@ -3465,6 +3470,17 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             $source = self::withDefine($source, $define);
         }
         return $source;
+    }
+
+    private function meshVertexSource(bool $storage = false): string
+    {
+        $source = $this->loadShader('mesh3d.vert.glsl');
+        if ($storage) {
+            $source = self::storageInstancingVertexSource($source);
+        }
+        return ProcModeShaderRegistry::instanceParamsEnabled()
+            ? self::withDefine($source, 'PHPOLYGON_INSTANCE_PARAMS')
+            : $source;
     }
 
     /**
@@ -3493,7 +3509,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
                 continue;
             }
             try {
-                $vert = $this->loadShader('mesh3d.vert.glsl');
+                $vert = $this->meshVertexSource();
                 $frag = $this->meshFragmentSource($variant);
                 if ($motion) {
                     $vert = self::withDefine($vert, 'PHPOLYGON_MOTION');
@@ -3757,6 +3773,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         $this->lastHasAlbedoTexture = null;
         $this->lastGbufferWrite = null;
         $this->lastHasPrev = null;
+        $this->lastDrawParams = null;
     }
 
     // ----------------------------------------------------------------
@@ -5638,7 +5655,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
     private function drawTransparentCommand(DrawMesh|DrawMeshInstanced $cmd, Material $material): void
     {
         if ($cmd instanceof DrawMesh) {
-            $this->drawMeshCommand($cmd->meshId, $material, $cmd->modelMatrix, $cmd->materialId, $cmd->excludeFromGbuffer, $cmd->prevModelMatrix);
+            $this->drawMeshCommand($cmd->meshId, $material, $cmd->modelMatrix, $cmd->materialId, $cmd->excludeFromGbuffer, $cmd->prevModelMatrix, $cmd->params);
         } else {
             $this->drawMeshInstancedCommand($cmd, $material);
         }
@@ -5665,7 +5682,8 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         return $flat;
     }
 
-    private function drawMeshCommand(string $meshId, Material $material, Mat4 $modelMatrix, string $materialId = '', bool $excludeFromGbuffer = false, ?Mat4 $prevModelMatrix = null): void
+    /** @param list<float>|null $params DrawMesh::$params */
+    private function drawMeshCommand(string $meshId, Material $material, Mat4 $modelMatrix, string $materialId = '', bool $excludeFromGbuffer = false, ?Mat4 $prevModelMatrix = null, ?array $params = null): void
     {
         $mesh = $this->uploadMesh($meshId);
         if ($mesh === null) {
@@ -5699,6 +5717,13 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             } elseif ($this->lastHasPrev !== 0) {
                 $perDraw['u_has_prev'] = 0;
                 $this->lastHasPrev = 0;
+            }
+        }
+        if ($this->instanceParamsThisFrame) {
+            $params ??= [0.0, 0.0, 0.0];
+            if ($params !== $this->lastDrawParams) {
+                $perDraw['u_draw_params'] = $params;
+                $this->lastDrawParams = $params;
             }
         }
         $this->setUniforms($perDraw);
@@ -5752,6 +5777,12 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
     private ?VioRenderTarget $sceneDepthCopy = null;
 
     private string $sceneDepthCopyKey = '';
+
+    /** ProcModeShaderRegistry::enableInstanceParams(), read once per frame. */
+    private bool $instanceParamsThisFrame = false;
+
+    /** @var list<float>|null u_draw_params resident in the bound program */
+    private ?array $lastDrawParams = null;
 
     /** Whether this frame's opaque depth is in $sceneDepthCopy yet. */
     private bool $sceneDepthCopied = false;
@@ -6229,6 +6260,9 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         if ($procMode === 9) {
             $u['u_moon_phase'] = $material->roughness;
         }
+        foreach (ProcModeShaderRegistry::materialParameters() as $name => $default) {
+            $u[$name] = $material->params[$name] ?? $default;
+        }
 
         $this->setUniforms($u);
     }
@@ -6411,10 +6445,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             return true;
         }
         try {
-            $vert = self::withDefine(
-                self::storageInstancingVertexSource($this->loadShader('mesh3d.vert.glsl')),
-                'PHPOLYGON_MOTION',
-            );
+            $vert = self::withDefine($this->meshVertexSource(true), 'PHPOLYGON_MOTION');
             $frag = $this->meshFragmentSource();
             $this->compileShader('default_storage_mrt_mv', $vert, self::withMrtDefine(self::withDefine($frag, 'PHPOLYGON_MOTION')));
         } catch (\RuntimeException $e) {
@@ -6435,7 +6466,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             return true;
         }
         try {
-            $vert = self::storageInstancingVertexSource($this->loadShader('mesh3d.vert.glsl'));
+            $vert = $this->meshVertexSource(true);
             $frag = $this->meshFragmentSource($variant);
             $this->compileShader($id, $vert, $frag);
             if ($this->mrtSupported()) {
@@ -6468,7 +6499,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             return false;
         }
         try {
-            $vert = self::storageInstancingVertexSource($this->loadShader('mesh3d.vert.glsl'));
+            $vert = $this->meshVertexSource(true);
             $frag = $this->meshFragmentSource();
             $this->compileShader('default_storage', $vert, $frag);
             if ($this->mrtSupported()) {
