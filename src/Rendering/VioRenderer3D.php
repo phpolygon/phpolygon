@@ -24,6 +24,7 @@ use PHPolygon\Rendering\Command\SetSky;
 use PHPolygon\Rendering\Command\SetSkybox;
 use PHPolygon\Rendering\Command\SetWaveAnimation;
 use PHPolygon\Rendering\Command\SetWind;
+use PHPolygon\Rendering\Accessibility\ComfortMotion;
 use PHPolygon\Rendering\Effects\EffectRegistry;
 use PHPolygon\Rendering\PostProcess\FullscreenPass;
 use PHPolygon\Rendering\PostProcess\FullscreenPassRegistry;
@@ -503,6 +504,9 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
     private ?VioAccessibilityPass $accessibilityPass = null;
     /** Engine time of the last frame the accessibility pass ran; null = it did not run. */
     private ?float $accessibilityTime = null;
+    private ?ComfortMotion $comfortMotion = null;
+    /** Floor of the comfort vignette from SetComfortVignette, sticky. */
+    private float $comfortMinimum = 0.0;
     /** The MRT target whose motion / depth / reactive textures temporalInputs holds. */
     private ?VioRenderTarget $temporalInputsOf = null;
     /** @var array{0: VioTexture, 1: VioTexture, 2: VioTexture}|null */
@@ -1471,7 +1475,14 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             // Seconds since the last frame the pass ran; a frame without it breaks the history.
             $dt = $this->accessibilityTime !== null ? $this->globalTime - $this->accessibilityTime : 0.0;
             $this->accessibilityTime = $this->globalTime;
-            $image = $accessibility->apply($image, $w, $h, $quad, VioAccessibilityPass::uniforms($a11y), $a11y->needsLuminance(), $a11y->flashLimit, $dt) ?? $image;
+            $uniforms = VioAccessibilityPass::uniforms($a11y);
+            $uniforms['u_aspect'] = $w / $h;
+            $uniforms['u_vignette'] = 0.0;
+            if ($a11y->comfortVignette > 0.0 && $this->currentViewMatrix !== null) {
+                $this->comfortMotion ??= new ComfortMotion();
+                $uniforms['u_vignette'] = $a11y->comfortVignette * $this->comfortMotion->update($this->currentViewMatrix, $dt, $this->comfortMinimum, $this->cameraCutThisFrame);
+            }
+            $image = $accessibility->apply($image, $w, $h, $quad, $uniforms, $a11y->needsLuminance(), $a11y->flashLimit, $dt) ?? $image;
             PerfProfiler::end();
             $this->gpuMark('post.a11y');
         }
@@ -2994,6 +3005,8 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
                 $this->shaderOverride = $cmd->shaderId;
             } elseif ($cmd instanceof Command\SetShaderParameter) {
                 $this->snippetParameters[$cmd->name] = $cmd->value;
+            } elseif ($cmd instanceof Command\SetComfortVignette) {
+                $this->comfortMinimum = max(0.0, min(1.0, $cmd->minimum));
             } elseif ($cmd instanceof Command\SetShaderTexture) {
                 $this->snippetTextures[$cmd->name] = $cmd->textureId;
             } elseif ($cmd instanceof Command\SetSnowCover) {

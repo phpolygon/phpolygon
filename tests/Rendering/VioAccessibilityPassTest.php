@@ -18,6 +18,7 @@ use PHPolygon\Rendering\Color;
 use PHPolygon\Rendering\Command\DrawMesh;
 use PHPolygon\Rendering\Command\SetAmbientLight;
 use PHPolygon\Rendering\Command\SetCamera;
+use PHPolygon\Rendering\Command\SetComfortVignette;
 use PHPolygon\Rendering\Command\SetDirectionalLight;
 use PHPolygon\Rendering\Command\SetShaderParameter;
 use PHPolygon\Rendering\Command\SetWind;
@@ -330,7 +331,39 @@ final class VioAccessibilityPassTest extends TestCase
         fwrite(STDERR, sprintf("\n[a11y] night boost 1: dark grey luminance %.4f -> %.4f, bright grey %.3f -> %.3f\n", $darkPlain, $dark[2], $brightPlain, $bright[2]));
     }
 
-    public function testStrengthBlendsTheCorrection(): void    {
+    public function testComfortVignetteClosesTheEdgesWhileTheCameraTurns(): void
+    {
+        $this->registerPattern();
+        $a = new AccessibilitySettings(comfortVignette: 1.0);
+        $corner = static fn (string $rgba): float => array_sum(self::pixel($rgba, 2, 2));
+        $centre = static fn (string $rgba): array => self::pixel($rgba, self::SIZE >> 2, self::SIZE >> 1);
+        $still = static function (int $i, RenderCommandList $l, VioRenderer3D $r): void {
+            $r->setAnimationTime($i / 60.0);
+        };
+        $plain = $this->image(self::settings(), 3, $still);
+        $calm = $this->image(self::settings($a), 6, $still);
+        self::assertEqualsWithDelta($corner($plain), $corner($calm), 3 / 255, 'a still camera keeps the view open');
+
+        // The game asks for it (a lift): corners close, the centre stays.
+        $lift = $this->image(self::settings($a), 3, static function (int $i, RenderCommandList $l, VioRenderer3D $r): void {
+            $r->setAnimationTime(10.0 + $i / 60.0);
+            $l->add(new SetComfortVignette(1.0));
+        });
+        self::assertLessThan(0.02, $corner($lift), 'corner closed');
+        self::assertColour($centre($plain), $centre($lift), 'centre open');
+
+        // A fast turn, 200 degrees per second, without the game's floor.
+        $turn = $this->image(self::settings($a), 20, static function (int $i, RenderCommandList $l, VioRenderer3D $r): void {
+            $r->setAnimationTime(20.0 + $i / 60.0);
+            $l->add(new SetComfortVignette(0.0));
+            $l->add(new SetCamera(Mat4::rotationY(deg2rad(200.0 * $i / 60.0))->multiply(Mat4::translation(0.0, 0.0, -3.0)), Mat4::perspective(deg2rad(60.0), 1.0, 0.1, 100.0)));
+        });
+        self::assertLessThan(0.3 * $corner($plain), $corner($turn), 'turning closes the corners');
+        fwrite(STDERR, sprintf("\n[a11y] comfort vignette 1: corner %.3f still, %.3f turning at 200 deg/s, %.3f with the game floor 1\n", $corner($calm), $corner($turn), $corner($lift)));
+    }
+
+    public function testStrengthBlendsTheCorrection(): void
+    {
         $this->registerPattern();
         $mode = ColorVisionMode::Protanopia;
         [$left] = self::halves($this->image(self::settings(new AccessibilitySettings(colorVision: $mode, colorVisionStrength: 0.5))));

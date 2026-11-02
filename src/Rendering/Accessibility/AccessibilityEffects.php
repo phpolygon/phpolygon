@@ -25,6 +25,7 @@ final class AccessibilityEffects
     {
         return [
             new EffectDefinition('a11y_color_vision', EffectTier::Low, self::cost(null), EffectFallback::Same, EffectFallback::Off, ReducedMotion::Static, FlashClass::None),
+            new EffectDefinition('a11y_comfort_vignette', EffectTier::Low, self::cost(null), EffectFallback::Same, EffectFallback::Off, ReducedMotion::Static, FlashClass::Gentle),
             new EffectDefinition('a11y_contrast', EffectTier::Low, self::cost(null), EffectFallback::Same, EffectFallback::Off, ReducedMotion::Static, FlashClass::None),
             new EffectDefinition('a11y_flash_limit', EffectTier::Low, self::cost(null), EffectFallback::Same, EffectFallback::Off, ReducedMotion::Static, FlashClass::None),
             new EffectDefinition('a11y_night_boost', EffectTier::Low, self::cost(null), EffectFallback::Same, EffectFallback::Off, ReducedMotion::Static, FlashClass::None),

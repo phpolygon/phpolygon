@@ -15,6 +15,8 @@ uniform sampler2D u_state;     // 1x1 (a11y_state): r = flash gain, g = mean lum
 uniform float u_has_state;     // 1 = u_state holds this frame's state
 uniform float u_flash_limit;   // 1 = multiply by the flash gain
 uniform float u_night_boost;   // 0 = off, 1 = strongest
+uniform float u_vignette;      // comfort vignette of this frame, 0 = open, 1 = closed
+uniform float u_aspect;        // width / height
 out vec4 frag_color;
 
 float luminance(vec3 lin) {
@@ -94,6 +96,12 @@ void main() {
     vec3 lin = pow(max(c, vec3(0.0)), vec3(2.2));
     lin = mix(vec3(luminance(lin)), lin, u_saturation);
     lin = colourVision(lin);
+    if (u_vignette > 0.0) {
+        // 0 at the centre, 1 in the corners; the dark edge moves inwards as it closes.
+        float r = length((v_uv - 0.5) * vec2(u_aspect, 1.0)) / length(vec2(u_aspect, 1.0) * 0.5);
+        float inner = 1.0 - 0.6 * u_vignette;
+        lin *= 1.0 - smoothstep(inner, inner + 0.25, r) * u_vignette;
+    }
     if (u_has_state > 0.5 && u_flash_limit > 0.5) {
         lin *= texture(u_state, vec2(0.5)).r;
     }

@@ -46,6 +46,11 @@ final class AccessibilitySettings
          * unlit rooms get lighter.
          */
         public readonly float $nightBoost = 0.0,
+        /**
+         * 0 = off, 1 = strongest: darken the edge of the view while the camera turns or
+         * moves fast (ComfortMotion), or while the game asks for it (SetComfortVignette).
+         */
+        public readonly float $comfortVignette = 0.0,
     ) {
     }
 
@@ -62,7 +67,8 @@ final class AccessibilitySettings
             || $this->worldSaturation < 1.0
             || $this->contrast > 0.0
             || $this->flashLimit
-            || $this->nightBoost > 0.0;
+            || $this->nightBoost > 0.0
+            || $this->comfortVignette > 0.0;
     }
 
     public function isDefault(): bool
@@ -80,6 +86,7 @@ final class AccessibilitySettings
         ?float $motionScale = null,
         ?bool $flashLimit = null,
         ?float $nightBoost = null,
+        ?float $comfortVignette = null,
     ): self {
         return new self(
             colorVision: $colorVision ?? $this->colorVision,
@@ -91,6 +98,7 @@ final class AccessibilitySettings
             motionScale: self::unit($motionScale ?? $this->motionScale),
             flashLimit: $flashLimit ?? $this->flashLimit,
             nightBoost: self::unit($nightBoost ?? $this->nightBoost),
+            comfortVignette: self::unit($comfortVignette ?? $this->comfortVignette),
         );
     }
 
@@ -107,6 +115,7 @@ final class AccessibilitySettings
             'motionScale' => $this->motionScale,
             'flashLimit' => $this->flashLimit,
             'nightBoost' => $this->nightBoost,
+            'comfortVignette' => $this->comfortVignette,
         ];
     }
 
@@ -130,6 +139,7 @@ final class AccessibilitySettings
             motionScale: $float('motionScale', $d->motionScale),
             flashLimit: $bool('flashLimit', $d->flashLimit),
             nightBoost: $float('nightBoost', $d->nightBoost),
+            comfortVignette: $float('comfortVignette', $d->comfortVignette),
         );
     }
 
