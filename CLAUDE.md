@@ -294,6 +294,17 @@ Rules that follow from it:
 - Escape hatches: `PHPOLYGON_VIO_MRT=0` forces the forward path, `=1` skips the php-vio
   version gate. `mrtActive()` tells tests which path a frame took.
 
+**SDF trace pass (SDF-AO + soft sun shadow, `VioSdfAoTest`).** Runs only when all of these hold: the frame's
+Fieldtracing tier is `SdfOcclusion` or `SdfBounce` (`GraphicsSettings::$fieldtracing` or a `SetFieldtracing` in
+the list), the context has `VIO_FEATURE_TEXTURE_3D`, a `SetFieldtracingVolume` reached the renderer (the game bakes and
+sends it; the engine bakes nothing), the backend is gated in (Direct3D) and `PHPOLYGON_SDF_AO` is not `0`. Then it forces the
+G-buffer, writes R = AO and G = sun shadow at full resolution, blurs them and marks `sdfao`; otherwise none of it exists
+and the frame is the probes-only frame byte for byte. No `sdfao` mark in a profile therefore means one of the
+conditions failed, usually the missing volume. `BoxSdf` takes the size first, then the centre.
+Measured 2026-11-02, RTX 2080, php-vio 2.40.0, D3D12, 1920x1080, 36 boxes in a 64³ volume, FXAA + bloom, median of 300 frames,
+3 runs per path: `sdfao` 0.42 ms forward and MRT (plus `gbuffer` 0.04 ms forward); the GPU frame grows by 0.36-0.47 ms forward and
+0.49 ms MRT. On WARP the pass is about 2.3 ms at 160x120 (CPU, no measure of a GPU).
+
 **Frame order** (`VioEngineFrameOrderTest`). The engine loop calls `renderer3D->beginFrame()` before `renderer2D->beginFrame()` opens
 the frame (`vio_begin`), so settings can reallocate targets while no command list is open. The scene target is therefore bound in
 `VioRenderer3D::frameOpened()` (the engine calls it right after `vio_begin`; `deferSceneTargetBind()` switches it on), cleared to opaque
@@ -438,6 +449,12 @@ therefore switches to `default_storage` (`storageInstancingVertexSource()`: mesh
 pass and back. Compiled lazily or via `warmStorageInstancing()`. They cast no shadow and stay out of the
 forward G-buffer. A count-only test cannot catch a wrong instance source — `VioRendererIndirectDrawTest`
 checks the position.
+
+**Environment cube on Vulkan (open php-vio defect):** up to php-vio 2.40.0 `vio_bind_cubemap` hands Vulkan the GL unit
+unmapped, while 2D textures go through the shader's sampler map. The mesh shader's `u_environment_map` (unit 10) therefore
+reads 0 on Vulkan: every IBL reflection is black there, a smooth metal goes black, a metal with a roughness or metallic pattern
+turns dark with bright bands. D3D12 and Metal are right. Measured 2026-11-02, RTX 2080: smooth gold cylinder under `SetSky`,
+mean luma of the cylinder 13 on Vulkan against 187 on D3D12 (and 187 on Metal, Apple M5, php-vio 2.35.0). Nothing in the engine works around it.
 
 **3D textures:** `resolveTexture()` binds the `VioTextureManager` upload (`vioTexture()`: mip chain,
 anisotropy, KTX2 container) — never decode the file a second time for 3D.

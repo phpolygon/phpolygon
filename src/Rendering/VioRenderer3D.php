@@ -1561,7 +1561,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         if ($this->fxaaSelected() && $this->fxaaPass !== null) {
             $this->fxaaPass->apply(
                 $sceneTex, $target->width(), $target->height(), $quad,
-                $bloomTex, $this->bloomIntensity, $post, $this->fullscreenPassWanted(),
+                $bloomTex, $this->bloomIntensity, $post,
             );
         } else {
             $this->drawPassthrough($sceneTex, $quad, $bloomTex, $post);
@@ -1996,7 +1996,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         vio_viewport($this->ctx, 0, 0, $lowW, $lowH);
         vio_clear($this->ctx, 0, 0, 0, 1);
         if ($this->fxaaSelected() && $this->fxaaPass !== null) {
-            $this->fxaaPass->apply($sceneTex, $lowW, $lowH, $quad, $bloomTex, $this->bloomIntensity, $lowPost, $this->fullscreenPassWanted());
+            $this->fxaaPass->apply($sceneTex, $lowW, $lowH, $quad, $bloomTex, $this->bloomIntensity, $lowPost);
         } else {
             $this->bindPostProcessPipeline('passthrough_blit');
             vio_bind_texture($this->ctx, $sceneTex, 0);
