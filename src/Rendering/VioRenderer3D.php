@@ -501,6 +501,8 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
     /** Lazy temporal resolve (TAA / TAAU). Allocated on the first temporal frame. */
     private ?VioTaaPass $taaPass = null;
     private ?VioAccessibilityPass $accessibilityPass = null;
+    /** Engine time of the last frame the accessibility pass ran; null = it did not run. */
+    private ?float $accessibilityTime = null;
     /** The MRT target whose motion / depth / reactive textures temporalInputs holds. */
     private ?VioRenderTarget $temporalInputsOf = null;
     /** @var array{0: VioTexture, 1: VioTexture, 2: VioTexture}|null */
@@ -1465,7 +1467,11 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         $image = $this->runFullscreenPasses(PostStage::Final, vio_render_target_texture($redirect), $w, $h, false, $quad);
         if ($accessibility !== null) {
             PerfProfiler::begin('render3d.post.a11y');
-            $image = $accessibility->apply($image, $w, $h, $quad, VioAccessibilityPass::uniforms($this->settings->accessibility)) ?? $image;
+            $a11y = $this->settings->accessibility;
+            // Seconds since the last frame the pass ran; a frame without it breaks the history.
+            $dt = $this->accessibilityTime !== null ? $this->globalTime - $this->accessibilityTime : 0.0;
+            $this->accessibilityTime = $this->globalTime;
+            $image = $accessibility->apply($image, $w, $h, $quad, VioAccessibilityPass::uniforms($a11y), $a11y->flashLimit, $a11y->flashLimit, $dt) ?? $image;
             PerfProfiler::end();
             $this->gpuMark('post.a11y');
         }
@@ -1588,6 +1594,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
     private function accessibilityThisFrame(): ?VioAccessibilityPass
     {
         if (!$this->settings->accessibility->changesImage() || $this->screenQuad === null) {
+            $this->accessibilityTime = null;
             return null;
         }
         $this->accessibilityPass ??= new VioAccessibilityPass($this->ctx, $this->conventions());

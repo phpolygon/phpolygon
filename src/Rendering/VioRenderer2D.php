@@ -1555,7 +1555,7 @@ class VioRenderer2D implements Renderer2DInterface, EffectRenderer2DInterface, A
             }
             vio_set_uniform($this->ctx, 'u_resolution', [(float) $w, (float) $h]);
             vio_set_uniform($this->ctx, 'u_rect', $rect);
-            vio_set_uniform($this->ctx, 'u_time', EffectRegistry::timeFrozen($entry) ? 0.0 : $this->animationTime);
+            vio_set_uniform($this->ctx, 'u_time', EffectRegistry::timeFrozen($entry) || EffectRegistry::flashLimited($entry) ? 0.0 : $this->animationTime);
             vio_set_uniform($this->ctx, 'u_motion', EffectRegistry::motionScale($entry));
             foreach ($parameters as $uniform => $value) {
                 vio_set_uniform($this->ctx, $uniform, $value);

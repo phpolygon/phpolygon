@@ -11,6 +11,9 @@ uniform float u_cvd_simulate;  // 1 = show what the viewer sees instead of corre
 uniform float u_saturation;    // 1 = unchanged, 0 = grey
 uniform float u_contrast;      // 0 = off, 1 = strongest
 uniform vec2  u_texel;         // 1 / size of u_source
+uniform sampler2D u_state;     // 1x1 (a11y_state): r = flash gain, g = mean luminance of the input
+uniform float u_has_state;     // 1 = u_state holds this frame's state
+uniform float u_flash_limit;   // 1 = multiply by the flash gain
 out vec4 frag_color;
 
 float luminance(vec3 lin) {
@@ -79,5 +82,8 @@ void main() {
     vec3 lin = pow(max(c, vec3(0.0)), vec3(2.2));
     lin = mix(vec3(luminance(lin)), lin, u_saturation);
     lin = colourVision(lin);
+    if (u_has_state > 0.5 && u_flash_limit > 0.5) {
+        lin *= texture(u_state, vec2(0.5)).r;
+    }
     frag_color = vec4(pow(clamp(lin, 0.0, 1.0), vec3(1.0 / 2.2)), 1.0);
 }

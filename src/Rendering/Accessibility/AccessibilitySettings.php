@@ -34,6 +34,12 @@ final class AccessibilitySettings
         public readonly bool $reducedMotion = false,
         /** 0..1, speed of ReducedMotion::Reduced effects while $reducedMotion is on. */
         public readonly float $motionScale = 0.25,
+        /**
+         * Photosensitivity: the mean brightness of the 3D image may change only so fast
+         * (VioAccessibilityPass::FLASH_RATE), and effects registered as FlashClass::Flashing
+         * have their shader time held.
+         */
+        public readonly bool $flashLimit = false,
     ) {
     }
 
@@ -42,7 +48,8 @@ final class AccessibilitySettings
     {
         return $this->colorVision !== ColorVisionMode::Off
             || $this->worldSaturation < 1.0
-            || $this->contrast > 0.0;
+            || $this->contrast > 0.0
+            || $this->flashLimit;
     }
 
     public function isDefault(): bool
@@ -58,6 +65,7 @@ final class AccessibilitySettings
         ?float $contrast = null,
         ?bool $reducedMotion = null,
         ?float $motionScale = null,
+        ?bool $flashLimit = null,
     ): self {
         return new self(
             colorVision: $colorVision ?? $this->colorVision,
@@ -67,6 +75,7 @@ final class AccessibilitySettings
             contrast: self::unit($contrast ?? $this->contrast),
             reducedMotion: $reducedMotion ?? $this->reducedMotion,
             motionScale: self::unit($motionScale ?? $this->motionScale),
+            flashLimit: $flashLimit ?? $this->flashLimit,
         );
     }
 
@@ -81,6 +90,7 @@ final class AccessibilitySettings
             'contrast' => $this->contrast,
             'reducedMotion' => $this->reducedMotion,
             'motionScale' => $this->motionScale,
+            'flashLimit' => $this->flashLimit,
         ];
     }
 
@@ -102,6 +112,7 @@ final class AccessibilitySettings
             contrast: $float('contrast', $d->contrast),
             reducedMotion: $bool('reducedMotion', $d->reducedMotion),
             motionScale: $float('motionScale', $d->motionScale),
+            flashLimit: $bool('flashLimit', $d->flashLimit),
         );
     }
 

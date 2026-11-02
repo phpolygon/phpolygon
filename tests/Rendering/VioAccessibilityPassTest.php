@@ -19,6 +19,7 @@ use PHPolygon\Rendering\Command\DrawMesh;
 use PHPolygon\Rendering\Command\SetAmbientLight;
 use PHPolygon\Rendering\Command\SetCamera;
 use PHPolygon\Rendering\Command\SetDirectionalLight;
+use PHPolygon\Rendering\Command\SetShaderParameter;
 use PHPolygon\Rendering\Command\SetWind;
 use PHPolygon\Rendering\CubemapRegistry;
 use PHPolygon\Rendering\Effects\EffectDefinition;
@@ -33,6 +34,7 @@ use PHPolygon\Rendering\MaterialRegistry;
 use PHPolygon\Rendering\PostProcess\FullscreenPass;
 use PHPolygon\Rendering\PostProcess\FullscreenPassRegistry;
 use PHPolygon\Rendering\PostProcess\PostStage;
+use PHPolygon\Rendering\PostProcess\VioAccessibilityPass;
 use PHPolygon\Rendering\ProcModeRegistry;
 use PHPolygon\Rendering\ProcModeShaderRegistry;
 use PHPolygon\Rendering\Quality\AntiAliasing;
@@ -250,6 +252,69 @@ final class VioAccessibilityPassTest extends TestCase
         $plainEdge = min($luma(self::pixel($plain, $mid - 1, $mid)), $luma(self::pixel($plain, $mid, $mid)));
         self::assertLessThan(0.6 * min($luma($l1), $luma($r1)), $edge, 'outline is darker than both sides');
         fwrite(STDERR, sprintf("\n[a11y] contrast 1: red-green channel spread %.3f -> %.3f, luminance at the seam %.3f -> %.3f (sides %.3f / %.3f)\n", $red0, $red1, $plainEdge, $edge, $luma($l1), $luma($r1)));
+    }
+
+    /**
+     * Mean relative luminance of the screen per frame for a scripted grey level.
+     *
+     * @param list<float> $levels encoded grey of the frame, one per frame at 60 fps
+     * @return list<float>
+     */
+    private function luminanceSeries(AccessibilitySettings $a, array $levels, bool $pinned = false): array
+    {
+        self::assertNotNull($this->ctx);
+        self::assertNotNull($this->renderer);
+        $path = "{$this->dir}/level.frag.glsl";
+        file_put_contents($path, "#version 410 core\nin vec2 v_uv;\nuniform sampler2D u_source;\nuniform float u_fx_level;\nout vec4 frag_color;\nvoid main() {\n"
+            . "    frag_color = vec4(texture(u_source, v_uv).rgb * 0.0 + vec3(u_fx_level), 1.0);\n}\n");
+        FullscreenPassRegistry::register(new FullscreenPass('level', PostStage::Final, $path));
+        $this->renderer->applySettings(self::settings($a));
+        $series = [];
+        foreach ($levels as $i => $level) {
+            $list = self::scene();
+            $list->add(new SetShaderParameter('u_fx_level', $level));
+            $this->renderer->setAnimationTime($pinned ? 3.0 : $i / 60.0);
+            vio_begin($this->ctx);
+            $this->renderer->beginFrame();
+            $this->renderer->clear(new Color(0.0, 0.0, 0.0, 1.0));
+            $this->renderer->render($list);
+            $this->renderer->endFrame();
+            vio_end($this->ctx);
+            $px = self::pixel((string) vio_read_pixels($this->ctx), self::SIZE >> 1, self::SIZE >> 1);
+            $lin = ColorVision::decode($px);
+            $series[] = 0.2126 * $lin[0] + 0.7152 * $lin[1] + 0.0722 * $lin[2];
+        }
+        return $series;
+    }
+
+    public function testFlashLimitHoldsAWhiteFlashToTheRate(): void
+    {
+        $levels = [...array_fill(0, 10, 0.0), ...array_fill(0, 70, 1.0)];
+        $free = $this->luminanceSeries(new AccessibilitySettings(), $levels);
+        self::assertEqualsWithDelta(1.0, $free[10], 0.01, 'without the limit the flash is there at once');
+
+        $limited = $this->luminanceSeries(new AccessibilitySettings(flashLimit: true), $levels);
+        $step = VioAccessibilityPass::FLASH_RATE / 60.0;
+        self::assertEqualsWithDelta(0.0, $limited[9], 0.002, 'black before');
+        self::assertEqualsWithDelta($step, $limited[10], 0.003, 'first white frame: one step');
+        $worst = 0.0;
+        $worstWindow = 0.0;
+        for ($i = 10; $i < count($limited); $i++) {
+            $worst = max($worst, $limited[$i] - $limited[$i - 1]);
+            if ($i >= 20) {
+                $worstWindow = max($worstWindow, $limited[$i] - $limited[$i - 10]);
+            }
+        }
+        // The read-back is 8 bit: around 0.3 luminance one code is worth ~0.0045, so a
+        // single frame may show one code more; over ten frames that evens out.
+        self::assertLessThan($step + 0.006, $worst, 'no frame rises by more than the rate allows');
+        self::assertLessThan(10 * $step + 0.005, $worstWindow, 'no ten frames rise by more than the rate allows');
+        self::assertEqualsWithDelta(VioAccessibilityPass::FLASH_RATE, $limited[70], 0.02, 'one second later');
+        fwrite(STDERR, sprintf("\n[a11y] flash limit: white frame after black shows %.4f (free %.3f), largest rise per frame %.4f / per 10 frames %.4f (limit %.4f / %.4f), after 1 s %.3f\n", $limited[10], $free[10], $worst, $worstWindow, $step, 10 * $step, $limited[70]));
+
+        // Pinned time (screenshots): no history, the frame shows as it is.
+        $pinned = $this->luminanceSeries(new AccessibilitySettings(flashLimit: true), [0.0, 1.0], true);
+        self::assertEqualsWithDelta(1.0, $pinned[1], 0.01);
     }
 
     public function testStrengthBlendsTheCorrection(): void

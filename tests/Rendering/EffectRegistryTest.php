@@ -65,6 +65,20 @@ final class EffectRegistryTest extends TestCase
         self::assertSame(12.5, EffectRegistry::effectTime(null, 12.5), 'no entry: untouched');
     }
 
+    public function testTheFlashLimitHoldsFlashingEffects(): void
+    {
+        $flashing = self::effect('lightning', EffectTier::Low, null, FlashClass::Flashing);
+        $gentle = self::effect('pulse', EffectTier::Low, null, FlashClass::Gentle);
+        self::assertSame(4.0, EffectRegistry::effectTime($flashing, 4.0));
+        EffectRegistry::setFlashLimit(true);
+        self::assertTrue(EffectRegistry::flashLimited($flashing));
+        self::assertFalse(EffectRegistry::flashLimited($gentle));
+        self::assertSame(0.0, EffectRegistry::effectTime($flashing, 4.0), 'held, with or without reduced motion');
+        self::assertSame(4.0, EffectRegistry::effectTime($gentle, 4.0));
+        EffectRegistry::clear();
+        self::assertFalse(EffectRegistry::flashLimit());
+    }
+
     public function testATierHoldsEverythingFromItDown(): void
     {
         EffectRegistry::register(self::effect('cheap', EffectTier::Low, 0.1));

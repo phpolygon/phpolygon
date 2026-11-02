@@ -21,6 +21,7 @@ final class EffectRegistry
 
     private static bool $reducedMotion = false;
     private static float $motionScale = 0.0;
+    private static bool $flashLimit = false;
 
     public static function register(EffectDefinition $effect): void
     {
@@ -129,21 +130,45 @@ final class EffectRegistry
     }
 
     /**
-     * Shader time (`u_time`) of an effect at engine time $time: 0 while held still (a 3D
-     * effect cannot be taken out, so `Off` holds it too), scaled for a `Reduced` effect,
+     * Shader time (`u_time`) of an effect at engine time $time: 0 while held still (by the
+     * flash limit, or by reduced motion: a 3D effect cannot be taken out, so `Off` holds
+     * it too), scaled for a `Reduced` effect,
      * $time itself otherwise and for a name without an entry. The 3D renderer gives every
      * fullscreen pass and shader variant its own, by the name of its entry; the base mesh
      * program has no name, so water, plants and every look in it keep the engine time.
      */
     public static function effectTime(?EffectDefinition $effect, float $time): float
     {
-        if ($effect === null || !self::$reducedMotion) {
+        if ($effect === null) {
             return $time;
         }
-        if (self::timeFrozen($effect) || self::motionSwitchesOff($effect)) {
+        if (self::flashLimited($effect) || self::timeFrozen($effect) || self::motionSwitchesOff($effect)) {
             return 0.0;
         }
-        return $effect->reducedMotion === ReducedMotion::Reduced ? $time * self::$motionScale : $time;
+        return self::$reducedMotion && $effect->reducedMotion === ReducedMotion::Reduced ? $time * self::$motionScale : $time;
+    }
+
+    /**
+     * The player's flash limit (`AccessibilitySettings::$flashLimit`, set by
+     * `GraphicsSettingsManager`). While it is on, every effect registered as
+     * {@see FlashClass::Flashing} has its shader time held at 0 (2D effects, fullscreen
+     * passes, shader variants), and the 3D renderer limits how fast the brightness of
+     * the whole image may change.
+     */
+    public static function setFlashLimit(bool $on): void
+    {
+        self::$flashLimit = $on;
+    }
+
+    public static function flashLimit(): bool
+    {
+        return self::$flashLimit;
+    }
+
+    /** Whether the flash limit holds this effect still. */
+    public static function flashLimited(?EffectDefinition $effect): bool
+    {
+        return self::$flashLimit && $effect?->flash === FlashClass::Flashing;
     }
 
     /** Whether reduced motion takes an effect out (its fallback draws instead). */
@@ -166,5 +191,6 @@ final class EffectRegistry
         self::$effects = [];
         self::$reducedMotion = false;
         self::$motionScale = 0.0;
+        self::$flashLimit = false;
     }
 }

@@ -185,6 +185,7 @@ class GraphicsSettingsManager
     {
         $accessibility = $this->settings->accessibility;
         EffectRegistry::setReducedMotion($accessibility->reducedMotion, $accessibility->motionScale);
+        EffectRegistry::setFlashLimit($accessibility->flashLimit);
         $r3d = $this->engine?->renderer3D;
         if ($r3d !== null) {
             $r3d->applySettings($this->settings);
