@@ -51,7 +51,8 @@ final class VioScreenSpaceParityTest extends TestCase
 
     /**
      * Centre column, centre row and pixel count of each effect on D3D12 (WARP), the
-     * reference. Measured with this test on 2026-11-02, php-vio 2.39.0.
+     * reference. Measured with this test on 2026-11-02: SSAO and SSR with php-vio 2.39.0,
+     * SDF-AO with 2.40.0.
      *
      * @var array<string, array{0: float, 1: float, 2: int}>
      */
@@ -61,10 +62,9 @@ final class VioScreenSpaceParityTest extends TestCase
         'ssao-1' => [80.8, 32.0, 767],
         'ssr-0' => [79.5, 48.3, 236],
         'ssr-1' => [79.5, 48.3, 236],
-        // This volume darkens nothing on D3D12 either, so it pins only that no backend
-        // invents an effect; SDF-AO itself is checked in a game's comparison images.
-        'sdfao-0' => [-1.0, -1.0, 0],
-        'sdfao-1' => [-1.0, -1.0, 0],
+        // The RTX 2080 measured the same on D3D12 and Vulkan (719 px both paths).
+        'sdfao-0' => [79.5, 35.6, 719],
+        'sdfao-1' => [79.5, 35.6, 720],
     ];
 
     private ?\VioContext $ctx = null;
@@ -103,6 +103,7 @@ final class VioScreenSpaceParityTest extends TestCase
         }
     }
 
+    /** @return array{0: Mat4, 1: Mat4} view, projection */
     private static function camera(): array
     {
         return [
@@ -121,7 +122,8 @@ final class VioScreenSpaceParityTest extends TestCase
         $list->add(new DrawMesh('floor', $floor, Mat4::translation(0.0, -1.1, 0.0)));
         $list->add(new DrawMesh('box', $box, Mat4::translation(0.0, -0.5, 0.0)));
         if ($volume) {
-            $vol = SdfVolumeBaker::bake(new BoxSdf(new Vec3(0.0, -0.5, 0.0), new Vec3(1.0, 1.0, 1.0)), new Vec3(-3.0, -1.2, -3.0), new Vec3(3.0, 1.5, 3.0), 32);
+            // BoxSdf takes the size first, then the centre: the box drawn above.
+            $vol = SdfVolumeBaker::bake(new BoxSdf(new Vec3(1.0, 1.0, 1.0), new Vec3(0.0, -0.5, 0.0)), new Vec3(-3.0, -1.2, -3.0), new Vec3(3.0, 1.5, 3.0), 32);
             $max = $vol->max();
             $list->add(new SetFieldtracingVolume(
                 $vol->toRgba8(4.0), $vol->nx, $vol->ny, $vol->nz, $vol->origin,
@@ -205,8 +207,8 @@ final class VioScreenSpaceParityTest extends TestCase
     {
         return new GraphicsSettings(
             shadowQuality: ShadowQuality::Off,
-            // Bloom keeps the offscreen HDR target; FXAA without bloom reads a stale
-            // texture on D3D12 and Metal (a known defect), so it stays out of the measurement.
+            // Bloom keeps the offscreen HDR target; no edge filter, the measurement
+            // wants the scene itself.
             antiAliasing: AntiAliasing::Off,
             bloom: true,
             ambientOcclusion: $ao,
@@ -221,14 +223,21 @@ final class VioScreenSpaceParityTest extends TestCase
         return ['forward' => ['0'], 'mrt' => ['1']];
     }
 
+    /** Where SSAO does not run yet ({@see VioRenderer3D::ssaoRunsOn()}), High draws what Low draws. */
     #[DataProvider('paths')]
     public function testSsaoDarkensTheFoot(string $mrt): void
     {
+        self::assertNotNull($this->ctx);
         putenv('PHPOLYGON_VIO_MRT=' . $mrt);
         $list = self::scene('floor_matte', 'box_grey');
         $off = $this->frame(self::settings(ScreenSpaceAO::Low), $list);
         $on = $this->frame(self::settings(ScreenSpaceAO::High), $list);
-        $this->assertLikeDirect3D("ssao-{$mrt}", self::centroid($off, $on, 6.0));
+        $m = self::centroid($off, $on, 6.0);
+        if (!VioRenderer3D::ssaoRunsOn(vio_backend_name($this->ctx))) {
+            self::assertLessThan(20, $m[2], sprintf('no real SSAO on %s yet, %d px changed', vio_backend_name($this->ctx), $m[2]));
+            return;
+        }
+        $this->assertLikeDirect3D("ssao-{$mrt}", $m);
     }
 
     #[DataProvider('paths')]
@@ -259,9 +268,9 @@ final class VioScreenSpaceParityTest extends TestCase
             $this->markTestSkipped('Direct3D always had the passes');
         }
         putenv('PHPOLYGON_VIO_PARITY=0');
-        $list = self::scene('floor_matte', 'box_grey');
-        $off = $this->frame(self::settings(ScreenSpaceAO::Low), $list);
-        $on = $this->frame(self::settings(ScreenSpaceAO::High), $list);
-        self::assertLessThan(20, self::centroid($off, $on, 6.0)[2], 'no real SSAO without the parity gate');
+        $list = self::scene('floor_mirror', 'box_red');
+        $off = $this->frame(self::settings(), $list, 0);
+        $on = $this->frame(self::settings(ssr: ScreenSpaceReflections::High), $list, 0);
+        self::assertLessThan(20, self::centroid($off, $on, 10.0, -1)[2], 'no ray-marched SSR without the parity gate');
     }
 }

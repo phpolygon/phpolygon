@@ -257,10 +257,13 @@ The engine selects the backend automatically at startup:
   image is the forward image up to FP16 rounding (`VioRendererMrtTest`,
   `MrtMeshShaderHeadlessTest` pin both).
 
-**Backends of the G-buffer effects** (`VioScreenSpaceParityTest`). SSAO, SDF-AO, SSR and the FP16
+**Backends of the G-buffer effects** (`VioScreenSpaceParityTest`). SDF-AO, SSR and the FP16
 scene target they read (`GraphicsSettings::$hdr`) run on every backend vio transpiles for: D3D11/D3D12,
 Vulkan, Metal (`screenSpaceEffectsSupported()`). Up to v0.93.0 they were gated to Direct3D; Vulkan and Metal
-drew curvature AO, the wetness surrogate and an LDR target. Their flips come from `BackendConventions`, their
+drew the wetness surrogate and an LDR target. SSAO runs on Direct3D only for now (`VioRenderer3D::SSAO_BACKENDS`,
+`ssaoRunsOn()`, pinned by `VioSsaoBackendsTest`): on Metal it streaks and on Vulkan it speckles on wide flat surfaces
+far from the camera, where D3D12 is smooth, so both keep the curvature AO surrogate. `PHPOLYGON_SSAO=1` runs it
+there anyway, for work on that defect; enabling a backend is one entry in the constant. Their flips come from `BackendConventions`, their
 depth is linear view depth from the G-buffer, so the stored depth convention plays no part. The OpenGL backend
 keeps the surrogates. `PHPOLYGON_VIO_PARITY=0` restores the Direct3D-only gate for A/B images. The parity test
 measures centre and size of each effect against D3D12 numbers written into the test.
@@ -268,7 +271,7 @@ measures centre and size of each effect against D3D12 numbers written into the t
   ~200 ms on D3D12) for `conventions.clip_z_remap`. Up to php-vio 2.39 the key is missing: Metal stores raw
   ndc z and clips what lies below 0 (`depthStoredRaw()`); from 2.40 it stores (ndc z + 1) / 2 like the others.
   The scene depth copy and the temporal dilate read the flag, so neither converts twice on 2.40.
-- **Not fixed here, php-vio 2.40 does it:** cascade shadows on Metal up to 2.39. The shadow pass renders with the
+- **Fixed by php-vio 2.40, not here:** cascade shadows on Metal up to 2.39. The shadow pass renders with the
   GL projection, half of each cascade's depth range is clipped and the stored compare value is wrong, so Metal
   shows shadows where D3D12 has none (a sunlit courtyard almost black). Settings with shadows off give the D3D12 image.
 

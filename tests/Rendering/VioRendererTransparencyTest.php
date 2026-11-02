@@ -56,6 +56,9 @@ final class VioRendererTransparencyTest extends TestCase
             $this->markTestSkipped('backend has no 3D pipeline');
         }
         $this->ctx = $ctx;
+        // SSAO is what puts the MRT cases on the MRT path. Vulkan and Metal do not run it
+        // by default yet (VioRenderer3D::ssaoRunsOn()); the MRT path itself is tested here.
+        putenv('PHPOLYGON_SSAO=1');
         MeshRegistry::clear();
         MaterialRegistry::clear();
         CubemapRegistry::clear();
@@ -73,6 +76,7 @@ final class VioRendererTransparencyTest extends TestCase
     protected function tearDown(): void
     {
         putenv('PHPOLYGON_VIO_MRT');
+        putenv('PHPOLYGON_SSAO');
         if ($this->ctx !== null) {
             vio_destroy($this->ctx);
             $this->ctx = null;

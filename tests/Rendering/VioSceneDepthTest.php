@@ -57,6 +57,10 @@ final class VioSceneDepthTest extends TestCase
         CubemapRegistry::clear();
         ProcModeRegistry::clear();
         ProcModeShaderRegistry::clear();
+        // SSAO is the G-buffer consumer that puts the MRT case on the MRT path. Vulkan and
+        // Metal do not run it by default yet (VioRenderer3D::ssaoRunsOn()); their depth on
+        // that path is tested here all the same.
+        putenv('PHPOLYGON_SSAO=1');
         MeshRegistry::register('wall', BoxMesh::generate(40.0, 40.0, 0.1));
         MeshRegistry::register('pane', BoxMesh::generate(1.0, 1.0, 0.01));
         MeshRegistry::register('post', BoxMesh::generate(0.6, 3.0, 0.25));
@@ -77,6 +81,7 @@ final class VioSceneDepthTest extends TestCase
     protected function tearDown(): void
     {
         putenv('PHPOLYGON_VIO_MRT');
+        putenv('PHPOLYGON_SSAO');
         ProcModeRegistry::clear();
         ProcModeShaderRegistry::clear();
         MaterialRegistry::clear();
@@ -152,7 +157,7 @@ final class VioSceneDepthTest extends TestCase
 
         $near = self::px($renderer->renderToImage(self::scene(-5.0, -8.0), self::SIZE, self::SIZE), 8, 32);
         if ($mrt === '1' && !$renderer->mrtActive()) {
-            $this->markTestSkipped('the MRT path needs G-buffer consumers, which are Direct3D only');
+            $this->markTestSkipped('this backend has no MRT path (G-buffer consumers)');
         }
         self::assertFalse($mrt === '0' && $renderer->mrtActive());
         $far = $renderer->renderToImage(self::scene(-5.0, -11.0), self::SIZE, self::SIZE);

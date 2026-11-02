@@ -73,6 +73,9 @@ final class VioMrtEarlyReturnAlphaTest extends TestCase
             $this->markTestSkipped('backend has no multiple render targets');
         }
         $this->ctx = $ctx;
+        // SSAO is what puts these frames on the MRT path. Vulkan and Metal do not run it
+        // by default yet (VioRenderer3D::ssaoRunsOn()); the MRT path itself is tested here.
+        putenv('PHPOLYGON_SSAO=1');
         MeshRegistry::clear();
         MaterialRegistry::clear();
         CubemapRegistry::clear();
@@ -96,6 +99,7 @@ final class VioMrtEarlyReturnAlphaTest extends TestCase
     protected function tearDown(): void
     {
         putenv('PHPOLYGON_VIO_MRT');
+        putenv('PHPOLYGON_SSAO');
         ProcModeRegistry::clear();
         ProcModeShaderRegistry::clear();
         if ($this->ctx !== null) {

@@ -53,6 +53,9 @@ final class VioRendererGpuPassTimingTest extends TestCase
     protected function setUp(): void
     {
         putenv('PHPOLYGON_PROFILE=1');
+        // The G-buffer passes are measured wherever they run; SSAO is off by default on
+        // Vulkan and Metal for now (VioRenderer3D::ssaoRunsOn()).
+        putenv('PHPOLYGON_SSAO=1');
         PerfProfiler::reset();
         MeshRegistry::clear();
         MaterialRegistry::clear();
@@ -68,6 +71,7 @@ final class VioRendererGpuPassTimingTest extends TestCase
     {
         putenv('PHPOLYGON_PROFILE');
         putenv('PHPOLYGON_VIO_MRT');
+        putenv('PHPOLYGON_SSAO');
         PerfProfiler::reset();
         if ($this->ctx !== null) {
             vio_destroy($this->ctx);

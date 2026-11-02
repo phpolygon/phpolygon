@@ -1053,6 +1053,23 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         return !$this->conventions()->isOpenGL();
     }
 
+    /**
+     * Backends the real SSAO chain runs on. Vulkan and Metal keep the curvature AO
+     * surrogate for now: their SSAO streaks (Metal) and speckles (Vulkan) on wide flat
+     * surfaces far from the camera, where D3D12 is smooth. Add a backend here once its
+     * SSAO matches D3D12. PHPOLYGON_SSAO=1 runs it on every transpiling backend anyway.
+     */
+    private const SSAO_BACKENDS = ['d3d11', 'd3d12'];
+
+    /** Whether the real SSAO chain runs on $backend (a vio backend name). */
+    public static function ssaoRunsOn(string $backend): bool
+    {
+        if ($backend === 'opengl') {
+            return false;
+        }
+        return getenv('PHPOLYGON_SSAO') === '1' || in_array($backend, self::SSAO_BACKENDS, true);
+    }
+
     /** SdfOcclusion / SdfBounce trace pass: with a volume present, where the G-buffer effects run. */
     private function sdfAoEnabledThisFrame(): bool
     {
@@ -4387,7 +4404,8 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             return false; // escape hatch for A/B testing
         }
         return $this->settings->ambientOcclusion->usesGbuffer()
-            && $this->screenSpaceEffectsSupported();
+            && $this->screenSpaceEffectsSupported()
+            && self::ssaoRunsOn($this->conventions()->name());
     }
 
     /**
