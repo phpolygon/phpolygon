@@ -563,9 +563,49 @@ pass is that stored value.
 `EffectDefinition` per effect: name (that of its pass or variant), lowest `EffectTier`, `EffectCost` (measured GPU ms with adapter, backend,
 resolution, date; null until measured), `EffectFallback` for `ShaderQuality::Unlit` and for the GL family, `ReducedMotion`,
 `FlashClass`. `assertComplete()` in a game's test fails for a fullscreen pass, shader variant or 2D effect without an entry, `budget($tier)` sums
-what is measured and names what is not, `flashing()` lists what has to go through the flash limit. The engine ships no entry.
-`setReducedMotion($on, $motionScale)` holds the player's choice (the game passes it from its settings); only the 2D effects follow it
-so far (see "VioRenderer2D — 2D effects"), the 3D passes and variants do not read it. Nothing enforces `FlashClass` yet.
+what is measured and names what is not, `flashing()` lists what has to go through the flash limit. The engine registers only the entries of
+its own accessibility options (`Accessibility\AccessibilityEffects`, names `a11y_*`, at `Engine` start-up; a game entry of the same name wins).
+`setReducedMotion($on, $motionScale)` and `setFlashLimit($on)` hold the player's choice; `GraphicsSettingsManager` sets both from
+`AccessibilitySettings` whenever it applies settings (call them directly only without a manager). `effectTime($entry, $time)` is the `u_time`
+an effect sees: 0 under the flash limit for `FlashClass::Flashing`, 0 under reduced motion for `Frozen` / `Off` (a 3D effect cannot be taken
+out), `$time * $motionScale` for `Reduced`, the engine time otherwise and for a name without an entry. 2D effects (held at 0, `u_motion`),
+every fullscreen pass (by pass name) and every shader variant (by variant name, `u_time` and `u_time_prev`) follow it; the base mesh program has
+no name and keeps the engine time, so water, plants and every look left in it run on. On D3D12 (WARP, php-vio 2.40.3) a mesh-shader snippet
+read `u_time` as 0 in the fragment stage (declared in both stages, see "Snippet uniforms"); the gate is therefore tested on vertex animation.
+
+**Accessibility options** (`Rendering\Accessibility\AccessibilitySettings` in `GraphicsSettings::$accessibility`, `PostProcess\VioAccessibilityPass`,
+`a11y_apply|a11y_reduce|a11y_state.frag.glsl`; `AccessibilitySettingsTest`, `ComfortMotionTest`, `VioAccessibilityPassTest`). A value object of
+its own, saved under `accessibility` only when it differs from the defaults, never touched by presets, the auto tuner or the adaptive
+controller. Every default is off: then no pass, target or compile exists, and frames are byte for byte those of v0.95.0 (6 settings x 3
+frames, D3D12 WARP and RTX 2080, Vulkan RTX 2080, Metal Apple M5 php-vio 2.40.0, 2026-11-02).
+```php
+$engine->graphics->update(fn (GraphicsSettings $s) => $s->with(accessibility: $s->accessibility->with(
+    colorVision: ColorVisionMode::Deuteranopia, flashLimit: true, comfortVignette: 0.6)));
+$list->add(SetFocusRegion::aroundBox($min, $max, $view, $projection)); // a terminal; SetFocusRegion::clear() ends it
+$list->add(new SetComfortVignette(0.5));                               // a lift, swimming; 0 hands it back to the camera
+```
+- One fullscreen draw over the finished image, after the Final-stage passes, before the HDR10 encoding and the UI (the UI is not
+  touched; `ColorVision::correct()` corrects a 2D colour on the CPU). Order: night boost, contrast (encoded), saturation, colour vision,
+  focus dim, comfort vignette, flash gain (linear). Vio family only; the GL family and native Vulkan have none, `renderToImage()` runs none.
+  `accessibilityAvailable()` for a settings screen. GPU mark `post.a11y` (it also holds the present draw before it), CPU section
+  `render3d.post.a11y`.
+- `colorVision` (+ `colorVisionStrength`, `colorVisionSimulate` = developer view): Machado 2009 simulation, correction by error
+  redistribution (Fidaner 2005); `ColorVision` holds the same model on the CPU. Status red / green (encoded 0.85/0.2/0.2, 0.2/0.65/0.2)
+  as a deuteranope sees them: dE76 6.0 uncorrected, 53.5 corrected on the GPU (WARP and Metal).
+- `contrast` 0..1: steeper curve around mid grey plus dark Sobel outlines on luminance edges. `worldSaturation` 1..0, luminance kept.
+- `flashLimit`: the mean relative luminance of the image may change by at most `VioAccessibilityPass::FLASH_RATE` = 0.3 per second.
+  WCAG 2.3.1 counts a general flash as a pair of opposing changes of at least 0.1 and allows three per second (0.6 per second); half of
+  that keeps a full-screen flash at 1.5 per second at most, a cut from black to white takes 3.3 s. 4x4 reductions to one texel, a
+  one-texel FP16 state carries the shown luminance, the image is scaled by the gain (at most 4x, so a cut to black still darkens at once).
+  It works on the mean of the whole frame: a flash on a small part of the screen is limited only by its share of the mean (the time hold of
+  `Flashing` effects is the second layer). Pinned clocks (screenshots), gaps over 0.25 s and the first frame start afresh.
+- `nightBoost` 0..1: gamma below 1 on the encoded image, weighted by the frame's mean linear luminance (full below 0.02, none above
+  0.12; design values). `comfortVignette` 0..1: `ComfortMotion` closes the edges from 30 to 120 degrees per second of turning or 3 to
+  10 units per second of motion, rises in 0.1 s, fades in 0.4 s (design values), plus the game's `SetComfortVignette` floor; the pass runs
+  every frame while the option is above 0. `focusDim` 0..1 outside `SetFocusRegion` (screen fractions, origin top left, sticky); without
+  a region it runs no pass, and a region set in a frame that had no offscreen target shows from the next frame. `reducedMotion` /
+  `motionScale`: see the effect register above, no pass of its own.
+- Costs (GPU frame with against without, median of 5 x 300 frames, RTX 2080, php-vio 2.40.3, 1920x1080, 201 draws, FXAA + bloom, GPU otherwise idle, 2026-11-03), D3D12 / Vulkan in ms: colour vision 0.092 / 0.076, saturation 0.084 / 0.084, contrast 0.113 / 0.104, flash limit 0.114 / 0.136, night boost 0.119 / 0.141, comfort vignette 0.086 / 0.081, focus dim 0.086 / 0.078, reduced motion 0.001 / 0.003, all at once 0.155 / 0.177. The D3D12 values are the `EffectCost` entries of `AccessibilityEffects`.
 
 ### Shaders
 - Authoring language: **GLSL** (human- and AI-readable plaintext)

@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace PHPolygon\Tests\Rendering;
 
 use PHPUnit\Framework\TestCase;
+use PHPolygon\Rendering\Accessibility\AccessibilityEffects;
 use PHPolygon\Rendering\Accessibility\AccessibilitySettings;
 use PHPolygon\Rendering\Accessibility\ColorVision;
 use PHPolygon\Rendering\Accessibility\ColorVisionMode;
@@ -98,6 +99,20 @@ final class AccessibilitySettingsTest extends TestCase
         self::assertFalse(SetFocusRegion::clear()->active);
         self::assertFalse((new AccessibilitySettings(focusDim: 1.0))->changesImage(), 'focus dim without a region runs no pass');
         self::assertTrue((new AccessibilitySettings(focusDim: 1.0))->changesImage(true));
+    }
+
+    public function testEveryOptionHasAMeasuredRegisterEntry(): void
+    {
+        EffectRegistry::clear();
+        try {
+            AccessibilityEffects::register();
+            AccessibilityEffects::register(); // twice: no duplicate
+            $names = array_map(static fn (EffectDefinition $e): string => $e->name, EffectRegistry::all());
+            self::assertSame(['a11y_color_vision', 'a11y_comfort_vignette', 'a11y_contrast', 'a11y_flash_limit', 'a11y_focus_dim', 'a11y_night_boost', 'a11y_reduced_motion', 'a11y_world_saturation'], $names);
+            self::assertSame([], EffectRegistry::budget(EffectTier::Low)['unmeasured']);
+        } finally {
+            EffectRegistry::clear();
+        }
     }
 
     public function testShaderUniformsFollowTheSettings(): void
