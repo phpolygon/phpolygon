@@ -432,6 +432,12 @@ pass and back. Compiled lazily or via `warmStorageInstancing()`. They cast no sh
 forward G-buffer. A count-only test cannot catch a wrong instance source — `VioRendererIndirectDrawTest`
 checks the position.
 
+**Environment cube on Vulkan (open php-vio defect):** up to php-vio 2.40.0 `vio_bind_cubemap` hands Vulkan the GL unit
+unmapped, while 2D textures go through the shader's sampler map. The mesh shader's `u_environment_map` (unit 10) therefore
+reads 0 on Vulkan: every IBL reflection is black there, a smooth metal goes black, a metal with a roughness or metallic pattern
+turns dark with bright bands. D3D12 and Metal are right. Measured 2026-11-02, RTX 2080: smooth gold cylinder under `SetSky`,
+mean luma of the cylinder 13 on Vulkan against 187 on D3D12 (and 187 on Metal, Apple M5, php-vio 2.35.0). Nothing in the engine works around it.
+
 **3D textures:** `resolveTexture()` binds the `VioTextureManager` upload (`vioTexture()`: mip chain,
 anisotropy, KTX2 container) — never decode the file a second time for 3D.
 
