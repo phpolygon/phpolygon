@@ -487,6 +487,9 @@ $engine->graphics->update(fn (GraphicsSettings $s) => $s->with(effects: ['film_g
   section `render3d.post.<name>`. `renderToImage()` draws straight into the caller's target and runs no pass, like bloom.
 - `GraphicsSettings::$effects` holds on/off by name; a save file without it stays as it was. `AdaptiveStep` places an effect at an
   `AdaptiveSlot` of the stack. Compiled at first use: register before `warmShaders()` does not pre-compile it, the first frame does.
+- Measured 2026-11-02, RTX 2080, php-vio 2.39.0, 1920x1080, 201 draws, FXAA + bloom, GPU frame median of 300 frames, one run per
+  case: a Final pass (one texture read, a hash) `post.grain` 0.134 ms on D3D12 / 0.135 ms on Vulkan, frame +0.06 ms on both; a Scene
+  pass that copies, with the blit back, frame +0.08 ms (D3D12) / +0.05 ms (Vulkan).
 
 **Scene depth for transparents** (`ProcModeShaderRegistry::requireSceneDepth($programs)`, `VioSceneDepthTest`). The transparent
 pass tests against the depth buffer, so it cannot sample it. With a consumer the renderer copies it as linear view depth
@@ -495,7 +498,9 @@ marks `scene_depth`; opaque draws see the copy as absent. Snippets in the listed
 `sceneDepthDelta()` (how far the opaque surface lies behind the fragment, world units), both forward and MRT, particles included.
 A frame without a readable depth (MSAA, no `VIO_FEATURE_RENDER_TARGET_DEPTH_SAMPLE`) answers 60000, i.e. no soft edge: snippets
 need no branch of their own. A consumer forces the offscreen path. It takes one sampler of the program's budget, slot 11. Vio family
-only. Without `requireSceneDepth()` no copy, no target, no sampler, no uniform. Stored depth is (ndcZ + 1) / 2, on Metal ndcZ: php-vio remaps clip z on D3D and Vulkan
+only. Without `requireSceneDepth()` no copy, no target, no sampler, no uniform.
+Measured the same way as the pass chain: `scene_depth` 0.039 ms (D3D12) / 0.055 ms (Vulkan) at 1920x1080; the frame total moved within
+its noise (-0.02 / -0.08 ms). Stored depth is (ndcZ + 1) / 2, on Metal ndcZ: php-vio remaps clip z on D3D and Vulkan
 only (measured on an M5, php-vio 2.35.0). `u_scene_depth_raw` of a fullscreen pass is that stored value.
 
 **Parameters without new material ids** (`InstanceParamsTest`, `VioInstanceParamsRenderTest`).
