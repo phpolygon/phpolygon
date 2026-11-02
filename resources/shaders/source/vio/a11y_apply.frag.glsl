@@ -9,6 +9,8 @@ uniform float u_cvd_mode;      // ColorVisionMode::code(): 0 off, 1 protan, 2 de
 uniform float u_cvd_strength;  // 0..1
 uniform float u_cvd_simulate;  // 1 = show what the viewer sees instead of correcting
 uniform float u_saturation;    // 1 = unchanged, 0 = grey
+uniform float u_contrast;      // 0 = off, 1 = strongest
+uniform vec2  u_texel;         // 1 / size of u_source
 out vec4 frag_color;
 
 float luminance(vec3 lin) {
@@ -50,8 +52,30 @@ vec3 colourVision(vec3 lin) {
     return clamp(lin + shift * u_cvd_strength, 0.0, 1.0);
 }
 
+// Contrast mode, on encoded values (perceptual steps): a steeper curve around mid grey,
+// and dark outlines where the luminance jumps (Sobel over the 3x3 neighbourhood).
+vec3 contrastMode(vec3 e) {
+    if (u_contrast <= 0.0) {
+        return e;
+    }
+    vec3 w = vec3(0.2126, 0.7152, 0.0722);
+    float tl = dot(texture(u_source, v_uv + u_texel * vec2(-1.0, -1.0)).rgb, w);
+    float t  = dot(texture(u_source, v_uv + u_texel * vec2( 0.0, -1.0)).rgb, w);
+    float tr = dot(texture(u_source, v_uv + u_texel * vec2( 1.0, -1.0)).rgb, w);
+    float l  = dot(texture(u_source, v_uv + u_texel * vec2(-1.0,  0.0)).rgb, w);
+    float r  = dot(texture(u_source, v_uv + u_texel * vec2( 1.0,  0.0)).rgb, w);
+    float bl = dot(texture(u_source, v_uv + u_texel * vec2(-1.0,  1.0)).rgb, w);
+    float b  = dot(texture(u_source, v_uv + u_texel * vec2( 0.0,  1.0)).rgb, w);
+    float br = dot(texture(u_source, v_uv + u_texel * vec2( 1.0,  1.0)).rgb, w);
+    float gx = (tr + 2.0 * r + br) - (tl + 2.0 * l + bl);
+    float gy = (bl + 2.0 * b + br) - (tl + 2.0 * t + tr);
+    float edge = smoothstep(0.1, 0.4, length(vec2(gx, gy)));
+    e = clamp((e - 0.5) * (1.0 + 0.6 * u_contrast) + 0.5, 0.0, 1.0);
+    return e * (1.0 - edge * 0.65 * u_contrast);
+}
+
 void main() {
-    vec3 c = texture(u_source, v_uv).rgb;
+    vec3 c = contrastMode(texture(u_source, v_uv).rgb);
     vec3 lin = pow(max(c, vec3(0.0)), vec3(2.2));
     lin = mix(vec3(luminance(lin)), lin, u_saturation);
     lin = colourVision(lin);

@@ -52,6 +52,7 @@ final class VioAccessibilityPass
             'u_cvd_strength' => $a->colorVisionStrength,
             'u_cvd_simulate' => $a->colorVisionSimulate ? 1.0 : 0.0,
             'u_saturation' => $a->worldSaturation,
+            'u_contrast' => $a->contrast,
         ];
     }
 
@@ -76,7 +77,7 @@ final class VioAccessibilityPass
         vio_viewport($this->ctx, 0, 0, $w, $h);
         vio_bind_pipeline($this->ctx, $pipeline);
         vio_bind_texture($this->ctx, $source, 0);
-        $this->setUniforms(['u_source' => 0, ...$uniforms]);
+        $this->setUniforms(['u_source' => 0, 'u_texel' => [1.0 / $w, 1.0 / $h], ...$uniforms]);
         vio_draw($this->ctx, $quad);
         vio_unbind_render_target($this->ctx);
         return $this->outputTexture;

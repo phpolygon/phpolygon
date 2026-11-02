@@ -24,6 +24,8 @@ final class AccessibilitySettings
         public readonly bool $colorVisionSimulate = false,
         /** 1 = unchanged, 0 = grey: saturation of the 3D image (the UI keeps its colours). */
         public readonly float $worldSaturation = 1.0,
+        /** 0 = off, 1 = strongest: steeper tone curve plus dark outlines along luminance edges. */
+        public readonly float $contrast = 0.0,
     ) {
     }
 
@@ -31,7 +33,8 @@ final class AccessibilitySettings
     public function changesImage(): bool
     {
         return $this->colorVision !== ColorVisionMode::Off
-            || $this->worldSaturation < 1.0;
+            || $this->worldSaturation < 1.0
+            || $this->contrast > 0.0;
     }
 
     public function isDefault(): bool
@@ -44,12 +47,14 @@ final class AccessibilitySettings
         ?float $colorVisionStrength = null,
         ?bool $colorVisionSimulate = null,
         ?float $worldSaturation = null,
+        ?float $contrast = null,
     ): self {
         return new self(
             colorVision: $colorVision ?? $this->colorVision,
             colorVisionStrength: self::unit($colorVisionStrength ?? $this->colorVisionStrength),
             colorVisionSimulate: $colorVisionSimulate ?? $this->colorVisionSimulate,
             worldSaturation: self::unit($worldSaturation ?? $this->worldSaturation),
+            contrast: self::unit($contrast ?? $this->contrast),
         );
     }
 
@@ -61,6 +66,7 @@ final class AccessibilitySettings
             'colorVisionStrength' => $this->colorVisionStrength,
             'colorVisionSimulate' => $this->colorVisionSimulate,
             'worldSaturation' => $this->worldSaturation,
+            'contrast' => $this->contrast,
         ];
     }
 
@@ -79,6 +85,7 @@ final class AccessibilitySettings
             colorVisionStrength: $float('colorVisionStrength', $d->colorVisionStrength),
             colorVisionSimulate: $bool('colorVisionSimulate', $d->colorVisionSimulate),
             worldSaturation: $float('worldSaturation', $d->worldSaturation),
+            contrast: $float('contrast', $d->contrast),
         );
     }
 

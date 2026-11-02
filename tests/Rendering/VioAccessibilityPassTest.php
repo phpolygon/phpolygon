@@ -215,6 +215,27 @@ final class VioAccessibilityPassTest extends TestCase
         fwrite(STDERR, sprintf("\n[a11y] saturation: red %.3f/%.3f/%.3f -> %.3f/%.3f/%.3f at 0.5, grey %.3f at 0\n", ...[...self::RED, ...$half, $grey[0]]));
     }
 
+    public function testContrastSpreadsTonesAndOutlinesEdges(): void
+    {
+        $this->registerPattern();
+        $luma = static fn (array $e): float => 0.2126 * $e[0] + 0.7152 * $e[1] + 0.0722 * $e[2];
+        $plain = $this->image(self::settings());
+        $strong = $this->image(self::settings(new AccessibilitySettings(contrast: 1.0)));
+
+        [$l0, $r0] = self::halves($plain);
+        [$l1, $r1] = self::halves($strong);
+        $red0 = $l0[0] - $l0[1];
+        $red1 = $l1[0] - $l1[1];
+        self::assertGreaterThan($red0 + 0.15, $red1, 'channels spread apart');
+
+        // The seam between the halves gets a dark line on both sides.
+        $mid = self::SIZE >> 1;
+        $edge = min($luma(self::pixel($strong, $mid - 1, $mid)), $luma(self::pixel($strong, $mid, $mid)));
+        $plainEdge = min($luma(self::pixel($plain, $mid - 1, $mid)), $luma(self::pixel($plain, $mid, $mid)));
+        self::assertLessThan(0.6 * min($luma($l1), $luma($r1)), $edge, 'outline is darker than both sides');
+        fwrite(STDERR, sprintf("\n[a11y] contrast 1: red-green channel spread %.3f -> %.3f, luminance at the seam %.3f -> %.3f (sides %.3f / %.3f)\n", $red0, $red1, $plainEdge, $edge, $luma($l1), $luma($r1)));
+    }
+
     public function testStrengthBlendsTheCorrection(): void
     {
         $this->registerPattern();
