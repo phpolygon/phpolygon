@@ -12,6 +12,7 @@ use PHPolygon\ECS\World;
 use PHPolygon\Event\EventDispatcher;
 use PHPolygon\Geometry\MeshCache;
 use PHPolygon\Locale\LocaleManager;
+use PHPolygon\Rendering\Accessibility\AccessibilityEffects;
 use PHPolygon\Rendering\AnimationClockInterface;
 use PHPolygon\Rendering\Camera2D;
 use PHPolygon\Rendering\Color;
@@ -238,6 +239,7 @@ class Engine
             path: $config->graphicsSettingsPath,
         );
         $this->graphics->bindEngine($this);
+        AccessibilityEffects::register();
         $this->adaptiveQuality = new AdaptiveQualityController($this);
 
         $this->hardware = (new HardwareProfiler())->detect($this->headless);

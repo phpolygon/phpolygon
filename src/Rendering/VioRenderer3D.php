@@ -27,6 +27,7 @@ use PHPolygon\Rendering\Command\SetWind;
 use PHPolygon\Rendering\PostProcess\FullscreenPass;
 use PHPolygon\Rendering\PostProcess\FullscreenPassRegistry;
 use PHPolygon\Rendering\PostProcess\PostStage;
+use PHPolygon\Rendering\PostProcess\VioAccessibilityPass;
 use PHPolygon\Rendering\PostProcess\VioFxaaPass;
 use PHPolygon\Rendering\PostProcess\VioMotionDebugPass;
 use PHPolygon\Rendering\PostProcess\VioNativeUpscalerPass;
@@ -498,6 +499,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
 
     /** Lazy temporal resolve (TAA / TAAU). Allocated on the first temporal frame. */
     private ?VioTaaPass $taaPass = null;
+    private ?VioAccessibilityPass $accessibilityPass = null;
     /** The MRT target whose motion / depth / reactive textures temporalInputs holds. */
     private ?VioRenderTarget $temporalInputsOf = null;
     /** @var array{0: VioTexture, 1: VioTexture, 2: VioTexture}|null */
@@ -1419,6 +1421,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             || $this->settings->bloom
             || $this->temporalRequested()
             || $this->fullscreenPassWanted()
+            || $this->settings->accessibility->changesImage()
             || ProcModeShaderRegistry::sceneDepthRequired();
     }
 
@@ -1441,9 +1444,10 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         // Final-stage passes read the finished image: everything below draws into
         // an RGBA8 target instead of the swapchain, without the HDR10 encoding.
         $final = $this->enabledFullscreenPasses(PostStage::Final);
+        $accessibility = $this->accessibilityThisFrame();
         $w = max(1, $this->backbufferWidth);
         $h = max(1, $this->backbufferHeight);
-        if ($final !== [] && $this->screenQuad !== null) {
+        if (($final !== [] || $accessibility !== null) && $this->screenQuad !== null) {
             $this->presentRedirect = $this->fullscreenPassTargets($w, $h, false)[2];
         }
         $pq = $this->postFinishParams();
@@ -1458,6 +1462,12 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         $this->presentRedirect = null;
         vio_unbind_render_target($this->ctx);
         $image = $this->runFullscreenPasses(PostStage::Final, vio_render_target_texture($redirect), $w, $h, false, $quad);
+        if ($accessibility !== null) {
+            PerfProfiler::begin('render3d.post.a11y');
+            $image = $accessibility->apply($image, $w, $h, $quad, VioAccessibilityPass::uniforms($this->settings->accessibility)) ?? $image;
+            PerfProfiler::end();
+            $this->gpuMark('post.a11y');
+        }
         vio_viewport($this->ctx, 0, 0, $w, $h);
         $this->bindPostProcessPipeline('fullscreen_blit');
         vio_bind_texture($this->ctx, $image, 0);
@@ -1568,6 +1578,29 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         }
 
         $this->offscreenActive = false;
+    }
+
+    /**
+     * The accessibility pass when an option changes this frame's image and the pass can
+     * run here; null otherwise, and then nothing of it exists (no target, no compile).
+     */
+    private function accessibilityThisFrame(): ?VioAccessibilityPass
+    {
+        if (!$this->settings->accessibility->changesImage() || $this->screenQuad === null) {
+            return null;
+        }
+        $this->accessibilityPass ??= new VioAccessibilityPass($this->ctx, $this->conventions());
+        return $this->accessibilityPass->ready() ? $this->accessibilityPass : null;
+    }
+
+    /** Whether the accessibility options can change the image on this context; a settings screen greys them out otherwise. */
+    public function accessibilityAvailable(): bool
+    {
+        if ($this->screenQuad === null) {
+            return false;
+        }
+        $this->accessibilityPass ??= new VioAccessibilityPass($this->ctx, $this->conventions());
+        return $this->accessibilityPass->ready();
     }
 
     /**

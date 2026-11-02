@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace PHPolygon\Rendering;
 
+use PHPolygon\Rendering\Accessibility\AccessibilitySettings;
 use PHPolygon\Rendering\Quality\AntiAliasing;
 use PHPolygon\Rendering\Quality\ColorGradingPreset;
 use PHPolygon\Rendering\Quality\FieldtracingMode;
@@ -127,6 +128,12 @@ final class GraphicsSettings
          * @var array<string, bool>
          */
         public readonly array $effects = [],
+        /**
+         * Accessibility and comfort choices (colour vision, flash limit, contrast, ...).
+         * A value object of its own: quality presets and the adaptive controller never
+         * touch it. Saved only when it differs from the defaults.
+         */
+        public readonly AccessibilitySettings $accessibility = new AccessibilitySettings(),
     ) {
     }
 
@@ -176,6 +183,7 @@ final class GraphicsSettings
         ?UpscaleQuality $upscaleQuality = null,
         ?GrassQuality $grassQuality = null,
         ?array $effects = null,
+        ?AccessibilitySettings $accessibility = null,
     ): self {
         $nextUpscaler = $upscaler ?? $this->upscaler;
         // Leaving a temporal upscaler re-clamps a sub-half render scale.
@@ -216,6 +224,7 @@ final class GraphicsSettings
             upscaleQuality: $upscaleQuality ?? $this->upscaleQuality,
             grassQuality: $grassQuality ?? $this->grassQuality,
             effects: $effects !== null ? [...$this->effects, ...$effects] : $this->effects,
+            accessibility: $accessibility ?? $this->accessibility,
         );
     }
 
@@ -261,6 +270,9 @@ final class GraphicsSettings
         if ($this->effects !== []) {
             $json['effects'] = $this->effects;
         }
+        if (!$this->accessibility->isDefault()) {
+            $json['accessibility'] = $this->accessibility->toJson();
+        }
         return $json;
     }
 
@@ -305,6 +317,7 @@ final class GraphicsSettings
             upscaleQuality: self::enumFrom(UpscaleQuality::class, $data['upscaleQuality'] ?? null) ?? $defaults->upscaleQuality,
             grassQuality: self::enumFrom(GrassQuality::class, $data['grassQuality'] ?? null) ?? $defaults->grassQuality,
             effects: self::effectStates($data['effects'] ?? null),
+            accessibility: AccessibilitySettings::fromJson($data['accessibility'] ?? null),
         );
     }
 
