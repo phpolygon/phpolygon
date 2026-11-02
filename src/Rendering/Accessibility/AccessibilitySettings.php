@@ -22,13 +22,16 @@ final class AccessibilitySettings
         public readonly float $colorVisionStrength = 1.0,
         /** Developer view: show what a viewer with $colorVision sees instead of correcting for them. */
         public readonly bool $colorVisionSimulate = false,
+        /** 1 = unchanged, 0 = grey: saturation of the 3D image (the UI keeps its colours). */
+        public readonly float $worldSaturation = 1.0,
     ) {
     }
 
     /** Whether any option changes the 3D image, i.e. the renderer has to run the accessibility pass. */
     public function changesImage(): bool
     {
-        return $this->colorVision !== ColorVisionMode::Off;
+        return $this->colorVision !== ColorVisionMode::Off
+            || $this->worldSaturation < 1.0;
     }
 
     public function isDefault(): bool
@@ -40,11 +43,13 @@ final class AccessibilitySettings
         ?ColorVisionMode $colorVision = null,
         ?float $colorVisionStrength = null,
         ?bool $colorVisionSimulate = null,
+        ?float $worldSaturation = null,
     ): self {
         return new self(
             colorVision: $colorVision ?? $this->colorVision,
             colorVisionStrength: self::unit($colorVisionStrength ?? $this->colorVisionStrength),
             colorVisionSimulate: $colorVisionSimulate ?? $this->colorVisionSimulate,
+            worldSaturation: self::unit($worldSaturation ?? $this->worldSaturation),
         );
     }
 
@@ -55,6 +60,7 @@ final class AccessibilitySettings
             'colorVision' => $this->colorVision->value,
             'colorVisionStrength' => $this->colorVisionStrength,
             'colorVisionSimulate' => $this->colorVisionSimulate,
+            'worldSaturation' => $this->worldSaturation,
         ];
     }
 
@@ -72,6 +78,7 @@ final class AccessibilitySettings
             colorVision: $mode ?? $d->colorVision,
             colorVisionStrength: $float('colorVisionStrength', $d->colorVisionStrength),
             colorVisionSimulate: $bool('colorVisionSimulate', $d->colorVisionSimulate),
+            worldSaturation: $float('worldSaturation', $d->worldSaturation),
         );
     }
 

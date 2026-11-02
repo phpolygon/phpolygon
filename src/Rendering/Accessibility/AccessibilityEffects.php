@@ -25,6 +25,7 @@ final class AccessibilityEffects
     {
         return [
             new EffectDefinition('a11y_color_vision', EffectTier::Low, self::cost(null), EffectFallback::Same, EffectFallback::Off, ReducedMotion::Static, FlashClass::None),
+            new EffectDefinition('a11y_world_saturation', EffectTier::Low, self::cost(null), EffectFallback::Same, EffectFallback::Off, ReducedMotion::Static, FlashClass::None),
         ];
     }
 

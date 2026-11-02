@@ -51,6 +51,7 @@ final class VioAccessibilityPass
             'u_cvd_mode' => (float) $a->colorVision->code(),
             'u_cvd_strength' => $a->colorVisionStrength,
             'u_cvd_simulate' => $a->colorVisionSimulate ? 1.0 : 0.0,
+            'u_saturation' => $a->worldSaturation,
         ];
     }
 

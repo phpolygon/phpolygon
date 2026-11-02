@@ -197,6 +197,24 @@ final class VioAccessibilityPassTest extends TestCase
         }
     }
 
+    public function testWorldSaturationKeepsLuminance(): void
+    {
+        $this->registerPattern();
+        $luma = static fn (array $lin): float => 0.2126 * $lin[0] + 0.7152 * $lin[1] + 0.0722 * $lin[2];
+        $red = ColorVision::decode(self::RED);
+
+        [$grey] = self::halves($this->image(self::settings(new AccessibilitySettings(worldSaturation: 0.0))));
+        self::assertEqualsWithDelta($grey[0], $grey[1], 2 / 255, 'grey');
+        self::assertEqualsWithDelta($grey[1], $grey[2], 2 / 255, 'grey');
+        self::assertEqualsWithDelta($luma($red), $luma(ColorVision::decode($grey)), 0.01, 'same luminance');
+
+        [$half] = self::halves($this->image(self::settings(new AccessibilitySettings(worldSaturation: 0.5))));
+        $y = $luma($red);
+        $expected = ColorVision::encode([$y + ($red[0] - $y) * 0.5, $y + ($red[1] - $y) * 0.5, $y + ($red[2] - $y) * 0.5]);
+        self::assertColour($expected, $half, 'half saturation');
+        fwrite(STDERR, sprintf("\n[a11y] saturation: red %.3f/%.3f/%.3f -> %.3f/%.3f/%.3f at 0.5, grey %.3f at 0\n", ...[...self::RED, ...$half, $grey[0]]));
+    }
+
     public function testStrengthBlendsTheCorrection(): void
     {
         $this->registerPattern();

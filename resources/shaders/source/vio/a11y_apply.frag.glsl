@@ -8,7 +8,12 @@ uniform sampler2D u_source;
 uniform float u_cvd_mode;      // ColorVisionMode::code(): 0 off, 1 protan, 2 deutan, 3 tritan
 uniform float u_cvd_strength;  // 0..1
 uniform float u_cvd_simulate;  // 1 = show what the viewer sees instead of correcting
+uniform float u_saturation;    // 1 = unchanged, 0 = grey
 out vec4 frag_color;
+
+float luminance(vec3 lin) {
+    return dot(lin, vec3(0.2126, 0.7152, 0.0722));
+}
 
 // Machado, Oliveira & Fernandes 2009, severity 1.0, rows of the linear-RGB matrix
 // (same numbers as Accessibility\ColorVision::SIMULATION).
@@ -48,6 +53,7 @@ vec3 colourVision(vec3 lin) {
 void main() {
     vec3 c = texture(u_source, v_uv).rgb;
     vec3 lin = pow(max(c, vec3(0.0)), vec3(2.2));
+    lin = mix(vec3(luminance(lin)), lin, u_saturation);
     lin = colourVision(lin);
     frag_color = vec4(pow(clamp(lin, 0.0, 1.0), vec3(1.0 / 2.2)), 1.0);
 }
