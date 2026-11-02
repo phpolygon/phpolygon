@@ -507,6 +507,12 @@ only. Without `requireSceneDepth()` no copy, no target, no sampler, no uniform. 
   Grass has its hash in `m[0].w`, its x reads 0. `MeshRenderer::$shaderParams` (not serialized) is the entity's way in, batched
   or not. Vio family only. Without it the shader and the vertex stages are the old ones and a draw pays one bool test.
 
+**Effect register** (`Rendering\Effects\EffectRegistry`, `EffectRegistryTest`). Plain data, nothing here touches a frame. A game registers one
+`EffectDefinition` per effect: name (that of its pass or variant), lowest `EffectTier`, `EffectCost` (measured GPU ms with adapter, backend,
+resolution, date; null until measured), `EffectFallback` for `ShaderQuality::Unlit` and for the GL family, `ReducedMotion`,
+`FlashClass`. `assertComplete()` in a game's test fails for a fullscreen pass or shader variant without an entry, `budget($tier)` sums
+what is measured and names what is not, `flashing()` lists what has to go through the flash limit. The engine ships no entry.
+
 ### Shaders
 - Authoring language: **GLSL** (human- and AI-readable plaintext)
 - 2D: used directly by NanoVG / OpenGL at runtime
