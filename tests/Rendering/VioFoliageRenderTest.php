@@ -48,8 +48,8 @@ final class VioFoliageRenderTest extends TestCase
 
     protected function setUp(): void
     {
-        $ctx = @vio_create('auto', ['width' => self::W, 'height' => self::H, 'headless' => true, 'vsync' => false]);
-        if ($ctx === false) {
+        $ctx = VioTestContext::create(self::W, self::H);
+        if ($ctx === null) {
             $this->markTestSkipped('vio_create(headless) unavailable');
         }
         if (!vio_supports_feature($ctx, VIO_FEATURE_3D_PIPELINE)) {
@@ -89,10 +89,10 @@ final class VioFoliageRenderTest extends TestCase
     public function testTwoSidedOnTheMrtPath(): void
     {
         self::assertNotNull($this->ctx);
-        if (!in_array(vio_backend_name($this->ctx), ['d3d11', 'd3d12'], true)
+        if (vio_backend_name($this->ctx) === 'opengl'
             || !defined('VIO_FEATURE_MRT') || !vio_supports_feature($this->ctx, VIO_FEATURE_MRT)
         ) {
-            $this->markTestSkipped('MRT scene path engages on Direct3D only');
+            $this->markTestSkipped('the OpenGL backend has no MRT scene path');
         }
         putenv('PHPOLYGON_VIO_MRT=1');
         $this->assertBackIsLit(ScreenSpaceAO::Medium);

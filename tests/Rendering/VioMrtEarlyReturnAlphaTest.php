@@ -60,13 +60,13 @@ final class VioMrtEarlyReturnAlphaTest extends TestCase
 
     protected function setUp(): void
     {
-        $ctx = @vio_create('auto', ['width' => self::W, 'height' => self::H, 'headless' => true, 'vsync' => false]);
-        if ($ctx === false) {
+        $ctx = VioTestContext::create(self::W, self::H);
+        if ($ctx === null) {
             $this->markTestSkipped('vio_create(headless) unavailable');
         }
-        if (!in_array(vio_backend_name($ctx), ['d3d11', 'd3d12'], true)) {
+        if (vio_backend_name($ctx) === 'opengl') {
             vio_destroy($ctx);
-            $this->markTestSkipped('MRT scene path engages on Direct3D only (G-buffer consumers)');
+            $this->markTestSkipped('the OpenGL backend has no MRT scene path (G-buffer consumers)');
         }
         if (!defined('VIO_FEATURE_MRT') || !vio_supports_feature($ctx, VIO_FEATURE_MRT)) {
             vio_destroy($ctx);

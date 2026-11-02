@@ -271,12 +271,12 @@ final class VioRendererGpuPassTimingTest extends TestCase
         return $ctx;
     }
 
-    /** The G-buffer consumers (SSAO, SSR) run on Direct3D only. */
+    /** The G-buffer consumers (SSAO, SSR) run on every backend but OpenGL. */
     private function direct3dContext(): void
     {
         $ctx = $this->context('auto');
-        if (!in_array(vio_backend_name($ctx), ['d3d11', 'd3d12'], true)) {
-            $this->markTestSkipped('G-buffer passes engage on Direct3D only');
+        if (vio_backend_name($ctx) === 'opengl') {
+            $this->markTestSkipped('the OpenGL backend has no G-buffer passes');
         }
     }
 

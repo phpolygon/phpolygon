@@ -127,6 +127,7 @@ final class VioTaaPass
         $this->setUniforms([
             'u_motion' => 0,
             'u_depth' => 1,
+            'u_depth_raw' => $this->conventions->depthStoredRaw() ? 1.0 : 0.0,
             'u_texel' => [1.0 / $renderW, 1.0 / $renderH],
             'u_jitter_uv' => [$jitterPx[0] / $renderW, $jitterPx[1] / $renderH],
             'u_uv_flip_y' => $flipY,

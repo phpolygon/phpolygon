@@ -39,14 +39,45 @@ final class BackendConventions
 
     private function __construct(
         public readonly string $backend,
+        private readonly bool $depthRaw = false,
     ) {
     }
 
+    /** Conventions by backend name, for a depth buffer that holds (ndc_z + 1) / 2. */
     public static function forBackend(string $backend): self
     {
         $backend = strtolower($backend);
 
         return self::$cache[$backend] ??= new self($backend);
+    }
+
+    /**
+     * Conventions of a live context. Only Metal is asked how it stores depth: php-vio
+     * up to 2.39 hands GLSL clip z to Metal unremapped, so the depth buffer holds raw
+     * ndc_z (and what lies at ndc_z < 0 is clipped); from 2.40 it remaps like D3D and
+     * Vulkan and says so in vio_backend_info()['conventions']['clip_z_remap']. The
+     * question is not put to other backends: vio_backend_info() takes ~200 ms on D3D12.
+     */
+    public static function forContext(\VioContext $ctx): self
+    {
+        $backend = strtolower(vio_backend_name($ctx));
+        if ($backend !== 'metal') {
+            return self::forBackend($backend);
+        }
+        $info = function_exists('vio_backend_info') ? vio_backend_info($ctx) : [];
+        $conventions = is_array($info['conventions'] ?? null) ? $info['conventions'] : [];
+        $raw = !((bool) ($conventions['clip_z_remap'] ?? false));
+
+        return self::$cache[$backend . ($raw ? ':raw' : '')] ??= new self($backend, $raw);
+    }
+
+    /**
+     * True when the depth buffer holds raw ndc_z instead of (ndc_z + 1) / 2: Metal
+     * before php-vio 2.40. Passes that turn stored depth back into view depth read it.
+     */
+    public function depthStoredRaw(): bool
+    {
+        return $this->depthRaw;
     }
 
     public function name(): string

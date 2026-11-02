@@ -1,8 +1,8 @@
 #version 410 core
 // Copy of the opaque depth as linear view depth, for the transparent pass: the depth
 // buffer itself stays attached while transparent surfaces test against it. Depth is
-// stored as (ndcZ + 1) / 2, on Metal as ndcZ: php-vio remaps clip z on D3D and Vulkan
-// only. u_proj = projection[2][2], [3][2].
+// stored as (ndcZ + 1) / 2, raw ndcZ where php-vio does not remap clip z (Metal before
+// 2.40, BackendConventions::depthStoredRaw()). u_proj = projection[2][2], [3][2].
 in vec2 v_uv;
 uniform sampler2D u_depth;
 uniform vec2 u_proj;

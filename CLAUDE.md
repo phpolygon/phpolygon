@@ -257,6 +257,21 @@ The engine selects the backend automatically at startup:
   image is the forward image up to FP16 rounding (`VioRendererMrtTest`,
   `MrtMeshShaderHeadlessTest` pin both).
 
+**Backends of the G-buffer effects** (`VioScreenSpaceParityTest`). SSAO, SDF-AO, SSR and the FP16
+scene target they read (`GraphicsSettings::$hdr`) run on every backend vio transpiles for: D3D11/D3D12,
+Vulkan, Metal (`screenSpaceEffectsSupported()`). Up to v0.93.0 they were gated to Direct3D; Vulkan and Metal
+drew curvature AO, the wetness surrogate and an LDR target. Their flips come from `BackendConventions`, their
+depth is linear view depth from the G-buffer, so the stored depth convention plays no part. The OpenGL backend
+keeps the surrogates. `PHPOLYGON_VIO_PARITY=0` restores the Direct3D-only gate for A/B images. The parity test
+measures centre and size of each effect against D3D12 numbers written into the test.
+- **Stored depth:** `BackendConventions::forContext()` asks Metal (only Metal: `vio_backend_info()` costs
+  ~200 ms on D3D12) for `conventions.clip_z_remap`. Up to php-vio 2.39 the key is missing: Metal stores raw
+  ndc z and clips what lies below 0 (`depthStoredRaw()`); from 2.40 it stores (ndc z + 1) / 2 like the others.
+  The scene depth copy and the temporal dilate read the flag, so neither converts twice on 2.40.
+- **Not fixed here, php-vio 2.40 does it:** cascade shadows on Metal up to 2.39. The shadow pass renders with the
+  GL projection, half of each cascade's depth range is clipped and the stored compare value is wrong, so Metal
+  shows shadows where D3D12 has none (a sunlit courtyard almost black). Settings with shadows off give the D3D12 image.
+
 Rules that follow from it:
 - Anything added to the mesh shader's lighting must be routed into one of the three
   accumulators (`sunAcc` = primary directional light, `ambientAcc` = AO-modulated terms,
@@ -508,8 +523,9 @@ A frame without a readable depth (MSAA, no `VIO_FEATURE_RENDER_TARGET_DEPTH_SAMP
 need no branch of their own. A consumer forces the offscreen path. It takes one sampler of the program's budget, slot 11. Vio family
 only. Without `requireSceneDepth()` no copy, no target, no sampler, no uniform.
 Measured the same way as the pass chain: `scene_depth` 0.039 ms (D3D12) / 0.055 ms (Vulkan) at 1920x1080; the frame total moved within
-its noise (-0.02 / -0.08 ms). Stored depth is (ndcZ + 1) / 2, on Metal ndcZ: php-vio remaps clip z on D3D and Vulkan
-only (measured on an M5, php-vio 2.35.0). `u_scene_depth_raw` of a fullscreen pass is that stored value.
+its noise (-0.02 / -0.08 ms). Stored depth is (ndcZ + 1) / 2, raw ndcZ on Metal before php-vio 2.40
+(`BackendConventions::depthStoredRaw()`, see "Backends of the G-buffer effects"). `u_scene_depth_raw` of a fullscreen
+pass is that stored value.
 
 **Parameters without new material ids** (`InstanceParamsTest`, `VioInstanceParamsRenderTest`).
 - Per material: `ProcModeShaderRegistry::declareMaterialParameter('u_fx_wear', 'float', 0.0)`, values in `Material::$params` by uniform
@@ -1290,7 +1306,7 @@ uploads, no extra passes. All are documented in
 | `AreaLightHelper` | Forward-pipeline rectangular area light = grid of point-light samples summing to total radiance. |
 | `ParticleEmitter` + `ParticleSystem` | Three tiers, best the context supports: (1) GPU simulation — spawn ring (`GpuParticleLedger`), `GpuParticleBaker::inject()` + `stepIndirect()` compaction, one `vio_draw_indirect` per emitter, only new rows cross the bus (needs php-vio >= `GpuParticleBaker::MIN_VIO_VERSION`, compute + vertex storage + indirect draws, an indexed mesh, `ParticleSimulation::Auto`). All emitters share one kernel per shader, dispatches are recorded into the open frame (`['async' => true]`), and CPU-written upload buffers rotate (`GpuParticleState::UPLOAD_ROTATION`) so no frame in flight reads the next frame's rows; `ParticleSystem::render()` writes the spawns of ALL GPU emitters with one buffer upload (`GpuParticleBaker::injectAll()`, each spawn dispatch reads its own range) - a buffer update is a staging copy per call on D3D12; (2) CPU simulation with GPU billboards; (3) CPU storage + flat `DrawMeshInstanced`. All tiers spawn through `spawnRows()`, so the `mt_rand` order is identical. `ParticleSystem(..., gpuSimulation: false)` or `simulation: Cpu` opts out. **Off screen** (`Frustum::sphereOutside()` on a generous reach sphere – spawn offset, lifetime travel with gravity, particle size and trail – after the emitter stood still for a lifetime): a GPU emitter pauses (no upload, no dispatch, no draw; `update()` keeps spawning into the ledger) and the first frame back integrates the whole pause in ONE step whose kernel parameter `hstep` (= the last regular frame step) reproduces semi-implicit Euler of that step size – `GpuParticleLedger::takePending(..., $catchUpStep)` solves the start rows for it; a CPU emitter only skips its draw, and only when its material is below the shadow alpha (0.9). `PHPOLYGON_NO_CULL=1` disables it. |
 | Particle render modes and shapes | `ParticleEmitter::$renderMode` (`ParticleRenderMode`): `Billboard` (default, camera-facing), `Stretched` (velocity-aligned streak: local +Y along the velocity, `size + speed × $stretch` long, turned about that axis towards the camera, head at the particle, trail behind; billboard at rest or along the view ray – rain, sparks, water jets) and `WorldAligned` (world axes × size – a flat ring mesh with normal +Y as an expanding ripple). Flat particle meshes for Billboard/Stretched lie in local XY facing +Z; closed meshes work everywhere. One matrix source: `ParticleOrientation::write()` (CPU) and `GpuParticleBaker::MATRIX_GLSL`, spliced into the step and billboard kernels (step params 64 bytes, billboard input 8 floats/particle) – `GpuParticleBakerTest` compares both per mode. Spawn shapes: `$radialSpeed` (horizontal outward speed in a random azimuth about world Y – umbrellas, crowns; `$radialSpokes` > 0 snaps that azimuth to N evenly spaced spokes, the first along +X – separate fountain arcs, starburst rays, same single draw), `$spawnRadius` ± `$spawnRadiusJitter` (start on a horizontal circle/band, same azimuth); they draw one `mt_rand` (azimuth) plus one for the radius jitter after x, y, z, only when set – default emitters keep the RNG order. `$activeDistance` > 0: no spawning while the last rendered camera is further away (live particles run out, no burst on return; before the first frame the emitter spawns). Particle colour still comes from the material only – per-instance colour/alpha over lifetime is not wired. |
-| `ScreenSpaceReflections` | Quality enum (Off/Low/High). On OpenGL the `OpenGLSsrPass` runs a 24-step world-space ray-march from the resolved depth buffer (via `OpenGLOffscreenTarget::depthTextureId()`); on Vio + Metal it scales the wetness IBL lobe via the shared `u_ssr_intensity` uniform. |
+| `ScreenSpaceReflections` | Quality enum (Off/Low/High). On OpenGL the `OpenGLSsrPass` runs a 24-step world-space ray-march from the resolved depth buffer (via `OpenGLOffscreenTarget::depthTextureId()`); on Vio the ray-marched pass runs on D3D, Vulkan and Metal; without it (tier Off, OpenGL) `u_ssr_intensity` scales the wetness IBL lobe. |
 | `AntiAliasing::Taa` | Temporal AA. OpenGL ships a real `OpenGLTaaPass` with per-frame Halton jitter on the projection matrix, neighbourhood-clamped composite, and a private history color target. Vio/Metal still fall back to FXAA via `AntiAliasing::fallback()` until their post-process chains are migrated. |
 
 ### Anti-patterns

@@ -16,14 +16,16 @@
 //   a   the depth this pixel's own surface had last frame (camera reprojection
 //       of the centre depth), for the resolve's disocclusion test.
 //
-// Depth is stored as (ndcZ + 1) / 2 on every backend (GL directly, D3D/Metal/
-// Vulkan via the depth-convention fixup), so ndcZ = d * 2 - 1 here.
+// Depth is stored as (ndcZ + 1) / 2 (GL directly, D3D/Vulkan and Metal from php-vio
+// 2.40 via the depth-convention fixup), so ndcZ = d * 2 - 1 here; u_depth_raw = 1 where
+// it is raw ndcZ (Metal before 2.40, BackendConventions::depthStoredRaw()).
 
 in vec2 v_uv;
 out vec4 frag_color;
 
 uniform sampler2D u_motion;        // MRT motion attachment (RG16F)
 uniform sampler2D u_depth;         // MRT depth
+uniform float u_depth_raw;          // 1: the depth buffer holds raw ndcZ
 uniform vec2  u_texel;             // 1 / render size
 uniform vec2  u_jitter_uv;         // this frame's jitter, texture space
 uniform float u_uv_flip_y;         // +1 GL, -1 where row 0 is NDC top
@@ -42,7 +44,7 @@ vec2 toNdc(vec2 uv) {
 // clip position (last frame) through prev.
 float linearDepth(vec2 uv, float d, out vec4 prev) {
     vec2 ndc = toNdc(uv);
-    float ndcZ = min(d, 1.0) * 2.0 - 1.0;
+    float ndcZ = u_depth_raw > 0.5 ? min(d, 1.0) : min(d, 1.0) * 2.0 - 1.0;
     prev = u_reprojection * vec4(ndc, ndcZ, 1.0);
     // inverse(viewProj) = inverse(view) * inverse(proj) and the view is affine,
     // so the homogeneous w u_reprojection carries is view.w: dividing it out

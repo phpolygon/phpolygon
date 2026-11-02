@@ -592,7 +592,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
      */
     private function conventions(): BackendConventions
     {
-        return $this->conventions ??= BackendConventions::forBackend(vio_backend_name($this->ctx));
+        return $this->conventions ??= BackendConventions::forContext($this->ctx);
     }
 
     public function applySettings(GraphicsSettings $settings): void
@@ -1037,7 +1037,23 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         }
     }
 
-    /** SdfOcclusion / SdfBounce trace pass runs only on D3D with a volume present. */
+    /**
+     * The G-buffer effects (SSAO, SDF-AO, SSR) and the FP16 scene target they read:
+     * every backend vio transpiles for - D3D11/D3D12, Vulkan, Metal. Their depth range
+     * and render-target origin are the same once php-vio remapped clip z and flipped
+     * clip y ({@see BackendConventions}); the passes take their flips from there. The
+     * OpenGL backend keeps the forward surrogates (curvature AO, wetness, LDR target).
+     * PHPOLYGON_VIO_PARITY=0 restores the former Direct3D-only gate, for A/B images.
+     */
+    private function screenSpaceEffectsSupported(): bool
+    {
+        if (getenv('PHPOLYGON_VIO_PARITY') === '0') {
+            return $this->conventions()->isDirect3D();
+        }
+        return !$this->conventions()->isOpenGL();
+    }
+
+    /** SdfOcclusion / SdfBounce trace pass: with a volume present, where the G-buffer effects run. */
     private function sdfAoEnabledThisFrame(): bool
     {
         if (getenv('PHPOLYGON_SDF_AO') === '0') {
@@ -1048,7 +1064,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             && $this->sdfVolumeTex !== null
             && $this->sdfVolOrigin !== null
             && $this->sdfVolSize !== null
-            && $this->conventions()->isDirect3D();
+            && $this->screenSpaceEffectsSupported();
     }
 
     private function ensureSdfAoTarget(): void
@@ -1355,7 +1371,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         if (getenv('PHPOLYGON_VIO_HDR') === '0') {
             return false; // escape hatch: force the legacy LDR offscreen target
         }
-        return $this->settings->hdr && $this->conventions()->isDirect3D();
+        return $this->settings->hdr && $this->screenSpaceEffectsSupported();
     }
 
     private function offscreenIsActive(): bool
@@ -1746,7 +1762,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         vio_bind_texture($this->ctx, $depth, 0);
         vio_set_uniform($this->ctx, 'u_depth', 0);
         vio_set_uniform($this->ctx, 'u_proj', [$p[10], $p[14]]);
-        vio_set_uniform($this->ctx, 'u_depth_is_ndc', $this->conventions()->isMetal() ? 1.0 : 0.0);
+        vio_set_uniform($this->ctx, 'u_depth_is_ndc', $this->conventions()->depthStoredRaw() ? 1.0 : 0.0);
         vio_draw($this->ctx, $quad);
         vio_unbind_render_target($this->ctx);
         if ($this->mrtThisFrame && $this->mrtTarget !== null) {
@@ -4371,7 +4387,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             return false; // escape hatch for A/B testing
         }
         return $this->settings->ambientOcclusion->usesGbuffer()
-            && $this->conventions()->isDirect3D();
+            && $this->screenSpaceEffectsSupported();
     }
 
     /**
@@ -4390,7 +4406,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             return false; // escape hatch for A/B testing
         }
         return $this->settings->ssr->usesRaymarch()
-            && $this->conventions()->isDirect3D()
+            && $this->screenSpaceEffectsSupported()
             && $this->sceneTargetIsHdr();
     }
 
