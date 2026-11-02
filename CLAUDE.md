@@ -276,6 +276,17 @@ Rules that follow from it:
 - Escape hatches: `PHPOLYGON_VIO_MRT=0` forces the forward path, `=1` skips the php-vio
   version gate. `mrtActive()` tells tests which path a frame took.
 
+**SDF trace pass (SDF-AO + soft sun shadow, `VioSdfAoTest`).** Runs only when all of these hold: the frame's
+Fieldtracing tier is `SdfOcclusion` or `SdfBounce` (`GraphicsSettings::$fieldtracing` or a `SetFieldtracing` in
+the list), the context has `VIO_FEATURE_TEXTURE_3D`, a `SetFieldtracingVolume` reached the renderer (the game bakes and
+sends it; the engine bakes nothing), the backend is gated in (Direct3D) and `PHPOLYGON_SDF_AO` is not `0`. Then it forces the
+G-buffer, writes R = AO and G = sun shadow at full resolution, blurs them and marks `sdfao`; otherwise none of it exists
+and the frame is the probes-only frame byte for byte. No `sdfao` mark in a profile therefore means one of the
+conditions failed, usually the missing volume. `BoxSdf` takes the size first, then the centre.
+Measured 2026-11-02, RTX 2080, php-vio 2.40.0, D3D12, 1920x1080, 36 boxes in a 64³ volume, FXAA + bloom, median of 300 frames,
+3 runs per path: `sdfao` 0.42 ms forward and MRT (plus `gbuffer` 0.04 ms forward); the GPU frame grows by 0.36-0.47 ms forward and
+0.49 ms MRT. On WARP the pass is about 2.3 ms at 160x120 (CPU, no measure of a GPU).
+
 **Frame order** (`VioEngineFrameOrderTest`). The engine loop calls `renderer3D->beginFrame()` before `renderer2D->beginFrame()` opens
 the frame (`vio_begin`), so settings can reallocate targets while no command list is open. The scene target is therefore bound in
 `VioRenderer3D::frameOpened()` (the engine calls it right after `vio_begin`; `deferSceneTargetBind()` switches it on), cleared to opaque
