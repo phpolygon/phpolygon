@@ -350,6 +350,9 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
     private const ENV_CUBEMAP_SLOT = 10;
     private const ENV_CUBEMAP_ID = 'reflection_probe';
 
+    /** The depth copy of ProcModeShaderRegistry::requireSceneDepth(). */
+    private const SCENE_DEPTH_SLOT = 11;
+
     // The baked coloured irradiance probe field (3× vio_texture_3d), from
     // SetFieldtracingProbes — one 3D texture per colour channel.
     private ?VioTexture $probeTexR = null;
@@ -1342,7 +1345,8 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             || $this->settings->effectiveRenderScale($this->knownCapabilities()) !== 1.0
             || $this->settings->bloom
             || $this->temporalRequested()
-            || $this->fullscreenPassWanted();
+            || $this->fullscreenPassWanted()
+            || ProcModeShaderRegistry::sceneDepthRequired();
     }
 
     /**
@@ -1653,7 +1657,9 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         $source = null;
         if ($this->mrtThisFrame) {
             $source = $this->mrtTarget;
-        } elseif ($this->offscreenTarget !== null && $this->offscreenTarget->samples() === 1) {
+        } elseif ($this->externalSceneTarget !== null) {
+            $source = $this->externalSceneTarget;
+        } elseif ($this->offscreenActive && $this->offscreenTarget !== null && $this->offscreenTarget->samples() === 1) {
             $source = $this->offscreenTarget->renderTarget();
         }
         if ($source === null) {
@@ -1667,7 +1673,52 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
     }
 
     /**
-     * FXAA runs in the present: selected, or TAA selected on a backend without    /**
+     * Copy the opaque depth for the transparent pass, as linear view depth. The depth
+     * buffer stays attached while transparent surfaces test against it, so they read
+     * this copy. The scene target is left and bound again, keeping colour and depth.
+     * Nothing happens without ProcModeShaderRegistry::requireSceneDepth().
+     */
+    private function captureSceneDepth(?VioRenderTarget $hdrTarget, int $w, int $h): void
+    {
+        $this->sceneDepthCopied = false;
+        $quad = $this->screenQuad;
+        $projection = $this->currentProjectionMatrix;
+        $depth = $this->sceneDepthTexture();
+        if ($hdrTarget !== null || $quad === null || $projection === null || $depth === null) {
+            return;
+        }
+        if (!isset($this->shaderCache['scene_depth_copy'])) {
+            $this->compileShaderFromFiles('scene_depth_copy', 'postprocess.vert.glsl', 'scene_depth_copy.frag.glsl');
+        }
+        $key = "{$w}x{$h}";
+        if ($this->sceneDepthCopyKey !== $key || $this->sceneDepthCopy === null) {
+            $this->sceneDepthCopy = vio_render_target($this->ctx, ['width' => $w, 'height' => $h, 'hdr' => true]) ?: null;
+            $this->sceneDepthCopyKey = $key;
+        }
+        if ($this->sceneDepthCopy === null) {
+            return;
+        }
+        $p = $projection->toArray();
+        vio_unbind_render_target($this->ctx);
+        vio_bind_render_target($this->ctx, $this->sceneDepthCopy);
+        vio_viewport($this->ctx, 0, 0, $w, $h);
+        $this->bindPostProcessPipeline('scene_depth_copy', true);
+        vio_bind_texture($this->ctx, $depth, 0);
+        vio_set_uniform($this->ctx, 'u_depth', 0);
+        vio_set_uniform($this->ctx, 'u_proj', [$p[10], $p[14]]);
+        vio_draw($this->ctx, $quad);
+        vio_unbind_render_target($this->ctx);
+        if ($this->mrtThisFrame && $this->mrtTarget !== null) {
+            vio_bind_render_target($this->ctx, $this->mrtTarget);
+        } else {
+            $this->bindSceneTarget(null);
+        }
+        vio_viewport($this->ctx, 0, 0, $w, $h);
+        $this->sceneDepthCopied = true;
+        $this->gpuMark('scene_depth');
+    }
+
+    /**
      * FXAA runs in the present: selected, or TAA selected on a backend without
      * the temporal path ({@see AntiAliasing::fallback()}). A frame that went
      * through the temporal resolve never reaches it.
@@ -2890,6 +2941,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             'ftAoRadius' => $ftAoRadius,
         ];
         $this->frameFtMode = $ftMode;
+        $this->sceneDepthCopied = false;
         $this->sceneVariant = ProcModeShaderRegistry::BASE_VARIANT;
         $this->variantsThisFrame = ProcModeShaderRegistry::hasVariants() && $this->activeShaderId() === 'default';
         $this->variantUniformsUploaded = [];
@@ -3050,7 +3102,14 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         // --- Pass 3: Transparent geometry ---
         PerfProfiler::begin('render3d.submit.transparent');
         $this->sceneVariant = ProcModeShaderRegistry::BASE_VARIANT;
+        if (ProcModeShaderRegistry::sceneDepthRequired()) {
+            $this->captureSceneDepth($hdrTarget, $sceneViewportW, $sceneViewportH);
+            $this->variantUniformsUploaded = [];
+        }
         $this->bindPipeline('transparent');
+        if (ProcModeShaderRegistry::sceneDepthRequired()) {
+            $this->uploadSceneDepthInputs();
+        }
         // The opaque pass already uploaded the frame uniforms (+ probe/ssao/sdfao
         // texture binds) into this same shader object's sticky cbuffer; re-upload
         // only if the shader actually changed (it doesn't within a normal frame).
@@ -5690,6 +5749,13 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
 
     private ?bool $indirectDrawAvailable = null;
 
+    private ?VioRenderTarget $sceneDepthCopy = null;
+
+    private string $sceneDepthCopyKey = '';
+
+    /** Whether this frame's opaque depth is in $sceneDepthCopy yet. */
+    private bool $sceneDepthCopied = false;
+
     /** The Final stage's input while the present draws into it instead of the swapchain. */
     private ?VioRenderTarget $presentRedirect = null;
 
@@ -6803,6 +6869,9 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
      */
     private function uploadSnippetInputs(): void
     {
+        if (ProcModeShaderRegistry::sceneDepthRequired()) {
+            $this->uploadSceneDepthInputs();
+        }
         if ($this->snippetParameters !== []) {
             $this->setUniforms($this->snippetParameters);
         }
@@ -6817,6 +6886,31 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
                 vio_bind_texture($this->ctx, $texture, $slot);
                 vio_set_uniform($this->ctx, $name, $slot);
             }
+        }
+    }
+
+    /**
+     * The depth copy on the bound mesh program. Before the copy exists, and in the
+     * opaque pass, the slot holds white: last frame's copy may be the target of this
+     * frame's, and a texture cannot be sampled while it is being written.
+     */
+    private function uploadSceneDepthInputs(): void
+    {
+        $texture = $this->sceneDepthCopied && $this->sceneDepthCopy !== null
+            ? vio_render_target_texture($this->sceneDepthCopy)
+            : null;
+        if ($texture === null) {
+            $this->ensureWhiteTexture();
+            $texture = $this->whiteTexture;
+        }
+        if ($texture !== null) {
+            vio_bind_texture($this->ctx, $texture, self::SCENE_DEPTH_SLOT);
+            vio_set_uniform($this->ctx, 'u_scene_depth', self::SCENE_DEPTH_SLOT);
+        }
+        vio_set_uniform($this->ctx, 'u_scene_depth_ready', $this->sceneDepthCopied ? 1.0 : 0.0);
+        $view = $this->currentViewMatrix?->toArray();
+        if ($view !== null) {
+            vio_set_uniform($this->ctx, 'u_scene_view_z', [$view[2], $view[6], $view[10], $view[14]]);
         }
     }
 

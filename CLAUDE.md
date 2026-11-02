@@ -486,6 +486,15 @@ $engine->graphics->update(fn (GraphicsSettings $s) => $s->with(effects: ['film_g
 - `GraphicsSettings::$effects` holds on/off by name; a save file without it stays as it was. `AdaptiveStep` places an effect at an
   `AdaptiveSlot` of the stack. Compiled at first use: register before `warmShaders()` does not pre-compile it, the first frame does.
 
+**Scene depth for transparents** (`ProcModeShaderRegistry::requireSceneDepth($programs)`, `VioSceneDepthTest`). The transparent
+pass tests against the depth buffer, so it cannot sample it. With a consumer the renderer copies it as linear view depth
+(`scene_depth_copy.frag`, RGBA16F, one fullscreen draw) between the opaque and transparent pass, leaves and rebinds the scene target and
+marks `scene_depth`; opaque draws see the copy as absent. Snippets in the listed programs call `sceneLinearDepth()` and
+`sceneDepthDelta()` (how far the opaque surface lies behind the fragment, world units), both forward and MRT, particles included.
+A frame without a readable depth (MSAA, no `VIO_FEATURE_RENDER_TARGET_DEPTH_SAMPLE`) answers 60000, i.e. no soft edge: snippets
+need no branch of their own. A consumer forces the offscreen path. It takes one sampler of the program's budget, slot 11. Vio family
+only. Without `requireSceneDepth()` no copy, no target, no sampler, no uniform. `depthZeroToOne` plays no part: stored depth is (ndcZ + 1) / 2 on every backend.
+
 ### Shaders
 - Authoring language: **GLSL** (human- and AI-readable plaintext)
 - 2D: used directly by NanoVG / OpenGL at runtime

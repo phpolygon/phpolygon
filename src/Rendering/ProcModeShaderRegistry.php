@@ -53,6 +53,9 @@ namespace PHPolygon\Rendering;
  * Values travel as {@see Command\SetShaderParameter} / {@see Command\SetShaderTexture}.
  * Uniforms live in the fragment stage, where snippets run, and a name must not exist
  * in the engine's stages: a uniform declared in two stages is not set in both on D3D12.
+ *
+ * SCENE DEPTH: {@see requireSceneDepth()} gives programs the opaque scene's depth for
+ * transparent surfaces and particles. It costs a copy per frame, only with a consumer.
  */
 final class ProcModeShaderRegistry
 {
@@ -133,6 +136,8 @@ final class ProcModeShaderRegistry
     private static array $samplers = [];
     /** @var array<string, list<string>|null> sampler name → the programs that declare it, null = all */
     private static array $samplerPrograms = [];
+    /** @var list<string>|null programs that read the scene depth, null = all of them */
+    private static ?array $sceneDepthPrograms = [];
 
     /**
      * Register the GLSL for one proc_mode.
@@ -277,13 +282,38 @@ final class ProcModeShaderRegistry
         return self::$samplers[$name] = self::FIRST_SAMPLER_SLOT + count(self::$samplers);
     }
 
+    /**
+     * Give programs `sceneLinearDepth()` and `sceneDepthDelta()`: the depth of the opaque
+     * scene behind a fragment, for what the transparent pass draws (soft particles,
+     * water edges, decals). Takes a sampler of each program's budget. The renderer
+     * copies the depth per frame while this is set, and a frame without a readable depth (MSAA,
+     * a backend without VIO_FEATURE_RENDER_TARGET_DEPTH_SAMPLE) answers "far away". Vio family
+     * only: a look that reads it registers a GL branch without.
+     *
+     * @param list<string>|null $programs null = every program
+     */
+    public static function requireSceneDepth(?array $programs = null): void
+    {
+        self::$sceneDepthPrograms = $programs;
+    }
+
+    public static function sceneDepthRequired(): bool
+    {
+        return self::$sceneDepthPrograms !== [];
+    }
+
+    private static function readsSceneDepth(string $variant): bool
+    {
+        return self::$sceneDepthPrograms === null || in_array($variant, self::$sceneDepthPrograms, true);
+    }
+
     /** Ordinary samplers a program has left for snippets. */
     public static function samplerBudget(string $variant = self::BASE_VARIANT): int
     {
         $omit = $variant === self::BASE_VARIANT ? self::$baseOmissions : (self::$variants[$variant]['omit'] ?? []);
         $engine = self::ENGINE_SAMPLERS - (in_array(ShaderPath::ProbeGi, $omit, true) ? self::PROBE_SAMPLERS : 0);
 
-        return self::SAMPLER_REGISTERS - $engine;
+        return self::SAMPLER_REGISTERS - $engine - (self::readsSceneDepth($variant) ? 1 : 0);
     }
 
     /**
@@ -385,7 +415,12 @@ final class ProcModeShaderRegistry
     {
         $omit = $variant === self::BASE_VARIANT ? self::$baseOmissions : (self::$variants[$variant]['omit'] ?? []);
 
-        return array_map(static fn (ShaderPath $path): string => $path->define(), $omit);
+        $defines = array_map(static fn (ShaderPath $path): string => $path->define(), $omit);
+        if (self::readsSceneDepth($variant)) {
+            $defines[] = 'PHPOLYGON_SCENE_DEPTH';
+        }
+
+        return $defines;
     }
 
     /**
@@ -550,5 +585,6 @@ final class ProcModeShaderRegistry
         self::$uniforms = [];
         self::$samplers = [];
         self::$samplerPrograms = [];
+        self::$sceneDepthPrograms = [];
     }
 }

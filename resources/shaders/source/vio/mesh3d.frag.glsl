@@ -192,6 +192,15 @@ uniform sampler2D u_sdf_ao_map;
 
 // PHPOLYGON:SNIPPET_UNIFORMS
 
+#ifdef PHPOLYGON_SCENE_DEPTH
+// Linear view depth of the opaque scene, copied between the opaque and the transparent
+// pass (ProcModeShaderRegistry::requireSceneDepth). Transparent surfaces and particles
+// read it through sceneLinearDepth() / sceneDepthDelta(), behind the POSTCOLOR helpers.
+uniform sampler2D u_scene_depth;
+uniform float     u_scene_depth_ready; // 0: opaque pass, or the frame has no readable depth
+uniform vec4      u_scene_view_z;      // third row of the view matrix (fragment-stage copy)
+#endif // PHPOLYGON_SCENE_DEPTH
+
 #ifdef PHPOLYGON_MRT
 // Deferred-composite path (engine RFC docs/rfcs/mrt-gbuffer.md). The lit result is
 // SPLIT so a later fullscreen composite can apply the screen-space AO terms exactly
@@ -545,6 +554,19 @@ vec3 applyVignette(vec3 color) {
     float v = smoothstep(0.45, 0.85, r);
     return color * (1.0 - v * u_vignette_intensity);
 }
+
+#ifdef PHPOLYGON_SCENE_DEPTH
+// Linear depth of the opaque surface behind this fragment; far away while unknown.
+float sceneLinearDepth() {
+    if (u_scene_depth_ready < 0.5) return 60000.0;
+    return texture(u_scene_depth, gl_FragCoord.xy / u_viewport_size).r;
+}
+
+// How far the opaque surface lies behind this fragment, in world units (0 = touching).
+float sceneDepthDelta() {
+    return sceneLinearDepth() + dot(u_scene_view_z, vec4(v_worldPos, 1.0));
+}
+#endif // PHPOLYGON_SCENE_DEPTH
 
 // PHPOLYGON:POSTCOLOR_HELPERS
 
