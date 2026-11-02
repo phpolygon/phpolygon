@@ -1616,8 +1616,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             $this->accessibilityTime = null;
             return null;
         }
-        $this->accessibilityPass ??= new VioAccessibilityPass($this->ctx, $this->conventions());
-        return $this->accessibilityPass->ready() ? $this->accessibilityPass : null;
+        return $this->accessibilityAvailable() ? $this->accessibilityPass : null;
     }
 
     /** Whether the accessibility options can change the image on this context; a settings screen greys them out otherwise. */
@@ -1627,7 +1626,19 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             return false;
         }
         $this->accessibilityPass ??= new VioAccessibilityPass($this->ctx, $this->conventions());
-        return $this->accessibilityPass->ready();
+        if (!$this->accessibilityPass->ready()) {
+            return false;
+        }
+        // The Final stage's image goes to the swapchain through this blit, also when no registered pass compiled it.
+        if (!isset($this->shaderCache['fullscreen_blit'])) {
+            try {
+                $this->compileShaderFromFiles('fullscreen_blit', 'postprocess.vert.glsl', 'fullscreen_blit.frag.glsl');
+            } catch (\RuntimeException $e) {
+                fwrite(STDERR, "[VioRenderer3D] accessibility pass unavailable: {$e->getMessage()}\n");
+                return false;
+            }
+        }
+        return true;
     }
 
     /**

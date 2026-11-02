@@ -390,6 +390,16 @@ final class VioAccessibilityPassTest extends TestCase
         self::assertSame(md5($plain), md5($cleared));
     }
 
+    public function testWithoutAnyRegisteredPassTheImageIsCorrectedOnce(): void
+    {
+        // No Final-stage pass of the game: the accessibility pass alone redirects the present.
+        MaterialRegistry::register('grey', new Material(albedo: new Color(0.6, 0.15, 0.1), roughness: 1.0));
+        $mode = ColorVisionMode::Deuteranopia;
+        $plain = self::pixel($this->image(self::settings()), self::SIZE >> 1, self::SIZE >> 1);
+        $fixed = self::pixel($this->image(self::settings(new AccessibilitySettings(colorVision: $mode))), self::SIZE >> 1, self::SIZE >> 1);
+        self::assertColour(ColorVision::encode(ColorVision::correct($mode, ColorVision::decode($plain))), $fixed, 'one correction of the scene, not two');
+    }
+
     public function testStrengthBlendsTheCorrection(): void
     {
         $this->registerPattern();
