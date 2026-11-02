@@ -787,6 +787,8 @@ class Engine
                         ? $this->config->shaderCachePath . '/upscaler-probe.json'
                         : '',
                 );
+                // The loop opens the frame after renderer3D->beginFrame(): bind in frameOpened().
+                $this->renderer3D->deferSceneTargetBind();
                 // The adaptive stack only lowers the shading rate where the backend can apply it.
                 \PHPolygon\Rendering\Quality\AdaptiveTierStack::setShadingRateAvailable($this->renderer3D->shadingRateAvailable());
             } else {
@@ -1026,6 +1028,9 @@ class Engine
                     PerfProfiler::begin('render2d.begin');
                     $this->renderer2D->beginFrame();
                     PerfProfiler::end();
+                    if ($this->renderer3D instanceof VioRenderer3D) {
+                        $this->renderer3D->frameOpened(); // the scene target, now that vio_begin() ran
+                    }
 
                     $this->world->render();
 
@@ -1122,6 +1127,9 @@ class Engine
                     PerfProfiler::begin('render2d.begin');
                     $this->renderer2D->beginFrame();
                     PerfProfiler::end();
+                    if ($this->renderer3D instanceof VioRenderer3D) {
+                        $this->renderer3D->frameOpened(); // the scene target, now that vio_begin() ran
+                    }
 
                     $this->world->render();
 

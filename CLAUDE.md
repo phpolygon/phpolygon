@@ -274,6 +274,14 @@ Rules that follow from it:
 - Escape hatches: `PHPOLYGON_VIO_MRT=0` forces the forward path, `=1` skips the php-vio
   version gate. `mrtActive()` tells tests which path a frame took.
 
+**Frame order** (`VioEngineFrameOrderTest`). The engine loop calls `renderer3D->beginFrame()` before `renderer2D->beginFrame()` opens
+the frame (`vio_begin`), so settings can reallocate targets while no command list is open. The scene target is therefore bound in
+`VioRenderer3D::frameOpened()` (the engine calls it right after `vio_begin`; `deferSceneTargetBind()` switches it on), cleared to opaque
+black as the 2D clear after `vio_begin` used to do while the target was bound. On Vulkan php-vio takes a target bound before
+`vio_begin` for a frame that is never presented: up to v0.92.0 every frame with the offscreen path (FXAA, the default) stayed black there,
+offscreen and in a window (measured 2026-11-02, RTX 2080, php-vio 2.39.0). D3D12 frames are byte for byte those of v0.92.0. Code that
+opens the frame itself before `beginFrame()` (tests, `renderToImage()`) keeps the immediate bind; `render()` and `endFrame()` bind a
+pending target too.
 **Transparency** (material `alpha < 1`; `VioRendererTransparencyTest`, `TransparentDrawSorterTest`):
 - Only the opaque pass writes depth. The transparent pipelines (`transparent`, `transparent_water`,
   forward and MRT) test against the opaque depth and never write it, so a pane drawn first does not
