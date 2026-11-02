@@ -91,6 +91,7 @@ final class VioAccessibilityPass
             'u_saturation' => $a->worldSaturation,
             'u_contrast' => $a->contrast,
             'u_flash_limit' => $a->flashLimit ? 1.0 : 0.0,
+            'u_night_boost' => $a->nightBoost,
         ];
     }
 

@@ -317,8 +317,20 @@ final class VioAccessibilityPassTest extends TestCase
         self::assertEqualsWithDelta(1.0, $pinned[1], 0.01);
     }
 
-    public function testStrengthBlendsTheCorrection(): void
+    public function testNightBoostLiftsDarkFramesAndLeavesBrightOnes(): void
     {
+        $boost = new AccessibilitySettings(nightBoost: 1.0);
+        $dark = $this->luminanceSeries($boost, [0.1, 0.1, 0.1]);
+        $bright = $this->luminanceSeries($boost, [0.7, 0.7, 0.7]);
+        $darkPlain = 0.1 ** 2.2;
+        $brightPlain = 0.7 ** 2.2;
+        // Full weight below 0.02 mean luminance: gamma 1 / (1 + 1) on the encoded value.
+        self::assertEqualsWithDelta((0.1 ** 0.5) ** 2.2, $dark[2], 0.004, 'dark frame lifted');
+        self::assertEqualsWithDelta($brightPlain, $bright[2], 0.006, 'bright frame unchanged');
+        fwrite(STDERR, sprintf("\n[a11y] night boost 1: dark grey luminance %.4f -> %.4f, bright grey %.3f -> %.3f\n", $darkPlain, $dark[2], $brightPlain, $bright[2]));
+    }
+
+    public function testStrengthBlendsTheCorrection(): void    {
         $this->registerPattern();
         $mode = ColorVisionMode::Protanopia;
         [$left] = self::halves($this->image(self::settings(new AccessibilitySettings(colorVision: $mode, colorVisionStrength: 0.5))));

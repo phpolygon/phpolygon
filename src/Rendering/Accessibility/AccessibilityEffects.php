@@ -27,6 +27,7 @@ final class AccessibilityEffects
             new EffectDefinition('a11y_color_vision', EffectTier::Low, self::cost(null), EffectFallback::Same, EffectFallback::Off, ReducedMotion::Static, FlashClass::None),
             new EffectDefinition('a11y_contrast', EffectTier::Low, self::cost(null), EffectFallback::Same, EffectFallback::Off, ReducedMotion::Static, FlashClass::None),
             new EffectDefinition('a11y_flash_limit', EffectTier::Low, self::cost(null), EffectFallback::Same, EffectFallback::Off, ReducedMotion::Static, FlashClass::None),
+            new EffectDefinition('a11y_night_boost', EffectTier::Low, self::cost(null), EffectFallback::Same, EffectFallback::Off, ReducedMotion::Static, FlashClass::None),
             // No pass of its own: it only changes which time other effects see.
             new EffectDefinition('a11y_reduced_motion', EffectTier::Low, self::cost(null), EffectFallback::Same, EffectFallback::Off, ReducedMotion::Static, FlashClass::None),
             new EffectDefinition('a11y_world_saturation', EffectTier::Low, self::cost(null), EffectFallback::Same, EffectFallback::Off, ReducedMotion::Static, FlashClass::None),

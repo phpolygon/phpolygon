@@ -14,6 +14,7 @@ uniform vec2  u_texel;         // 1 / size of u_source
 uniform sampler2D u_state;     // 1x1 (a11y_state): r = flash gain, g = mean luminance of the input
 uniform float u_has_state;     // 1 = u_state holds this frame's state
 uniform float u_flash_limit;   // 1 = multiply by the flash gain
+uniform float u_night_boost;   // 0 = off, 1 = strongest
 out vec4 frag_color;
 
 float luminance(vec3 lin) {
@@ -77,8 +78,19 @@ vec3 contrastMode(vec3 e) {
     return e * (1.0 - edge * 0.65 * u_contrast);
 }
 
+// Night boost: a gamma below 1 on the encoded image lifts the shadows and keeps black
+// and white where they are. Weighted by the frame's mean linear luminance: full below
+// 0.02 (night), none above 0.12 (an ordinary daylight frame).
+vec3 nightBoost(vec3 e) {
+    if (u_night_boost <= 0.0 || u_has_state < 0.5) {
+        return e;
+    }
+    float w = u_night_boost * (1.0 - smoothstep(0.02, 0.12, texture(u_state, vec2(0.5)).g));
+    return pow(max(e, vec3(0.0)), vec3(1.0 / (1.0 + w)));
+}
+
 void main() {
-    vec3 c = contrastMode(texture(u_source, v_uv).rgb);
+    vec3 c = contrastMode(nightBoost(texture(u_source, v_uv).rgb));
     vec3 lin = pow(max(c, vec3(0.0)), vec3(2.2));
     lin = mix(vec3(luminance(lin)), lin, u_saturation);
     lin = colourVision(lin);

@@ -40,7 +40,19 @@ final class AccessibilitySettings
          * have their shader time held.
          */
         public readonly bool $flashLimit = false,
+        /**
+         * 0 = off, 1 = strongest: lift the shadows of a dark image. Weighted by the mean
+         * luminance of the frame, so a bright day stays as it is and night, caves and
+         * unlit rooms get lighter.
+         */
+        public readonly float $nightBoost = 0.0,
     ) {
+    }
+
+    /** Whether an option needs the mean luminance of the frame (flash limit, night boost). */
+    public function needsLuminance(): bool
+    {
+        return $this->flashLimit || $this->nightBoost > 0.0;
     }
 
     /** Whether any option changes the 3D image, i.e. the renderer has to run the accessibility pass. */
@@ -49,7 +61,8 @@ final class AccessibilitySettings
         return $this->colorVision !== ColorVisionMode::Off
             || $this->worldSaturation < 1.0
             || $this->contrast > 0.0
-            || $this->flashLimit;
+            || $this->flashLimit
+            || $this->nightBoost > 0.0;
     }
 
     public function isDefault(): bool
@@ -66,6 +79,7 @@ final class AccessibilitySettings
         ?bool $reducedMotion = null,
         ?float $motionScale = null,
         ?bool $flashLimit = null,
+        ?float $nightBoost = null,
     ): self {
         return new self(
             colorVision: $colorVision ?? $this->colorVision,
@@ -76,6 +90,7 @@ final class AccessibilitySettings
             reducedMotion: $reducedMotion ?? $this->reducedMotion,
             motionScale: self::unit($motionScale ?? $this->motionScale),
             flashLimit: $flashLimit ?? $this->flashLimit,
+            nightBoost: self::unit($nightBoost ?? $this->nightBoost),
         );
     }
 
@@ -91,6 +106,7 @@ final class AccessibilitySettings
             'reducedMotion' => $this->reducedMotion,
             'motionScale' => $this->motionScale,
             'flashLimit' => $this->flashLimit,
+            'nightBoost' => $this->nightBoost,
         ];
     }
 
@@ -113,6 +129,7 @@ final class AccessibilitySettings
             reducedMotion: $bool('reducedMotion', $d->reducedMotion),
             motionScale: $float('motionScale', $d->motionScale),
             flashLimit: $bool('flashLimit', $d->flashLimit),
+            nightBoost: $float('nightBoost', $d->nightBoost),
         );
     }
 

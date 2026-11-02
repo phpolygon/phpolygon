@@ -1471,7 +1471,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             // Seconds since the last frame the pass ran; a frame without it breaks the history.
             $dt = $this->accessibilityTime !== null ? $this->globalTime - $this->accessibilityTime : 0.0;
             $this->accessibilityTime = $this->globalTime;
-            $image = $accessibility->apply($image, $w, $h, $quad, VioAccessibilityPass::uniforms($a11y), $a11y->flashLimit, $a11y->flashLimit, $dt) ?? $image;
+            $image = $accessibility->apply($image, $w, $h, $quad, VioAccessibilityPass::uniforms($a11y), $a11y->needsLuminance(), $a11y->flashLimit, $dt) ?? $image;
             PerfProfiler::end();
             $this->gpuMark('post.a11y');
         }
