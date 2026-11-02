@@ -1236,8 +1236,44 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
      * (renderScale == 1.0 AND AntiAliasing == Off), keeping behaviour
      * identical to pre-Phase-1.5 frames at default settings.
      */
+    /**
+     * Bind the scene target in frameOpened() instead of beginFrame(). The engine loop
+     * calls beginFrame() before vio_begin(), so settings can reallocate targets while
+     * no command list is open; but on Vulkan php-vio takes a target bound before
+     * vio_begin() for a frame that is never presented, and the whole frame stays
+     * black. Callers that open the frame themselves first keep the old behaviour.
+     */
+    public function deferSceneTargetBind(): void
+    {
+        $this->deferSceneTargetBind = true;
+    }
+
+    /**
+     * The frame is open (vio_begin() ran): bind the scene target beginFrame() prepared,
+     * and clear it to opaque black - what the 2D renderer's clear after vio_begin()
+     * used to do to it while it was already bound.
+     */
+    public function frameOpened(): void
+    {
+        if (!$this->sceneTargetBindPending) {
+            return;
+        }
+        $this->sceneTargetBindPending = false;
+        if ($this->offscreenTarget === null) {
+            return;
+        }
+        $this->offscreenTarget->bindForDraw();
+        vio_viewport($this->ctx, 0, 0, $this->offscreenTarget->width(), $this->offscreenTarget->height());
+        vio_clear($this->ctx, 0.0, 0.0, 0.0, 1.0);
+    }
+
+    private bool $deferSceneTargetBind = false;
+
+    private bool $sceneTargetBindPending = false;
+
     private function beginOffscreenIfRequired(): void
     {
+        $this->sceneTargetBindPending = false;
         if (!$this->offscreenIsActive()) {
             $this->offscreenActive = false;
             return;
@@ -1253,9 +1289,13 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             $this->fxaaPass = new VioFxaaPass($this->ctx);
         }
 
+        $this->offscreenActive = true;
+        if ($this->deferSceneTargetBind) {
+            $this->sceneTargetBindPending = true;
+            return;
+        }
         $this->offscreenTarget->bindForDraw();
         vio_viewport($this->ctx, 0, 0, $this->offscreenTarget->width(), $this->offscreenTarget->height());
-        $this->offscreenActive = true;
     }
 
     /**
@@ -2531,6 +2571,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
 
     public function endFrame(): void
     {
+        $this->frameOpened();
         // UI and post-processing shade every pixel; only the scene pass ran coarse.
         $this->applyShadingRate(Quality\ShadingRate::Full);
         if ($this->offscreenActive) {
@@ -2801,6 +2842,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
 
     public function render(RenderCommandList $commandList): void
     {
+        $this->frameOpened();
         // Safety net: if the engine did not warm shaders behind the splash,
         // compile them now so the first 3D frame still renders (at the cost of
         // a one-time hitch on this frame). No-op once warmed.
