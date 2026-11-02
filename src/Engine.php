@@ -845,6 +845,7 @@ class Engine
             $vioCtx = $this->window->getContext();
 
             $vioRenderer = new VioRenderer2D($vioCtx, $this->config->textMeasureCacheCap);
+            $vioRenderer->applyEffectSettings($this->graphics->settings());
             $this->renderer2D = $vioRenderer;
 
             $vioTextures = new VioTextureManager($vioCtx, $this->config->assetsPath);
@@ -1018,6 +1019,9 @@ class Engine
                     if ($this->renderer3D instanceof AnimationClockInterface) {
                         $this->renderer3D->setAnimationTime($this->animationTime);
                     }
+                    if ($this->renderer2D instanceof AnimationClockInterface) {
+                        $this->renderer2D->setAnimationTime($this->animationTime);
+                    }
                     if ($this->renderer3D !== null) {
                         $this->renderer3D->beginFrame();
                     }
@@ -1116,6 +1120,9 @@ class Engine
 
                     if ($this->renderer3D instanceof AnimationClockInterface) {
                         $this->renderer3D->setAnimationTime($this->animationTime);
+                    }
+                    if ($this->renderer2D instanceof AnimationClockInterface) {
+                        $this->renderer2D->setAnimationTime($this->animationTime);
                     }
                     if ($this->renderer3D !== null) {
                         $this->renderer3D->beginFrame();

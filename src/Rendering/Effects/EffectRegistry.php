@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace PHPolygon\Rendering\Effects;
 
+use PHPolygon\Rendering\Effect2D\Effect2DRegistry;
 use PHPolygon\Rendering\PostProcess\FullscreenPassRegistry;
 use PHPolygon\Rendering\ProcModeShaderRegistry;
 
@@ -17,6 +18,9 @@ final class EffectRegistry
 {
     /** @var array<string, EffectDefinition> */
     private static array $effects = [];
+
+    private static bool $reducedMotion = false;
+    private static float $motionScale = 0.0;
 
     public static function register(EffectDefinition $effect): void
     {
@@ -76,7 +80,7 @@ final class EffectRegistry
     }
 
     /**
-     * Fullscreen passes and shader variants without an entry.
+     * Fullscreen passes, shader variants and 2D effects without an entry.
      *
      * @return list<string>
      */
@@ -86,8 +90,46 @@ final class EffectRegistry
         foreach (FullscreenPassRegistry::all() as $pass) {
             $names[] = $pass->name;
         }
+        foreach (Effect2DRegistry::all() as $effect) {
+            $names[] = $effect->name;
+        }
 
-        return array_values(array_diff($names, array_keys(self::$effects)));
+        return array_values(array_unique(array_diff($names, array_keys(self::$effects))));
+    }
+
+    /**
+     * The player's reduced-motion choice, set by the game from its own settings. The 2D
+     * effects follow it through their {@see ReducedMotion} entry: `Frozen` holds `u_time`
+     * at 0, `Reduced` hands `$motionScale` to the shader as `u_motion`, `Off` draws the
+     * fallback instead.
+     */
+    public static function setReducedMotion(bool $reduced, float $motionScale = 0.0): void
+    {
+        self::$reducedMotion = $reduced;
+        self::$motionScale = max(0.0, min(1.0, $motionScale));
+    }
+
+    public static function reducedMotion(): bool
+    {
+        return self::$reducedMotion;
+    }
+
+    /** `u_motion` of an effect: 1, or under reduced motion the game's scale for a `Reduced` effect. */
+    public static function motionScale(?EffectDefinition $effect): float
+    {
+        return self::$reducedMotion && $effect?->reducedMotion === ReducedMotion::Reduced ? self::$motionScale : 1.0;
+    }
+
+    /** Whether reduced motion holds an effect's time still. */
+    public static function timeFrozen(?EffectDefinition $effect): bool
+    {
+        return self::$reducedMotion && $effect?->reducedMotion === ReducedMotion::Frozen;
+    }
+
+    /** Whether reduced motion takes an effect out (its fallback draws instead). */
+    public static function motionSwitchesOff(?EffectDefinition $effect): bool
+    {
+        return self::$reducedMotion && $effect?->reducedMotion === ReducedMotion::Off;
     }
 
     /** Throws when a pass or variant has no entry. For a game's test suite or a build step. */
@@ -102,5 +144,7 @@ final class EffectRegistry
     public static function clear(): void
     {
         self::$effects = [];
+        self::$reducedMotion = false;
+        self::$motionScale = 0.0;
     }
 }

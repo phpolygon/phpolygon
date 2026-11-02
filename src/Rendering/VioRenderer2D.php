@@ -7,14 +7,32 @@ namespace PHPolygon\Rendering;
 use PHPolygon\Math\Mat3;
 use PHPolygon\Math\Rect;
 use PHPolygon\Math\Vec2;
+use PHPolygon\Rendering\Effect2D\Effect2D;
+use PHPolygon\Rendering\Effect2D\Effect2DRegistry;
+use PHPolygon\Rendering\Effect2D\EffectRenderer2DInterface;
+use PHPolygon\Rendering\Effects\EffectFallback;
+use PHPolygon\Rendering\Effects\EffectRegistry;
+use PHPolygon\Rendering\Quality\ShaderQuality;
+use PHPolygon\Runtime\PerfProfiler;
 use VioContext;
 use VioFont;
 use VioTexture;
 
-class VioRenderer2D implements Renderer2DInterface
+class VioRenderer2D implements Renderer2DInterface, EffectRenderer2DInterface, AnimationClockInterface
 {
     /** Frames an unregistered texture stays alive: more than php-vio ever has in flight. */
     private const int RETIRE_FRAMES = 8;
+
+    /** Effect targets grow in steps of this many pixels, so a rectangle that changes size reuses one. */
+    private const int EFFECT_TARGET_STEP = 64;
+
+    /** Largest effect target edge; a larger rectangle is drawn at lower resolution. */
+    private const int EFFECT_TARGET_MAX = 4096;
+
+    /** Frames an unused effect target size is kept. */
+    private const int EFFECT_TARGET_KEEP_FRAMES = 120;
+
+    private const string EFFECT_VERTEX_SHADER = __DIR__ . '/../../resources/shaders/source/vio/postprocess.vert.glsl';
 
     private int $width;
     private int $height;
@@ -175,6 +193,56 @@ class VioRenderer2D implements Renderer2DInterface
     private float $zCounter = 0.0;
     private const Z_STEP = 0.0001;
 
+    /**
+     * Effects drawn this frame, run in endFrame() right before the 2D batch: each
+     * renders into its own target, which the batch already holds as a sprite at the
+     * effect's place in the draw order.
+     *
+     * @var list<array{0: Effect2D, 1: \VioRenderTarget, 2: int, 3: int, 4: array<string, int|float|list<float>>, 5: array<string, Texture>, 6: list<float>}>
+     */
+    private array $effectJobs = [];
+
+    /** @var array<string, bool> name -> features there and shader compiled, for this registry version */
+    private array $effectReady = [];
+
+    /** @var array<string, \VioPipeline> */
+    private array $effectPipelines = [];
+
+    private int $effectRegistryVersion = -1;
+
+    private ?\VioMesh $effectQuad = null;
+
+    private ?VioTexture $effectWhite = null;
+
+    private ?GraphicsSettings $effectSettings = null;
+
+    /** @var array<string, list<array{0: \VioRenderTarget, 1: VioTexture}>> target size -> targets */
+    private array $effectTargets = [];
+
+    /** @var array<string, int> target size -> targets handed out this frame */
+    private array $effectTargetsTaken = [];
+
+    /** @var array<string, int> target size -> frame it was last used */
+    private array $effectTargetsUsed = [];
+
+    private int $frameIndex = 0;
+
+    /** Framebuffer pixels per logical pixel, from beginFrame(). */
+    private float $pixelRatio = 1.0;
+
+    /** @var array{0: int, 1: int} framebuffer size of this frame */
+    private array $framebufferSize = [1280, 720];
+
+    /** Scale of the current transform (product of the pushed ones), so effects render at the size they appear. */
+    private float $transformScale = 1.0;
+
+    /** @var list<float> */
+    private array $transformScaleStack = [];
+
+    private float $animationTime = 0.0;
+
+    private bool $animationDriven = false;
+
     public function __construct(
         private readonly VioContext $ctx,
         int $measureCacheCap = 4096,
@@ -227,6 +295,19 @@ class VioRenderer2D implements Renderer2DInterface
         // its async work each frame. Cheap no-op when nothing is in flight.
         $this->pollAsyncFontLoads();
 
+        $this->frameIndex++;
+        if (!$this->animationDriven) {
+            $this->animationTime += 1.0 / 60.0;
+        }
+        // vio_begin() empties php-vio's transform stack.
+        $this->transformScale = 1.0;
+        $this->transformScaleStack = [];
+        if ($this->effectTargetsUsed !== []) {
+            // Jobs of a frame whose endFrame() never ran lost their sprites with the batch.
+            $this->effectJobs = [];
+            $this->sweepEffectTargets();
+        }
+
         if ($this->offscreenWarmTarget !== null) {
             // Redirected path: route this frame's draws into the warm-up
             // offscreen target instead of the swapchain. Window-size sync is
@@ -240,6 +321,8 @@ class VioRenderer2D implements Renderer2DInterface
             $this->offscreenWarmTarget->bindForDraw();
             vio_begin($this->ctx);
             vio_viewport($this->ctx, 0, 0, $w, $h);
+            $this->pixelRatio = 1.0;
+            $this->framebufferSize = [$w, $h];
 
             $this->zCounter = 0.0;
             vio_clear($this->ctx, 0.0, 0.0, 0.0, 1.0);
@@ -260,6 +343,8 @@ class VioRenderer2D implements Renderer2DInterface
         vio_viewport($this->ctx, 0, 0, $fb[0], $fb[1]);
         vio_begin($this->ctx);
         vio_viewport($this->ctx, 0, 0, $fb[0], $fb[1]);
+        $this->framebufferSize = [$fb[0], $fb[1]];
+        $this->pixelRatio = $this->width > 0 ? $fb[0] / $this->width : 1.0;
 
         $this->zCounter = 0.0;
 
@@ -268,6 +353,9 @@ class VioRenderer2D implements Renderer2DInterface
 
     public function endFrame(): void
     {
+        if ($this->effectJobs !== []) {
+            $this->runEffects();
+        }
         \PHPolygon\Runtime\PerfProfiler::begin('render2d.draw2d');
         vio_draw_2d($this->ctx);
         \PHPolygon\Runtime\PerfProfiler::end();
@@ -687,11 +775,14 @@ class VioRenderer2D implements Renderer2DInterface
         // vio affine [a,b,c,d,e,f]: | a b e |  =>  a=m00, b=m01, c=m10, d=m11, e=m02(tx), f=m12(ty)
         //                           | c d f |
         vio_push_transform($this->ctx, $m[0], $m[3], $m[1], $m[4], $m[6], $m[7]);
+        $this->transformScaleStack[] = $this->transformScale;
+        $this->transformScale *= sqrt(abs($m[0] * $m[4] - $m[3] * $m[1]));
     }
 
     public function popTransform(): void
     {
         vio_pop_transform($this->ctx);
+        $this->transformScale = array_pop($this->transformScaleStack) ?? 1.0;
     }
 
     public function pushScissor(float $x, float $y, float $w, float $h): void
@@ -1202,6 +1293,7 @@ class VioRenderer2D implements Renderer2DInterface
         $this->stateStack[] = [$this->currentFontName, $this->textAlign, $this->globalAlpha];
         // Also push transform/scissor state in VIO
         vio_push_transform($this->ctx, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0);
+        $this->transformScaleStack[] = $this->transformScale;
     }
 
     public function restoreState(): void
@@ -1210,6 +1302,7 @@ class VioRenderer2D implements Renderer2DInterface
             [$this->currentFontName, $this->textAlign, $this->globalAlpha] = array_pop($this->stateStack);
         }
         vio_pop_transform($this->ctx);
+        $this->transformScale = array_pop($this->transformScaleStack) ?? 1.0;
     }
 
     public function registerVioTexture(int $textureId, VioTexture $vioTexture): void
@@ -1244,6 +1337,238 @@ class VioRenderer2D implements Renderer2DInterface
     public function getContext(): VioContext
     {
         return $this->ctx;
+    }
+
+    public function setAnimationTime(float $seconds): void
+    {
+        $this->animationTime = $seconds;
+        $this->animationDriven = true;
+    }
+
+    // ── Effects (Effect2DRegistry) ───────────────────────────────────
+
+    public function applyEffectSettings(GraphicsSettings $settings): void
+    {
+        $this->effectSettings = $settings;
+    }
+
+    public function effectAvailable(string $name): bool
+    {
+        $effect = Effect2DRegistry::get($name);
+        return $effect !== null && $this->effectReady($effect);
+    }
+
+    public function drawEffect(
+        string $name,
+        float $x,
+        float $y,
+        float $w,
+        float $h,
+        array $parameters = [],
+        array $textures = [],
+        ?float $padding = null,
+    ): bool {
+        $effect = Effect2DRegistry::get($name);
+        if ($effect === null || !$this->effectRuns($effect)) {
+            return false;
+        }
+        $pad = $padding ?? $effect->padding;
+        $qw = $w + 2.0 * $pad;
+        $qh = $h + 2.0 * $pad;
+        if ($qw <= 0.0 || $qh <= 0.0) {
+            return true; // nothing to cover
+        }
+        // Rendered at the size it appears: framebuffer pixels under the current transform.
+        $scale = $this->pixelRatio * $this->transformScale;
+        $pw = max(1, min(self::EFFECT_TARGET_MAX, (int) ceil($qw * $scale)));
+        $ph = max(1, min(self::EFFECT_TARGET_MAX, (int) ceil($qh * $scale)));
+        $target = $this->effectTarget($pw, $ph);
+        if ($target === null) {
+            return false;
+        }
+        $this->effectJobs[] = [$effect, $target[0], $pw, $ph, $parameters, $textures, [$pad / $qw, $pad / $qh, ($pad + $w) / $qw, ($pad + $h) / $qh]];
+        // The region of the target the effect draws into: row 0 is the top row of
+        // the image on every backend (the quad's v follows the target convention).
+        vio_sprite($this->ctx, $target[1], [
+            'x' => $x - $pad,
+            'y' => $y - $pad,
+            'width' => $qw,
+            'height' => $qh,
+            'src_x' => 0.0,
+            'src_y' => 0.0,
+            'src_w' => (float) $pw,
+            'src_h' => (float) $ph,
+            'color' => $this->colorToArgb(new Color(1.0, 1.0, 1.0, 1.0)),
+            'z' => $this->nextZ(),
+        ]);
+
+        return true;
+    }
+
+    /** Whether an effect draws now: settings, reduced motion, shader quality, then its gates. */
+    private function effectRuns(Effect2D $effect): bool
+    {
+        $settings = $this->effectSettings ??= new GraphicsSettings();
+        if (!$effect->enabledBy($settings)) {
+            return false;
+        }
+        $entry = EffectRegistry::get($effect->name);
+        if (EffectRegistry::motionSwitchesOff($entry)) {
+            return false;
+        }
+        if ($entry !== null && $settings->shaderQuality === ShaderQuality::Unlit && $entry->unlitFallback !== EffectFallback::Same) {
+            return false;
+        }
+        return $this->effectReady($effect);
+    }
+
+    /** Features and compile of an effect, once per registry version. A shader that fails is logged; its fallback draws. */
+    private function effectReady(Effect2D $effect): bool
+    {
+        if ($this->effectRegistryVersion !== Effect2DRegistry::version()) {
+            $this->effectRegistryVersion = Effect2DRegistry::version();
+            $this->effectReady = [];
+            $this->effectPipelines = [];
+        }
+        if (isset($this->effectReady[$effect->name])) {
+            return $this->effectReady[$effect->name];
+        }
+        $ready = true;
+        foreach ($effect->features as $feature) {
+            $flag = defined($feature) ? constant($feature) : null;
+            $ready = $ready && is_int($flag) && vio_supports_feature($this->ctx, $flag);
+        }
+        if ($ready) {
+            try {
+                $this->effectPipelines[$effect->name] = $this->compileEffect($effect);
+            } catch (\RuntimeException $e) {
+                fwrite(STDERR, "[VioRenderer2D] 2D effect '{$effect->name}' unavailable: {$e->getMessage()}\n");
+                $ready = false;
+            }
+        }
+        return $this->effectReady[$effect->name] = $ready;
+    }
+
+    private function compileEffect(Effect2D $effect): \VioPipeline
+    {
+        $fragment = @file_get_contents($effect->fragmentPath);
+        $vertex = @file_get_contents(self::EFFECT_VERTEX_SHADER);
+        if ($fragment === false || $vertex === false) {
+            throw new \RuntimeException("cannot read {$effect->fragmentPath}");
+        }
+        $conventions = BackendConventions::forBackend(vio_backend_name($this->ctx));
+        $start = hrtime(true);
+        $shader = @vio_shader($this->ctx, ['vertex' => $vertex, 'fragment' => $fragment, 'format' => $conventions->shaderSourceFormat()]);
+        \PHPolygon\Runtime\FrameSpikeRecorder::note(\PHPolygon\Runtime\FrameSpikeRecorder::NOTE_SHADER, 1, hrtime(true) - $start);
+        if ($shader === false) {
+            throw new \RuntimeException('shader does not compile');
+        }
+        $pipeline = vio_pipeline($this->ctx, [
+            'shader' => $shader,
+            'depth_test' => false,
+            'cull_mode' => VIO_CULL_NONE,
+            'blend' => VIO_BLEND_NONE,
+        ]);
+        if ($pipeline === false) {
+            throw new \RuntimeException('pipeline refused');
+        }
+        if ($this->effectQuad === null) {
+            // v = 0 at the top row of the target image on every backend (see VioRenderer3D's screen quad).
+            [$vBottom, $vTop] = $conventions->flipRenderTargetClipY() ? [1, 0] : [0, 1];
+            $this->effectQuad = vio_mesh($this->ctx, [
+                'vertices' => [
+                    -1, -1, 0, 0, $vBottom,
+                     1, -1, 0, 1, $vBottom,
+                     1,  1, 0, 1, $vTop,
+                    -1,  1, 0, 0, $vTop,
+                ],
+                'indices' => [0, 1, 2, 0, 2, 3],
+                'layout' => [VIO_FLOAT3, VIO_FLOAT2],
+            ]) ?: throw new \RuntimeException('quad refused');
+        }
+        return $pipeline;
+    }
+
+    /**
+     * A target that holds at least $w x $h, not yet used this frame. Sizes are rounded
+     * up to {@see EFFECT_TARGET_STEP}, so a rectangle that grows or shrinks keeps its target.
+     *
+     * @return array{0: \VioRenderTarget, 1: VioTexture}|null
+     */
+    private function effectTarget(int $w, int $h): ?array
+    {
+        $step = self::EFFECT_TARGET_STEP;
+        $tw = min(self::EFFECT_TARGET_MAX, (int) (ceil($w / $step) * $step));
+        $th = min(self::EFFECT_TARGET_MAX, (int) (ceil($h / $step) * $step));
+        $key = "{$tw}x{$th}";
+        $i = $this->effectTargetsTaken[$key] ?? 0;
+        if (!isset($this->effectTargets[$key][$i])) {
+            $target = vio_render_target($this->ctx, ['width' => $tw, 'height' => $th]);
+            $texture = $target !== false ? vio_render_target_texture($target) : false;
+            if ($target === false || $texture === false) {
+                return null;
+            }
+            $this->effectTargets[$key][$i] = [$target, $texture];
+        }
+        $this->effectTargetsTaken[$key] = $i + 1;
+        $this->effectTargetsUsed[$key] = $this->frameIndex;
+        return $this->effectTargets[$key][$i];
+    }
+
+    /** Drop target sizes no frame used for a while; called before vio_begin(). */
+    private function sweepEffectTargets(): void
+    {
+        $this->effectTargetsTaken = [];
+        foreach ($this->effectTargetsUsed as $key => $frame) {
+            if ($this->frameIndex - $frame > self::EFFECT_TARGET_KEEP_FRAMES) {
+                unset($this->effectTargets[$key], $this->effectTargetsUsed[$key]);
+            }
+        }
+    }
+
+    /**
+     * Render the frame's effects into their targets, then bind the 2D batch's target
+     * again. Runs after the 3D present and before vio_draw_2d(): the batch samples the
+     * targets when it draws, and nothing of the 3D frame is bound any more.
+     */
+    private function runEffects(): void
+    {
+        PerfProfiler::begin('render2d.effects');
+        $quad = $this->effectQuad;
+        foreach ($this->effectJobs as [$effect, $target, $w, $h, $parameters, $textures, $rect]) {
+            $pipeline = $this->effectPipelines[$effect->name] ?? null;
+            if ($pipeline === null || $quad === null) {
+                continue;
+            }
+            $entry = EffectRegistry::get($effect->name);
+            vio_bind_render_target($this->ctx, $target);
+            vio_viewport($this->ctx, 0, 0, $w, $h);
+            vio_bind_pipeline($this->ctx, $pipeline);
+            foreach ($effect->samplers as $slot => $sampler) {
+                $texture = isset($textures[$sampler]) ? $this->getVioTexture($textures[$sampler]) : null;
+                // A declared sampler is always bound: an unbound one reads an empty SRV on D3D12.
+                $texture ??= $this->effectWhite ??= (vio_texture($this->ctx, ['data' => "\xff\xff\xff\xff", 'width' => 1, 'height' => 1]) ?: null);
+                if ($texture !== null) {
+                    vio_set_uniform($this->ctx, $sampler, $slot);
+                    vio_bind_texture($this->ctx, $texture, $slot);
+                }
+            }
+            vio_set_uniform($this->ctx, 'u_resolution', [(float) $w, (float) $h]);
+            vio_set_uniform($this->ctx, 'u_rect', $rect);
+            vio_set_uniform($this->ctx, 'u_time', EffectRegistry::timeFrozen($entry) ? 0.0 : $this->animationTime);
+            vio_set_uniform($this->ctx, 'u_motion', EffectRegistry::motionScale($entry));
+            foreach ($parameters as $uniform => $value) {
+                vio_set_uniform($this->ctx, $uniform, $value);
+            }
+            vio_draw($this->ctx, $quad);
+            vio_unbind_render_target($this->ctx);
+        }
+        $this->effectJobs = [];
+        if ($this->offscreenWarmTarget !== null) {
+            $this->offscreenWarmTarget->bindForDraw();
+        }
+        vio_viewport($this->ctx, 0, 0, $this->framebufferSize[0], $this->framebufferSize[1]);
+        PerfProfiler::end();
     }
 
     private function resolveFont(float $size): ?VioFont

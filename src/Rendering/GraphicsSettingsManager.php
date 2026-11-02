@@ -8,6 +8,7 @@ use PHPolygon\Engine;
 use PHPolygon\Event\EventDispatcher;
 use PHPolygon\Event\GraphicsSettingsChanged;
 use PHPolygon\Event\TargetFpsChanged;
+use PHPolygon\Rendering\Effect2D\EffectRenderer2DInterface;
 use PHPolygon\Rendering\Quality\BenchmarkResult;
 use PHPolygon\Rendering\Quality\GraphicsAutoTuner;
 use PHPolygon\Rendering\Quality\QualityMode;
@@ -184,6 +185,10 @@ class GraphicsSettingsManager
         $r3d = $this->engine?->renderer3D;
         if ($r3d !== null) {
             $r3d->applySettings($this->settings);
+        }
+        // The engine applies settings once before it creates the 2D renderer, and hands them over then.
+        if ($this->engine !== null && isset($this->engine->renderer2D) && $this->engine->renderer2D instanceof EffectRenderer2DInterface) {
+            $this->engine->renderer2D->applyEffectSettings($this->settings);
         }
         $this->engine?->shaders->reset();
         $shaderId = $this->settings->shaderQuality->shaderId();

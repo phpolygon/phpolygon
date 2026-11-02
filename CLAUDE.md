@@ -526,8 +526,10 @@ only (measured on an M5, php-vio 2.35.0). `u_scene_depth_raw` of a fullscreen pa
 **Effect register** (`Rendering\Effects\EffectRegistry`, `EffectRegistryTest`). Plain data, nothing here touches a frame. A game registers one
 `EffectDefinition` per effect: name (that of its pass or variant), lowest `EffectTier`, `EffectCost` (measured GPU ms with adapter, backend,
 resolution, date; null until measured), `EffectFallback` for `ShaderQuality::Unlit` and for the GL family, `ReducedMotion`,
-`FlashClass`. `assertComplete()` in a game's test fails for a fullscreen pass or shader variant without an entry, `budget($tier)` sums
+`FlashClass`. `assertComplete()` in a game's test fails for a fullscreen pass, shader variant or 2D effect without an entry, `budget($tier)` sums
 what is measured and names what is not, `flashing()` lists what has to go through the flash limit. The engine ships no entry.
+`setReducedMotion($on, $motionScale)` holds the player's choice (the game passes it from its settings); only the 2D effects follow it
+so far (see "VioRenderer2D — 2D effects"), the 3D passes and variants do not read it. Nothing enforces `FlashClass` yet.
 
 ### Shaders
 - Authoring language: **GLSL** (human- and AI-readable plaintext)
@@ -1920,6 +1922,52 @@ $r2d->clearFallbackFonts();         // when switching to a non-CJK locale
 Games should only register CJK fallbacks when the active locale requires them.
 The primary font renders first; fallback fonts only render glyphs the primary
 doesn't cover. `measureText()` uses the full chain for width calculation.
+
+### VioRenderer2D — 2D effects (`Effect2DRegistry`)
+
+A game draws its own fragment effects among its 2D draws: a glow around a panel, scanlines over the screen, a wipe, a
+sprite with swapped colours (`Effect2DRegistryTest`, `VioEffect2DTest`).
+
+```php
+Effect2DRegistry::register(new Effect2D('panel_glow', $fragPath, padding: 32.0, samplers: ['u_mask'],
+    fallback: fn (Renderer2DInterface $r, float $x, float $y, float $w, float $h, array $p) => $r->drawRoundedRectOutline($x, $y, $w, $h, 12, $glowColor, 2.0)));
+EffectRegistry::register(new EffectDefinition('panel_glow', EffectTier::Low, null, EffectFallback::Same, EffectFallback::Simplified, ReducedMotion::Frozen, FlashClass::Gentle));
+// in render(), at its place in the draw order:
+Effect2DRegistry::draw($renderer, 'panel_glow', $x, $y, $w, $h, ['u_glow_color' => [0.2, 0.8, 1.0, 0.8]], ['u_mask' => $texture]);
+```
+
+- **How it draws.** php-vio's 2D batch has fixed item types and one shader, and `vio_draw_2d()` flushes the whole batch
+  without emptying it, so nothing can be drawn between two 2D items. An effect therefore renders into a target of its own
+  and enters the batch as a sprite at its z: `drawEffect()` pushes the sprite at once, `endFrame()` renders every effect of
+  the frame into its target right before `vio_draw_2d()` (after the 3D present, while nothing of the 3D frame is bound), then
+  binds the 2D target again (swapchain, headless target or the warm-render target). The batch samples the targets when it
+  draws, so the order of draws, transform, scissor and global alpha hold as for any sprite.
+- **Fragment contract.** `postprocess.vert` hands `v_uv`: 0..1 over the rectangle plus `$padding` on every side, (0, 0) top
+  left on every backend. Write `frag_color` in the 2D colour space (the values a 2D colour has, straight alpha; HDR10 output
+  encodes it like the rest of the UI); give pixels with alpha 0 a sensible colour, the sprite is filtered bilinearly. From the
+  renderer: `u_resolution` (pixels of the padded quad), `u_rect` (the rectangle without padding in `v_uv`), `u_time` (the
+  engine's animation clock, `AnimationClockInterface`), `u_motion`; the draw's parameters by uniform name and its textures
+  (`Texture` of the texture manager) for the names in `$samplers` (slots 0..7, white when not given).
+- **Size.** The target follows the pixels the rectangle covers: framebuffer / window ratio times the scale of the current
+  transform; `ScaledRenderer2D` hands rectangle and padding on in physical pixels. Targets grow in 64 px steps (a rectangle
+  that changes size keeps its target), one per effect draw and frame, at most 4096; a size no frame used for 120 frames goes.
+- **When it does not run** the fallback closure draws in its place (or nothing): renderers without effects (php-glfw/NanoVG,
+  GD, Null), a setting that is off (`GraphicsSettings::$effects` by name, `$default`), a feature of `$features` missing, a
+  shader that does not compile (logged once), `ShaderQuality::Unlit` with an entry whose `unlitFallback` is not `Same`, and
+  reduced motion with `ReducedMotion::Off`. Reduced motion with `Frozen` holds `u_time` at 0, with `Reduced` sets `u_motion`
+  to the game's scale. `effectAvailable($name)` for a settings screen.
+- **What it cannot do yet:** read the 2D content drawn before it (blur or distort a panel, a text layer, the whole 2D layer)
+  or the 3D image behind it. That needs php-vio to flush part of the batch into a target; until then an effect reads
+  textures only (a text layer can go through `TextRasterizer` into a texture, the 3D image through a `FullscreenPass`).
+- Without an effect drawn in the frame `endFrame()` adds one array test: 2D and 3D+2D frames (direct and FXAA) are byte for
+  byte those of v0.93.0 on D3D12 (RTX 2080 and WARP), Vulkan (RTX 2080) and Metal (Apple M5, php-vio 2.39.0), measured
+  2026-11-02. No GPU mark of its own: the 3D renderer counts the frame's marks; CPU section `render2d.effects`.
+- Measured 2026-11-02, RTX 2080, driver 621.01, php-vio 2.39.0, headless 1920x1080, a HUD of 4 panels (~40 rects, ~36 texts),
+  median of 540 frames, 3 runs. D3D12: GPU frame 0.038 ms without effect; one glow (544x334 px with padding) +0.008 ms, a
+  glow on all 4 panels +0.024 ms, fullscreen scanlines +0.062 ms; one glow alone on an empty frame 0.018 -> 0.029 ms. CPU:
+  draws +0.01 ms for one effect, +0.03 ms for four; `render2d.effects` 0.018 ms (one) / 0.037 ms (four). Vulkan: GPU frame
+  0.80 ms with a run-to-run spread of +-0.04 ms, so one glow did not show; four +0.04 ms, scanlines +0.04-0.05 ms;
+  `render2d.effects` 0.039 / 0.062 ms.
 
 ---
 

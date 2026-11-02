@@ -7,6 +7,8 @@ namespace PHPolygon\Rendering;
 use PHPolygon\Math\Mat3;
 use PHPolygon\Math\Rect;
 use PHPolygon\Math\Vec2;
+use PHPolygon\Rendering\Effect2D\Effect2DRegistry;
+use PHPolygon\Rendering\Effect2D\EffectRenderer2DInterface;
 use PHPolygon\UI\UIScale;
 
 /**
@@ -25,7 +27,7 @@ use PHPolygon\UI\UIScale;
  * the pointer lands in the same logical space, and hand both to a UIContext
  * via {@see \PHPolygon\UI\UIContext::useBackends()} while it lays out.
  */
-final class ScaledRenderer2D implements Renderer2DInterface
+final class ScaledRenderer2D implements Renderer2DInterface, EffectRenderer2DInterface
 {
     public function __construct(
         private readonly Renderer2DInterface $inner,
@@ -264,6 +266,39 @@ final class ScaledRenderer2D implements Renderer2DInterface
     public function beginOffscreenFrame(int $width, int $height): void
     {
         $this->inner->beginOffscreenFrame($width, $height);
+    }
+
+    // ── Effects ──────────────────────────────────────────────────────
+
+    public function drawEffect(
+        string $name,
+        float $x,
+        float $y,
+        float $w,
+        float $h,
+        array $parameters = [],
+        array $textures = [],
+        ?float $padding = null,
+    ): bool {
+        if (!$this->inner instanceof EffectRenderer2DInterface) {
+            return false;
+        }
+        $padding ??= Effect2DRegistry::get($name)->padding ?? 0.0;
+        [$x, $y, $w, $h] = $this->snap($x, $y, $w, $h);
+
+        return $this->inner->drawEffect($name, $x, $y, $w, $h, $parameters, $textures, $padding * $this->scale->factor);
+    }
+
+    public function effectAvailable(string $name): bool
+    {
+        return $this->inner instanceof EffectRenderer2DInterface && $this->inner->effectAvailable($name);
+    }
+
+    public function applyEffectSettings(GraphicsSettings $settings): void
+    {
+        if ($this->inner instanceof EffectRenderer2DInterface) {
+            $this->inner->applyEffectSettings($settings);
+        }
     }
 
     public function endOffscreenFrame(): void

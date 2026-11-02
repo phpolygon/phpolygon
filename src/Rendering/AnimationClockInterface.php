@@ -5,8 +5,8 @@ declare(strict_types=1);
 namespace PHPolygon\Rendering;
 
 /**
- * A 3D renderer whose shader animation time (`u_time`: water ripples, wave and
- * sway vertex animation, procedural pulses) follows a clock the caller drives.
+ * A renderer whose shader animation time (`u_time`: water ripples, wave and
+ * sway vertex animation, procedural pulses, 2D effects) follows a clock the caller drives.
  *
  * The engine sets it once per rendered frame, before `beginFrame()`, to the
  * simulated time (the sum of all update steps), so animations run at the same
