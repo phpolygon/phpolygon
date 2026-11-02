@@ -17,6 +17,11 @@ uniform float u_flash_limit;   // 1 = multiply by the flash gain
 uniform float u_night_boost;   // 0 = off, 1 = strongest
 uniform float u_vignette;      // comfort vignette of this frame, 0 = open, 1 = closed
 uniform float u_aspect;        // width / height
+uniform vec2  u_focus_min;     // left, top of the focus region in screen fractions, origin top left
+uniform vec2  u_focus_max;     // right, bottom
+uniform float u_focus_dim;     // 0 = no focus region this frame
+uniform float u_focus_feather; // soft edge, fraction of the screen height
+uniform float u_uv_top_down;   // 1 = v_uv.y grows downwards on this backend's targets
 out vec4 frag_color;
 
 float luminance(vec3 lin) {
@@ -96,6 +101,12 @@ void main() {
     vec3 lin = pow(max(c, vec3(0.0)), vec3(2.2));
     lin = mix(vec3(luminance(lin)), lin, u_saturation);
     lin = colourVision(lin);
+    if (u_focus_dim > 0.0) {
+        vec2 p = vec2(v_uv.x, u_uv_top_down > 0.5 ? v_uv.y : 1.0 - v_uv.y);
+        vec2 d = max(u_focus_min - p, p - u_focus_max) * vec2(u_aspect, 1.0);
+        float outside = length(max(d, vec2(0.0)));
+        lin *= 1.0 - u_focus_dim * smoothstep(0.0, max(u_focus_feather, 1e-4), outside);
+    }
     if (u_vignette > 0.0) {
         // 0 at the centre, 1 in the corners; the dark edge moves inwards as it closes.
         float r = length((v_uv - 0.5) * vec2(u_aspect, 1.0)) / length(vec2(u_aspect, 1.0) * 0.5);

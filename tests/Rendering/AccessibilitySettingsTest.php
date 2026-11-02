@@ -8,6 +8,9 @@ use PHPUnit\Framework\TestCase;
 use PHPolygon\Rendering\Accessibility\AccessibilitySettings;
 use PHPolygon\Rendering\Accessibility\ColorVision;
 use PHPolygon\Rendering\Accessibility\ColorVisionMode;
+use PHPolygon\Math\Mat4;
+use PHPolygon\Math\Vec3;
+use PHPolygon\Rendering\Command\SetFocusRegion;
 use PHPolygon\Rendering\Effects\EffectDefinition;
 use PHPolygon\Rendering\Effects\EffectFallback;
 use PHPolygon\Rendering\Effects\EffectRegistry;
@@ -76,6 +79,25 @@ final class AccessibilitySettingsTest extends TestCase
             @unlink($path);
             EffectRegistry::clear();
         }
+    }
+
+    public function testFocusRegionAroundABoxCoversItsScreenRectangle(): void
+    {
+        $view = Mat4::translation(0.0, 0.0, -5.0);
+        $projection = Mat4::perspective(deg2rad(90.0), 1.0, 0.1, 100.0);
+        // A 2 x 2 box 5 units ahead spans 0.4 .. 0.6 of the screen on both axes.
+        $r = SetFocusRegion::aroundBox(new Vec3(-1.0, -1.0, 0.0), new Vec3(1.0, 1.0, 0.0), $view, $projection, 0.0);
+        self::assertEqualsWithDelta(0.4, $r->left, 1e-6);
+        self::assertEqualsWithDelta(0.6, $r->right, 1e-6);
+        self::assertEqualsWithDelta(0.4, $r->top, 1e-6);
+        self::assertEqualsWithDelta(0.6, $r->bottom, 1e-6);
+        $high = SetFocusRegion::aroundBox(new Vec3(-1.0, 2.0, 0.0), new Vec3(1.0, 3.0, 0.0), $view, $projection, 0.0);
+        self::assertLessThan(0.5, $high->bottom, 'up in the world is up on the screen (origin top left)');
+        $behind = SetFocusRegion::aroundBox(new Vec3(-1.0, -1.0, 4.0), new Vec3(1.0, 1.0, 6.0), $view, $projection);
+        self::assertSame([0.0, 0.0, 1.0, 1.0], [$behind->left, $behind->top, $behind->right, $behind->bottom]);
+        self::assertFalse(SetFocusRegion::clear()->active);
+        self::assertFalse((new AccessibilitySettings(focusDim: 1.0))->changesImage(), 'focus dim without a region runs no pass');
+        self::assertTrue((new AccessibilitySettings(focusDim: 1.0))->changesImage(true));
     }
 
     public function testShaderUniformsFollowTheSettings(): void

@@ -507,6 +507,8 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
     private ?ComfortMotion $comfortMotion = null;
     /** Floor of the comfort vignette from SetComfortVignette, sticky. */
     private float $comfortMinimum = 0.0;
+    /** Focus region for the focus dim (SetFocusRegion), sticky; null = none. */
+    private ?Command\SetFocusRegion $focusRegion = null;
     /** The MRT target whose motion / depth / reactive textures temporalInputs holds. */
     private ?VioRenderTarget $temporalInputsOf = null;
     /** @var array{0: VioTexture, 1: VioTexture, 2: VioTexture}|null */
@@ -1428,7 +1430,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             || $this->settings->bloom
             || $this->temporalRequested()
             || $this->fullscreenPassWanted()
-            || $this->settings->accessibility->changesImage()
+            || $this->settings->accessibility->changesImage($this->focusRegion !== null)
             || ProcModeShaderRegistry::sceneDepthRequired();
     }
 
@@ -1476,12 +1478,18 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             $dt = $this->accessibilityTime !== null ? $this->globalTime - $this->accessibilityTime : 0.0;
             $this->accessibilityTime = $this->globalTime;
             $uniforms = VioAccessibilityPass::uniforms($a11y);
-            $uniforms['u_aspect'] = $w / $h;
+            $uniforms['u_aspect'] = (float) $w / $h;
             $uniforms['u_vignette'] = 0.0;
             if ($a11y->comfortVignette > 0.0 && $this->currentViewMatrix !== null) {
                 $this->comfortMotion ??= new ComfortMotion();
                 $uniforms['u_vignette'] = $a11y->comfortVignette * $this->comfortMotion->update($this->currentViewMatrix, $dt, $this->comfortMinimum, $this->cameraCutThisFrame);
             }
+            $focus = $this->focusRegion;
+            $uniforms['u_focus_dim'] = $focus !== null ? $a11y->focusDim : 0.0;
+            $uniforms['u_focus_min'] = $focus !== null ? [$focus->left, $focus->top] : [0.0, 0.0];
+            $uniforms['u_focus_max'] = $focus !== null ? [$focus->right, $focus->bottom] : [1.0, 1.0];
+            $uniforms['u_focus_feather'] = $focus->feather ?? 0.04;
+            $uniforms['u_uv_top_down'] = 1.0;
             $image = $accessibility->apply($image, $w, $h, $quad, $uniforms, $a11y->needsLuminance(), $a11y->flashLimit, $dt) ?? $image;
             PerfProfiler::end();
             $this->gpuMark('post.a11y');
@@ -1604,7 +1612,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
      */
     private function accessibilityThisFrame(): ?VioAccessibilityPass
     {
-        if (!$this->settings->accessibility->changesImage() || $this->screenQuad === null) {
+        if (!$this->settings->accessibility->changesImage($this->focusRegion !== null) || $this->screenQuad === null) {
             $this->accessibilityTime = null;
             return null;
         }
@@ -3005,6 +3013,8 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
                 $this->shaderOverride = $cmd->shaderId;
             } elseif ($cmd instanceof Command\SetShaderParameter) {
                 $this->snippetParameters[$cmd->name] = $cmd->value;
+            } elseif ($cmd instanceof Command\SetFocusRegion) {
+                $this->focusRegion = $cmd->active ? $cmd : null;
             } elseif ($cmd instanceof Command\SetComfortVignette) {
                 $this->comfortMinimum = max(0.0, min(1.0, $cmd->minimum));
             } elseif ($cmd instanceof Command\SetShaderTexture) {

@@ -20,6 +20,7 @@ use PHPolygon\Rendering\Command\SetAmbientLight;
 use PHPolygon\Rendering\Command\SetCamera;
 use PHPolygon\Rendering\Command\SetComfortVignette;
 use PHPolygon\Rendering\Command\SetDirectionalLight;
+use PHPolygon\Rendering\Command\SetFocusRegion;
 use PHPolygon\Rendering\Command\SetShaderParameter;
 use PHPolygon\Rendering\Command\SetWind;
 use PHPolygon\Rendering\CubemapRegistry;
@@ -360,6 +361,33 @@ final class VioAccessibilityPassTest extends TestCase
         });
         self::assertLessThan(0.3 * $corner($plain), $corner($turn), 'turning closes the corners');
         fwrite(STDERR, sprintf("\n[a11y] comfort vignette 1: corner %.3f still, %.3f turning at 200 deg/s, %.3f with the game floor 1\n", $corner($calm), $corner($turn), $corner($lift)));
+    }
+
+    public function testFocusDimDarkensEverythingOutsideTheRegion(): void
+    {
+        $this->registerPattern();
+        $a = new AccessibilitySettings(focusDim: 0.8);
+        $plain = $this->image(self::settings());
+        self::assertSame(md5($plain), md5($this->image(self::settings($a))), 'no region, no pass');
+
+        // Focus on the top left quarter of the screen.
+        $focused = $this->image(self::settings($a), 3, static function (int $i, RenderCommandList $l): void {
+            $l->add(new SetFocusRegion(0.0, 0.0, 0.5, 0.5, 0.01));
+        });
+        $inside = self::pixel($focused, 12, 12);
+        $below = self::pixel($focused, 12, 52);
+        $right = self::pixel($focused, 52, 12);
+        fwrite(STDERR, sprintf("\n[a11y] focus dim 0.8: inside %.3f, below %.3f, right %.3f (red channel; plain %.3f / %.3f)\n", $inside[0], $below[0], $right[0], self::RED[0], self::GREEN[1]));
+        self::assertColour(self::RED, $inside, 'the focus region stays');
+        $dim = ColorVision::encode([0.2 * ColorVision::decode(self::RED)[0], 0.2 * ColorVision::decode(self::RED)[1], 0.2 * ColorVision::decode(self::RED)[2]]);
+        self::assertColour($dim, $below, 'below the region: dimmed to a fifth of the light');
+        self::assertLessThan(self::GREEN[1] - 0.2, $right[1], 'right of the region: dimmed');
+
+        // Cleared: the next frame is the plain one again.
+        $cleared = $this->image(self::settings($a), 3, static function (int $i, RenderCommandList $l): void {
+            $l->add(SetFocusRegion::clear());
+        });
+        self::assertSame(md5($plain), md5($cleared));
     }
 
     public function testStrengthBlendsTheCorrection(): void

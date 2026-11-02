@@ -51,6 +51,11 @@ final class AccessibilitySettings
          * moves fast (ComfortMotion), or while the game asks for it (SetComfortVignette).
          */
         public readonly float $comfortVignette = 0.0,
+        /**
+         * 0 = off, 1 = black: how far the 3D image outside the game's focus region
+         * (SetFocusRegion: a terminal, a dialogue) is dimmed. Costs nothing while no region is set.
+         */
+        public readonly float $focusDim = 0.0,
     ) {
     }
 
@@ -60,15 +65,19 @@ final class AccessibilitySettings
         return $this->flashLimit || $this->nightBoost > 0.0;
     }
 
-    /** Whether any option changes the 3D image, i.e. the renderer has to run the accessibility pass. */
-    public function changesImage(): bool
+    /**
+     * Whether any option changes the 3D image, i.e. the renderer has to run the accessibility
+     * pass. The focus dim only counts while the game has set a focus region.
+     */
+    public function changesImage(bool $focusRegion = false): bool
     {
         return $this->colorVision !== ColorVisionMode::Off
             || $this->worldSaturation < 1.0
             || $this->contrast > 0.0
             || $this->flashLimit
             || $this->nightBoost > 0.0
-            || $this->comfortVignette > 0.0;
+            || $this->comfortVignette > 0.0
+            || ($focusRegion && $this->focusDim > 0.0);
     }
 
     public function isDefault(): bool
@@ -87,6 +96,7 @@ final class AccessibilitySettings
         ?bool $flashLimit = null,
         ?float $nightBoost = null,
         ?float $comfortVignette = null,
+        ?float $focusDim = null,
     ): self {
         return new self(
             colorVision: $colorVision ?? $this->colorVision,
@@ -99,6 +109,7 @@ final class AccessibilitySettings
             flashLimit: $flashLimit ?? $this->flashLimit,
             nightBoost: self::unit($nightBoost ?? $this->nightBoost),
             comfortVignette: self::unit($comfortVignette ?? $this->comfortVignette),
+            focusDim: self::unit($focusDim ?? $this->focusDim),
         );
     }
 
@@ -116,6 +127,7 @@ final class AccessibilitySettings
             'flashLimit' => $this->flashLimit,
             'nightBoost' => $this->nightBoost,
             'comfortVignette' => $this->comfortVignette,
+            'focusDim' => $this->focusDim,
         ];
     }
 
@@ -140,6 +152,7 @@ final class AccessibilitySettings
             flashLimit: $bool('flashLimit', $d->flashLimit),
             nightBoost: $float('nightBoost', $d->nightBoost),
             comfortVignette: $float('comfortVignette', $d->comfortVignette),
+            focusDim: $float('focusDim', $d->focusDim),
         );
     }
 
