@@ -297,7 +297,7 @@ Rules that follow from it:
 **SDF trace pass (SDF-AO + soft sun shadow, `VioSdfAoTest`).** Runs only when all of these hold: the frame's
 Fieldtracing tier is `SdfOcclusion` or `SdfBounce` (`GraphicsSettings::$fieldtracing` or a `SetFieldtracing` in
 the list), the context has `VIO_FEATURE_TEXTURE_3D`, a `SetFieldtracingVolume` reached the renderer (the game bakes and
-sends it; the engine bakes nothing), the backend is gated in (Direct3D) and `PHPOLYGON_SDF_AO` is not `0`. Then it forces the
+sends it; the engine bakes nothing), the backend is gated in (every backend php-vio transpiles to, see `screenSpaceEffectsSupported()`; not OpenGL) and `PHPOLYGON_SDF_AO` is not `0`. Then it forces the
 G-buffer, writes R = AO and G = sun shadow at full resolution, blurs them and marks `sdfao`; otherwise none of it exists
 and the frame is the probes-only frame byte for byte. No `sdfao` mark in a profile therefore means one of the
 conditions failed, usually the missing volume. `BoxSdf` takes the size first, then the centre.
