@@ -56,7 +56,6 @@ final class VioFxaaPass
         ?VioTexture $bloomTexture = null,
         float $bloomIntensity = 0.0,
         ?array $post = null,
-        bool $bindBloomSlot = false,
     ): void {
         if (!$this->initialised) {
             $this->initialise();
@@ -80,14 +79,13 @@ final class VioFxaaPass
             vio_set_uniform($this->ctx, 'u_bloom', 1);
             vio_set_uniform($this->ctx, 'u_bloom_intensity', $bloomIntensity);
         } else {
-            // Without this u_bloom shares u_color_texture's slot, and on D3D12 one
-            // of the two registers then holds a stale view (seen on WARP). Only
-            // the fullscreen pass chain asks for it, so that a frame without one
-            // stays the frame it was.
-            if ($bindBloomSlot) {
-                vio_bind_texture($this->ctx, $inputTexture, 1);
-                vio_set_uniform($this->ctx, 'u_bloom', 1);
-            }
+            // u_bloom is never sampled at intensity 0, but its slot must still be
+            // named and bound: left unnamed it shares u_color_texture's slot, and
+            // on D3D12 (hardware and WARP), Vulkan and Metal the colour texture
+            // then reads a stale view - the frame lost its lighting. The input is
+            // a valid stand-in that costs no extra texture.
+            vio_bind_texture($this->ctx, $inputTexture, 1);
+            vio_set_uniform($this->ctx, 'u_bloom', 1);
             vio_set_uniform($this->ctx, 'u_bloom_intensity', 0.0);
         }
 
