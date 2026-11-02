@@ -3091,7 +3091,9 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         // reordering cannot change the image.
         $opaque = OpaqueDrawOrder::sort($commands, $this->motionThisFrame);
         foreach ($opaque as [$materialId, , $cmd, $material]) {
-            $this->selectVariant($material, $materialId);
+            if ($this->variantsThisFrame) {
+                $this->selectVariant($material, $materialId);
+            }
             if ($cmd instanceof DrawMesh) {
                 $this->drawMeshCommand($cmd->meshId, $material, $cmd->modelMatrix, $cmd->materialId, $cmd->excludeFromGbuffer, $cmd->prevModelMatrix, $cmd->params);
             } else {
@@ -3141,7 +3143,9 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             if ($material === null || $material->alpha >= 1.0) {
                 continue;
             }
-            $this->selectVariant($material, $cmd->materialId);
+            if ($this->variantsThisFrame) {
+                $this->selectVariant($material, $cmd->materialId);
+            }
             if ($waterToGbuffer) {
                 $pass = $this->isReflectiveTransparent($cmd->materialId) ? 'transparent_water' : 'transparent';
                 if ($pass !== $transparentPass) {
@@ -3531,13 +3535,10 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
      * own sticky cbuffer, so it takes the frame uniforms the first time a frame uses
      * it. Its textures are bound at every switch: a program with other samplers has
      * other registers, and php-vio's Vulkan path binds by register.
-     * Costs one bool test per draw on a frame without variants.
+     * Callers test $variantsThisFrame first: a frame without variants pays no call.
      */
     private function selectVariant(Material $material, string $materialId): void
     {
-        if (!$this->variantsThisFrame) {
-            return;
-        }
         $variant = $material->grass
             ? ProcModeShaderRegistry::BASE_VARIANT
             : ProcModeShaderRegistry::variantOf(ProcModeRegistry::resolve($materialId));
