@@ -9,6 +9,7 @@ use PHPolygon\Event\EventDispatcher;
 use PHPolygon\Event\GraphicsSettingsChanged;
 use PHPolygon\Event\TargetFpsChanged;
 use PHPolygon\Rendering\Effect2D\EffectRenderer2DInterface;
+use PHPolygon\Rendering\Effects\EffectRegistry;
 use PHPolygon\Rendering\Quality\BenchmarkResult;
 use PHPolygon\Rendering\Quality\GraphicsAutoTuner;
 use PHPolygon\Rendering\Quality\QualityMode;
@@ -182,6 +183,8 @@ class GraphicsSettingsManager
      */
     public function applyToRenderer(): void
     {
+        $accessibility = $this->settings->accessibility;
+        EffectRegistry::setReducedMotion($accessibility->reducedMotion, $accessibility->motionScale);
         $r3d = $this->engine?->renderer3D;
         if ($r3d !== null) {
             $r3d->applySettings($this->settings);

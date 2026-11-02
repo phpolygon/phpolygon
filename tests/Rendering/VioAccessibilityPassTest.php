@@ -19,13 +19,22 @@ use PHPolygon\Rendering\Command\DrawMesh;
 use PHPolygon\Rendering\Command\SetAmbientLight;
 use PHPolygon\Rendering\Command\SetCamera;
 use PHPolygon\Rendering\Command\SetDirectionalLight;
+use PHPolygon\Rendering\Command\SetWind;
 use PHPolygon\Rendering\CubemapRegistry;
+use PHPolygon\Rendering\Effects\EffectDefinition;
+use PHPolygon\Rendering\Effects\EffectFallback;
+use PHPolygon\Rendering\Effects\EffectRegistry;
+use PHPolygon\Rendering\Effects\EffectTier;
+use PHPolygon\Rendering\Effects\FlashClass;
+use PHPolygon\Rendering\Effects\ReducedMotion;
 use PHPolygon\Rendering\GraphicsSettings;
 use PHPolygon\Rendering\Material;
 use PHPolygon\Rendering\MaterialRegistry;
 use PHPolygon\Rendering\PostProcess\FullscreenPass;
 use PHPolygon\Rendering\PostProcess\FullscreenPassRegistry;
 use PHPolygon\Rendering\PostProcess\PostStage;
+use PHPolygon\Rendering\ProcModeRegistry;
+use PHPolygon\Rendering\ProcModeShaderRegistry;
 use PHPolygon\Rendering\Quality\AntiAliasing;
 use PHPolygon\Rendering\Quality\ShadowQuality;
 use PHPolygon\Rendering\RenderCommandList;
@@ -71,6 +80,9 @@ final class VioAccessibilityPassTest extends TestCase
     protected function tearDown(): void
     {
         FullscreenPassRegistry::clear();
+        EffectRegistry::clear();
+        ProcModeRegistry::clear();
+        ProcModeShaderRegistry::clear();
         MaterialRegistry::clear();
         MeshRegistry::clear();
         foreach ((array) glob($this->dir . '/*') as $file) {
@@ -103,13 +115,17 @@ final class VioAccessibilityPassTest extends TestCase
         FullscreenPassRegistry::register(new FullscreenPass('pattern', PostStage::Final, $path));
     }
 
-    private function image(GraphicsSettings $settings, int $frames = 3): string
+    /** @param (\Closure(int, RenderCommandList, VioRenderer3D): void)|null $frame adds commands or sets the clock per frame */
+    private function image(GraphicsSettings $settings, int $frames = 3, ?\Closure $frame = null): string
     {
         self::assertNotNull($this->ctx);
         self::assertNotNull($this->renderer);
         $this->renderer->applySettings($settings);
-        $list = self::scene();
         for ($i = 0; $i < $frames; $i++) {
+            $list = self::scene();
+            if ($frame !== null) {
+                $frame($i, $list, $this->renderer);
+            }
             vio_begin($this->ctx);
             $this->renderer->beginFrame();
             $this->renderer->clear(new Color(0.0, 0.0, 0.0, 1.0));
@@ -242,5 +258,79 @@ final class VioAccessibilityPassTest extends TestCase
         $mode = ColorVisionMode::Protanopia;
         [$left] = self::halves($this->image(self::settings(new AccessibilitySettings(colorVision: $mode, colorVisionStrength: 0.5))));
         self::assertColour(ColorVision::encode(ColorVision::correct($mode, ColorVision::decode(self::RED), 0.5)), $left, 'half strength');
+    }
+
+    public function testReducedMotionHoldsTheTimeOfRegisteredPassesAndVariants(): void
+    {
+        $entry = static fn (string $name, ReducedMotion $m): EffectDefinition => new EffectDefinition($name, EffectTier::Low, null, EffectFallback::Same, EffectFallback::Off, $m, FlashClass::None);
+
+        // A Final pass that shows fract(u_time / 10) as grey.
+        $path = "{$this->dir}/clock.frag.glsl";
+        file_put_contents($path, "#version 410 core\nin vec2 v_uv;\nuniform sampler2D u_source;\nuniform float u_time;\nout vec4 frag_color;\nvoid main() {\n"
+            . "    frag_color = vec4(texture(u_source, v_uv).rgb * 0.0 + vec3(fract(u_time * 0.1)), 1.0);\n}\n");
+        FullscreenPassRegistry::register(new FullscreenPass('clock', PostStage::Final, $path));
+        $at = static fn (float $t): \Closure => static function (int $i, RenderCommandList $l, VioRenderer3D $r) use ($t): void {
+            $r->setAnimationTime($t);
+        };
+        $grey = fn (float $t): float => self::pixel($this->image(self::settings(), 3, $at($t)), 8, 8)[0];
+
+        self::assertEqualsWithDelta(0.3, $grey(3.0), 2 / 255, 'engine time without an entry');
+        EffectRegistry::register($entry('clock', ReducedMotion::Frozen));
+        self::assertEqualsWithDelta(0.3, $grey(3.0), 2 / 255, 'engine time while reduced motion is off');
+        EffectRegistry::setReducedMotion(true, 0.5);
+        self::assertEqualsWithDelta(0.0, $grey(3.0), 2 / 255, 'Frozen: held');
+        EffectRegistry::clear();
+        EffectRegistry::register($entry('clock', ReducedMotion::Reduced));
+        EffectRegistry::setReducedMotion(true, 0.5);
+        self::assertEqualsWithDelta(0.15, $grey(3.0), 2 / 255, 'Reduced: half speed');
+
+        // Mesh programs: a variant follows its entry, the base program keeps running. The
+        // fragment stage of the mesh shader does not see u_time on every backend, so the
+        // clock is read from vertex animation: cloth banners sway with u_time.
+        FullscreenPassRegistry::clear();
+        MeshRegistry::register('banner', BoxMesh::generate(0.5, 2.4, 0.05));
+        MaterialRegistry::register('banner_base', new Material(albedo: new Color(0.8, 0.8, 0.8), cloth: true, clothStrength: 0.3));
+        MaterialRegistry::register('banner_variant', new Material(albedo: new Color(0.8, 0.8, 0.8), cloth: true, clothStrength: 0.3));
+        ProcModeRegistry::map('banner_base', 3);
+        ProcModeRegistry::map('banner_variant', 5);
+        ProcModeShaderRegistry::registerGlsl(3, '', "    if (u_proc_mode == 3) {\n        frag_color = outputColor(vec3(1.0), alpha);\n        return;\n    } else");
+        ProcModeShaderRegistry::registerGlsl(5, '', "    if (u_proc_mode == 5) {\n        frag_color = outputColor(vec3(1.0), alpha);\n        return;\n    } else");
+        ProcModeShaderRegistry::defineVariant('sway', [5]);
+        EffectRegistry::clear();
+        EffectRegistry::register($entry('sway', ReducedMotion::Frozen));
+        self::assertNotNull($this->ctx);
+        // The mesh programs take their snippets when the renderer is built.
+        $this->renderer = new VioRenderer3D($this->ctx, self::SIZE, self::SIZE);
+        $draw = static fn (float $t): \Closure => static function (int $i, RenderCommandList $l, VioRenderer3D $r) use ($t): void {
+            $r->setAnimationTime($t);
+            $l->add(new SetWind(new Vec3(1.0, 0.0, 0.0), 1.0));
+            $l->add(new DrawMesh('banner', 'banner_base', Mat4::translation(-0.9, 0.0, 0.5)));
+            $l->add(new DrawMesh('banner', 'banner_variant', Mat4::translation(0.9, 0.0, 0.5)));
+        };
+        // Centre column of the white pixels of a half, in a row near the free (bottom) end.
+        $centre = static function (string $rgba, bool $left): float {
+            [$sum, $n] = [0.0, 0];
+            for ($x = $left ? 0 : self::SIZE >> 1; $x < ($left ? self::SIZE >> 1 : self::SIZE); $x++) {
+                if (self::pixel($rgba, $x, 52)[0] > 0.9) {
+                    [$sum, $n] = [$sum + $x, $n + 1];
+                }
+            }
+            return $n > 0 ? $sum / $n : -1.0;
+        };
+        foreach ([false, true] as $reduced) {
+            EffectRegistry::setReducedMotion($reduced, 0.5);
+            $early = $this->image(self::settings(), 3, $draw(2.0));
+            $late = $this->image(self::settings(), 3, $draw(5.0));
+            $base = [$centre($early, true), $centre($late, true)];
+            $variant = [$centre($early, false), $centre($late, false)];
+            self::assertGreaterThan(0.0, min($base[0], $variant[0]), 'both banners are on screen');
+            self::assertNotEqualsWithDelta($base[0], $base[1], 0.75, 'the base program keeps the engine time');
+            if ($reduced) {
+                self::assertEqualsWithDelta($variant[0], $variant[1], 0.01, 'the Frozen variant stands still');
+            } else {
+                self::assertNotEqualsWithDelta($variant[0], $variant[1], 0.75, 'the variant runs while reduced motion is off');
+            }
+            fwrite(STDERR, sprintf("\n[a11y] reduced motion %s: base banner at column %.1f -> %.1f, variant %.1f -> %.1f (t 2 -> 5)\n", $reduced ? 'on' : 'off', ...[...$base, ...$variant]));
+        }
     }
 }

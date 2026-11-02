@@ -24,6 +24,7 @@ use PHPolygon\Rendering\Command\SetSky;
 use PHPolygon\Rendering\Command\SetSkybox;
 use PHPolygon\Rendering\Command\SetWaveAnimation;
 use PHPolygon\Rendering\Command\SetWind;
+use PHPolygon\Rendering\Effects\EffectRegistry;
 use PHPolygon\Rendering\PostProcess\FullscreenPass;
 use PHPolygon\Rendering\PostProcess\FullscreenPassRegistry;
 use PHPolygon\Rendering\PostProcess\PostStage;
@@ -926,7 +927,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         $this->setUniforms([
             'u_curr_view_proj' => $frame->jitter->unjitteredViewProjection->toArray(),
             'u_prev_view_proj' => $frame->prevViewProjection->toArray(),
-            'u_time_prev'      => $frame->prevTime,
+            'u_time_prev'      => $this->programTime($frame->prevTime),
             'u_has_prev'       => 0,
             'u_motion_flip_y'  => $this->conventions()->flipRenderTargetClipY() ? -1.0 : 1.0,
             // FSR / DLSS guidance: log2(render / display) - 1.
@@ -1716,7 +1717,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             vio_bind_texture($this->ctx, $image, 0);
             vio_set_uniform($this->ctx, 'u_source', 0);
             vio_set_uniform($this->ctx, 'u_resolution', [(float) $w, (float) $h]);
-            vio_set_uniform($this->ctx, 'u_time', $this->globalTime);
+            vio_set_uniform($this->ctx, 'u_time', EffectRegistry::effectTime(EffectRegistry::get($pass->name), $this->globalTime));
             if ($pass->depth) {
                 vio_bind_texture($this->ctx, $this->sceneDepthTexture() ?? $image, 1);
                 vio_set_uniform($this->ctx, 'u_scene_depth_raw', 1);
@@ -6766,6 +6767,15 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
     // ----------------------------------------------------------------
 
     /**
+     * u_time of the bound mesh program: a shader variant follows the reduced-motion
+     * entry under its name, the base program (no name) keeps the engine time.
+     */
+    private function programTime(float $time): float
+    {
+        return $this->sceneVariant === ProcModeShaderRegistry::BASE_VARIANT ? $time : EffectRegistry::effectTime(EffectRegistry::get($this->sceneVariant), $time);
+    }
+
+    /**
      * @param array{ambientColor: Color, ambientIntensity: float, dirLights: list<SetDirectionalLight>, pointLights: list<AddPointLight>, spotLights: list<AddSpotLight>, fogColor: Color, fogNear: float, fogFar: float, waveEnabled: bool, waveAmplitude: float, waveFrequency: float, wavePhase: float, ftMode: \PHPolygon\Rendering\Quality\FieldtracingMode, ftIntensity: float, ftAoRadius: float} $state
      */
     private function uploadFrameUniforms(array $state): void
@@ -6896,7 +6906,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         vio_set_uniform($this->ctx, 'u_fog_near', $state['fogNear']);
         vio_set_uniform($this->ctx, 'u_fog_far', $state['fogFar']);
 
-        vio_set_uniform($this->ctx, 'u_time', $this->globalTime);
+        vio_set_uniform($this->ctx, 'u_time', $this->programTime($this->globalTime));
         vio_set_uniform($this->ctx, 'u_ao_strength', $this->settings->ambientOcclusion->strength());
 
         // Fieldtracing (SDF GI) — float mode (int-in-UBO is unreliable across

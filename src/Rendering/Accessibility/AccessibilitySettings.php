@@ -26,6 +26,14 @@ final class AccessibilitySettings
         public readonly float $worldSaturation = 1.0,
         /** 0 = off, 1 = strongest: steeper tone curve plus dark outlines along luminance edges. */
         public readonly float $contrast = 0.0,
+        /**
+         * Hold or slow the shader time of effects by their register entry (ReducedMotion::
+         * Frozen / Off hold it, Reduced runs at $motionScale). Changes no pixel by itself and
+         * leaves every effect without an entry, and the base mesh program, alone.
+         */
+        public readonly bool $reducedMotion = false,
+        /** 0..1, speed of ReducedMotion::Reduced effects while $reducedMotion is on. */
+        public readonly float $motionScale = 0.25,
     ) {
     }
 
@@ -48,6 +56,8 @@ final class AccessibilitySettings
         ?bool $colorVisionSimulate = null,
         ?float $worldSaturation = null,
         ?float $contrast = null,
+        ?bool $reducedMotion = null,
+        ?float $motionScale = null,
     ): self {
         return new self(
             colorVision: $colorVision ?? $this->colorVision,
@@ -55,6 +65,8 @@ final class AccessibilitySettings
             colorVisionSimulate: $colorVisionSimulate ?? $this->colorVisionSimulate,
             worldSaturation: self::unit($worldSaturation ?? $this->worldSaturation),
             contrast: self::unit($contrast ?? $this->contrast),
+            reducedMotion: $reducedMotion ?? $this->reducedMotion,
+            motionScale: self::unit($motionScale ?? $this->motionScale),
         );
     }
 
@@ -67,6 +79,8 @@ final class AccessibilitySettings
             'colorVisionSimulate' => $this->colorVisionSimulate,
             'worldSaturation' => $this->worldSaturation,
             'contrast' => $this->contrast,
+            'reducedMotion' => $this->reducedMotion,
+            'motionScale' => $this->motionScale,
         ];
     }
 
@@ -86,6 +100,8 @@ final class AccessibilitySettings
             colorVisionSimulate: $bool('colorVisionSimulate', $d->colorVisionSimulate),
             worldSaturation: $float('worldSaturation', $d->worldSaturation),
             contrast: $float('contrast', $d->contrast),
+            reducedMotion: $bool('reducedMotion', $d->reducedMotion),
+            motionScale: $float('motionScale', $d->motionScale),
         );
     }
 

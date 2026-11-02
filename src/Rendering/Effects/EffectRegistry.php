@@ -98,10 +98,12 @@ final class EffectRegistry
     }
 
     /**
-     * The player's reduced-motion choice, set by the game from its own settings. The 2D
-     * effects follow it through their {@see ReducedMotion} entry: `Frozen` holds `u_time`
-     * at 0, `Reduced` hands `$motionScale` to the shader as `u_motion`, `Off` draws the
-     * fallback instead.
+     * The player's reduced-motion choice. `GraphicsSettingsManager` sets it from
+     * `AccessibilitySettings::$reducedMotion` whenever it applies settings; call it
+     * directly only without a manager (tools, tests). The 2D effects follow it through
+     * their {@see ReducedMotion} entry: `Frozen` holds `u_time` at 0, `Reduced` hands
+     * `$motionScale` to the shader as `u_motion`, `Off` draws the fallback instead. The
+     * 3D renderer reads {@see effectTime()} for its fullscreen passes and shader variants.
      */
     public static function setReducedMotion(bool $reduced, float $motionScale = 0.0): void
     {
@@ -124,6 +126,24 @@ final class EffectRegistry
     public static function timeFrozen(?EffectDefinition $effect): bool
     {
         return self::$reducedMotion && $effect?->reducedMotion === ReducedMotion::Frozen;
+    }
+
+    /**
+     * Shader time (`u_time`) of an effect at engine time $time: 0 while held still (a 3D
+     * effect cannot be taken out, so `Off` holds it too), scaled for a `Reduced` effect,
+     * $time itself otherwise and for a name without an entry. The 3D renderer gives every
+     * fullscreen pass and shader variant its own, by the name of its entry; the base mesh
+     * program has no name, so water, plants and every look in it keep the engine time.
+     */
+    public static function effectTime(?EffectDefinition $effect, float $time): float
+    {
+        if ($effect === null || !self::$reducedMotion) {
+            return $time;
+        }
+        if (self::timeFrozen($effect) || self::motionSwitchesOff($effect)) {
+            return 0.0;
+        }
+        return $effect->reducedMotion === ReducedMotion::Reduced ? $time * self::$motionScale : $time;
     }
 
     /** Whether reduced motion takes an effect out (its fallback draws instead). */

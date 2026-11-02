@@ -46,6 +46,25 @@ final class EffectRegistryTest extends TestCase
         );
     }
 
+    public function testReducedMotionGatesTheShaderTimeByEntry(): void
+    {
+        $make = static fn (string $name, ReducedMotion $m): EffectDefinition => new EffectDefinition($name, EffectTier::Low, null, EffectFallback::Same, EffectFallback::Off, $m, FlashClass::None);
+        $frozen = $make('scan', ReducedMotion::Frozen);
+        $reduced = $make('water', ReducedMotion::Reduced);
+        $static = $make('logo', ReducedMotion::Static);
+        $off = $make('glitch', ReducedMotion::Off);
+
+        foreach ([$frozen, $reduced, $static, $off, null] as $e) {
+            self::assertSame(12.5, EffectRegistry::effectTime($e, 12.5), 'without reduced motion every effect runs on engine time');
+        }
+        EffectRegistry::setReducedMotion(true, 0.25);
+        self::assertSame(0.0, EffectRegistry::effectTime($frozen, 12.5));
+        self::assertSame(0.0, EffectRegistry::effectTime($off, 12.5), 'a 3D effect cannot be taken out, it is held');
+        self::assertSame(3.125, EffectRegistry::effectTime($reduced, 12.5));
+        self::assertSame(12.5, EffectRegistry::effectTime($static, 12.5));
+        self::assertSame(12.5, EffectRegistry::effectTime(null, 12.5), 'no entry: untouched');
+    }
+
     public function testATierHoldsEverythingFromItDown(): void
     {
         EffectRegistry::register(self::effect('cheap', EffectTier::Low, 0.1));

@@ -8,7 +8,14 @@ use PHPUnit\Framework\TestCase;
 use PHPolygon\Rendering\Accessibility\AccessibilitySettings;
 use PHPolygon\Rendering\Accessibility\ColorVision;
 use PHPolygon\Rendering\Accessibility\ColorVisionMode;
+use PHPolygon\Rendering\Effects\EffectDefinition;
+use PHPolygon\Rendering\Effects\EffectFallback;
+use PHPolygon\Rendering\Effects\EffectRegistry;
+use PHPolygon\Rendering\Effects\EffectTier;
+use PHPolygon\Rendering\Effects\FlashClass;
+use PHPolygon\Rendering\Effects\ReducedMotion;
 use PHPolygon\Rendering\GraphicsSettings;
+use PHPolygon\Rendering\GraphicsSettingsManager;
 use PHPolygon\Rendering\PostProcess\VioAccessibilityPass;
 
 final class AccessibilitySettingsTest extends TestCase
@@ -48,6 +55,27 @@ final class AccessibilitySettingsTest extends TestCase
         self::assertTrue(AccessibilitySettings::fromJson('nonsense')->isDefault());
         self::assertSame(1.0, AccessibilitySettings::fromJson(['colorVisionStrength' => 7])->colorVisionStrength, 'clamped to 0..1');
         self::assertSame(0.0, (new AccessibilitySettings())->with(colorVisionStrength: -2.0)->colorVisionStrength);
+    }
+
+    public function testTheManagerHandsReducedMotionToTheEffectRegister(): void
+    {
+        $path = sys_get_temp_dir() . '/phpolygon-a11y-settings-' . getmypid() . '.json';
+        @unlink($path);
+        try {
+            $manager = new GraphicsSettingsManager($path);
+            $manager->update(fn (GraphicsSettings $s): GraphicsSettings => $s->with(accessibility: $s->accessibility->with(reducedMotion: true, motionScale: 0.4)));
+            self::assertTrue(EffectRegistry::reducedMotion());
+            $reduced = new EffectDefinition('fx', EffectTier::Low, null, EffectFallback::Same, EffectFallback::Off, ReducedMotion::Reduced, FlashClass::None);
+            self::assertEqualsWithDelta(0.4, EffectRegistry::motionScale($reduced), 1e-9);
+
+            $reloaded = new GraphicsSettingsManager($path);
+            self::assertTrue($reloaded->settings()->accessibility->reducedMotion, 'persisted');
+            $reloaded->update(fn (GraphicsSettings $s): GraphicsSettings => $s->with(accessibility: $s->accessibility->with(reducedMotion: false)));
+            self::assertFalse(EffectRegistry::reducedMotion());
+        } finally {
+            @unlink($path);
+            EffectRegistry::clear();
+        }
     }
 
     public function testShaderUniformsFollowTheSettings(): void
