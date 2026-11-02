@@ -111,6 +111,7 @@ final class VioFullscreenPassTest extends TestCase
         for ($i = 0; $i < 3; $i++) {
             vio_begin($this->ctx);
             $this->renderer->beginFrame();
+            $this->renderer->clear(new Color(0.0, 0.0, 0.0, 1.0));
             $this->renderer->render($list);
             $this->renderer->endFrame();
             vio_end($this->ctx);
@@ -180,9 +181,11 @@ final class VioFullscreenPassTest extends TestCase
         self::assertNotNull($this->renderer);
         self::assertGreaterThan(200, $this->frame()[1], 'the wall is nearer than the far plane');
 
-        $empty = new RenderCommandList();
-        $empty->add(new SetCamera(Mat4::translation(0.0, 0.0, -3.0), Mat4::perspective(deg2rad(60.0), 1.0, 0.1, 100.0)));
-        self::assertLessThan(10, $this->frame($empty)[1], 'nothing drawn: far plane');
+        // A draw off to the side: a frame without any draw clears nothing on Metal.
+        $open = new RenderCommandList();
+        $open->add(new SetCamera(Mat4::translation(0.0, 0.0, -3.0), Mat4::perspective(deg2rad(60.0), 1.0, 0.1, 100.0)));
+        $open->add(new DrawMesh('box', 'grey', Mat4::translation(1.4, 1.4, 0.0)));
+        self::assertLessThan(10, $this->frame($open)[1], 'nothing at the centre: far plane');
     }
 
     public function testGatesTakeAPassOutOfTheChain(): void

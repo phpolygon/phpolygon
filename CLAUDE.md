@@ -436,8 +436,10 @@ without a definition the program is the v0.92.0 shader (the test pins its hash w
   A variant that fails is logged, and its materials draw as standard PBR.
 - Each program needs its forward, MRT and motion twin plus storage twins; cache keys and shader ids carry `@<variant>`.
   `selectVariant()` switches per material, the first draw of a program in a frame uploads its frame uniforms
-  (cbuffers are per program), textures stay bound. `OpaqueDrawOrder` groups by program, the transparent pass keeps its
-  order and pays one bind per change. Without variants it is one bool test per draw.
+  (cbuffers are per program), and shadow, AO and snippet textures are bound at every switch: `vio_bind_texture` resolves a slot
+  through the bound program's sampler map, which knows a unit once `vio_set_uniform(name, slot)` ran, so name before bind. Environment
+  and probe textures are bound with the frame uniforms, once per program and frame. `OpaqueDrawOrder` groups by program, the
+  transparent pass keeps its order and pays that per change. Without variants it is one bool test per draw.
 - The GL renderer has one program: `spliceGlsl()` without a variant takes every mode.
 - The branch ladder is assembled per program (`glslBranches()`), so modes can be left out or moved: the first arm
   opens with `if`, others with `} else if`, the `} else` of the mode-0 arm lands at the end wherever a snippet carried
@@ -493,7 +495,8 @@ marks `scene_depth`; opaque draws see the copy as absent. Snippets in the listed
 `sceneDepthDelta()` (how far the opaque surface lies behind the fragment, world units), both forward and MRT, particles included.
 A frame without a readable depth (MSAA, no `VIO_FEATURE_RENDER_TARGET_DEPTH_SAMPLE`) answers 60000, i.e. no soft edge: snippets
 need no branch of their own. A consumer forces the offscreen path. It takes one sampler of the program's budget, slot 11. Vio family
-only. Without `requireSceneDepth()` no copy, no target, no sampler, no uniform. `depthZeroToOne` plays no part: stored depth is (ndcZ + 1) / 2 on every backend.
+only. Without `requireSceneDepth()` no copy, no target, no sampler, no uniform. Stored depth is (ndcZ + 1) / 2, on Metal ndcZ: php-vio remaps clip z on D3D and Vulkan
+only (measured on an M5, php-vio 2.35.0). `u_scene_depth_raw` of a fullscreen pass is that stored value.
 
 **Parameters without new material ids** (`InstanceParamsTest`, `VioInstanceParamsRenderTest`).
 - Per material: `ProcModeShaderRegistry::declareMaterialParameter('u_fx_wear', 'float', 0.0)`, values in `Material::$params` by uniform

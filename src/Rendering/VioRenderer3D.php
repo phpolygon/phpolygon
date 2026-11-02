@@ -1624,8 +1624,8 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
                     $texture = $this->whiteTexture;
                 }
                 if ($texture !== null) {
-                    vio_bind_texture($this->ctx, $texture, $slot);
                     vio_set_uniform($this->ctx, $name, $slot);
+                    vio_bind_texture($this->ctx, $texture, $slot);
                 }
             }
             if ($this->snippetParameters !== []) {
@@ -1706,6 +1706,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         vio_bind_texture($this->ctx, $depth, 0);
         vio_set_uniform($this->ctx, 'u_depth', 0);
         vio_set_uniform($this->ctx, 'u_proj', [$p[10], $p[14]]);
+        vio_set_uniform($this->ctx, 'u_depth_is_ndc', $this->conventions()->isMetal() ? 1.0 : 0.0);
         vio_draw($this->ctx, $quad);
         vio_unbind_render_target($this->ctx);
         if ($this->mrtThisFrame && $this->mrtTarget !== null) {
@@ -3528,7 +3529,8 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
     /**
      * Switch the scene pass to the program $materialId draws with. A program has its
      * own sticky cbuffer, so it takes the frame uniforms the first time a frame uses
-     * it; textures stay bound across pipelines, as the storage-instance path relies on.
+     * it. Its textures are bound at every switch: a program with other samplers has
+     * other registers, and php-vio's Vulkan path binds by register.
      * Costs one bool test per draw on a frame without variants.
      */
     private function selectVariant(Material $material, string $materialId): void
@@ -3550,12 +3552,14 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         }
         $this->sceneVariant = $variant;
         $this->bindPipeline($this->currentScenePass, cull: $this->currentSceneCull);
-        if (isset($this->variantUniformsUploaded[$variant]) || $this->sceneUniformInputs === null) {
+        if ($this->sceneUniformInputs === null) {
             return;
         }
-        $this->variantUniformsUploaded[$variant] = true;
         [$frameState, $hasShadowMap, $dirLights] = $this->sceneUniformInputs;
-        $this->uploadFrameUniforms($frameState);
+        if (!isset($this->variantUniformsUploaded[$variant])) {
+            $this->variantUniformsUploaded[$variant] = true;
+            $this->uploadFrameUniforms($frameState);
+        }
         $this->uploadShadowUniforms($hasShadowMap, $dirLights);
         $this->uploadSsaoUniforms();
         $this->uploadSdfAoUniforms();
@@ -6913,9 +6917,11 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
                 $this->ensureWhiteTexture();
                 $texture = $this->whiteTexture;
             }
+            // Name first: php-vio resolves the slot through the bound program's
+            // sampler map, which knows a unit once the uniform was set.
             if ($texture !== null) {
-                vio_bind_texture($this->ctx, $texture, $slot);
                 vio_set_uniform($this->ctx, $name, $slot);
+                vio_bind_texture($this->ctx, $texture, $slot);
             }
         }
     }
@@ -6935,8 +6941,8 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             $texture = $this->whiteTexture;
         }
         if ($texture !== null) {
-            vio_bind_texture($this->ctx, $texture, self::SCENE_DEPTH_SLOT);
             vio_set_uniform($this->ctx, 'u_scene_depth', self::SCENE_DEPTH_SLOT);
+            vio_bind_texture($this->ctx, $texture, self::SCENE_DEPTH_SLOT);
         }
         vio_set_uniform($this->ctx, 'u_scene_depth_ready', $this->sceneDepthCopied ? 1.0 : 0.0);
         $view = $this->currentViewMatrix?->toArray();
