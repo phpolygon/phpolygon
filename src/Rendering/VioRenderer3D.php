@@ -1065,12 +1065,33 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
     }
 
     /**
-     * Backends the real SSAO chain runs on. Vulkan and Metal keep the curvature AO
-     * surrogate for now: their SSAO streaks (Metal) and speckles (Vulkan) on wide flat
-     * surfaces far from the camera, where D3D12 is smooth. Add a backend here once its
-     * SSAO matches D3D12. PHPOLYGON_SSAO=1 runs it on every transpiling backend anyway.
+     * Backends the real SSAO chain runs on: every backend vio transpiles for. Vulkan and
+     * Metal joined once the SSAO pass filtered the G-buffer itself
+     * ({@see self::SSAO_SHADER_FILTER_BACKENDS}). PHPOLYGON_SSAO=1 runs it on every
+     * transpiling backend anyway, =0 nowhere.
      */
-    private const SSAO_BACKENDS = ['d3d11', 'd3d12'];
+    private const SSAO_BACKENDS = ['d3d11', 'd3d12', 'vulkan', 'metal'];
+
+    /**
+     * Backends whose SSAO pass filters the G-buffer in the shader (texelFetch, float
+     * weights) instead of through the sampler. Every tap of the pass lands between
+     * texels; Metal samples render-target textures NEAREST (streaks along the rows of a
+     * far, flat surface), the coarse weights of hardware bilinear filtering leave speckle
+     * there on Vulkan and D3D12 alike (measured on an RTX 2080). WARP filters precisely and
+     * never shows it. PHPOLYGON_SSAO_FILTER=0 restores the sampler (frames of v0.96.1 on
+     * Direct3D), =1 forces the shader filter on every backend.
+     */
+    private const SSAO_SHADER_FILTER_BACKENDS = ['d3d11', 'd3d12', 'vulkan', 'metal'];
+
+    /** Whether the SSAO pass filters the G-buffer in the shader on $backend. */
+    public static function ssaoFiltersInShader(string $backend): bool
+    {
+        $forced = getenv('PHPOLYGON_SSAO_FILTER');
+        if ($forced === '0' || $forced === '1') {
+            return $forced === '1';
+        }
+        return in_array($backend, self::SSAO_SHADER_FILTER_BACKENDS, true);
+    }
 
     /** Whether the real SSAO chain runs on $backend (a vio backend name). */
     public static function ssaoRunsOn(string $backend): bool
@@ -4671,6 +4692,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         vio_set_uniform($this->ctx, 'u_bias', 0.025);
         vio_set_uniform($this->ctx, 'u_intensity', $tier->ssaoIntensity());
         vio_set_uniform($this->ctx, 'u_power', $tier->ssaoPower());
+        vio_set_uniform($this->ctx, 'u_filter_in_shader', self::ssaoFiltersInShader($this->conventions()->name()) ? 1 : 0);
         vio_draw($this->ctx, $screenQuad);
         vio_unbind_render_target($this->ctx);
 

@@ -34,6 +34,7 @@ uniform float u_radius;       // sample radius in VIEW-space units (world metres
 uniform float u_bias;         // depth bias to suppress self-occlusion acne
 uniform float u_intensity;    // occlusion scale (tier-driven)
 uniform float u_power;        // contrast curve applied to the final AO
+uniform int   u_filter_in_shader; // 1: filter the G-buffer here (gbufferFiltered)
 
 out vec4 frag_color;
 
@@ -58,9 +59,37 @@ vec3 rotationNoise(vec2 uv) {
     return vec3(cos(a), sin(a), 0.0);
 }
 
+// The G-buffer bilinearly filtered at uv, weights in full float precision.
+// Every tap of this pass lands between texels: the centre of a half-res
+// pixel is the corner of four full-res texels, the kernel samples anywhere.
+// Hardware filtering decides there: a nearest sampler (Metal's render-target
+// textures) picks one row or the other per pixel row, and a hardware filter
+// weight (8 bits of subtexel precision are all the APIs ask) is coarse
+// against the depth step between two rows of a far, flat surface. Both put the reconstructed position off the surface by more than
+// the bias, which reads as streaks or speckle where nothing occludes.
+vec4 gbufferFiltered(vec2 uv) {
+    ivec2 size = textureSize(u_gbuffer, 0);
+    vec2 t = uv * vec2(size) - 0.5;
+    vec2 f = fract(t);
+    ivec2 i = ivec2(floor(t));
+    ivec2 last = size - 1;
+    vec4 a = texelFetch(u_gbuffer, clamp(i, ivec2(0), last), 0);
+    vec4 b = texelFetch(u_gbuffer, clamp(i + ivec2(1, 0), ivec2(0), last), 0);
+    vec4 c = texelFetch(u_gbuffer, clamp(i + ivec2(0, 1), ivec2(0), last), 0);
+    vec4 d = texelFetch(u_gbuffer, clamp(i + ivec2(1, 1), ivec2(0), last), 0);
+    return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+}
+
+vec4 sampleGbuffer(vec2 uv) {
+    if (u_filter_in_shader == 1) {
+        return gbufferFiltered(uv);
+    }
+    return texture(u_gbuffer, uv);
+}
+
 // Linear VIEW depth (world units) stored at UV, or 0 for sky/no-geometry.
 float sampleViewDepth(vec2 uv) {
-    return texture(u_gbuffer, uv).a;
+    return sampleGbuffer(uv).a;
 }
 
 // Decode the VIEW-space normal from the octahedral pair gbuffer.frag wrote into
@@ -86,7 +115,7 @@ vec3 viewPosFromUV(vec2 uv, float linearDepth) {
 }
 
 void main() {
-    vec4 g = texture(u_gbuffer, v_uv);
+    vec4 g = sampleGbuffer(v_uv);
     float depth = g.a;
 
     // Sky / no geometry: leave fully lit (alpha-cleared to 0 -> depth 0).

@@ -57,9 +57,8 @@ final class VioSceneDepthTest extends TestCase
         CubemapRegistry::clear();
         ProcModeRegistry::clear();
         ProcModeShaderRegistry::clear();
-        // SSAO is the G-buffer consumer that puts the MRT case on the MRT path. Vulkan and
-        // Metal do not run it by default yet (VioRenderer3D::ssaoRunsOn()); their depth on
-        // that path is tested here all the same.
+        // SSAO is the G-buffer consumer that puts the MRT case on the MRT path. PHPOLYGON_SSAO=1
+        // keeps it on whatever VioRenderer3D::ssaoRunsOn() says.
         putenv('PHPOLYGON_SSAO=1');
         MeshRegistry::register('wall', BoxMesh::generate(40.0, 40.0, 0.1));
         MeshRegistry::register('pane', BoxMesh::generate(1.0, 1.0, 0.01));

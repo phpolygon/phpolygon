@@ -271,13 +271,23 @@ The engine selects the backend automatically at startup:
 **Backends of the G-buffer effects** (`VioScreenSpaceParityTest`). SDF-AO, SSR and the FP16
 scene target they read (`GraphicsSettings::$hdr`) run on every backend vio transpiles for: D3D11/D3D12,
 Vulkan, Metal (`screenSpaceEffectsSupported()`). Up to v0.93.0 they were gated to Direct3D; Vulkan and Metal
-drew the wetness surrogate and an LDR target. SSAO runs on Direct3D only for now (`VioRenderer3D::SSAO_BACKENDS`,
-`ssaoRunsOn()`, pinned by `VioSsaoBackendsTest`): on Metal it streaks and on Vulkan it speckles on wide flat surfaces
-far from the camera, where D3D12 is smooth, so both keep the curvature AO surrogate. `PHPOLYGON_SSAO=1` runs it
-there anyway, for work on that defect; enabling a backend is one entry in the constant. Their flips come from `BackendConventions`, their
-depth is linear view depth from the G-buffer, so the stored depth convention plays no part. The OpenGL backend
-keeps the surrogates. `PHPOLYGON_VIO_PARITY=0` restores the Direct3D-only gate for A/B images. The parity test
-measures centre and size of each effect against D3D12 numbers written into the test.
+drew the wetness surrogate and an LDR target. SSAO runs on the same backends since v0.96.3 (`VioRenderer3D::SSAO_BACKENDS`,
+`ssaoRunsOn()`, pinned by `VioSsaoBackendsTest`; up to v0.96.1 Direct3D only, `PHPOLYGON_SSAO=1` / `=0` forces it on / off).
+Their flips come from `BackendConventions`, their depth is linear view depth from the G-buffer, so the stored depth convention
+plays no part. The OpenGL backend keeps the surrogates. `PHPOLYGON_VIO_PARITY=0` restores the Direct3D-only gate for A/B images.
+The parity test measures centre and size of each effect against D3D12 numbers written into the test.
+- **SSAO filters the G-buffer in the shader** on every SSAO backend (`ssaoFiltersInShader()`, `SSAO_SHADER_FILTER_BACKENDS`,
+  `u_filter_in_shader` in `ssao.frag`: four `texelFetch`, float weights). Every tap of the pass lands between G-buffer texels
+  (the centre of a half-res pixel is the corner of four full-res texels). Metal samples render-target textures NEAREST, so the
+  centre depth came from one row or the other per pixel row: streaks along far flat ground. Hardware bilinear filtering (the APIs
+  ask only 8 bits of subtexel weight; the exact float filter cures it, WARP never shows it) puts the reconstructed position off a far
+  flat surface by more than the 0.025 m bias: false occlusion, the same on Vulkan and D3D12 on an RTX 2080 (mean darkening of an
+  open floor seen from 150 m: 14 % at 1280x720, 32 % from 400 m; with the shader filter 0.02 % on D3D12, Vulkan and Metal).
+  `VioSsaoFlatSurfaceTest` pins it; only a hardware adapter shows the defect. Direct3D uses the filter too, so its frames differ
+  from v0.96.1 where SSAO falsely darkened far flat ground (luminance MAD 0.3–0.6 on aerial views of a game);
+  `PHPOLYGON_SSAO_FILTER=0` restores the sampler (frames of v0.96.1 on Direct3D), `=1` forces the filter on every backend.
+  Cost at 1920x1080, `ssao` GPU mark (occlusion + blur), median of 279 frames, 3 runs each, measured 2026-11-03: Vulkan 0.137 ->
+  0.154 ms, D3D12 0.180 -> 0.215 ms (RTX 2080, idle GPU), Metal 0.293 -> 0.316 ms (M5, php-vio 2.40.0).
 - **Stored depth:** `BackendConventions::forContext()` asks Metal (only Metal: `vio_backend_info()` costs
   ~200 ms on D3D12) for `conventions.clip_z_remap`. Up to php-vio 2.39 the key is missing: Metal stores raw
   ndc z and clips what lies below 0 (`depthStoredRaw()`); from 2.40 it stores (ndc z + 1) / 2 like the others.

@@ -53,7 +53,10 @@ final class VioEngineFrameOrderTest extends TestCase
     private static function frame(): array
     {
         $backend = getenv('PHPOLYGON_TEST_VIO_BACKEND') ?: 'auto';
-        $dir = sys_get_temp_dir() . '/phpolygon-frame-order-' . getmypid();
+        // The golden frames predate the SSAO shader filter (v0.96.3); this test pins the
+        // frame order, so it renders SSAO through the sampler as v0.92.0 did.
+        putenv('PHPOLYGON_SSAO_FILTER=0');
+        $dir =sys_get_temp_dir() . '/phpolygon-frame-order-' . getmypid();
         $engine = new Engine(new EngineConfig(
             width: self::W,
             height: self::H,
