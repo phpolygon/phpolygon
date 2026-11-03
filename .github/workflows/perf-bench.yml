@@ -162,6 +162,7 @@ jobs:
             "src/System/Physics3DSystem:System"
             "src/System/GrassSystem:System"
             "src/System/SignalMotionSystem:System"
+            "src/System/NavigationSystem:System"
             "src/Component/Signal:System"
             "src/Motion:System"
             "src/Vegetation/Grass:Vegetation"
