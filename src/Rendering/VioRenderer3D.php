@@ -6947,7 +6947,12 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         vio_set_uniform($this->ctx, 'u_fog_near', $state['fogNear']);
         vio_set_uniform($this->ctx, 'u_fog_far', $state['fogFar']);
 
-        vio_set_uniform($this->ctx, 'u_time', $this->programTime($this->globalTime));
+        // Both stages animate with the same time; the fragment stage reads it under its
+        // own name (mesh3d.frag: a name declared in both stages reaches only the vertex
+        // stage on D3D11 / D3D12 / Vulkan / Metal).
+        $time = $this->programTime($this->globalTime);
+        vio_set_uniform($this->ctx, 'u_time', $time);
+        vio_set_uniform($this->ctx, 'u_frag_time', $time);
         vio_set_uniform($this->ctx, 'u_ao_strength', $this->settings->ambientOcclusion->strength());
 
         // Fieldtracing (SDF GI) — float mode (int-in-UBO is unreliable across

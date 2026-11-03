@@ -139,7 +139,12 @@ uniform vec3 u_fog_color;
 uniform float u_fog_near;
 uniform float u_fog_far;
 uniform vec3 u_camera_pos;
-uniform float u_time;
+// Animation time of this stage. The vertex stage declares u_time too, and php-vio's
+// cbuffer backends (D3D11, D3D12, Vulkan, Metal) set a name declared in both stages
+// in the vertex stage only - the fragment copy read 0. The renderer uploads the same
+// value under this stage-local name; fragment code and snippets keep writing u_time.
+uniform float u_frag_time;
+#define u_time u_frag_time
 uniform int u_proc_mode;
 
 uniform vec3 u_sky_color;

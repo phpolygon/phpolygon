@@ -157,6 +157,17 @@ Never advance animation time by a constant per rendered frame - water and
 vertex animation would run 2.4x too fast at 144 fps. Screenshot tests pin it with
 `Engine::setAnimationTime()`; an undriven renderer falls back to 1/60 s per frame.
 
+**One uniform name per stage.** php-vio's cbuffer backends (D3D11, D3D12, Vulkan, Metal;
+not OpenGL) set a uniform declared in BOTH stages of a program in the vertex stage only -
+the fragment copy reads 0, without an error (measured 2026-11-03 on php-vio 2.40.3 Windows,
+2.40.0 macOS). The vio `mesh3d.frag` therefore declares `u_frag_time` and
+`#define u_time u_frag_time`; `uploadFrameUniforms()` sets both names with the same
+(reduced-motion gated) value, so snippets keep writing `u_time` in the fragment stage.
+Up to v0.96.0 every fragment-side `u_time` animation of a mesh snippet stood still on those
+backends. `StageUniformNamesTest` refuses a uniform declared in both stages of any vio
+program; `VioFragmentTimeTest` reads the fragment time back on the base program, a variant
+and the MRT path.
+
 ### Shader management
 
 Games control shaders via the `Shader` facade or `$engine->shaders`:
@@ -841,7 +852,7 @@ carries the look. Game-agnostic: bounds, ground, mask, colours and density come 
   (sideways bend comes down). Fragment: root (albedo) -> tip colour (`u_grass_tip`, bands or smooth),
   per-blade + field noise variation, root shade, transmission strongest at the tip (vio). The
   fragment flag is `u_grass_shade`, not `u_grass`: a uniform declared in both stages is not set in
-  both on D3D12 - give every stage its own name. Grass materials never resolve to a proc mode.
+  both on D3D11 / D3D12 / Vulkan / Metal - give every stage its own name (see "One uniform name per stage"). Grass materials never resolve to a proc mode.
   Native Vulkan (per-instance CPU draws) skips grass batches.
 - Measured (RTX 2080, D3D12, eye level over a meadow, SSAO medium; GPU = frame delta to the same scene
   without grass at 1280x720 / 1920x1080): Low +0.07 / +0.11 ms (6k tufts, 0.06 M tris, 4 draws), Medium

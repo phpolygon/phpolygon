@@ -433,8 +433,8 @@ final class VioAccessibilityPassTest extends TestCase
         self::assertEqualsWithDelta(0.15, $grey(3.0), 2 / 255, 'Reduced: half speed');
 
         // Mesh programs: a variant follows its entry, the base program keeps running. The
-        // fragment stage of the mesh shader does not see u_time on every backend, so the
-        // clock is read from vertex animation: cloth banners sway with u_time.
+        // clock is read from vertex animation: cloth banners sway with u_time (the
+        // fragment stage's copy, u_frag_time, is pinned by VioFragmentTimeTest).
         FullscreenPassRegistry::clear();
         MeshRegistry::register('banner', BoxMesh::generate(0.5, 2.4, 0.05));
         MaterialRegistry::register('banner_base', new Material(albedo: new Color(0.8, 0.8, 0.8), cloth: true, clothStrength: 0.3));

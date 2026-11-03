@@ -24,6 +24,14 @@ final class ShaderVariantRegistryTest extends TestCase
     /** sha256 of mesh3d.frag at v0.92.0 with whitespace collapsed. */
     private const VIO_FRAG_V092 = '3f45aaaee65df657b11d60ba86f0640d4d928ed32890e3bcced9ffae8a24625e';
 
+    /** The stage-local animation time of mesh3d.frag (v0.96.1), replacing `uniform float u_time;`. */
+    private const FRAGMENT_TIME = "// Animation time of this stage. The vertex stage declares u_time too, and php-vio's\n"
+        . "// cbuffer backends (D3D11, D3D12, Vulkan, Metal) set a name declared in both stages\n"
+        . "// in the vertex stage only - the fragment copy read 0. The renderer uploads the same\n"
+        . "// value under this stage-local name; fragment code and snippets keep writing u_time.\n"
+        . "uniform float u_frag_time;\n"
+        . "#define u_time u_frag_time\n";
+
     protected function setUp(): void
     {
         ProcModeShaderRegistry::clear();
@@ -182,6 +190,10 @@ final class ShaderVariantRegistryTest extends TestCase
     public function testWithoutDefinesTheShaderIsTheOneOfTheLastRelease(): void
     {
         $frag = str_replace("\r\n", "\n", (string) file_get_contents(dirname(__DIR__, 2) . '/resources/shaders/source/vio/mesh3d.frag.glsl'));
+        // The one intended change since: the fragment stage reads the time under its own
+        // name (VioFragmentTimeTest). Undo exactly that block.
+        self::assertStringContainsString(self::FRAGMENT_TIME, $frag);
+        $frag = str_replace(self::FRAGMENT_TIME, "uniform float u_time;\n", $frag);
         self::assertSame(self::VIO_FRAG_V092, hash('sha256', self::preprocess($frag)));
     }
 
