@@ -311,13 +311,15 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
     // projection. temporalCamera remembers last frame's unjittered camera.
     /** MRT attachment holding prevUv - uv per pixel (RG16F). */
     public const MOTION_ATTACHMENT = 4;
-    /** MRT attachment holding the transparent coverage the resolve trusts less (R8). */
+    /** MRT attachment holding what the resolve trusts less (R8): transparent coverage, Material::$reactive. */
     public const REACTIVE_ATTACHMENT = 5;
     private Quality\TemporalCamera $temporalCamera;
     /** This frame's temporal camera; null when no temporal technique ran this frame. */
     private ?Quality\TemporalFrame $temporalFrame = null;
     /** Motion attachments are written this frame (the MRT pipelines use their ':mv' variants). */
     private bool $motionThisFrame = false;
+    /** With motion, an opaque material of this frame has Material::$reactive (the opaque pipelines use ':rx'). */
+    private bool $reactiveOpaqueThisFrame = false;
     /** The MRT target was allocated with the motion attachments. */
     private bool $mrtTargetHasMotion = false;
     /** Lazily probed: MRT + depth sampling + RG16F/R8 formats (or PHPOLYGON_VIO_TEMPORAL=0). */
@@ -3243,6 +3245,14 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
 
         // --- Pass 2: Opaque geometry ---
         PerfProfiler::begin('render3d.submit.opaque');
+        // Collect opaque-eligible draws (resolving each material ONCE) and sort by
+        // (materialId, meshId) so identical draws cluster — that makes the per-draw
+        // material-uniform / mesh-AABB dedup in drawMeshCommand effective (a sorted
+        // run re-uploads the ~28 material uniforms once per material instead of per
+        // draw). Opaque is depth-buffer order-independent (VIO_BLEND_NONE) up to
+        // equal depth, see OpaqueDrawOrder. Sorted before the first pipeline bind:
+        // a reactive opaque material opens the reactive attachment for the pass.
+        $opaque = OpaqueDrawOrder::sort($commands, $this->motionThisFrame, $this->reactiveOpaqueThisFrame);
         $this->bindPipeline('opaque');
         $this->uploadFrameUniforms($frameState);
         $this->uploadShadowUniforms($hasShadowMap, $dirLights);
@@ -3254,13 +3264,6 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
 
         $this->uploadMotionUniforms();
 
-        // Collect opaque-eligible draws (resolving each material ONCE) and sort by
-        // (materialId, meshId) so identical draws cluster — that makes the per-draw
-        // material-uniform / mesh-AABB dedup in drawMeshCommand effective (a sorted
-        // run re-uploads the ~28 material uniforms once per material instead of per
-        // draw). Opaque is depth-buffer order-independent (VIO_BLEND_NONE), so
-        // reordering cannot change the image.
-        $opaque = OpaqueDrawOrder::sort($commands, $this->motionThisFrame);
         foreach ($opaque as [$materialId, , $cmd, $material]) {
             if ($this->variantsThisFrame) {
                 $this->selectVariant($material, $materialId);
@@ -3855,6 +3858,13 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         // the PSO RTV formats (R8 vs FP16, 1 vs 4 vs 6 attachments) are baked in
         // and must match the bound target.
         $key = $pass . ':' . $shaderId . $variantSuffix . ($mrt ? ':mrt' . ($mv ? ':mv' : '') : ($hdr ? ':hdr' : ''));
+        // A frame with a reactive opaque material: every opaque draw writes the
+        // reactive attachment (0 for the others, as cleared), so a surface drawn
+        // in front of a reactive one also takes its mask away - in any order.
+        $reactiveOpaque = $mv && $pass === 'opaque' && $this->reactiveOpaqueThisFrame;
+        if ($reactiveOpaque) {
+            $key .= ':rx';
+        }
         if ($cull !== VIO_CULL_NONE) {
             $key .= ':cull' . $cull;
         }
@@ -3867,7 +3877,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
                 // blended, and written only by opaque geometry (+ water for SSR).
                 // With motion, attachment 4 (vectors) is written by opaque
                 // geometry only and attachment 5 (reactive) by transparent
-                // geometry only, additively.
+                // geometry, additively, and by opaque geometry in ':rx' frames.
                 $program = ($storageInstances ? 'default_storage_mrt' : 'default_mrt') . ($mv ? '_mv' : '') . $variantSuffix;
                 $cfg = [
                     'shader' => $this->shaderCache[$program],
@@ -3892,7 +3902,8 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
                 } elseif ($mv) {
                     $cfg['attachment_blend'] = array_fill(0, 6, VIO_BLEND_NONE);
                     $cfg['attachment_color_mask'] = [
-                        VIO_COLOR_RGBA, VIO_COLOR_RGBA, VIO_COLOR_RGBA, VIO_COLOR_RGBA, VIO_COLOR_RGBA, 0,
+                        VIO_COLOR_RGBA, VIO_COLOR_RGBA, VIO_COLOR_RGBA, VIO_COLOR_RGBA, VIO_COLOR_RGBA,
+                        $reactiveOpaque ? VIO_COLOR_RGBA : 0,
                     ];
                 }
                 $pipeline = $this->createPipeline($cfg);
@@ -6440,6 +6451,9 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         }
         foreach (ProcModeShaderRegistry::materialParameters() as $name => $default) {
             $u[$name] = $material->params[$name] ?? $default;
+        }
+        if ($this->motionThisFrame) {
+            $u['u_material_reactive'] = $material->reactive;
         }
 
         $this->setUniforms($u);

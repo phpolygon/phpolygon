@@ -379,7 +379,16 @@ same forward and MRT. Backends without stencil (Metal) skip it; `outlineSupporte
 - `mesh3d` with `PHPOLYGON_MOTION` (only together with `PHPOLYGON_MRT`) adds `o_motion` (RG16F,
   attachment 4, `prevUv - uv` in texture space - the Y sign follows `flipRenderTargetClipY()`) and
   `o_reactive` (R8, attachment 5, transparent coverage, additive). Opaque pipelines mask 5, transparent
-  ones mask 4, sky/skybox both; their cache keys carry `:mv`. Moved entities upload `u_prev_model`
+  ones mask 4, sky/skybox both; their cache keys carry `:mv`.
+- **Reactive opaque surfaces** (`Material::$reactive` 0..1, `withReactive()`; `VioReactiveMaterialTest`): for opaque surfaces whose
+  content moves while they stand still (scrolling scanlines, screens, running text), which have no motion vector and streak under the
+  history. In a frame whose opaque draws include such a material (`OpaqueDrawOrder::sort(..., $reactive)`, sorted before the first
+  opaque bind) every opaque pipeline opens attachment 5 (key `:rx`) and writes `reactiveValue()` = max(`u_material_reactive`,
+  transparent coverage): its value on the reactive surface, 0 elsewhere, so a surface drawn later in front of it takes the mask away in
+  any order. The resolve and the native upscalers read the same attachment. Without such a material the pipelines, masks and frames
+  are those of v0.96.1; the shader gained one uniform. Measured 2026-11-03, WARP, 160x112, scanlines moving ~1.5 px per frame, 24 TAA
+  frames: mean |TAA - frame without history| on the surface 32.9 -> 21.9 (luma 0..255), stripe contrast 27.3 -> 38.1 of 52.7
+  (`VioTaaPass::REACTIVE_STRENGTH` 0.6 caps how far the history is dropped). Moved entities upload `u_prev_model`
   behind a sticky `u_has_prev` (from `DrawMesh::$prevModelMatrix`); vertex animation replays at
   `u_time_prev`. Without a temporal technique nothing of this exists (4 attachments, same shaders).
 - `PostProcess\VioTaaPass` runs in the present stage after composite/SSR/outlines and before bloom:

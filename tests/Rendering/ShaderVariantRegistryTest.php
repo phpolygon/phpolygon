@@ -24,6 +24,33 @@ final class ShaderVariantRegistryTest extends TestCase
     /** sha256 of mesh3d.frag at v0.92.0 with whitespace collapsed. */
     private const VIO_FRAG_V092 = '3f45aaaee65df657b11d60ba86f0640d4d928ed32890e3bcced9ffae8a24625e';
 
+    /**
+     * Intended changes since v0.96.1, as [new text, old text]: the reactive mask of opaque
+     * surfaces (Material::$reactive, VioReactiveMaterialTest).
+     *
+     * @var list<array{0: string, 1: string}>
+     */
+    private const SINCE_V0961 = [
+        [
+            "//                      (transparent pass, additive), or Material::\$reactive of an\n"
+            . "//                      opaque surface whose content moves (opaque pass, only in\n"
+            . "//                      frames that draw one; the others write 0 then)\n",
+            "//                      (transparent pass, additive)\n",
+        ],
+        ["uniform float u_material_reactive; // Material::\$reactive\n", ''],
+        [
+            "#ifdef PHPOLYGON_MOTION\n"
+            . "// The reactive mask: a transparent surface's coverage, an opaque one's own value\n"
+            . "// (Material::\$reactive), whichever is larger.\n"
+            . "float reactiveValue(float coverage) {\n"
+            . "    return clamp(max(u_material_reactive, u_alpha >= 1.0 ? 0.0 : coverage), 0.0, 1.0);\n"
+            . "}\n"
+            . "#endif\n",
+            '',
+        ],
+        ['float reactiveAlpha = reactiveValue(alpha);', 'float reactiveAlpha = clamp(alpha, 0.0, 1.0);'],
+        ['float reactive = reactiveValue(u_alpha);', 'float reactive = clamp(u_alpha, 0.0, 1.0);'],
+    ];
     /** The stage-local animation time of mesh3d.frag (v0.96.1), replacing `uniform float u_time;`. */
     private const FRAGMENT_TIME = "// Animation time of this stage. The vertex stage declares u_time too, and php-vio's\n"
         . "// cbuffer backends (D3D11, D3D12, Vulkan, Metal) set a name declared in both stages\n"
@@ -194,6 +221,10 @@ final class ShaderVariantRegistryTest extends TestCase
         // name (VioFragmentTimeTest). Undo exactly that block.
         self::assertStringContainsString(self::FRAGMENT_TIME, $frag);
         $frag = str_replace(self::FRAGMENT_TIME, "uniform float u_time;\n", $frag);
+        foreach (self::SINCE_V0961 as [$now, $before]) {
+            self::assertStringContainsString($now, $frag);
+            $frag = str_replace($now, $before, $frag);
+        }
         self::assertSame(self::VIO_FRAG_V092, hash('sha256', self::preprocess($frag)));
     }
 

@@ -34,10 +34,14 @@ final class OpaqueDrawOrder
      * @param list<object> $commands the frame's command list
      * @param bool $motion motion vectors this frame: moved DrawMesh entities
      *                     (with a previous model matrix) go last in their run
+     * @param bool $reactive set to whether, with $motion, an opaque material has
+     *                       a reactive value ({@see Material::$reactive})
+     * @param-out bool $reactive
      * @return list<array{0: string, 1: string, 2: DrawMesh|DrawMeshInstanced, 3: Material, 4: int}>
      */
-    public static function sort(array $commands, bool $motion): array
+    public static function sort(array $commands, bool $motion, ?bool &$reactive = null): array
     {
+        $reactive = false;
         $opaque = [];
         $keys = [];
         $numeric = false;
@@ -55,6 +59,9 @@ final class OpaqueDrawOrder
             if ($material === null) {
                 $found = MaterialRegistry::get($materialId);
                 $material = $materials[$materialId] = $found !== null && $found->alpha >= 1.0 ? $found : false;
+                if ($motion && $material !== false && $material->reactive > 0.0) {
+                    $reactive = true;
+                }
             }
             if ($material === false) {
                 continue;

@@ -254,6 +254,14 @@ class Material
          * @var array<string, int|float|list<float>>
          */
         public readonly array $params = [],
+        /**
+         * 0..1, how little temporal anti-aliasing and upscalers (TAA, TAAU, FSR 3, DLSS) may
+         * trust last frame's colour of this surface. For opaque surfaces whose content moves
+         * while the surface stands still: scrolling scanlines, a screen, running text. They
+         * carry no motion vector of their own, so the history smears their content into
+         * streaks. 1 = the strongest response; transparent surfaces count their coverage anyway.
+         */
+        public readonly float $reactive = 0.0,
     ) {}
 
     /**
@@ -368,6 +376,12 @@ class Material
         return $this->copy(params: [...$this->params, ...$params]);
     }
 
+    /** This material with another reactive value (see {@see $reactive}), clamped to 0..1. */
+    public function withReactive(float $reactive): self
+    {
+        return $this->copy(reactive: max(0.0, min(1.0, $reactive)));
+    }
+
     /** This material drawn by another shader. */
     public function withShader(string $shader): self
     {
@@ -407,6 +421,7 @@ class Material
         ?Color $albedo = null,
         ?string $shader = null,
         ?array $params = null,
+        ?float $reactive = null,
     ): self {
         return new self(
             albedo: $albedo ?? $this->albedo,
@@ -448,6 +463,7 @@ class Material
             grassPatchScale: $this->grassPatchScale,
             windTufts: $this->windTufts,
             params: $params ?? $this->params,
+            reactive: $reactive ?? $this->reactive,
         );
     }
 

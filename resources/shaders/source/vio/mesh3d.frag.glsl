@@ -236,7 +236,9 @@ uniform int  u_gbuffer_write;  // 0 => this draw opts out of the G-buffer (exclu
 //   o_motion    RG16F  prevUv - uv in the scene target's texture space (opaque pass)
 //   o_reactive  R8     how little the history should be trusted: the coverage of
 //                      transparent surfaces, which carry no motion of their own
-//                      (transparent pass, additive)
+//                      (transparent pass, additive), or Material::$reactive of an
+//                      opaque surface whose content moves (opaque pass, only in
+//                      frames that draw one; the others write 0 then)
 // The pipelines mask whichever of the two a pass must not touch.
 in vec4 v_currClip;
 in vec4 v_prevClip;
@@ -244,6 +246,7 @@ layout(location = 4) out vec4 o_motion;
 layout(location = 5) out vec4 o_reactive;
 uniform float u_motion_flip_y;  // +1 GL, -1 where render-target row 0 is NDC top
 uniform float u_mip_bias;       // texture LOD bias for the upscale ratio (negative = sharper)
+uniform float u_material_reactive; // Material::$reactive
 #endif
 #else
 out vec4 frag_color;
@@ -589,6 +592,13 @@ float sceneDepthDelta() {
 float mrtCoverage(float alpha) {
     return u_alpha >= 1.0 ? 1.0 : alpha;
 }
+#ifdef PHPOLYGON_MOTION
+// The reactive mask: a transparent surface's coverage, an opaque one's own value
+// (Material::$reactive), whichever is larger.
+float reactiveValue(float coverage) {
+    return clamp(max(u_material_reactive, u_alpha >= 1.0 ? 0.0 : coverage), 0.0, 1.0);
+}
+#endif
 #endif
 
 vec4 outputColor(vec3 color, float alpha) {
@@ -611,7 +621,7 @@ vec4 outputColor(vec3 color, float alpha) {
     o_sun.a = alpha;
     o_ambient.a = alpha;
 #ifdef PHPOLYGON_MOTION
-    float reactiveAlpha = clamp(alpha, 0.0, 1.0);
+    float reactiveAlpha = reactiveValue(alpha);
     o_reactive = vec4(reactiveAlpha, reactiveAlpha, reactiveAlpha, 1.0);
 #endif
 #endif
@@ -1049,7 +1059,7 @@ void main() {
     vec2 currNdc = v_currClip.xy / v_currClip.w;
     vec2 prevNdc = v_prevClip.xy / v_prevClip.w;
     o_motion = vec4((prevNdc - currNdc) * vec2(0.5, 0.5 * u_motion_flip_y), 0.0, 0.0);
-    float reactive = clamp(u_alpha, 0.0, 1.0);
+    float reactive = reactiveValue(u_alpha);
     o_reactive = vec4(reactive, reactive, reactive, 1.0);
 #endif
 #endif
