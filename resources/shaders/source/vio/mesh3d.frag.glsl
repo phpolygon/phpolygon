@@ -175,6 +175,37 @@ uniform int u_csm_count;
 // Texture
 uniform int u_has_albedo_texture;
 uniform sampler2D u_albedo_texture;
+uniform float u_material_mip_bias; // Material::$mipBias, in mip levels (negative = sharper)
+uniform vec2 u_material_aniso;     // x: most taps along the stretched axis (1 = one tap), y: the texture's own anisotropy
+
+// The albedo texture over a pixel's footprint. Material::$anisotropy above the
+// texture's own level takes several taps along the footprint's long axis, each
+// with the hardware filter over its share, so a sign seen at a grazing angle
+// keeps its strokes instead of blurring to the mip of the long axis.
+vec3 sampleAlbedoTexture(vec2 uv, vec2 dx, vec2 dy) {
+    if (u_material_aniso.x > 1.0) {
+        // Lengths in texels: a texture that is not square stretches uv space.
+        vec2 texels = vec2(textureSize(u_albedo_texture, 0));
+        float lx = dot(dx * texels, dx * texels);
+        float ly = dot(dy * texels, dy * texels);
+        vec2 major = lx >= ly ? dx : dy;
+        vec2 minor = lx >= ly ? dy : dx;
+        float ratio = sqrt(max(lx, ly) / max(min(lx, ly), 1e-20));
+        float n = clamp(ceil(ratio / u_material_aniso.y), 1.0, u_material_aniso.x);
+        if (n > 1.0) {
+            vec2 tapGrad = major / n;
+            vec3 sum = vec3(0.0);
+            for (int i = 0; i < 16; i++) {
+                if (float(i) >= n) {
+                    break;
+                }
+                sum += textureGrad(u_albedo_texture, uv + major * ((float(i) + 0.5) / n - 0.5), tapGrad, minor).rgb;
+            }
+            return sum / n;
+        }
+    }
+    return textureGrad(u_albedo_texture, uv, dx, dy).rgb;
+}
 
 // Screen-space ambient occlusion (real depth+normal SSAO; see ssao.frag.glsl).
 // u_ssao_map is the SECOND regular sampler declared after u_albedo_texture, so
@@ -1095,11 +1126,11 @@ void main() {
 #ifdef PHPOLYGON_MOTION
         // Temporal upscaling reconstructs display-resolution detail: pick the
         // mip for the display, not the render resolution (2^bias scales the LOD).
-        float mipScale = exp2(u_mip_bias);
-        texAlbedo *= textureGrad(u_albedo_texture, patternUv, uvDx * mipScale, uvDy * mipScale).rgb;
+        float mipScale = exp2(u_mip_bias + u_material_mip_bias);
 #else
-        texAlbedo *= textureGrad(u_albedo_texture, patternUv, uvDx, uvDy).rgb;
+        float mipScale = exp2(u_material_mip_bias);
 #endif
+        texAlbedo *= sampleAlbedoTexture(patternUv, uvDx * mipScale, uvDy * mipScale);
     }
 
     // ---- Material selection ----

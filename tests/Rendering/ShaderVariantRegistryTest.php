@@ -26,10 +26,14 @@ final class ShaderVariantRegistryTest extends TestCase
 
     /**
      * Intended changes since v0.96.1, as [new text, old text]: the reactive mask of opaque
-     * surfaces (Material::$reactive, VioReactiveMaterialTest).
+     * surfaces (Material::$reactive, VioReactiveMaterialTest) and the albedo filter of a material
+     * (Material::$mipBias / $anisotropy, VioMaterialTextureFilterTest; its sampling function is cut
+     * out between {@see ALBEDO_FILTER_START} and the next blank line).
      *
      * @var list<array{0: string, 1: string}>
      */
+    private const ALBEDO_FILTER_START = 'uniform float u_material_mip_bias;';
+
     private const SINCE_V0961 = [
         [
             "//                      (transparent pass, additive), or Material::\$reactive of an\n"
@@ -50,8 +54,19 @@ final class ShaderVariantRegistryTest extends TestCase
         ],
         ['float reactiveAlpha = reactiveValue(alpha);', 'float reactiveAlpha = clamp(alpha, 0.0, 1.0);'],
         ['float reactive = reactiveValue(u_alpha);', 'float reactive = clamp(u_alpha, 0.0, 1.0);'],
-    ];
-    /** The stage-local animation time of mesh3d.frag (v0.96.1), replacing `uniform float u_time;`. */
+        [
+            "        float mipScale = exp2(u_mip_bias + u_material_mip_bias);\n"
+            . "#else\n"
+            . "        float mipScale = exp2(u_material_mip_bias);\n"
+            . "#endif\n"
+            . "        texAlbedo *= sampleAlbedoTexture(patternUv, uvDx * mipScale, uvDy * mipScale);\n",
+            "        float mipScale = exp2(u_mip_bias);\n"
+            . "        texAlbedo *= textureGrad(u_albedo_texture, patternUv, uvDx * mipScale, uvDy * mipScale).rgb;\n"
+            . "#else\n"
+            . "        texAlbedo *= textureGrad(u_albedo_texture, patternUv, uvDx, uvDy).rgb;\n"
+            . "#endif\n",
+        ],
+    ];    /** The stage-local animation time of mesh3d.frag (v0.96.1), replacing `uniform float u_time;`. */
     private const FRAGMENT_TIME = "// Animation time of this stage. The vertex stage declares u_time too, and php-vio's\n"
         . "// cbuffer backends (D3D11, D3D12, Vulkan, Metal) set a name declared in both stages\n"
         . "// in the vertex stage only - the fragment copy read 0. The renderer uploads the same\n"
@@ -221,6 +236,11 @@ final class ShaderVariantRegistryTest extends TestCase
         // name (VioFragmentTimeTest). Undo exactly that block.
         self::assertStringContainsString(self::FRAGMENT_TIME, $frag);
         $frag = str_replace(self::FRAGMENT_TIME, "uniform float u_time;\n", $frag);
+        $start = strpos($frag, self::ALBEDO_FILTER_START);
+        self::assertNotFalse($start);
+        $end = strpos($frag, "}\n\n", $start);
+        self::assertNotFalse($end);
+        $frag = substr($frag, 0, $start) . substr($frag, $end + 3);
         foreach (self::SINCE_V0961 as [$now, $before]) {
             self::assertStringContainsString($now, $frag);
             $frag = str_replace($now, $before, $frag);

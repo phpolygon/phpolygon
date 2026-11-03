@@ -6455,6 +6455,14 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         if ($this->motionThisFrame) {
             $u['u_material_reactive'] = $material->reactive;
         }
+        // Albedo texture filter of the material: extra taps only above the
+        // anisotropy the texture was created with (the player's setting).
+        $u['u_material_mip_bias'] = $material->mipBias;
+        $hwAniso = max(1, min(16, $this->settings->anisotropy));
+        $u['u_material_aniso'] = [
+            $material->anisotropy > $hwAniso ? (float) min(16, (int) ceil($material->anisotropy / $hwAniso)) : 1.0,
+            (float) $hwAniso,
+        ];
 
         $this->setUniforms($u);
     }

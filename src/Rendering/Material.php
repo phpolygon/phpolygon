@@ -262,6 +262,19 @@ class Material
          * streaks. 1 = the strongest response; transparent surfaces count their coverage anyway.
          */
         public readonly float $reactive = 0.0,
+        /**
+         * Mip levels added to the albedo texture's level of detail, on top of the engine's own
+         * bias for temporal upscaling. Negative = sharper: a sign or a text panel that must stay
+         * legible from far away (-0.5 to -1; below that it shimmers without temporal AA).
+         */
+        public readonly float $mipBias = 0.0,
+        /**
+         * Filtering ratio the albedo texture gets at least, 0 = the texture's own (the player's
+         * anisotropy setting). Above that setting the shader takes up to 16 taps along the
+         * stretched axis, so a panel seen at a grazing angle keeps its strokes. Costs those taps
+         * on the material's pixels only.
+         */
+        public readonly int $anisotropy = 0,
     ) {}
 
     /**
@@ -382,6 +395,15 @@ class Material
         return $this->copy(reactive: max(0.0, min(1.0, $reactive)));
     }
 
+    /**
+     * This material's albedo texture read sharper or more anisotropic (see {@see $mipBias},
+     * {@see $anisotropy}); null keeps a value. Anisotropy is clamped to 0..16.
+     */
+    public function withTextureFilter(?float $mipBias = null, ?int $anisotropy = null): self
+    {
+        return $this->copy(mipBias: $mipBias, anisotropy: $anisotropy !== null ? max(0, min(16, $anisotropy)) : null);
+    }
+
     /** This material drawn by another shader. */
     public function withShader(string $shader): self
     {
@@ -422,6 +444,8 @@ class Material
         ?string $shader = null,
         ?array $params = null,
         ?float $reactive = null,
+        ?float $mipBias = null,
+        ?int $anisotropy = null,
     ): self {
         return new self(
             albedo: $albedo ?? $this->albedo,
@@ -464,6 +488,8 @@ class Material
             windTufts: $this->windTufts,
             params: $params ?? $this->params,
             reactive: $reactive ?? $this->reactive,
+            mipBias: $mipBias ?? $this->mipBias,
+            anisotropy: $anisotropy ?? $this->anisotropy,
         );
     }
 

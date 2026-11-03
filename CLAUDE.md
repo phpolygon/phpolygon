@@ -489,6 +489,16 @@ mean luma of the cylinder 13 on Vulkan against 187 on D3D12 (and 187 on Metal, A
 **3D textures:** `resolveTexture()` binds the `VioTextureManager` upload (`vioTexture()`: mip chain,
 anisotropy, KTX2 container) — never decode the file a second time for 3D.
 
+**Albedo filter per material** (`Material::$mipBias`, `$anisotropy`, `withTextureFilter()`; `VioMaterialTextureFilterTest`). Vio mesh
+shader only (GL family: none). php-vio bakes a texture's sampler at creation (one anisotropy per texture, no per-bind state), so both
+work in the shader: `mipBias` adds levels to the `textureGrad` gradients (with `u_mip_bias` of temporal upscaling), `anisotropy` above
+the player's setting takes `ceil(material / setting)` taps, at most 16, along the footprint's long axis in texels (`sampleAlbedoTexture()`),
+each with the hardware filter over its share. Default 0 / 0 is the one-tap path: frames byte for byte those of v0.96.1. Measured 2026-11-03,
+WARP, 192x128, a 512x128 text texture against the same view at 4x4 resolution box-filtered (what the pixel ideally shows): a 3 x 0.75 m panel
+at 30 m (3.7 texels per pixel) with `mipBias` -1: stroke contrast 6.2 -> 15.0 of 15.5, correlation 0.86 -> 0.77 (a finer mip aliases a
+little without temporal AA; -0.5: 9.2, 0.83); the panel turned 80 degrees with `anisotropy` 16: setting 1x contrast 19.8 -> 23.7 of 23.4,
+correlation 0.73 -> 0.87; setting 4x 23.0 -> 24.1, 0.83 -> 0.86.
+
 **KTX2 files:** a `.ktx2` beside an image path wins (`VioTextureManager::ktx2Sibling()`).
 `PHPolygon\Rendering\Ktx2Container` writes them for pre-bakes (`bc7()`, `build()`, `ddsPayload()`)
 and, with `zlibLevel` 1-9, compresses each mip level with zlib (KTX2 supercompression scheme 3).
