@@ -706,6 +706,7 @@ slept is recomputed on its first awake tick (its world matrix may be stale while
 | `GrassSystem` | Grass blades of every `GrassField` near the camera (`variants x 2` packed instanced draws, `SetGrass`); register after `Camera3DSystem`, BEFORE `Renderer3DSystem` |
 | `SurfaceTextSystem` | Keeps every `SurfaceText` on its current text and language, the only writer of those materials; register BEFORE `Renderer3DSystem` |
 | `SignalMotionSystem` | Drives `SignalTrack` / `SignalSpin` / `SignalSwitch` from `Signals` channels (see "Signal motion"); BEFORE `Transform3DSystem`, with a command list also after `Camera3DSystem` and before `Renderer3DSystem` |
+| `PosePlayerSystem` | Plays `PosePlayer` clips onto bound figure parts (see "Pose clips"); after navigation and the game's figure logic, BEFORE `Transform3DSystem`; command list as with `SignalMotionSystem` |
 
 ### Vegetation — the plant family (`PHPolygon\Vegetation`)
 
@@ -1039,6 +1040,54 @@ $agent->setDestination($goal, faceTarget: $door);                             //
   it the position is written directly, height included (the old behaviour).
 - All of it is opt-in; an agent that uses none of it moves exactly as before (`NavigationSystemTest`).
   Tests: `tests/Navigation/NavMeshAgentPathTest.php`.
+
+### Pose clips — forward-kinematics figure animation (`PHPolygon\Animation` + `PosePlayer`)
+
+A clip player for procedural figures built from parts (no skinning): the engine plays and blends, the
+game owns the rig and every pose (`tests/Animation/PoseClipTest.php`, `tests/System/PosePlayerSystemTest.php`).
+
+```php
+PoseLibrary::registerRig('humanoid', (new PoseRig())
+    ->joint('hip_r', null, new Vec3(-0.09, 0.95, 0.0))
+    ->joint('knee_r', 'hip_r', new Vec3(0.0, -0.44, 0.0))
+    ->joint('shoulder_r', null, new Vec3(-0.2, 1.42, 0.0), $armRest));
+PoseLibrary::registerClip('work_lift', PoseClip::keyframes([
+    [0.0, Pose::degrees(['shoulder_r' => [-20]])], [0.8, Pose::degrees(['shoulder_r' => [-75], 'knee_r' => [30]])],
+    [1.6, Pose::degrees(['shoulder_r' => [-20]])]]));
+PoseLibrary::registerClip('walk', PoseClip::procedural(0.9, true, fn (float $t): Pose => myGait($t)));
+$root->attach($player = new PosePlayer('humanoid', ['hip_r' => $thighId, 'knee_r' => $calfId], seed: 7));
+$player->playIdle(['idle_shrug', 'idle_look', 'idle_arms_crossed']);   // variants by seed + cycle
+$player->play('walk', blend: 0.3); $player->speed = $agentSpeed / 1.3;  // walk cycle at walking speed
+$player->play('work_lift', blend: 0.4);
+```
+
+- `PoseRig`: joints in FK order (parent before child; null parent = on the figure root), offset from the
+  parent joint in its rest frame, rest orientation. `solve()` gives root-space position + rotation per
+  joint: `rot = parentRot · rest · poseRot`, `pos = parentPos + parentRot · offset` (root joints: offset +
+  pose root offset). That is the local transform of a part whose parent is the figure root and whose mesh
+  origin sits at its joint (the flat part layout procedural figures use).
+- `Pose`: rotation per joint relative to rest (missing = rest) + optional root offset (bob, sitting);
+  `Pose::degrees(['joint' => [x, y, z]])` in `Quaternion::fromEuler` order; `Pose::blend()` slerps.
+- `PoseClip::keyframes(keys, loop, smooth)` (lasts until the last key; repeat the first pose as the last
+  key for a seamless loop; `smooth` = smoothstep per segment) or `PoseClip::procedural(duration, loop,
+  closure)` for maths-driven motion like a speed-scaled gait. `PoseLibrary` holds rigs and clips by id.
+- `PosePlayer` (component on the root): rig id, joint → part entity bindings, `play(clip, blend, speed)`
+  (crossfade, smoothstep weight; the same clip keeps running), `playIdle(list)` (after every completed
+  cycle the next variant from `crc32(seed:cycle)`, faded over `$idleBlend`), one-shots hold their last
+  pose (`isFinished()`), `$speed` scales clip time. `$effect` / `$cullRadius` / `$maxDistance` as in
+  signal motion; a frozen or finished figure costs no solve.
+- `PosePlayerSystem` writes the bound parts' `Transform3D` position + rotation. The per-frame path works
+  on plain arrays (`Pose::raw()`, `PoseClip::sampleRaw()`, `PoseRig::solveRaw()`, `Animation\QuatMath`):
+  the object version cost twice as much.
+- Instancing: the poses are ordinary child transforms. A drawer that re-reads the parts' world matrices
+  every frame (non-static `DrawMeshInstanced`) draws any pose in one draw per mesh + material, the same
+  way a walk cycle is drawn today; a cached or static instanced batch freezes them, and
+  `MeshRenderer::$batchable` keeps every moved part as its own draw.
+- Measured 2026-11-03 (PHP 8.5.5 CLI, dev machine, `benchmarks/micro/System/PosePlayerBench.php` driven
+  by a plain loop, median of 5 × 2000 updates): 10 figures × 14 joints, a crossfade always running on half
+  of them: 0.50 ms per update without OPcache, 0.20 ms with tracing JIT. Same loop, signal motion bench
+  0.38 / 0.17 ms, 10 waypoint walkers 0.08 / 0.03 ms. Transform propagation and drawing of the moved
+  parts come on top and are not in these numbers.
 
 ### Physics queries — rays and line of sight
 
