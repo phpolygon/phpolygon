@@ -128,7 +128,7 @@ final class ProcModeShaderRegistry
     private static ?array $postColorCall = null;
     /** @var array<string, list<int>> region → explicit mode emission order */
     private static array $order = [];
-    /** @var array<string, array{modes: list<int>, omit: list<ShaderPath>, lazy: bool}> name → variant */
+    /** @var array<string, array{modes: list<int>, omit: list<ShaderPath>, lazy: bool, keepOrder: bool}> name → variant */
     private static array $variants = [];
     /** @var array<int, string> mode → variant name */
     private static array $modeVariant = [];
@@ -214,10 +214,17 @@ final class ProcModeShaderRegistry
      * it is not there. $lazy compiles it at first use instead of behind the splash,
      * for looks only some scenes need.
      *
+     * The opaque pass groups draws by program, so a variant's draws normally move to
+     * their own run. Where two opaque surfaces meet at the same depth (a sea plane
+     * along a shore, a decal on a wall) the earlier draw keeps the pixel, and that
+     * move changes which one it is. $keepOrder leaves this variant's draws at their
+     * material position among the base program's draws: the image is that of the
+     * base program, for a pipeline switch per change of program in the run.
+     *
      * @param list<int>        $modes
      * @param list<ShaderPath> $omit
      */
-    public static function defineVariant(string $name, array $modes, array $omit = [], bool $lazy = false): void
+    public static function defineVariant(string $name, array $modes, array $omit = [], bool $lazy = false, bool $keepOrder = false): void
     {
         if (preg_match('/^[a-z][a-z0-9_]*$/', $name) !== 1) {
             throw new \InvalidArgumentException("Shader variant name '{$name}' must be lower snake case");
@@ -229,7 +236,7 @@ final class ProcModeShaderRegistry
             }
             self::$modeVariant[$mode] = $name;
         }
-        self::$variants[$name] = ['modes' => $modes, 'omit' => $omit, 'lazy' => $lazy];
+        self::$variants[$name] = ['modes' => $modes, 'omit' => $omit, 'lazy' => $lazy, 'keepOrder' => $keepOrder];
     }
 
     /**
@@ -445,6 +452,16 @@ final class ProcModeShaderRegistry
     public static function variantOf(int $mode): string
     {
         return self::$modeVariant[$mode] ?? self::BASE_VARIANT;
+    }
+
+    /**
+     * The program run a mode's opaque draws are sorted into: its variant, or the base
+     * program's for a variant defined with `keepOrder`.
+     */
+    public static function sortVariantOf(int $mode): string
+    {
+        $variant = self::$modeVariant[$mode] ?? self::BASE_VARIANT;
+        return $variant !== self::BASE_VARIANT && self::$variants[$variant]['keepOrder'] ? self::BASE_VARIANT : $variant;
     }
 
     /**

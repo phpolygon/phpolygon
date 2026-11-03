@@ -115,7 +115,42 @@ final class VioShaderVariantRenderTest extends TestCase
         self::assertNotSame(self::px($reference, 48, 32), self::px($reference, 84, 32));
     }
 
-    private function render(): string
+    /**
+     * Two opaque planes at exactly the same depth, as sand and sea meet along a
+     * shore: the depth test lets one draw keep the pixel, so the submission order
+     * decides the colour. A variant's own run moved the sea behind the sand;
+     * `keepOrder` gives the image without variants again.
+     */
+    #[DataProvider('paths')]
+    public function testAKeepOrderVariantDrawsEqualDepthLikeTheBaseProgram(string $mrt): void
+    {
+        putenv('PHPOLYGON_VIO_MRT=' . $mrt);
+        MaterialRegistry::register('coast_sea', new Material(albedo: new Color(0.1, 0.3, 0.8)));
+        MaterialRegistry::register('sand', new Material(albedo: new Color(0.9, 0.75, 0.4)));
+        ProcModeRegistry::map('coast_sea', 3);
+        $draws = [
+            new DrawMesh('slab', 'sand', Mat4::translation(0.0, -1.0, 0.0)),
+            new DrawMesh('slab', 'coast_sea', Mat4::translation(0.0, -1.0, 0.0)),
+        ];
+        $reference = $this->render($draws);
+
+        ProcModeShaderRegistry::defineVariant('tinted', [3]);
+        $ownRun = $this->render($draws);
+        ProcModeShaderRegistry::clear();
+        ProcModeShaderRegistry::registerGlsl(
+            3,
+            "vec3 tintRed(vec3 c) { return c * vec3(1.0, 0.2, 0.2); }\n",
+            "    if (u_proc_mode == 3) {\n        albedo = tintRed(texAlbedo);\n",
+        );
+        ProcModeShaderRegistry::defineVariant('tinted', [3], keepOrder: true);
+        $kept = $this->render($draws);
+
+        self::assertNotSame(md5($reference), md5($ownRun), 'the own run changes which plane keeps the shared depth');
+        self::assertSame(md5($reference), md5($kept), 'keepOrder: every pixel as without the variant');
+    }
+
+    /** @param list<DrawMesh>|null $draws replaces the scene's draws */
+    private function render(?array $draws = null): string
     {
         self::assertNotNull($this->ctx);
         $renderer = new VioRenderer3D($this->ctx, self::W, self::H);
@@ -131,11 +166,16 @@ final class VioShaderVariantRenderTest extends TestCase
         ));
         $list->add(new SetAmbientLight(new Color(0.4, 0.4, 0.45), 0.5));
         $list->add(new SetDirectionalLight(new Vec3(-0.4, -1.0, -0.3), new Color(1.0, 0.95, 0.9), 1.0));
-        $list->add(new DrawMesh('slab', 'floor', Mat4::translation(0.0, -1.0, 0.0)));
-        $list->add(new DrawMesh('box', 'tint_red', Mat4::translation(-2.2, 0.0, 0.0)));
-        $list->add(new DrawMesh('box', 'floor', Mat4::translation(0.0, 0.0, 0.0)));
-        $list->add(new DrawMesh('box', 'tint_flat', Mat4::translation(2.2, 0.0, 0.0)));
-        $list->add(new DrawMesh('box', 'flat_glass', Mat4::translation(1.1, 0.2, 1.5)));
+        $draws ??= [
+            new DrawMesh('slab', 'floor', Mat4::translation(0.0, -1.0, 0.0)),
+            new DrawMesh('box', 'tint_red', Mat4::translation(-2.2, 0.0, 0.0)),
+            new DrawMesh('box', 'floor', Mat4::translation(0.0, 0.0, 0.0)),
+            new DrawMesh('box', 'tint_flat', Mat4::translation(2.2, 0.0, 0.0)),
+            new DrawMesh('box', 'flat_glass', Mat4::translation(1.1, 0.2, 1.5)),
+        ];
+        foreach ($draws as $draw) {
+            $list->add($draw);
+        }
         $rgba = $renderer->renderToImage($list, self::W, self::H, new Color(0.1, 0.2, 0.4, 1.0));
         self::assertSame(self::W * self::H * 4, strlen($rgba));
         return $rgba;

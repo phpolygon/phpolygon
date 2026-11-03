@@ -12,6 +12,8 @@ use PHPolygon\Rendering\Command\SetCamera;
 use PHPolygon\Rendering\Material;
 use PHPolygon\Rendering\MaterialRegistry;
 use PHPolygon\Rendering\OpaqueDrawOrder;
+use PHPolygon\Rendering\ProcModeRegistry;
+use PHPolygon\Rendering\ProcModeShaderRegistry;
 use PHPUnit\Framework\TestCase;
 
 /**
@@ -55,6 +57,39 @@ final class OpaqueDrawOrderTest extends TestCase
             $commands[] = new DrawMesh('m' . ($i % 2), $material, Mat4::identity());
         }
         self::assertSame(self::reference($commands, false), self::ids(OpaqueDrawOrder::sort($commands, false)));
+    }
+
+    /**
+     * A sea plane meeting the sand at the same depth: whichever draws first keeps
+     * the shore pixels. Its own program's run moved it behind the sand; with
+     * keepOrder it stays at its material position, as without variants.
+     */
+    public function testAKeepOrderVariantStaysAtItsMaterialPosition(): void
+    {
+        MaterialRegistry::register('ob_coast_sea', new Material(albedo: new Color(0.1, 0.3, 0.6)));
+        MaterialRegistry::register('ob_sand', new Material(albedo: new Color(0.8, 0.7, 0.5)));
+        ProcModeRegistry::map('ob_coast_sea', 14);
+        $commands = [
+            new DrawMesh('plane', 'ob_sand', Mat4::identity()),
+            new DrawMesh('plane', 'ob_coast_sea', Mat4::identity()),
+            new DrawMesh('box', 'ob_a', Mat4::identity()),
+        ];
+        $order = static fn (): array => array_map(static fn (array $e): string => $e[0], OpaqueDrawOrder::sort($commands, false));
+        try {
+            self::assertSame(['ob_a', 'ob_coast_sea', 'ob_sand'], $order(), 'no variant: material order');
+
+            ProcModeShaderRegistry::defineVariant('water', [14]);
+            self::assertSame(['ob_a', 'ob_sand', 'ob_coast_sea'], $order(), 'own run: the sea after the sand');
+
+            ProcModeShaderRegistry::clear();
+            ProcModeShaderRegistry::defineVariant('water', [14], keepOrder: true);
+            self::assertSame(['ob_a', 'ob_coast_sea', 'ob_sand'], $order(), 'keepOrder: the order without variants');
+            self::assertSame('water', ProcModeShaderRegistry::variantOf(14), 'it still draws with its own program');
+            self::assertSame(ProcModeShaderRegistry::BASE_VARIANT, ProcModeShaderRegistry::sortVariantOf(14));
+        } finally {
+            ProcModeShaderRegistry::clear();
+            ProcModeRegistry::clear();
+        }
     }
 
     /**

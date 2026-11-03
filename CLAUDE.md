@@ -491,7 +491,7 @@ textures: 144.5 MB -> 18.0 MB, inflating all of them +0.3 s (~1 ms per texture).
 **Mesh shader programs and variants** (`ProcModeShaderRegistry`, `ShaderPath`; `ShaderVariantRegistryTest`,
 `VioShaderVariantRenderTest`). The mesh shader is not meant to grow with every look. Nothing here is on by default:
 without a definition the program is the v0.92.0 shader (the test pins its hash with the guards removed).
-- `defineVariant($name, $modes, $omit = [], $lazy = false)` moves proc modes into a program of their own. `$omit`
+- `defineVariant($name, $modes, $omit = [], $lazy = false, $keepOrder = false)` moves proc modes into a program of their own. `$omit`
   lists `ShaderPath`s it is compiled without (`#ifndef PHPOLYGON_OMIT_*` in `vio/mesh3d.frag`): a mode that returns
   early reaches no lighting pattern. `$lazy` compiles at first use instead of behind the splash.
   `omitFromBase($paths)` does the same for the base program. `omissionViolations()` lists materials drawn with a
@@ -504,6 +504,11 @@ without a definition the program is the v0.92.0 shader (the test pins its hash w
   through the bound program's sampler map, which knows a unit once `vio_set_uniform(name, slot)` ran, so name before bind. Environment
   and probe textures are bound with the frame uniforms, once per program and frame. `OpaqueDrawOrder` groups by program, the
   transparent pass keeps its order and pays that per change. Without variants it is one bool test per draw.
+- **Equal depth decides by order.** Where two opaque surfaces share a depth (sea and sand along a shore, a coplanar decal) the
+  earlier draw keeps the pixel, so moving a mode into its own run can change pixels there. `defineVariant(..., keepOrder: true)`
+  sorts the variant's draws as the base program (`sortVariantOf()`): they stay at their material position and the image is that of
+  the base program, for a pipeline switch at each change of program in the run (`OpaqueDrawOrderTest`,
+  `VioShaderVariantRenderTest::testAKeepOrderVariantDrawsEqualDepthLikeTheBaseProgram`).
 - The GL renderer has one program: `spliceGlsl()` without a variant takes every mode.
 - The branch ladder is assembled per program (`glslBranches()`), so modes can be left out or moved: the first arm
   opens with `if`, others with `} else if`, the `} else` of the mode-0 arm lands at the end wherever a snippet carried

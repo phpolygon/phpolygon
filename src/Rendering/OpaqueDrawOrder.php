@@ -22,7 +22,9 @@ use PHPolygon\Rendering\Command\DrawMeshInstanced;
  * comparator sort, so the order never differs.
  *
  * With shader variants registered, the program comes first in the key: every
- * program change costs a pipeline bind. Opaque draws are order-independent.
+ * program change costs a pipeline bind. Opaque draws are order-independent up to
+ * equal depth, where the earlier draw keeps the pixel; a variant defined with
+ * `keepOrder` therefore sorts as the base program and keeps its material position.
  */
 final class OpaqueDrawOrder
 {
@@ -63,7 +65,7 @@ final class OpaqueDrawOrder
             $moved = $motion && $cmd instanceof DrawMesh && $cmd->prevModelMatrix !== null ? 1 : 0;
             $key = $materialId . "\0" . $meshId . "\0" . $moved;
             if ($variants) {
-                $key = ProcModeShaderRegistry::variantOf(ProcModeRegistry::resolve($materialId)) . "\0" . $key;
+                $key = ProcModeShaderRegistry::sortVariantOf(ProcModeRegistry::resolve($materialId)) . "\0" . $key;
             }
             $keys[] = $key;
             $opaque[] = [$materialId, $meshId, $cmd, $material, $moved];
