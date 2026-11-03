@@ -853,6 +853,7 @@ slept is recomputed on its first awake tick (its world matrix may be stale while
 | `GrassSystem` | Grass blades of every `GrassField` near the camera (`variants x 2` packed instanced draws, `SetGrass`); register after `Camera3DSystem`, BEFORE `Renderer3DSystem` |
 | `WaterDisturbanceSystem` | Wake trails and swimmer rings of every `WaterDisturber` as water-shader uniforms (see "Water building blocks"); register after the systems that move them, BEFORE `Renderer3DSystem` |
 | `SurfaceTextSystem` | Keeps every `SurfaceText` on its current text and language, the only writer of those materials; register BEFORE `Renderer3DSystem` |
+| `SignalMotionSystem` | Drives `SignalTrack` / `SignalSpin` / `SignalSwitch` from `Signals` channels (see "Signal motion"); BEFORE `Transform3DSystem`, with a command list also after `Camera3DSystem` and before `Renderer3DSystem` |
 
 ### Vegetation — the plant family (`PHPolygon\Vegetation`)
 
@@ -1108,6 +1109,56 @@ TextPlate::place($builder, 'Exit_Sign', $faceCentre, $faceNormal, new SurfaceTex
   scene of 41 draws at 1.36 ms: 27 distinct texts single draws 2.23 ms, `batchable` 2.03 ms; 8 distinct
   texts single 2.03 ms, `batchable` 1.52 ms. GPU time stayed in its noise (0.4-0.8 ms) in all cases. Idle
   `SurfaceTextSystem` tick over 200 surfaces 9 us (`benchmarks/micro/System/SurfaceTextBench.php`).
+
+### Signal motion — machines driven by channels (`Signals` + `SignalMotionSystem`)
+
+Parametric motion for machines, doors and displays, driven by named channels the game writes
+(`tests/System/SignalMotionSystemTest.php`, no GPU). The engine gives channels no meaning; names,
+speeds, lengths and the pool come from the game.
+
+```php
+$root->attach($signals = new Signals(['run' => true]));
+$root->attach($track = new SignalTrack($points, $poolIds, speed: 1.2, spacing: 0.9, end: TrackEnd::Queue,
+    runChannel: 'run', haltChannel: 'blocked', rampUp: 2.0, rampDown: 0.6));
+$track->effect = 'machine_motion'; $track->reducedRampScale = 1.5; $track->cullRadius = 12.0;
+$roller->attach(new SignalSpin(new Vec3(1, 0, 0), followTrack: $root->id, radius: 0.06));
+$lamp->attach(new SignalSwitch('fault', blinkHz: 1.0, source: $root->id));
+$signals->play('spawn', [0, 1, 2, 3], interval: 1.2, loop: true);   // a recorded run, as pulses
+$signals->pulse('spawn', 4.0);                                       // one more item, value 4
+```
+
+- `Signals` (component, usually on the machine's root): bool channels `set()/get()`, numbers
+  `setNumber()/number()`, pulses `pulse(channel, value)` (queued, at most `$maxPendingPulses` per channel,
+  the rest dropped and counted in `droppedPulses()`; one consumer per pulse channel) and sequences
+  `play(channel, values, interval, loop, delay)` that turn a list into pulses over time. Bools and numbers
+  are `#[Property]`; pulses and sequences are runtime state.
+- `SignalTrack`: items carried along a polyline (`setPoints()`; the items' parent space). The items are a
+  fixed pool of entities the game builds (`$items`); free ones are hidden (MeshRenderer of the item and its
+  descendants). A pulse on `$spawnChannel` puts the next free item at the start once `$spacing` is clear
+  and keeps the pulse value (`valueOf()`). Moves while `$runChannel` ('' = always) is on and `$haltChannel`
+  off, at `$speed` × number `$speedChannel`, eased (smoothstep of a linear drive level) over `$rampUp` /
+  `$rampDown`. Items keep spacing and never pass; `TrackEnd::Queue` stops them at the end, `Recycle`
+  returns them to the pool; arrivals add to number `$arrivedChannel`, bool `$fullChannel` = a pulse waits
+  and no item is free. `$travel` is the total surface travel. `$alignToPath` turns item +Z along the path.
+- `SignalSpin`: turns about a local axis on top of the rotation it had at its first update; own drive
+  (the same channels and ramps, radians per second) or `$followTrack` + `$radius` (angle = track travel /
+  radius: rollers turn exactly with the belt, ramps and halts included).
+- `SignalSwitch`: visibility from a bool channel (`$invert`, `$blinkHz`, `$duty`). It writes only
+  `MeshRenderer::$visible`, never a material or a light, so their single writers stay single.
+- Reduced motion: a motion names its effect register entry (`$effect`); `Motion\MotionTime::scale()` follows
+  `EffectRegistry` (`Reduced` = the player's motion scale, `Frozen` / `Off` = still, `Static` or no entry =
+  full speed). Ramps also stretch by `$reducedRampScale`. A blinking switch that stands still shows a steady
+  "on"; `$maxBlinkHzReduced` caps its rate. `SignalMotionSystem::$timeScale` scales everything (pause);
+  sequences follow only that.
+- Out of view: `$cullRadius` > 0 freezes a track or spin (nothing advances, nothing is written) while the
+  sphere around the entity's world position is outside the last rendered frustum or beyond `$maxDistance`
+  (`Motion\MotionView`, captured from `SetCamera` in the render phase when the system got the command list;
+  without a camera nothing freezes). Pulses keep waiting. Dormant entities are not iterated at all.
+- Instanced drawing: the motions write `Transform3D` and `MeshRenderer::$visible`. A system that re-reads
+  world matrices every frame draws them correctly; a static instanced batch would freeze them.
+- Measured 2026-11-03 (PHP 8.5.5 CLI, this repo's dev machine, `benchmarks/micro/System/SignalMotionBench.php`):
+  10 belts with 50 items on them, 80 following rollers, 10 blinking switches: 0.44 ms per update without
+  OPcache; a plain loop over the same scene 0.49 ms without and 0.19 ms with tracing JIT (median of 5 × 3000).
 
 ### Physics queries — rays and line of sight
 
