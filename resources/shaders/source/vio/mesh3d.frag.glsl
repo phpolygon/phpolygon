@@ -288,7 +288,20 @@ out vec4 frag_color;
 // ================================================================
 
 float hash21(vec2 p) {
+#ifdef PHPOLYGON_PRECISE_HASH
+    // The sine hash amplifies its argument by ~43758 per unit, and noise() reads the
+    // same lattice point from both cells beside it (`i + vec2(1,0)` here, `floor(p)`
+    // there). A compiler free to fuse or reorder the dot product rounds those two
+    // differently, and one ulp of a dot product near 1e5 is a different hash: value
+    // noise breaks at every cell edge, and the bump and noise normal patterns turn
+    // into per-pixel grain once a cell is smaller than a pixel. Set per backend
+    // (VioRenderer3D::preciseHashOn()); `precise` pins the order.
+    precise float d = fma(p.y, 311.7, p.x * 127.1);
+    precise float s = sin(d) * 43758.5453;
+    return fract(s);
+#else
     return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
+#endif // PHPOLYGON_PRECISE_HASH
 }
 
 float hash31(vec3 p) {

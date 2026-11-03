@@ -486,6 +486,21 @@ reads 0 on Vulkan: every IBL reflection is black there, a smooth metal goes blac
 turns dark with bright bands. D3D12 and Metal are right. Measured 2026-11-02, RTX 2080: smooth gold cylinder under `SetSky`,
 mean luma of the cylinder 13 on Vulkan against 187 on D3D12 (and 187 on Metal, Apple M5, php-vio 2.35.0). Nothing in the engine works around it.
 
+**Sine hash, pinned per backend** (`VioRenderer3D::preciseHashOn()`, `PRECISE_HASH_BACKENDS`, `VioPreciseHashTest`). `hash21` in
+`vio/mesh3d.frag` is `fract(sin(dot(p, c)) * 43758.5453)`: one ulp of the dot product (near 1e6 for lattice points a few
+hundred units out) is a different hash. `noise()` reads each lattice point from both cells beside it, and a driver that fuses or
+reorders the dot product differently at the two reads breaks value noise at every cell edge; where a cell is smaller than a pixel
+the `bumps` / `noise` normal patterns (and everything else built on `noise()`, snippets included) turn into per-pixel grain.
+`PHPOLYGON_PRECISE_HASH` compiles the hash with `precise` and a fixed `fma` order. On for Vulkan only; Direct3D keeps the plain
+hash and its frames byte for byte, Metal is unmeasured. `PHPOLYGON_PRECISE_HASH=0` / `=1` switch it off / on for every backend.
+Measured 2026-11-03, php-vio 2.40.3, noise painted as grey at ~18 px per cell, neighbour jumps > 40 with plain / pinned hash:
+Vulkan RTX 2080 283 / 0, D3D12 RTX 2080 55 / 0 (the defect exists there too, rarer), D3D12 WARP 0 / 0. Patterned ground from
+40 m (960x540, `bumps` x6, FXAA, AO Medium, v0.97.0), mean |L - 3x3 mean| over the ground: Vulkan 0.88 -> 0.45, D3D12 0.46
+unchanged (byte for byte). A game's 60 aerial shots (960x540, same graphics, on v0.96.3): mean luminance difference Vulkan to D3D12 2.90 -> 0.12,
+the D3D12 frames with the change pixel for pixel those without. GPU cost not measured cleanly (GPU shared with a running game). With the pin the Vulkan frame equals the D3D12 frame compiled with it (3 of 518 400 pixels differ by at most 0.2 luma).
+Not fixed by the pin: at a noise coordinate of ~1.4e5 (`bumps` x6 on UVs near 3000) the hash has no variation left and the
+pattern is flat on both backends; at ~1e4 it still works (measured, same scene).
+
 **3D textures:** `resolveTexture()` binds the `VioTextureManager` upload (`vioTexture()`: mip chain,
 anisotropy, KTX2 container) — never decode the file a second time for 3D.
 

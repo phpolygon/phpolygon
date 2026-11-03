@@ -264,7 +264,7 @@ final class ShaderVariantRegistryTest extends TestCase
                 $stack[] = 'keep';
                 continue;
             }
-            if (preg_match('/^\s*#ifdef PHPOLYGON_(SCENE_DEPTH|INSTANCE_PARAMS|MATERIAL_PARAMS)\b/', $line) === 1) {
+            if (preg_match('/^\s*#ifdef PHPOLYGON_(SCENE_DEPTH|INSTANCE_PARAMS|MATERIAL_PARAMS|PRECISE_HASH)\b/', $line) === 1) {
                 $stack[] = 'drop';
                 continue;
             }

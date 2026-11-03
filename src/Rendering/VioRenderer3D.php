@@ -1104,6 +1104,26 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         return getenv('PHPOLYGON_SSAO') === '1' || in_array($backend, self::SSAO_BACKENDS, true);
     }
 
+    /**
+     * Backends whose mesh shader evaluates its sine hash with a pinned operation order
+     * (`PHPOLYGON_PRECISE_HASH`, see `hash21` in vio/mesh3d.frag). On Vulkan the driver
+     * rounds the same lattice point differently depending on how it was reached, so value
+     * noise breaks at every cell edge and the bump / noise normal patterns read as
+     * per-pixel grain. Direct3D stays on the plain hash and keeps its frames byte for byte;
+     * Metal is unmeasured. PHPOLYGON_PRECISE_HASH=0 switches it off, =1 on for every backend.
+     */
+    private const PRECISE_HASH_BACKENDS = ['vulkan'];
+
+    /** Whether the mesh shader is compiled with the order-pinned hash on $backend (a vio backend name). */
+    public static function preciseHashOn(string $backend): bool
+    {
+        $env = getenv('PHPOLYGON_PRECISE_HASH');
+        if ($env === '0' || $env === '1') {
+            return $env === '1';
+        }
+        return in_array($backend, self::PRECISE_HASH_BACKENDS, true);
+    }
+
     /** SdfOcclusion / SdfBounce trace pass: with a volume present, where the G-buffer effects run. */
     private function sdfAoEnabledThisFrame(): bool
     {
@@ -3647,6 +3667,9 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         );
         foreach (ProcModeShaderRegistry::variantDefines($variant) as $define) {
             $source = self::withDefine($source, $define);
+        }
+        if (self::preciseHashOn($this->conventions()->name())) {
+            $source = self::withDefine($source, 'PHPOLYGON_PRECISE_HASH');
         }
         return $source;
     }
