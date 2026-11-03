@@ -610,8 +610,16 @@ $engine->graphics->update(fn (GraphicsSettings $s) => $s->with(accessibility: $s
 $list->add(SetFocusRegion::aroundBox($min, $max, $view, $projection)); // a terminal; SetFocusRegion::clear() ends it
 $list->add(new SetComfortVignette(0.5));                               // a lift, swimming; 0 hands it back to the camera
 ```
-- One fullscreen draw over the finished image, after the Final-stage passes, before the HDR10 encoding and the UI (the UI is not
-  touched; `ColorVision::correct()` corrects a 2D colour on the CPU). Order: night boost, contrast (encoded), saturation, colour vision,
+- One fullscreen draw over the finished image, after the Final-stage passes, before the HDR10 encoding and the UI (the pass does not
+  touch the UI; colour vision reaches it on the CPU, see the next point).
+- **Colour vision in the UI** (`Accessibility\ColorVisionFilter`, `VioRenderer2DColorVisionTest`, `ColorVisionFilterTest`): `VioRenderer2D`
+  takes the option from `applyEffectSettings()` (the settings manager calls it) and corrects every draw colour - rects, outlines,
+  circles, lines, arcs, text, the clear - with the same model (decode, `ColorVision::correct()`, or `simulate()` for the developer
+  view, encode; alpha kept), cached per packed colour. `ScaledRenderer2D` hands colours on unchanged, so it is corrected too.
+  Sprites and 2D effect output are not: correcting texels would take a pass per sprite. `setColorVisionScope(false)` leaves the UI
+  to a game that corrects it itself, a closure `fn (Color $c): bool` narrows it (only the state colours); `colorVisionFilter()` is the
+  filter for colours that leave the renderer (effect parameters, markers). Off: one null test per draw, frames byte for byte those
+  of v0.96.1. The NanoVG, GD and Null renderers have none. Status red / green as a deuteranope sees them: dE76 5.9 -> 53.2 (WARP). Order: night boost, contrast (encoded), saturation, colour vision,
   focus dim, comfort vignette, flash gain (linear). Vio family only; the GL family and native Vulkan have none, `renderToImage()` runs none.
   `accessibilityAvailable()` for a settings screen. GPU mark `post.a11y` (it also holds the present draw before it), CPU section
   `render3d.post.a11y`.

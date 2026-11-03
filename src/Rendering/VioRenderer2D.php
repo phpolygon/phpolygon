@@ -7,6 +7,7 @@ namespace PHPolygon\Rendering;
 use PHPolygon\Math\Mat3;
 use PHPolygon\Math\Rect;
 use PHPolygon\Math\Vec2;
+use PHPolygon\Rendering\Accessibility\ColorVisionFilter;
 use PHPolygon\Rendering\Effect2D\Effect2D;
 use PHPolygon\Rendering\Effect2D\Effect2DRegistry;
 use PHPolygon\Rendering\Effect2D\EffectRenderer2DInterface;
@@ -215,6 +216,15 @@ class VioRenderer2D implements Renderer2DInterface, EffectRenderer2DInterface, A
     private ?VioTexture $effectWhite = null;
 
     private ?GraphicsSettings $effectSettings = null;
+
+    /** The colour vision option of the settings, null while it is off. */
+    private ?ColorVisionFilter $colorVision = null;
+
+    /** Which draw colours it reaches: all, none, or those a game's test accepts. */
+    private bool|\Closure $colorVisionScope = true;
+
+    /** $colorVision while the scope lets it reach any colour, else null: one test per draw when off. */
+    private ?ColorVisionFilter $drawColorFilter = null;
 
     /** @var array<string, list<array{0: \VioRenderTarget, 1: VioTexture}>> target size -> targets */
     private array $effectTargets = [];
@@ -429,6 +439,9 @@ class VioRenderer2D implements Renderer2DInterface, EffectRenderer2DInterface, A
 
     public function clear(Color $color): void
     {
+        if ($this->drawColorFilter !== null && $this->colorVisionReaches($color)) {
+            $color = $this->drawColorFilter->color($color);
+        }
         vio_clear($this->ctx, $color->r, $color->g, $color->b, $color->a);
     }
 
@@ -742,6 +755,12 @@ class VioRenderer2D implements Renderer2DInterface, EffectRenderer2DInterface, A
     }
 
 
+    /**
+     * Sprites keep their pixels under the colour vision option: the tint is white, and
+     * correcting the texels would take a render pass per sprite (a 2D effect cannot read
+     * what was drawn before it). A state shown by colour belongs in a drawn shape or text,
+     * or in the game's own art for each mode.
+     */
     public function drawSprite(Texture $texture, ?Rect $srcRegion, float $x, float $y, float $w, float $h, float $opacity = 1.0): void
     {
         $vioTex = $this->getVioTexture($texture);
@@ -754,7 +773,7 @@ class VioRenderer2D implements Renderer2DInterface, EffectRenderer2DInterface, A
             'y' => $y,
             'width' => $w,
             'height' => $h,
-            'color' => $this->colorToArgb(new Color(1.0, 1.0, 1.0, $opacity)),
+            'color' => ((((int)($opacity * $this->globalAlpha * 255)) & 0xFF) << 24) | 0xFFFFFF,
             'z' => $this->nextZ(),
         ];
 
@@ -1350,6 +1369,34 @@ class VioRenderer2D implements Renderer2DInterface, EffectRenderer2DInterface, A
     public function applyEffectSettings(GraphicsSettings $settings): void
     {
         $this->effectSettings = $settings;
+        // Colour vision reaches the UI here as well as the 3D image (VioAccessibilityPass).
+        $filter = ColorVisionFilter::fromSettings($settings->accessibility);
+        if ($filter === null || !$filter->sameAs($this->colorVision)) {
+            $this->colorVision = $filter;
+        }
+        $this->drawColorFilter = $this->colorVisionScope === false ? null : $this->colorVision;
+    }
+
+    /**
+     * Which draw colours the colour vision option reaches. true (default): every colour
+     * of rects, outlines, circles, lines, arcs, text and the clear. false: none, for a game
+     * that corrects its UI itself. A closure `fn (Color $c): bool` picks the colours, e.g.
+     * only those that carry a state (success, error, warning); it runs for each such draw
+     * while the option is on. Sprites are never filtered (see {@see drawSprite()}).
+     */
+    public function setColorVisionScope(bool|\Closure $scope): void
+    {
+        $this->colorVisionScope = $scope;
+        $this->drawColorFilter = $scope === false ? null : $this->colorVision;
+    }
+
+    /**
+     * The colour vision option as the UI applies it, null while it is off. For colours that
+     * leave the 2D renderer with the same meaning: 2D effect parameters, a 3D marker.
+     */
+    public function colorVisionFilter(): ?ColorVisionFilter
+    {
+        return $this->colorVision;
     }
 
     public function effectAvailable(string $name): bool
@@ -1398,7 +1445,8 @@ class VioRenderer2D implements Renderer2DInterface, EffectRenderer2DInterface, A
             'src_y' => 0.0,
             'src_w' => (float) $pw,
             'src_h' => (float) $ph,
-            'color' => $this->colorToArgb(new Color(1.0, 1.0, 1.0, 1.0)),
+            // White at the global alpha: like a sprite, an effect's output is not filtered.
+            'color' => ((((int)($this->globalAlpha * 255)) & 0xFF) << 24) | 0xFFFFFF,
             'z' => $this->nextZ(),
         ]);
 
@@ -1697,6 +1745,15 @@ class VioRenderer2D implements Renderer2DInterface, EffectRenderer2DInterface, A
         $r = ((int)($color->r * 255)) & 0xFF;
         $g = ((int)($color->g * 255)) & 0xFF;
         $b = ((int)($color->b * 255)) & 0xFF;
-        return ($a << 24) | ($r << 16) | ($g << 8) | $b;
+        $argb = ($a << 24) | ($r << 16) | ($g << 8) | $b;
+        if ($this->drawColorFilter !== null && $this->colorVisionReaches($color)) {
+            return $this->drawColorFilter->argb($argb);
+        }
+        return $argb;
+    }
+
+    private function colorVisionReaches(Color $color): bool
+    {
+        return $this->colorVisionScope === true || ($this->colorVisionScope instanceof \Closure && ($this->colorVisionScope)($color) === true);
     }
 }

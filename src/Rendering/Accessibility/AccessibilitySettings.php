@@ -16,7 +16,7 @@ namespace PHPolygon\Rendering\Accessibility;
 final class AccessibilitySettings
 {
     public function __construct(
-        /** Colour vision deficiency the image is corrected for. */
+        /** Colour vision deficiency the image is corrected for; VioRenderer2D corrects the UI's draw colours too. */
         public readonly ColorVisionMode $colorVision = ColorVisionMode::Off,
         /** 0..1, how much of the correction (or simulation) is applied. */
         public readonly float $colorVisionStrength = 1.0,
