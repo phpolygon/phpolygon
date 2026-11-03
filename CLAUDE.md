@@ -1012,6 +1012,34 @@ $signals->pulse('spawn', 4.0);                                       // one more
   10 belts with 50 items on them, 80 following rollers, 10 blinking switches: 0.44 ms per update without
   OPcache; a plain loop over the same scene 0.49 ms without and 0.19 ms with tracing JIT (median of 5 × 3000).
 
+### Navigation agents — NavMesh paths and authored waypoints (`NavMeshAgent` + `NavigationSystem`)
+
+```php
+$agent = new NavMeshAgent(speed: 1.3, angularSpeed: 240.0, acceleration: 6.0, stoppingDistance: 0.15);
+$agent->faceMovement = true;            // yaw follows the travel direction (upright), angularSpeed °/s
+$agent->useCharacterController = true;  // with a CharacterController3D: XZ step only, physics settles the rest
+$agent->followPath($waypoints, waits: [2 => 1.0], faceTarget: $workbench);   // no NavMesh needed
+if ($agent->hasArrived()) { /* there and turned toward $workbench */ }
+$agent->setDestination($goal, faceTarget: $door);                             // NavMesh search, same arrival
+```
+
+- `followPath(list<Vec3>, waits, faceTarget)` walks an authored list (halls without a NavMesh, scripted
+  routes); the first point may be where the agent stands. Agents with such a path move even when the
+  system has no NavMesh; a pending `setDestination()` without one still waits, as before.
+- Wait points (`waits`: waypoint index → seconds, `isWaiting()`): the agent slows toward the next stop
+  (a wait point still to serve, or the end) with the old arrive rule (linear below one second of walking),
+  stands, then goes on. The arrive rule sums only up to that one second, so a path of any length costs
+  the same per tick (before: the whole remaining path every tick; 10 agents on 400-point paths 2.2 ms →
+  0.08 ms per update, `benchmarks/micro/System/NavigationPathBench.php`, no OPcache, 2026-11-03).
+- `hasArrived()` = destination reached and, with `faceTarget`, turned toward it at `angularSpeed`
+  (≤ 0 = at once). `faceMovement` turns while walking. `yawOffset` (radians) for models that do not
+  look along local +Z. Turning writes a pure yaw quaternion.
+- `useCharacterController` + a `CharacterController3D` on the entity: only the horizontal step is
+  written (the waypoints' height is ignored), `Physics3DSystem` resolves walls, steps and height. Without
+  it the position is written directly, height included (the old behaviour).
+- All of it is opt-in; an agent that uses none of it moves exactly as before (`NavigationSystemTest`).
+  Tests: `tests/Navigation/NavMeshAgentPathTest.php`.
+
 ### Physics queries — rays and line of sight
 
 `Raycaster3D` answers two kinds of question:
