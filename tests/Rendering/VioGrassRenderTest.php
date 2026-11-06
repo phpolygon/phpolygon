@@ -109,7 +109,11 @@ final class VioGrassRenderTest extends TestCase
         foreach ($draws as $d) {
             $list->add($d);
         }
-        return $renderer->renderToImage($list, self::W, self::H, new Color(0.0, 0.0, 0.0));
+        $image = $renderer->renderToImage($list, self::W, self::H, new Color(0.0, 0.0, 0.0));
+        // A lost device reads back nothing: one clear failure instead of a warning per pixel.
+        self::assertSame(self::W * self::H * 4, strlen($image), 'read-back of the frame');
+
+        return $image;
     }
 
     /** @return array{count: int, cx: float, red: int, green: int} pixels that are not the black clear colour */

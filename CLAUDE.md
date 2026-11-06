@@ -486,6 +486,17 @@ reads 0 on Vulkan: every IBL reflection is black there, a smooth metal goes blac
 turns dark with bright bands. D3D12 and Metal are right. Measured 2026-11-02, RTX 2080: smooth gold cylinder under `SetSky`,
 mean luma of the cylinder 13 on Vulkan against 187 on D3D12 (and 187 on Metal, Apple M5, php-vio 2.35.0). Nothing in the engine works around it.
 
+**Render targets created inside a frame on OpenGL (open php-vio defect):** up to php-vio 2.41.0 `vio_render_target()` on OpenGL ends with
+`glBindFramebuffer(0)` and does not rebind the target that was bound, while php-vio still counts it as bound; the draws after it land in no
+readable target. Every target the renderer creates lazily inside a frame is exposed. Seen through `renderToImage()` with shadows off: the
+placeholder shadow target is created inside that frame, so the first image of a renderer is black (17 of the 18 OpenGL failures of the
+`native-gpu` group, RTX 2080, 2026-11-06). Direct3D 11/12 and Vulkan keep the binding. Nothing in the engine works around it.
+
+**Instanced draws on a second D3D11 context (open php-vio defect):** up to php-vio 2.41.0 `vio_draw_instanced` on D3D11 keeps its instance
+buffer in a function-static that outlives the device. A later context whose draw fits that buffer binds the old device's buffer and the device
+is removed (`DXGI_ERROR_DRIVER_INTERNAL_ERROR`), on WARP and on hardware (RTX 2080, 2026-11-06). Only processes that open several D3D11
+contexts meet it (`VioGrassRenderTest`, `VioSurfaceTextRenderTest` in the full group, not alone). Nothing in the engine works around it.
+
 **Sine hash, pinned per backend** (`VioRenderer3D::preciseHashOn()`, `PRECISE_HASH_BACKENDS`, `VioPreciseHashTest`). `hash21` in
 `vio/mesh3d.frag` is `fract(sin(dot(p, c)) * 43758.5453)`: one ulp of the dot product (near 1e6 for lattice points a few
 hundred units out) is a different hash. `noise()` reads each lattice point from both cells beside it, and a driver that fuses or

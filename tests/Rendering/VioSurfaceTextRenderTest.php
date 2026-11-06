@@ -141,12 +141,18 @@ final class VioSurfaceTextRenderTest extends TestCase
         }
 
         if ($this->firstImage) {
-            // The OpenGL backend answers the very first off-screen image black.
+            // The OpenGL backend answers the very first off-screen image black: the
+            // renderer creates its placeholder shadow target inside that frame, and
+            // php-vio's OpenGL target creation leaves the bound target unbound.
             $this->firstImage = false;
             $renderer->renderToImage($list, self::W, self::H, new Color(0.0, 0.0, 0.0));
         }
 
-        return $renderer->renderToImage($list, self::W, self::H, new Color(0.0, 0.0, 0.0));
+        $image = $renderer->renderToImage($list, self::W, self::H, new Color(0.0, 0.0, 0.0));
+        // A lost device reads back nothing: one clear failure instead of a warning per pixel.
+        self::assertSame(self::W * self::H * 4, strlen($image), 'read-back of the frame');
+
+        return $image;
     }
 
     /** @return array{0: int, 1: int, 2: int} */
