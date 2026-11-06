@@ -86,6 +86,18 @@ final class ProcModeShaderRegistry
     public const POSTCOLOR_HELPERS_SENTINEL = '// PHPOLYGON:POSTCOLOR_HELPERS';
     public const POSTCOLOR_SENTINEL = '// PHPOLYGON:POSTCOLOR';
 
+    // Surface hook. A game-specific change of the SURFACE before lighting, for every
+    // fragment that reaches the lit path (proc_mode arms that return early never get
+    // there): it has the last word on `albedo`, `roughness` and `metallic`, may
+    // `discard`, and adds self-lit colour through `surfaceEmission` (local light,
+    // fogged like the material emission). Reads `v_worldPos`, `N`, `V` and, with
+    // instance params, `v_instance_params`. Helpers at file scope after the proc_mode
+    // helpers, so they can use those and the engine noise; {@see SurfaceEffects}
+    // is an engine library of building blocks for it. Both sentinels are line
+    // comments and replace with '' when no game registers a hook.
+    public const SURFACE_HELPERS_SENTINEL = '// PHPOLYGON:SURFACE_HELPERS';
+    public const SURFACE_SENTINEL = '// PHPOLYGON:SURFACE';
+
     /** File scope of the fragment stage, where the generated declarations land. */
     public const UNIFORMS_SENTINEL = '// PHPOLYGON:SNIPPET_UNIFORMS';
 
@@ -126,6 +138,10 @@ final class ProcModeShaderRegistry
     private static ?array $postColorHelpers = null;
     /** @var array{vio: string, gl: string}|null call site for the post-color transform */
     private static ?array $postColorCall = null;
+    /** @var array{vio: string, gl: string}|null file-scope helpers of the surface hook */
+    private static ?array $surfaceHelpers = null;
+    /** @var array{vio: string, gl: string}|null statement(s) of the surface hook in main() */
+    private static ?array $surfaceCall = null;
     /** @var array<string, list<int>> region → explicit mode emission order */
     private static array $order = [];
     /** @var array<string, array{modes: list<int>, omit: list<ShaderPath>, lazy: bool, keepOrder: bool}> name → variant */
@@ -193,6 +209,34 @@ final class ProcModeShaderRegistry
     public static function postColorCall(string $family = self::FAMILY_VIO): string
     {
         return self::$postColorCall[$family] ?? self::$postColorCall[self::FAMILY_VIO] ?? '';
+    }
+
+    /**
+     * Register the game's surface hook (see {@see SURFACE_SENTINEL}): file-scope
+     * helpers and the statement(s) inside main(), spliced into every mesh program
+     * (forward, MRT, motion, storage, each variant; the native-GL program with the GL
+     * text). Pass '' as $glCall to leave the native-GL renderer untouched, e.g. for a
+     * hook that needs instance params (vio family only).
+     *
+     * @param string      $helpers   file-scope helper text (VIO family / default)
+     * @param string      $call      statement(s) inside main() (VIO family / default)
+     * @param string|null $glHelpers native-GL helper variant; falls back to $helpers
+     * @param string|null $glCall    native-GL call variant; falls back to $call
+     */
+    public static function registerSurfaceGlsl(string $helpers, string $call, ?string $glHelpers = null, ?string $glCall = null): void
+    {
+        self::$surfaceHelpers = [self::FAMILY_VIO => $helpers, self::FAMILY_GL => $glHelpers ?? $helpers];
+        self::$surfaceCall = [self::FAMILY_VIO => $call, self::FAMILY_GL => $glCall ?? $call];
+    }
+
+    public static function surfaceHelpers(string $family = self::FAMILY_VIO): string
+    {
+        return self::$surfaceHelpers[$family] ?? self::$surfaceHelpers[self::FAMILY_VIO] ?? '';
+    }
+
+    public static function surfaceCall(string $family = self::FAMILY_VIO): string
+    {
+        return self::$surfaceCall[$family] ?? self::$surfaceCall[self::FAMILY_VIO] ?? '';
     }
 
     /**
@@ -628,6 +672,9 @@ final class ProcModeShaderRegistry
         $source = str_replace(self::BRANCHES_SENTINEL, self::glslBranches($family, $variant), $source);
         $source = str_replace(self::POSTCOLOR_HELPERS_SENTINEL, self::postColorHelpers($family), $source);
         $source = str_replace(self::POSTCOLOR_SENTINEL, self::postColorCall($family), $source);
+        // SURFACE is a prefix of SURFACE_HELPERS: the helpers go first.
+        $source = str_replace(self::SURFACE_HELPERS_SENTINEL, self::surfaceHelpers($family), $source);
+        $source = str_replace(self::SURFACE_SENTINEL, self::surfaceCall($family), $source);
 
         return $source;
     }
@@ -639,6 +686,8 @@ final class ProcModeShaderRegistry
         self::$glslBranch = [];
         self::$postColorHelpers = null;
         self::$postColorCall = null;
+        self::$surfaceHelpers = null;
+        self::$surfaceCall = null;
         self::$order = [];
         self::$variants = [];
         self::$modeVariant = [];

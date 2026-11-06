@@ -630,6 +630,18 @@ pass is that stored value.
   Grass has its hash in `m[0].w`, its x reads 0. `MeshRenderer::$shaderParams` (not serialized) is the entity's way in, batched
   or not. Vio family only. Without it the shader and the vertex stages are the old ones and a draw pays one bool test.
 
+**Surface hook** (`ProcModeShaderRegistry::registerSurfaceGlsl()`, `SurfaceHookRegistryTest`, `VioSurfaceHookRenderTest`). A game's change of
+the SURFACE before lighting, for every fragment that reaches the lit path (arms that return early – water, unlit panels – never get there):
+the last word on `albedo`, `roughness`, `metallic`, may `discard`, and adds self-lit colour through `surfaceEmission` (summed with
+`u_emission` into `localAcc`, fogged like it, so `applyPostColor` stays affine). Helpers land after the proc_mode helpers
+(`// PHPOLYGON:SURFACE_HELPERS`), the call after snow (`// PHPOLYGON:SURFACE`), in both mesh3d.frag copies and every program; '' as GL call
+leaves the native-GL program alone (needed for hooks that read `v_instance_params`). Without a hook both sentinels vanish and the frame is
+the old one byte for byte. `Rendering\SurfaceEffects::glsl()` is a library of building blocks for it (prefix `sfx_`, no uniform, no varying,
+sine-free hash): 3D value noise, dissolve with edge glow, ring front and "behind the front", scan build-up with scanline, antialiased
+world-space wire grid (needs derivatives: per-primitive uniform control flow, before any discard), blocky glitch, saturation, weathering by
+amount, distance to a segment, travelling pulse bands. The shadow pass knows nothing of the hook: a surface cut away by it still casts its
+shadow, so a game hides the caster (`MeshRenderer::$castShadows`) while it matters.
+
 **Effect register** (`Rendering\Effects\EffectRegistry`, `EffectRegistryTest`). Plain data, nothing here touches a frame. A game registers one
 `EffectDefinition` per effect: name (that of its pass or variant), lowest `EffectTier`, `EffectCost` (measured GPU ms with adapter, backend,
 resolution, date; null until measured), `EffectFallback` for `ShaderQuality::Unlit` and for the GL family, `ReducedMotion`,

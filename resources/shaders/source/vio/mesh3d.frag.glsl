@@ -716,6 +716,7 @@ vec4 gbufferValue(vec3 worldN) {
 #endif
 
 // PHPOLYGON:PROCMODE_HELPERS
+// PHPOLYGON:SURFACE_HELPERS
 
 #ifndef PHPOLYGON_OMIT_NORMAL_PATTERNS
 // ================================================================
@@ -1244,6 +1245,12 @@ void main() {
     }
 #endif // PHPOLYGON_OMIT_SNOW
 
+    // Game surface hook (ProcModeShaderRegistry::registerSurfaceGlsl): the last word
+    // on albedo, roughness and metallic before lighting; may discard; self-lit colour
+    // goes into surfaceEmission (local light, fogged like u_emission).
+    vec3 surfaceEmission = vec3(0.0);
+    // PHPOLYGON:SURFACE
+
     // ---- PBR Lighting (Cook-Torrance GGX) ----
     roughness = clamp(roughness, 0.04, 1.0);
     vec3 F0 = mix(vec3(0.04), albedo, metallic);
@@ -1508,7 +1515,7 @@ void main() {
     }
 #endif // PHPOLYGON_OMIT_CLEARCOAT
 
-    localAcc += u_emission;
+    localAcc += u_emission + surfaceEmission;
 
     float fogDist = length(v_worldPos - u_camera_pos);
     float fogFactor = clamp((fogDist - u_fog_near) / (u_fog_far - u_fog_near), 0.0, 1.0);

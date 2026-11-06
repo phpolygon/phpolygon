@@ -489,6 +489,7 @@ float distributionGGX(float NdotH, float rough) {
 }
 
 // PHPOLYGON:PROCMODE_HELPERS
+// PHPOLYGON:SURFACE_HELPERS
 
 // ================================================================
 //  Procedural Carpaint (proc_mode = 10)
@@ -1030,6 +1031,11 @@ void main() {
         albedo    = mix(albedo,    albedo * 0.7,                 wetnessApplied);
     }
 
+    // Game surface hook (mirrors the Vio copy): the last word on albedo, roughness
+    // and metallic before lighting; may discard; self-lit colour in surfaceEmission.
+    vec3 surfaceEmission = vec3(0.0);
+    // PHPOLYGON:SURFACE
+
     // ---- PBR Lighting (sand + standard materials) ----
     float shininess = exp2(10.0 * (1.0 - roughness) + 1.0);
 
@@ -1234,7 +1240,7 @@ void main() {
     }
 
     // Emission
-    color += u_emission;
+    color += u_emission + surfaceEmission;
 
     // Fog
     float fogDist = length(v_worldPos - u_camera_pos);

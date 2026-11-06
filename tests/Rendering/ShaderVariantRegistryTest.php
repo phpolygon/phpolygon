@@ -66,6 +66,18 @@ final class ShaderVariantRegistryTest extends TestCase
             . "        texAlbedo *= textureGrad(u_albedo_texture, patternUv, uvDx, uvDy).rgb;\n"
             . "#endif\n",
         ],
+        // The surface hook (registerSurfaceGlsl): two sentinels and the emission it adds.
+        ["// PHPOLYGON:PROCMODE_HELPERS\n// PHPOLYGON:SURFACE_HELPERS\n", "// PHPOLYGON:PROCMODE_HELPERS\n"],
+        [
+            "#endif // PHPOLYGON_OMIT_SNOW\n\n"
+            . "    // Game surface hook (ProcModeShaderRegistry::registerSurfaceGlsl): the last word\n"
+            . "    // on albedo, roughness and metallic before lighting; may discard; self-lit colour\n"
+            . "    // goes into surfaceEmission (local light, fogged like u_emission).\n"
+            . "    vec3 surfaceEmission = vec3(0.0);\n"
+            . "    // PHPOLYGON:SURFACE\n",
+            "#endif // PHPOLYGON_OMIT_SNOW\n",
+        ],
+        ['localAcc += u_emission + surfaceEmission;', 'localAcc += u_emission;'],
     ];    /** The stage-local animation time of mesh3d.frag (v0.96.1), replacing `uniform float u_time;`. */
     private const FRAGMENT_TIME = "// Animation time of this stage. The vertex stage declares u_time too, and php-vio's\n"
         . "// cbuffer backends (D3D11, D3D12, Vulkan, Metal) set a name declared in both stages\n"
