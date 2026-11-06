@@ -2139,6 +2139,22 @@ Games should only register CJK fallbacks when the active locale requires them.
 The primary font renders first; fallback fonts only render glyphs the primary
 doesn't cover. `measureText()` uses the full chain for width calculation.
 
+- **Glyph size of fallback fonts** (`Text\EmNormalizedFont`, `EmNormalizedFontTest`). php-vio's shaped
+  `vio_text` (up to at least 2.40.3) lays a run out with HarfBuzz at `size` px per EM but rasterises with
+  stb_truetype's pixel-height scale (hhea ascender - descender = `size`): glyphs come out smaller than their
+  advances - Inter 83 %, Noto CJK 69 %, Noto Thai 66 %, Noto Arabic 47 % (tiny letters, gaps where Arabic joins).
+  A font named in `addFallbackFont()` therefore loads from a copy whose hhea ascender/descender are rescaled to
+  sum to units per EM (`<temp>/phpolygon-font-em/<hash>-<file>`, written once; cache key suffix `#em`): glyphs fill
+  their advances, measured widths are unchanged. Primary fonts are loaded as they are (Latin keeps its look) -
+  the real fix is php-vio rasterising per EM, which draws the copies exactly like the sources.
+- **Right-to-left text** (`Text\BidiOrder`, `VioRenderer2DBidiRunsTest`, `VioRenderer2DArabicTextTest`). A string
+  split across the chain is placed in visual order (reduced UAX #9: paragraph direction from the first strong
+  character, numbers left to right, neutrals by their neighbours, brackets mirrored; a `$`/`#`/`%` glued to a word
+  stays in front of it). Right-to-left runs go to `vio_text` in logical order, so php-vio shapes them; they are
+  measured with `vio_text_bitmap`, because `vio_text_measure` shapes every run left to right (other joining
+  forms, other widths). Strings without Hebrew/Arabic-range characters take the old path unchanged. The UI
+  layout itself stays left to right: alignment and wrapping are the caller's.
+
 ### VioRenderer2D — 2D effects (`Effect2DRegistry`)
 
 A game draws its own fragment effects among its 2D draws: a glow around a panel, scanlines over the screen, a wipe, a

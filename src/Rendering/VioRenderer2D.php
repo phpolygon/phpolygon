@@ -14,6 +14,8 @@ use PHPolygon\Rendering\Effect2D\EffectRenderer2DInterface;
 use PHPolygon\Rendering\Effects\EffectFallback;
 use PHPolygon\Rendering\Effects\EffectRegistry;
 use PHPolygon\Rendering\Quality\ShaderQuality;
+use PHPolygon\Rendering\Text\BidiOrder;
+use PHPolygon\Rendering\Text\EmNormalizedFont;
 use PHPolygon\Runtime\PerfProfiler;
 use VioContext;
 use VioFont;
@@ -51,6 +53,26 @@ class VioRenderer2D implements Renderer2DInterface, EffectRenderer2DInterface, A
     private array $fontCache = [];
 
     /**
+     * Fonts used as a fallback: loaded from an {@see EmNormalizedFont} copy, so their
+     * glyphs fill the advances php-vio's shaped layout gives them. Their measured
+     * widths stay those of the source file.
+     *
+     * @var array<string, true>
+     */
+    private array $emNormalizedFonts = [];
+
+    /** @var array<string, string> font name -> file actually loaded (the copy or the source) */
+    private array $fontFiles = [];
+
+    /**
+     * Per font object id: the face and logical size its right-to-left runs are measured
+     * with ({@see rtlRunWidth()}), null when that is not possible.
+     *
+     * @var array<int, array{\VioFontFace, float}|null>
+     */
+    private array $shapingFaces = [];
+
+    /**
      * devicePixelRatio for glyph rasterisation. The UI is authored in a fixed
      * design grid and magnified onto the framebuffer by a transform; a glyph
      * atlas rasterised at its logical size then gets bilinearly upscaled by that
@@ -69,6 +91,7 @@ class VioRenderer2D implements Renderer2DInterface, EffectRenderer2DInterface, A
         $this->fontCache = [];
         // Keyed by font object id - a freed font's id can be reused.
         $this->alignHeightCache = [];
+        $this->shapingFaces = [];
     }
 
     /**
@@ -96,7 +119,8 @@ class VioRenderer2D implements Renderer2DInterface, EffectRenderer2DInterface, A
      */
     private function fontCacheKey(string $name, int $roundedSize): string
     {
-        return $name . ':' . $roundedSize . '@' . (int)round($this->fontRenderScale * 100);
+        return $name . ':' . $roundedSize . '@' . (int)round($this->fontRenderScale * 100)
+            . (isset($this->emNormalizedFonts[$name]) ? '#em' : '');
     }
 
     /** @var array<int, VioTexture> Texture glId/objectId -> VioTexture */
@@ -659,15 +683,102 @@ class VioRenderer2D implements Renderer2DInterface, EffectRenderer2DInterface, A
     }
 
     /**
+     * {@see planTextRuns} for a line with right-to-left text: the runs are placed in
+     * visual order ({@see BidiOrder}), so an Arabic or Hebrew sentence split across
+     * fonts reads from right to left instead of word by word from left to right.
+     *
+     * A run is a stretch of characters, adjacent on screen, with one claiming font
+     * and one embedding level. Its text goes to vio_text in the order vio needs:
+     * - right to left with a strong RTL character: logical order - php-vio shapes it
+     *   (joining forms) and lays it out right to left itself;
+     * - right to left without one (spaces, punctuation): already reversed, brackets
+     *   mirrored - vio draws it left to right as given;
+     * - left to right (Latin words, numbers): logical order.
+     * Each run is measured whole ($runWidth), so joined Arabic letters reserve their
+     * shaped width, not the sum of their isolated forms.
+     *
+     * @param list<string>                 $chars     one line, ordered single characters
+     * @param callable(int, string): bool  $charCovers fn($fontIndex, $char): bool
+     * @param callable(int, string): float $runWidth  fn($fontIndex, $text): float - advance of $text
+     * @param int|null                     $base      paragraph level of a wrapped line, null = its own
+     * @return array{runs: list<array{font: int, text: string, x: float}>, width: float}
+     */
+    private static function planBidiRuns(
+        array $chars,
+        int $chainSize,
+        callable $charCovers,
+        callable $runWidth,
+        float $originX,
+        ?int $base = null,
+    ): array {
+        $claims = [];
+        foreach ($chars as $ch) {
+            $claim = 0;
+            for ($i = 0; $i < $chainSize; $i++) {
+                if ($charCovers($i, $ch)) {
+                    $claim = $i;
+                    break;
+                }
+            }
+            $claims[] = $claim;
+        }
+        $levels = BidiOrder::levels($chars, $base)['levels'];
+        $order = BidiOrder::visualOrder($levels);
+
+        $runs = [];
+        $penX = $originX;
+        $count = count($order);
+        for ($v = 0; $v < $count;) {
+            $font = $claims[$order[$v]];
+            $level = $levels[$order[$v]];
+            $group = [];
+            while ($v < $count && $claims[$order[$v]] === $font && $levels[$order[$v]] === $level) {
+                $group[] = $order[$v];
+                $v++;
+            }
+            if ($level % 2 === 1) {
+                $strong = false;
+                foreach ($group as $index) {
+                    if (BidiOrder::isStrongRtl($chars[$index])) {
+                        $strong = true;
+                        break;
+                    }
+                }
+                $text = '';
+                if ($strong) {
+                    foreach (array_reverse($group) as $index) {
+                        $text .= $chars[$index];
+                    }
+                } else {
+                    foreach ($group as $index) {
+                        $text .= BidiOrder::mirror($chars[$index]);
+                    }
+                }
+            } else {
+                $text = '';
+                foreach ($group as $index) {
+                    $text .= $chars[$index];
+                }
+            }
+            $runs[] = ['font' => $font, 'text' => $text, 'x' => $penX];
+            $penX += $runWidth($font, $text);
+        }
+
+        return ['runs' => $runs, 'width' => $penX - $originX];
+    }
+
+    /**
      * Render text using the font chain. Plain Western text (and text the primary
      * already covers fully) is drawn in a single primary pass. A genuinely mixed
      * string is split into runs by {@see planTextRuns} and each run is drawn with
      * its claiming font at the pen position reached by advancing through the
      * claiming fonts' own widths — so full-width CJK glyphs never get overprinted
-     * by following text.
+     * by following text. A string with right-to-left text is laid out by
+     * {@see planBidiRuns} instead.
      * @param list<\VioFont> $chain
+     * @param int|null $bidiBase paragraph level of a wrapped line (see BidiOrder::levels())
      */
-    private function drawTextWithChain(array $chain, string $text, float $x, float $y, int $argb, float $z): void
+    private function drawTextWithChain(array $chain, string $text, float $x, float $y, int $argb, float $z, ?int $bidiBase = null): void
     {
         $primary = $chain[0];
 
@@ -713,7 +824,10 @@ class VioRenderer2D implements Renderer2DInterface, EffectRenderer2DInterface, A
         $charCovers = fn (int $fontIndex, string $ch): bool
             => $this->fontCoversChar($chain[$fontIndex], $ch);
 
-        foreach (self::planTextRuns($chars, $chainSize, $charWidth, $charCovers, $x)['runs'] as $draw) {
+        $plan = BidiOrder::hasRtl($text) || $bidiBase === 1
+            ? self::planBidiRuns($chars, $chainSize, $charCovers, $this->runWidth($chain), $x, $bidiBase)
+            : self::planTextRuns($chars, $chainSize, $charWidth, $charCovers, $x);
+        foreach ($plan['runs'] as $draw) {
             vio_text($this->ctx, $chain[$draw['font']], $draw['text'], $draw['x'], $y, ['color' => $argb, 'z' => $z]);
         }
     }
@@ -737,6 +851,9 @@ class VioRenderer2D implements Renderer2DInterface, EffectRenderer2DInterface, A
         // primary, so it never wrapped and then drew every glyph as a .notdef
         // box. The chain-aware width here matches what measureTextBox() reports.
         $lineWidth = fn (string $s): float => $this->measureTextWithChain($chain, $s)->width;
+        // A wrapped line keeps the direction of its paragraph: an Arabic sentence whose
+        // second line starts with "$language" still runs right to left there.
+        $bidiBase = BidiOrder::hasRtl($text) ? BidiOrder::paragraphLevel(mb_str_split($text)) : null;
 
         foreach (TextWrap::lines($text, $breakWidth, $lineWidth) as $line) {
             if ($line !== '') {
@@ -746,7 +863,7 @@ class VioRenderer2D implements Renderer2DInterface, EffectRenderer2DInterface, A
                 } elseif ($align & TextAlign::RIGHT) {
                     $lx = $x + $breakWidth - $lineWidth($line);
                 }
-                $this->drawTextWithChain($chain, $line, $lx, $lineY, $argb, $z);
+                $this->drawTextWithChain($chain, $line, $lx, $lineY, $argb, $z, $bidiBase);
             }
             // A '' entry is a blank line from consecutive newlines; it still
             // advances one line height to produce the visible gap.
@@ -817,6 +934,21 @@ class VioRenderer2D implements Renderer2DInterface, EffectRenderer2DInterface, A
     public function loadFont(string $name, string $path): void
     {
         $this->fontPaths[$name] = $path;
+        unset($this->fontFiles[$name]);
+    }
+
+    /**
+     * The file vio loads for $name: for a fallback font the {@see EmNormalizedFont}
+     * copy (php-vio's shaped path otherwise draws its glyphs too small for their
+     * advances - Arabic at 47 %, CJK at 69 %), for every other font its own file.
+     */
+    private function fontFile(string $name): string
+    {
+        if (!isset($this->emNormalizedFonts[$name])) {
+            return $this->fontPaths[$name];
+        }
+
+        return $this->fontFiles[$name] ??= EmNormalizedFont::path($this->fontPaths[$name]);
     }
 
     /**
@@ -844,6 +976,7 @@ class VioRenderer2D implements Renderer2DInterface, EffectRenderer2DInterface, A
     public function preloadFontAsync(string $name, string $path): void
     {
         $this->fontPaths[$name] = $path;
+        unset($this->fontFiles[$name]);
         if (\function_exists('vio_font_load_async') && \function_exists('vio_font_load_poll')) {
             $this->asyncFontNames[$name] = true;
         }
@@ -911,7 +1044,7 @@ class VioRenderer2D implements Renderer2DInterface, EffectRenderer2DInterface, A
             if (!isset($this->fontPaths[$name])) {
                 continue;
             }
-            $path = $this->fontPaths[$name];
+            $path = $this->fontFile($name);
             foreach ($sizes as $size) {
                 $rounded = (float)(int)$size;
                 $key = $this->fontCacheKey($name, (int)$rounded);
@@ -1090,6 +1223,56 @@ class VioRenderer2D implements Renderer2DInterface, EffectRenderer2DInterface, A
     }
 
     /**
+     * Width of a run of {@see planBidiRuns}: vio_text_measure, except for a run with
+     * right-to-left letters, which {@see rtlRunWidth()} measures.
+     *
+     * @param list<\VioFont> $chain
+     * @return \Closure(int, string): float
+     */
+    private function runWidth(array $chain): \Closure
+    {
+        return fn (int $fontIndex, string $text): float => BidiOrder::hasRtl($text)
+            ? $this->rtlRunWidth($chain[$fontIndex], $text)
+            : (float) $this->measureCached($chain[$fontIndex], $text)['width'];
+    }
+
+    /**
+     * Advance of a right-to-left run as vio_text draws it. php-vio's vio_text_measure
+     * (up to at least 2.40.3) shapes every run left to right, which gives Arabic other
+     * joining forms and widths than the right-to-left drawing ("حاول" 51.5 px measured,
+     * 64.7 px drawn at 32 px): the next run would overlap or leave a gap. The CPU
+     * layout of vio_text_bitmap resolves the direction and lays out at the same
+     * pixels per EM as vio_text's HarfBuzz pass, so its advance is the drawn one.
+     * Falls back to vio_text_measure where that is not available.
+     */
+    private function rtlRunWidth(\VioFont $font, string $text): float
+    {
+        $id = \spl_object_id($font);
+        if (!\array_key_exists($id, $this->shapingFaces)) {
+            $this->shapingFaces[$id] = null;
+            $key = \array_search($font, $this->fontCache, true);
+            if (\is_string($key) && \function_exists('vio_text_bitmap') && \function_exists('vio_font_face')
+                && \preg_match('/^(.*):(\d+)@\d+(#em)?$/', $key, $m) === 1 && isset($this->fontPaths[$m[1]])) {
+                $face = @vio_font_face($this->fontFile($m[1]));
+                if ($face instanceof \VioFontFace) {
+                    $this->shapingFaces[$id] = [$face, (float) $m[2]];
+                }
+            }
+        }
+        $source = $this->shapingFaces[$id];
+        if ($source === null) {
+            return (float) $this->measureCached($font, $text)['width'];
+        }
+        $cacheKey = $id . '|rtl|' . $text;
+        if (!isset($this->measureCache[$cacheKey])) {
+            $m = vio_text_bitmap([$source[0]], $text, $source[1], ['measure' => true]);
+            $this->measureCache[$cacheKey] = ['width' => \is_array($m) ? (float) $m['advance'] : 0.0, 'height' => 0.0];
+        }
+
+        return (float) $this->measureCache[$cacheKey]['width'];
+    }
+
+    /**
      * Precomputed byte mask for {@see textNeedsFallback}: every byte value
      * from 0xD4 to 0xFF. Building this once at class-load is meaningfully
      * cheaper than the original `preg_match('/[\x{0500}-\x{10FFFF}]/u', ...)`
@@ -1193,7 +1376,9 @@ class VioRenderer2D implements Renderer2DInterface, EffectRenderer2DInterface, A
             => (float)$this->measureCached($chain[$fontIndex], $ch)['width'];
         $charCovers = fn (int $fontIndex, string $ch): bool
             => $this->fontCoversChar($chain[$fontIndex], $ch);
-        $width = self::planTextRuns(mb_str_split($text), $chainSize, $charWidth, $charCovers, 0.0)['width'];
+        $width = BidiOrder::hasRtl($text)
+            ? self::planBidiRuns(mb_str_split($text), $chainSize, $charCovers, $this->runWidth($chain), 0.0)['width']
+            : self::planTextRuns(mb_str_split($text), $chainSize, $charWidth, $charCovers, 0.0)['width'];
 
         return new TextMetrics($width, $maxH);
     }
@@ -1266,6 +1451,9 @@ class VioRenderer2D implements Renderer2DInterface, EffectRenderer2DInterface, A
         if (!isset($this->fallbackFonts[$baseFont]) || !in_array($fallbackFont, $this->fallbackFonts[$baseFont], true)) {
             $this->fallbackFonts[$baseFont][] = $fallbackFont;
         }
+        // From now on the font loads from its normalised copy (its own cache keys,
+        // see fontCacheKey(); atlases built from the source file before stay unused).
+        $this->emNormalizedFonts[$fallbackFont] = true;
     }
 
     public function clearFallbackFonts(?string $baseFont = null): void
@@ -1643,12 +1831,12 @@ class VioRenderer2D implements Renderer2DInterface, EffectRenderer2DInterface, A
         // the worker is still busy, so the caller skips this font in the chain.
         if (isset($this->asyncFontNames[$name])) {
             if (!isset($this->pendingFontLoads[$key])) {
-                $handle = vio_font_load_async($this->ctx, $this->fontPaths[$name], (float)$roundedSize, $scale);
+                $handle = vio_font_load_async($this->ctx, $this->fontFile($name), (float)$roundedSize, $scale);
                 if ($handle === false) {
                     // Couldn't even start the worker (e.g. thread-create
                     // failure). Fall back to a synchronous load so the font
                     // still appears rather than being lost forever.
-                    $font = vio_font($this->ctx, $this->fontPaths[$name], (float)$roundedSize, $scale);
+                    $font = vio_font($this->ctx, $this->fontFile($name), (float)$roundedSize, $scale);
                     if ($font === false) {
                         return null;
                     }
@@ -1661,7 +1849,7 @@ class VioRenderer2D implements Renderer2DInterface, EffectRenderer2DInterface, A
             return null;
         }
 
-        $font = vio_font($this->ctx, $this->fontPaths[$name], (float)$roundedSize, $scale);
+        $font = vio_font($this->ctx, $this->fontFile($name), (float)$roundedSize, $scale);
         if ($font === false) {
             return null;
         }
