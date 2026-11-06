@@ -3842,6 +3842,12 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         if (self::preciseHashOn($this->conventions()->name())) {
             $source = self::withDefine($source, 'PHPOLYGON_PRECISE_HASH');
         }
+        if ($this->lightGridSupported()) {
+            $source = self::withDefine($source, 'PHPOLYGON_LIGHT_GRID');
+            // std430 storage blocks under #version 410 need the extension; right after
+            // #version, before any other token.
+            $source = (string) preg_replace('/^(\s*#version[^\n]*\n)/', "$1#extension GL_ARB_shader_storage_buffer_object : require\n#extension GL_ARB_shading_language_420pack : require\n", $source, 1);
+        }
         return $source;
     }
 
@@ -6297,6 +6303,98 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         vio_set_uniform($this->ctx, PlanarReflection::INFO, [PlanarReflection::plane() ?? 0.0, $texture !== null && $this->planarDrawn ? 1.0 : 0.0, 0.0, 0.0]);
     }
 
+    private ?bool $lightGridSupported = null;
+    private ?string $lightGridKey = null;
+    private ?Lighting\LightGrid $lightGrid = null;
+    /** @var array{0: mixed, 1: mixed, 2: mixed}|null lights, cells, indices */
+    private ?array $lightGridBuffers = null;
+    /** @var array{0: mixed, 1: mixed, 2: mixed}|null placeholders while the grid is off */
+    private ?array $lightGridEmpty = null;
+    /** @var list<array{0: mixed, 1: mixed, 2: mixed}> superseded grid buffers, kept for frames in flight */
+    private array $lightGridRetired = [];
+
+    /**
+     * The world light grid (Lighting\LightGrid) runs where the fragment stage can
+     * read storage buffers; PHPOLYGON_LIGHT_GRID=0 turns it off. Without it the
+     * eight point lights nearest to the camera light the scene, as before.
+     */
+    /** Point lights this renderer reads per frame: all of them up to 512 with the light grid, else 8. */
+    public function maxPointLights(): int
+    {
+        return $this->lightGridSupported() ? self::LIGHT_GRID_MAX_LIGHTS : 8;
+    }
+
+    /** Point lights the light grid takes per frame (the rest are the farthest). */
+    public const int LIGHT_GRID_MAX_LIGHTS = 512;
+
+    private function lightGridSupported(): bool
+    {
+        return $this->lightGridSupported ??= getenv('PHPOLYGON_LIGHT_GRID') !== '0'
+            && defined('VIO_FEATURE_FRAGMENT_STORAGE')
+            && function_exists('vio_bind_fragment_storage_buffer')
+            && vio_supports_feature($this->ctx, VIO_FEATURE_FRAGMENT_STORAGE);
+    }
+
+    /**
+     * More than eight point lights: every one goes into the grid the shader reads
+     * per cell, rebuilt only when a light changes. Eight or fewer keep the uniform
+     * path (u_light_grid.w = 0), so small scenes render exactly as before.
+     *
+     * @param list<AddPointLight> $pointLights
+     */
+    private function uploadLightGrid(array $pointLights, float $piScale): void
+    {
+        if (count($pointLights) <= 8) {
+            $this->lightGridEmpty ??= [
+                vio_storage_buffer($this->ctx, ['data' => pack('g*', 0, 0, 0, 0, 0, 0, 0, 0)]),
+                vio_storage_buffer($this->ctx, ['data' => Lighting\LightGrid::emptyCellBytes()]),
+                vio_storage_buffer($this->ctx, ['data' => pack('V*', 0)]),
+            ];
+            $this->bindLightGridBuffers($this->lightGridEmpty);
+            vio_set_uniform($this->ctx, 'u_light_grid', [0.0, 0.0, 1.0, 0.0]);
+            vio_set_uniform($this->ctx, 'u_light_grid_dims', [1.0, 1.0, 0.0, 0.0]);
+            return;
+        }
+        $lights = [];
+        foreach ($pointLights as $pl) {
+            $k = $pl->intensity * $piScale;
+            $lights[] = [$pl->position->x, $pl->position->y, $pl->position->z, max($pl->radius, 0.001),
+                $pl->color->r * $k, $pl->color->g * $k, $pl->color->b * $k];
+        }
+        $key = md5(serialize($lights));
+        if ($key !== $this->lightGridKey || $this->lightGridBuffers === null) {
+            $grid = new Lighting\LightGrid($lights);
+            $this->lightGrid = $grid;
+            $this->lightGridKey = $key;
+            // The GPU may still read the previous buffers for frames in flight: keep the
+            // last sets alive instead of letting PHP free them now (device hung otherwise).
+            if ($this->lightGridBuffers !== null) {
+                $this->lightGridRetired[] = $this->lightGridBuffers;
+                if (count($this->lightGridRetired) > 3) {
+                    array_shift($this->lightGridRetired);
+                }
+            }
+            $this->lightGridBuffers = [
+                vio_storage_buffer($this->ctx, ['data' => $grid->lightBytes()]),
+                vio_storage_buffer($this->ctx, ['data' => $grid->cellBytes()]),
+                vio_storage_buffer($this->ctx, ['data' => $grid->indexBytes()]),
+            ];
+        }
+        $this->bindLightGridBuffers($this->lightGridBuffers);
+        vio_set_uniform($this->ctx, 'u_light_grid', $this->lightGrid?->gridUniform() ?? [0.0, 0.0, 1.0, 0.0]);
+        vio_set_uniform($this->ctx, 'u_light_grid_dims', $this->lightGrid?->dimsUniform() ?? [1.0, 1.0, 0.0, 0.0]);
+    }
+
+    /** @param array{0: mixed, 1: mixed, 2: mixed} $buffers */
+    private function bindLightGridBuffers(array $buffers): void
+    {
+        foreach ($buffers as $i => $buffer) {
+            if ($buffer !== false && $buffer !== null) {
+                vio_bind_fragment_storage_buffer($this->ctx, $buffer, $i + 1);
+            }
+        }
+    }
+
     /** 1x1 white cube for a snippet samplerCube with nothing to show (never an empty SRV). */
     private ?VioCubemap $whiteCubemap = null;
 
@@ -7296,6 +7394,9 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
                 $db = ($b->position->x - $cx) ** 2 + ($b->position->y - $cy) ** 2 + ($b->position->z - $cz) ** 2;
                 return $da <=> $db;
             });
+        }
+        if ($this->lightGridSupported()) {
+            $this->uploadLightGrid($pointLights, $piScale);
         }
         $ptCount = min(count($pointLights), 8);
         vio_set_uniform($this->ctx, 'u_point_light_count', $ptCount);

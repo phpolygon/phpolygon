@@ -42,6 +42,18 @@ struct PointLight {
 uniform PointLight u_point_lights[8];
 uniform int u_point_light_count;
 
+#ifdef PHPOLYGON_LIGHT_GRID
+// World light grid (PHPolygon\Rendering\Lighting\LightGrid): all point lights of
+// the frame, and per x/z cell the ones that reach it. Declared writable like every
+// fragment storage buffer of vio (the backends bind them as UAVs); only read here.
+layout(std430, binding = 1) buffer LightGridLights { vec4 lgLights[]; };  // 2 per light: pos + radius, colour·intensity
+layout(std430, binding = 2) buffer LightGridCells { uint lgCells[]; };    // header (8), then 2 per cell: offset, count
+layout(std430, binding = 3) buffer LightGridIndex { uint lgIndex[]; };
+uniform vec4 u_light_grid;       // w: 1 = read the grid; the shape comes from the cells header
+uniform vec4 u_light_grid_dims;  // unused by the shader (kept for tools)
+const uint LIGHT_GRID_MAX = 32u; // LightGrid::MAX_PER_CELL
+#endif
+
 // Same packing discipline as PointLight: every vec3 is paired with a trailing
 // float so each member lands on a clean 16-byte boundary that both std140 and
 // HLSL cbuffer packing agree on (SPIRV-Cross rejects ambiguous layouts).
@@ -1433,7 +1445,47 @@ void main() {
         if (dl == 0) sunAcc += lit; else localAcc += lit;
     }
 
+#ifdef PHPOLYGON_LIGHT_GRID
+    // More than eight point lights: the lights of this fragment's grid cell.
+    if (u_light_grid.w > 0.5) {
+        // Shape from the buffer's own header, every index bounded by it.
+        uint lgNx = lgCells[0];
+        uint lgNz = lgCells[1];
+        vec2 lgOrigin = vec2(uintBitsToFloat(lgCells[2]), uintBitsToFloat(lgCells[3]));
+        float lgInv = uintBitsToFloat(lgCells[4]);
+        uint lgLightCount = lgCells[5];
+        uint lgIndexCount = lgCells[6];
+        ivec2 lgc = ivec2(floor((v_worldPos.xz - lgOrigin) * lgInv));
+        if (lgNx > 0u && lgc.x >= 0 && lgc.y >= 0 && uint(lgc.x) < lgNx && uint(lgc.y) < lgNz) {
+            uint lgCell = uint(lgc.x) + uint(lgc.y) * lgNx;
+            uint lgOff = lgCells[8u + lgCell * 2u];
+            uint lgCount = min(lgCells[8u + lgCell * 2u + 1u], LIGHT_GRID_MAX);
+            for (uint k = 0u; k < LIGHT_GRID_MAX; k++) {
+                if (k >= lgCount || lgOff + k >= lgIndexCount) break;
+                uint li = lgIndex[lgOff + k];
+                if (li >= lgLightCount) continue;
+                vec4 lgPos = lgLights[li * 2u];
+                vec3 lgRad = lgLights[li * 2u + 1u].rgb;
+                vec3 Lg = lgPos.xyz - v_worldPos;
+                float lgDist = length(Lg);
+                if (lgDist >= lgPos.w) continue;
+                Lg /= max(lgDist, 1e-4);
+                float lgAtten = clamp(1.0 - lgDist * lgDist / (lgPos.w * lgPos.w), 0.0, 1.0);
+                lgAtten *= lgAtten;
+                float NdotLG = max(dot(N, Lg), 0.0);
+                if (NdotLG > 0.0) {
+                    vec3 spec = cookTorranceSpecular(N, V, Lg, roughness, F0);
+                    vec3 F = fresnelSchlick(max(dot(normalize(V + Lg), V), 0.0), F0);
+                    vec3 kD = (1.0 - F) * (1.0 - metallic);
+                    localAcc += (kD * albedo / 3.14159265 + spec) * lgRad * lgAtten * NdotLG;
+                }
+            }
+        }
+    }
+    int pointCount = u_light_grid.w > 0.5 ? 0 : min(u_point_light_count, 8);
+#else
     int pointCount = min(u_point_light_count, 8);
+#endif
     for (int i = 0; i < pointCount; i++) {
         vec3 Lp = u_point_lights[i].position - v_worldPos;
         float dist = length(Lp);
