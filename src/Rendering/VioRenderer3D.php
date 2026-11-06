@@ -405,6 +405,20 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
      * the other three) on unit 4.
      */
     private const SPOT_SHADOW_UNIT = 4;
+
+    /**
+     * Point shadow: ONE depth cube around the first shadow-casting point light, read
+     * as a plain samplerCube on unit 5 with the compare in the shader (all four
+     * comparison samplers are taken: three cascades and the spot map).
+     */
+    private const POINT_SHADOW_UNIT = 5;
+    private const POINT_SHADOW_NEAR = 0.05;
+    private ?VioRenderTarget $pointShadowTarget = null;
+    private ?VioCubemap $pointShadowCube = null;
+    private int $pointShadowRes = 0;
+    private bool $pointShadowUnsupported = false;
+    private ?Vec3 $pointShadowPos = null;
+    private float $pointShadowFar = 1.0;
     private ?VioRenderTarget $spotShadowTarget = null;
     private int $spotShadowRes = 0;
     /** Index into u_spot_lights of the beam with the map, -1 for none. */
@@ -413,6 +427,8 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
     private array $spotShadowMatrix = [];
     /** @var list<array{0: \VioMesh, 1: string, 2: int}>|null Shadow draws of this frame. */
     private ?array $frameShadowDraws = null;
+    /** @var list<array{0: \VioMesh, 1: string, 2: int}>|null Local-light shadow draws of this frame. */
+    private ?array $frameLocalShadowDraws = null;
     private const SHADOW_ORTHO_SIZE = 60.0;
 
     /**
@@ -3317,6 +3333,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         PerfProfiler::begin('render3d.submit.shadow');
         $hasShadowMap = $this->renderShadowPass($commandList, $dirLights);
         $this->renderSpotShadowPass($commandList, $spotLights);
+        $this->renderPointShadowPass($commandList, $pointLights);
         PerfProfiler::end();
         if ($hasShadowMap) {
             $this->gpuMark('shadow');
@@ -4570,8 +4587,11 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
      *
      * @return list<array{0: \VioMesh, 1: string, 2: int}>
      */
-    private function collectShadowDraws(RenderCommandList $commandList): array
+    private function collectShadowDraws(RenderCommandList $commandList, bool $local = false): array
     {
+        // Two caster sets with their own packed cache: the sun's, and the local lights'
+        // (without light-emitting surfaces, which are the lamp or flame itself).
+        $k = $local ? 1 : 0;
         PerfProfiler::begin('render3d.shadow.collect');
         /** @var list<DrawMesh> $casters */
         $casters = [];
@@ -4583,7 +4603,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
                     continue;
                 }
                 $mat = MaterialRegistry::get($cmd->materialId);
-                if ($mat === null || $mat->alpha < 0.9 || !$this->castsShadow($cmd->materialId)) {
+                if ($mat === null || $mat->alpha < 0.9 || !$this->castsShadow($cmd->materialId) || ($local && self::emitsLight($mat))) {
                     continue;
                 }
                 $casters[] = $cmd;
@@ -4595,7 +4615,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
                     continue;
                 }
                 $mat = MaterialRegistry::get($cmd->materialId);
-                if ($mat === null || $mat->alpha < 0.9 || !$this->castsShadow($cmd->materialId)) {
+                if ($mat === null || $mat->alpha < 0.9 || !$this->castsShadow($cmd->materialId) || ($local && self::emitsLight($mat))) {
                     continue;
                 }
                 $instancedCasters[] = [$cmd, $mat];
@@ -4633,10 +4653,10 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         // packed once here and reused for every cascade.
         // The same casters with the same (immutable) matrix objects as last frame
         // pack to the same bytes: reuse them. A built world's casters are static.
-        $reusePacked = count($casters) === count($this->shadowCasterMatrices);
+        $reusePacked = count($casters) === count($this->shadowCasterMatrices[$k]);
         if ($reusePacked) {
             foreach ($casters as $i => $cmd) {
-                if ($cmd->modelMatrix !== $this->shadowCasterMatrices[$i] || $cmd->meshId !== $this->shadowCasterMeshIds[$i]) {
+                if ($cmd->modelMatrix !== $this->shadowCasterMatrices[$k][$i] || $cmd->meshId !== $this->shadowCasterMeshIds[$k][$i]) {
                     $reusePacked = false;
                     break;
                 }
@@ -4644,14 +4664,14 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         }
         if (!$reusePacked) {
             $shadowGroups = [];
-            $this->shadowCasterMatrices = [];
-            $this->shadowCasterMeshIds = [];
+            $this->shadowCasterMatrices[$k] = [];
+            $this->shadowCasterMeshIds[$k] = [];
             foreach ($casters as $cmd) {
                 $shadowGroups[$cmd->meshId][] = $cmd->modelMatrix;
-                $this->shadowCasterMatrices[] = $cmd->modelMatrix;
-                $this->shadowCasterMeshIds[] = $cmd->meshId;
+                $this->shadowCasterMatrices[$k][] = $cmd->modelMatrix;
+                $this->shadowCasterMeshIds[$k][] = $cmd->meshId;
             }
-            $this->shadowPackedCache = [];
+            $this->shadowPackedCache[$k] = [];
             foreach ($shadowGroups as $meshId => $mats) {
                 $floats = [];
                 foreach ($mats as $mm) {
@@ -4659,14 +4679,14 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
                         $floats[] = $f;
                     }
                 }
-                $this->shadowPackedCache[$meshId] = [pack('f*', ...$floats), count($mats)];
+                $this->shadowPackedCache[$k][$meshId] = [pack('f*', ...$floats), count($mats)];
             }
         }
 
         // Resolve every shadow draw once per frame, not once per cascade.
         /** @var list<array{0: \VioMesh, 1: string, 2: int}> $shadowDraws */
         $shadowDraws = [];
-        foreach ($this->shadowPackedCache as $meshId => [$buf, $cnt]) {
+        foreach ($this->shadowPackedCache[$k] as $meshId => [$buf, $cnt]) {
             $mesh = $this->uploadMesh((string) $meshId);
             if ($mesh !== null) {
                 $shadowDraws[] = [$mesh, $buf, $cnt];
@@ -4695,6 +4715,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
     private function renderShadowPass(RenderCommandList $commandList, array $dirLights): bool
     {
         $this->frameShadowDraws = null;
+        $this->frameLocalShadowDraws = null;
         if ($this->settings->shadowQuality === \PHPolygon\Rendering\Quality\ShadowQuality::Off) {
             return false;
         }
@@ -5530,6 +5551,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         vio_set_uniform($this->ctx, 'u_has_shadow_map', $hasShadowMap ? 1 : 0);
         vio_set_uniform($this->ctx, 'u_csm_count', count(self::CASCADE_ORTHO_SIZES));
         $this->uploadSpotShadowUniforms();
+        $this->uploadPointShadowUniforms();
 
         if (!$hasShadowMap || empty($this->cascadeShadowTargets)) {
             // No real shadow map this frame, but mesh3d.frag.glsl still
@@ -5644,7 +5666,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         if ($this->spotShadowTarget === null) {
             return;
         }
-        $draws = $this->frameShadowDraws ??= $this->collectShadowDraws($commandList);
+        $draws = $this->frameLocalShadowDraws ??= $this->collectShadowDraws($commandList, true);
 
         $dir = $sl->direction->normalize();
         $up = abs($dir->y) > 0.95 ? new Vec3(0.0, 0.0, 1.0) : new Vec3(0.0, 1.0, 0.0);
@@ -5675,6 +5697,113 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         }
         $this->spotShadowMatrix = array_values($m);
         $this->spotShadowIndex = $pick;
+    }
+
+    /**
+     * Depth cube of the first shadow-casting point light: six 90-degree views with
+     * the standard cubemap up-vectors (clip-Y flipped where render targets are
+     * top-left, like the environment cube), so a world direction samples the right
+     * texel on every backend. Same casters and depth pipeline as the cascades.
+     *
+     * @param list<AddPointLight> $pointLights
+     */
+    private function renderPointShadowPass(RenderCommandList $commandList, array $pointLights): void
+    {
+        $this->pointShadowPos = null;
+        if ($this->pointShadowUnsupported || $this->settings->shadowQuality === \PHPolygon\Rendering\Quality\ShadowQuality::Off) {
+            return;
+        }
+        // The shadow-casting light nearest to the camera gets the cube.
+        $eye = $this->currentViewMatrix?->inverse()->getTranslation() ?? new Vec3(0.0, 0.0, 0.0);
+        $light = null;
+        $best = INF;
+        foreach ($pointLights as $pl) {
+            if (!$pl->castsShadow || $pl->radius <= 0.2 || $pl->intensity <= 0.001) {
+                continue;
+            }
+            $d = $pl->position->sub($eye)->length();
+            if ($d < $best) {
+                $best = $d;
+                $light = $pl;
+            }
+        }
+        if ($light === null) {
+            return;
+        }
+        $full = $this->settings->shadowQuality->resolution();
+        $res = max(128, intdiv($full > 0 ? $full : self::SHADOW_MAP_RESOLUTION, 4));
+        if ($this->pointShadowTarget === null || $this->pointShadowRes !== $res) {
+            if (!function_exists('vio_render_target_cubemap')
+                || !vio_supports_feature($this->ctx, \VIO_FEATURE_RENDER_TARGET_CUBE)
+                || !vio_supports_feature($this->ctx, \VIO_FEATURE_RENDER_TARGET_LAYERED)) {
+                $this->pointShadowUnsupported = true;
+                return;
+            }
+            $rt = vio_render_target($this->ctx, ['cube' => true, 'size' => $res, 'depth_only' => true]);
+            $cube = $rt !== false ? vio_render_target_cubemap($rt) : false;
+            if ($rt === false || $cube === false) {
+                $this->pointShadowUnsupported = true;
+                return;
+            }
+            $this->pointShadowTarget = $rt;
+            $this->pointShadowCube = $cube;
+            $this->pointShadowRes = $res;
+        }
+        $draws = $this->frameLocalShadowDraws ??= $this->collectShadowDraws($commandList, true);
+
+        $proj = Mat4::perspective(M_PI / 2.0, 1.0, self::POINT_SHADOW_NEAR, $light->radius);
+        if ($this->conventions()->flipRenderTargetClipY()) {
+            $p = $proj->toArray();
+            $p[5] = -$p[5];
+            $proj = new Mat4($p);
+        }
+        $faces = [
+            [new Vec3(1.0, 0.0, 0.0), new Vec3(0.0, -1.0, 0.0)],
+            [new Vec3(-1.0, 0.0, 0.0), new Vec3(0.0, -1.0, 0.0)],
+            [new Vec3(0.0, 1.0, 0.0), new Vec3(0.0, 0.0, 1.0)],
+            [new Vec3(0.0, -1.0, 0.0), new Vec3(0.0, 0.0, -1.0)],
+            [new Vec3(0.0, 0.0, 1.0), new Vec3(0.0, -1.0, 0.0)],
+            [new Vec3(0.0, 0.0, -1.0), new Vec3(0.0, -1.0, 0.0)],
+        ];
+        $pos = $light->position;
+        PerfProfiler::begin('render3d.shadow.point');
+        foreach ($faces as $face => [$forward, $up]) {
+            vio_bind_render_target($this->ctx, $this->pointShadowTarget, $face);
+            vio_viewport($this->ctx, 0, 0, $res, $res);
+            vio_clear($this->ctx, 1.0, 1.0, 1.0, 1.0);
+            $this->bindShadowPipeline();
+            vio_set_uniform($this->ctx, 'u_view', Mat4::lookAt($pos, $pos->add($forward), $up)->toArray());
+            vio_set_uniform($this->ctx, 'u_projection', $proj->toArray());
+            vio_set_uniform($this->ctx, 'u_use_instancing', 1);
+            foreach ($draws as [$mesh, $buf, $cnt]) {
+                vio_draw_instanced($this->ctx, $mesh, $buf, $cnt);
+            }
+        }
+        vio_unbind_render_target($this->ctx);
+        PerfProfiler::end();
+        $this->pointShadowPos = $pos;
+        $this->pointShadowFar = $light->radius;
+    }
+
+    /** The point shadow cube on its unit (u_point_shadow_on 0 with a 1x1 white cube otherwise). */
+    private function uploadPointShadowUniforms(): void
+    {
+        $on = $this->pointShadowPos !== null && $this->pointShadowCube !== null;
+        $cube = $on ? $this->pointShadowCube : ($this->whiteCubemap ??= vio_cubemap($this->ctx, [
+            'pixels' => array_fill(0, 6, [255, 255, 255, 255]),
+            'width' => 1,
+            'height' => 1,
+        ]) ?: null);
+        if ($cube !== null) {
+            vio_bind_cubemap($this->ctx, $cube, self::POINT_SHADOW_UNIT);
+        }
+        vio_set_uniform($this->ctx, 'u_point_shadow_map', self::POINT_SHADOW_UNIT);
+        vio_set_uniform($this->ctx, 'u_point_shadow_on', $on ? 1.0 : 0.0);
+        if ($on) {
+            $p = $this->pointShadowPos;
+            vio_set_uniform($this->ctx, 'u_point_shadow_pos', [$p->x, $p->y, $p->z]);
+            vio_set_uniform($this->ctx, 'u_point_shadow_range', [self::POINT_SHADOW_NEAR, $this->pointShadowFar, 1.0 / max(1, $this->pointShadowRes)]);
+        }
     }
 
     /** The spot shadow map on its unit, or the 1x1 dummy depth target with index -1. */
@@ -6682,14 +6811,20 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
      */
     private ?\WeakMap $drawMatrixMemo = null;
 
-    /** @var list<Mat4> individual shadow casters of the last frame, in draw order */
-    private array $shadowCasterMatrices = [];
+    /** @var array<int, list<Mat4>> individual shadow casters of the last frame, in draw order (0 sun, 1 local lights) */
+    private array $shadowCasterMatrices = [[], []];
 
-    /** @var list<string> */
-    private array $shadowCasterMeshIds = [];
+    /** @var array<int, list<string>> */
+    private array $shadowCasterMeshIds = [[], []];
 
-    /** @var array<string, array{0: string, 1: int}> packed matrices per mesh for those casters */
-    private array $shadowPackedCache = [];
+    /** @var array<int, array<string, array{0: string, 1: int}>> packed matrices per mesh for those casters */
+    private array $shadowPackedCache = [[], []];
+
+    /** A surface that glows is a light source itself: it casts no shadow for local lights. */
+    private static function emitsLight(Material $mat): bool
+    {
+        return max($mat->emission->r, $mat->emission->g, $mat->emission->b) > 0.05;
+    }
 
     /**
      * vio_set_shading_rate() usable on this context (php-vio >= 2.19 with

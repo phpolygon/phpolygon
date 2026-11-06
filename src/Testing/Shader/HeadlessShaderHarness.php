@@ -642,6 +642,10 @@ final class HeadlessShaderHarness
         if ($this->dummyCubemap !== null) {
             vio_bind_cubemap($this->ctx, $this->dummyCubemap, 10);
             $this->setUniform('u_environment_map', 10);
+            // The point shadow cube (VioRenderer3D::POINT_SHADOW_UNIT), off.
+            vio_bind_cubemap($this->ctx, $this->dummyCubemap, 5);
+            $this->setUniform('u_point_shadow_map', 5);
+            $this->setUniform('u_point_shadow_on', 0.0);
         }
     }
 

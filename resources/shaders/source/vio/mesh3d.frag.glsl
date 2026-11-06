@@ -188,6 +188,15 @@ uniform sampler2DShadow u_spot_shadow_map;
 uniform mat4 u_spot_shadow_matrix;
 uniform int u_spot_shadow_index;
 
+// Point shadow (VioRenderer3D::renderPointShadowPass): one depth cube around the
+// light at u_point_shadow_pos, read as a plain cube with the compare done here.
+// u_point_shadow_range = (near, far, 1 / face size). The light is found by its
+// position, in the eight uniforms and in the light grid alike.
+uniform samplerCube u_point_shadow_map;
+uniform float u_point_shadow_on;
+uniform vec3 u_point_shadow_pos;
+uniform vec3 u_point_shadow_range;
+
 // Texture
 uniform int u_has_albedo_texture;
 uniform sampler2D u_albedo_texture;
@@ -500,6 +509,35 @@ float spotShadow(vec3 worldPos, vec3 N, vec3 L, float dist) {
         s += texture(u_spot_shadow_map, vec3(pc.xy + rot * SHADOW_DISC[i] * ts, pc.z - 0.0002));
     }
     return s / 8.0;
+}
+
+// The depth a face of the point cube stored for a direction d from the light: the
+// face's perspective depth of the major axis, mapped to 0..1 like the cascades.
+float pointCubeDepth(vec3 d) {
+    float n = u_point_shadow_range.x;
+    float f = u_point_shadow_range.y;
+    float za = max(max(abs(d.x), abs(d.y)), abs(d.z));
+    float ndc = (f + n) / (f - n) - 2.0 * f * n / ((f - n) * max(za, 1e-4));
+    return ndc * 0.5 + 0.5;
+}
+
+float pointShadow(vec3 worldPos, vec3 N, vec3 L, float dist) {
+    if (u_point_shadow_on < 0.5 || dist >= u_point_shadow_range.y) return 1.0;
+    float NdotL = max(dot(N, L), 0.0);
+    float texel = 2.0 * dist * u_point_shadow_range.z;
+    vec3 d = worldPos + N * (texel * 1.5 + 0.01) * (1.5 - NdotL) - u_point_shadow_pos;
+    float ref = pointCubeDepth(d) - 0.0004;
+    vec3 ad = normalize(d);
+    vec3 t = normalize(cross(abs(ad.y) < 0.99 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0), ad));
+    vec3 b = cross(ad, t);
+    float a = 6.2831853 * fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))));
+    float ca = cos(a), sa = sin(a);
+    float s = 0.0;
+    for (int i = 0; i < 6; i++) {
+        vec2 o = vec2(ca * SHADOW_DISC[i].x - sa * SHADOW_DISC[i].y, sa * SHADOW_DISC[i].x + ca * SHADOW_DISC[i].y) * texel * 1.5;
+        s += textureLod(u_point_shadow_map, d + t * o.x + b * o.y, 0.0).r >= ref ? 1.0 : 0.0;
+    }
+    return s / 6.0;
 }
 
 float calcShadow(vec4 lsp, vec3 N) {
@@ -1588,6 +1626,9 @@ void main() {
                 Lg /= max(lgDist, 1e-4);
                 float lgAtten = clamp(1.0 - lgDist * lgDist / (lgPos.w * lgPos.w), 0.0, 1.0);
                 lgAtten *= lgAtten;
+                if (u_point_shadow_on > 0.5 && distance(lgPos.xyz, u_point_shadow_pos) < 0.01) {
+                    lgAtten *= pointShadow(v_worldPos, N, Lg, lgDist);
+                }
                 float NdotLG = max(dot(N, Lg), 0.0);
                 if (NdotLG > 0.0) {
                     vec3 spec = cookTorranceSpecular(N, V, Lg, roughness, F0);
@@ -1612,6 +1653,9 @@ void main() {
         float r = max(u_point_lights[i].radius, 0.001);
         float atten = clamp(1.0 - dist*dist/(r*r), 0.0, 1.0);
         atten *= atten;
+        if (u_point_shadow_on > 0.5 && distance(u_point_lights[i].position, u_point_shadow_pos) < 0.01) {
+            atten *= pointShadow(v_worldPos, N, Lp, dist);
+        }
         float NdotPL = max(dot(N, Lp), 0.0);
         if (NdotPL > 0.0) {
             vec3 spec = cookTorranceSpecular(N, V, Lp, roughness, F0);

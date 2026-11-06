@@ -14,5 +14,6 @@ readonly class AddPointLight
         public Color $color,
         public float $intensity,
         public float $radius,
+        public bool $castsShadow = false,
     ) {}
 }

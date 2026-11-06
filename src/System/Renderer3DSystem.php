@@ -302,6 +302,7 @@ class Renderer3DSystem extends AbstractSystem
                 $light->color,
                 $light->intensity,
                 $light->radius,
+                $light->castsShadow,
             ));
         }
 
