@@ -686,6 +686,29 @@ vec2 rainSoak(vec3 p, vec3 n) {
     return vec2(soak, puddle);
 }
 
+// Fog at a world point, rgb = its colour, a = how much of it: the distance fog and,
+// in rain, the rain veil (shader plan 4.1) – beyond 25 m surfaces fade into the
+// falling rain, lit like a white surface under that sky (the ambient light; the
+// fog and horizon colours stay bright under clouds), denser shafts drift across (a slow
+// noise over the view direction and time); not from inside an interior volume.
+// Shared with the proc-mode branches that output on their own:
+// mix(colour, fog.rgb, fog.a).
+vec4 sceneFog(vec3 p) {
+    float d = length(p - u_camera_pos);
+    float f = clamp((d - u_fog_near) / (u_fog_far - u_fog_near), 0.0, 1.0);
+    float t = 1.0 - exp(-f * f * 3.0);
+    if (u_rain_wetness > 0.0 && interiorMask(u_camera_pos) <= 0.0) {
+        vec3 vd = (p - u_camera_pos) / max(d, 1e-3);
+        float shaft = 0.55 + 0.45 * noise(vd.xz * 7.0 + vec2(u_frag_time * 0.12, u_frag_time * 0.05));
+        float veil = clamp(u_rain_wetness, 0.0, 1.0) * 0.45 * smoothstep(25.0, 160.0, d) * shaft;
+        float total = 1.0 - (1.0 - t) * (1.0 - veil);
+        vec3 veilColor = u_ambient_color * u_ambient_intensity;
+        vec3 c = (u_fog_color * t + veilColor * veil * (1.0 - t)) / max(total, 1e-4);
+        return vec4(c, total);
+    }
+    return vec4(u_fog_color, t);
+}
+
 // Rain rings on wet ground (shader plan 4.1): two offset grids of 0.35 m cells, each
 // with a drop landing at a random spot and time; its ring grows and fades over its
 // cycle. Returns the horizontal tilt of the normal.
@@ -1891,9 +1914,8 @@ void main() {
 
     localAcc += u_emission + surfaceEmission;
 
-    float fogDist = length(v_worldPos - u_camera_pos);
-    float fogFactor = clamp((fogDist - u_fog_near) / (u_fog_far - u_fog_near), 0.0, 1.0);
-    float fogT = 1.0 - exp(-fogFactor * fogFactor * 3.0);
+    vec4 sceneFogV = sceneFog(v_worldPos);
+    float fogT = sceneFogV.a;
 
 #ifdef PHPOLYGON_MRT
     // mix(sum, fog, t) is affine: every part scales by (1 - t), the fog colour is
@@ -1901,7 +1923,7 @@ void main() {
     // distributed as S * part (+ A on the local part), see applyPostColor().
     sunAcc     *= (1.0 - fogT);
     ambientAcc *= (1.0 - fogT);
-    localAcc    = localAcc * (1.0 - fogT) + u_fog_color * fogT;
+    localAcc    = localAcc * (1.0 - fogT) + sceneFogV.rgb * fogT;
     localAcc   += volumetricScatter(v_worldPos);
     vec3 pcA = applyPostColor(vec3(0.0));
     vec3 pcS = applyPostColor(vec3(1.0)) - pcA;
@@ -1911,7 +1933,7 @@ void main() {
     o_ambient = vec4(max(ambientAcc * pcS, vec3(0.0)), coverage);
 #else
     vec3 color = sunAcc + localAcc + ambientAcc;
-    color = mix(color, u_fog_color, fogT);
+    color = mix(color, sceneFogV.rgb, fogT);
     color += volumetricScatter(v_worldPos);
     color = applyPostColor(color);
     frag_color = outputColor(color, alpha);
