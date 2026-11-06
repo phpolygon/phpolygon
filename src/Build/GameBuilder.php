@@ -4,11 +4,15 @@ declare(strict_types=1);
 
 namespace PHPolygon\Build;
 
+use PHPolygon\Build\Icon\AppIconBuilder;
+use PHPolygon\Icon\WindowIconSet;
+
 class GameBuilder
 {
     private BuildConfig $config;
     private PharBuilder $pharBuilder;
     private StaticPhpResolver $staticPhpResolver;
+    private AppIconBuilder $iconBuilder;
     private PlatformPackager $platformPackager;
     private IosAppBuilder $iosAppBuilder;
     private BuildHookRunner $hookRunner;
@@ -28,7 +32,8 @@ class GameBuilder
         $this->productionVendor = new ProductionVendor($config->projectRoot, $composerCommand);
         $this->pharBuilder = new PharBuilder($config);
         $this->staticPhpResolver = new StaticPhpResolver();
-        $this->platformPackager = new PlatformPackager($config);
+        $this->iconBuilder = new AppIconBuilder($config->icon, $config->projectRoot);
+        $this->platformPackager = new PlatformPackager($config, $this->iconBuilder);
         $this->iosAppBuilder = new IosAppBuilder($config);
         $this->upscalerResolver = new NativeUpscalerResolver($config->projectRoot, $this->staticPhpResolver->getCacheDir());
         $this->hookRunner = new BuildHookRunner(
@@ -51,6 +56,7 @@ class GameBuilder
         $this->hookRunner->setLogger(fn(string $level, string $msg) => $logger($level, $msg));
         $this->upscalerResolver->setLogger(fn(string $level, string $msg) => $logger($level, $msg));
         $this->productionVendor->setLogger(fn(string $level, string $msg) => $logger($level, $msg));
+        $this->iconBuilder->setLogger(fn(string $level, string $msg) => $logger($level, $msg));
     }
 
     /**
@@ -217,6 +223,17 @@ class GameBuilder
                     ];
                 }
 
+                // Phase 2e: build.json icon - the window icon set the engine
+                // applies at start-up, ready-made so the start decodes nothing.
+                $windowIcon = $this->iconBuilder->windowIconSet();
+                if ($windowIcon !== null) {
+                    if (!is_dir($stagingDir . '/resources')) {
+                        mkdir($stagingDir . '/resources', 0755, true);
+                    }
+                    file_put_contents($stagingDir . '/resources/' . WindowIconSet::FILE, $windowIcon->encode());
+                    $this->log('info', 'Window icon: ' . count($windowIcon->images) . ' size(s)');
+                }
+
                 // Phase 3: Create PHAR
                 $pharPath = $tempDir . '/' . strtolower($this->config->name) . '.phar';
                 $this->log('info', 'Creating PHAR archive...');
@@ -238,6 +255,19 @@ class GameBuilder
             $this->log('info', 'Resolving micro.sfx binary...');
             $sfxPath = $this->staticPhpResolver->resolve($microSfxPath, $platform, $arch, $variant, $phpVersion);
             $this->log('success', 'Found micro.sfx: ' . $sfxPath);
+
+            // Phase 4a: Windows icon resource, written into a copy of the bare
+            // runtime before the PHAR is appended (micro finds its payload at the
+            // end of the grown last section, so nothing else changes).
+            if ($platform === 'windows') {
+                $iconSfx = $tempDir . '/micro-icon.sfx';
+                if (!is_dir($tempDir)) {
+                    mkdir($tempDir, 0755, true);
+                }
+                if ($this->iconBuilder->patchWindowsRuntime($sfxPath, $iconSfx)) {
+                    $sfxPath = $iconSfx;
+                }
+            }
 
             // Phase 4b: Resolve platform-specific runtime libs (vulkan-1.dll on Windows)
             $runtimeLibs = $this->staticPhpResolver->resolveRuntimeLibs($platform, $arch, $variant, $phpVersion);

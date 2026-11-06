@@ -6,6 +6,10 @@ namespace PHPolygon\Tests\Build;
 
 use PHPolygon\Build\BuildConfig;
 use PHPolygon\Build\HttpClient;
+use PHPolygon\Build\Icon\AppIconBuilder;
+use PHPolygon\Build\Icon\IcnsFile;
+use PHPolygon\Icon\Png;
+use PHPolygon\Tests\Icon\TestIcons;
 use PHPolygon\Build\HttpResponse;
 use PHPolygon\Build\MicroIni;
 use PHPolygon\Build\NativeUpscalerResolver;
@@ -138,6 +142,79 @@ class PlatformPackagerTest extends TestCase
         $result = $packager->package($binaryPath, $this->outputDir, 'macos');
 
         $this->assertFileExists($result . '/Contents/Resources/icon.icns');
+        $this->assertSame('fake-icon-data', file_get_contents($result . '/Contents/Resources/icon.icns'), 'a finished .icns is copied as it is');
+        $this->assertMatchesRegularExpression('#<key>CFBundleIconFile</key>\s*<string>icon\.icns</string>#', (string) file_get_contents($result . '/Contents/Info.plist'));
+    }
+
+    public function testMacBundleGetsAnIcnsMadeFromTheIconSource(): void
+    {
+        file_put_contents($this->tempDir . '/icon.png', Png::encode(TestIcons::pattern(256)));
+        file_put_contents($this->tempDir . '/build.json', json_encode(['name' => 'IconGame', 'icon' => 'icon.png']));
+        $binaryPath = $this->tempDir . '/test-binary';
+        file_put_contents($binaryPath, 'fake');
+
+        $result = (new PlatformPackager(BuildConfig::load($this->tempDir)))->package($binaryPath, $this->outputDir, 'macos');
+
+        $icns = IcnsFile::parse((string) file_get_contents($result . '/Contents/Resources/' . AppIconBuilder::MAC_ICON_FILE));
+        $this->assertArrayHasKey('ic08', $icns, '256 px entry');
+        $this->assertArrayHasKey('icp4', $icns, '16 px entry');
+        $this->assertStringContainsString('<string>AppIcon.icns</string>', (string) file_get_contents($result . '/Contents/Info.plist'));
+    }
+
+    public function testMissingLegacyMacIconFallsBackToTheSourceOrNothing(): void
+    {
+        file_put_contents($this->tempDir . '/build.json', json_encode(['name' => 'IconGame', 'platforms' => ['macos' => ['icon' => 'missing.icns']]]));
+        $binaryPath = $this->tempDir . '/test-binary';
+        file_put_contents($binaryPath, 'fake');
+
+        $result = (new PlatformPackager(BuildConfig::load($this->tempDir)))->package($binaryPath, $this->outputDir, 'macos');
+
+        // As before build.json `icon`: no failure, but no dangling CFBundleIconFile either.
+        $this->assertMatchesRegularExpression('#<key>CFBundleIconFile</key>\s*<string></string>#', (string) file_get_contents($result . '/Contents/Info.plist'));
+    }
+
+    public function testLinuxPackageCarriesIconDirIconAndDesktopEntry(): void
+    {
+        file_put_contents($this->tempDir . '/icon.png', Png::encode(TestIcons::pattern(512)));
+        file_put_contents($this->tempDir . '/build.json', json_encode([
+            'name' => 'Icon Game',
+            'identifier' => 'com.example.icongame',
+            'icon' => 'icon.png',
+        ]));
+        $binaryPath = $this->tempDir . '/test-binary';
+        file_put_contents($binaryPath, 'fake');
+
+        $result = (new PlatformPackager(BuildConfig::load($this->tempDir)))->package($binaryPath, $this->outputDir, 'linux');
+
+        $png = (string) file_get_contents($result . '/com.example.icongame.png');
+        $this->assertSame([256, 256], Png::size($png));
+        $this->assertSame($png, file_get_contents($result . '/.DirIcon'));
+        $this->assertSame(
+            "[Desktop Entry]\nType=Application\nName=Icon Game\nExec=\"Icon Game\"\nIcon=com.example.icongame\nTerminal=false\nCategories=Game;\n",
+            file_get_contents($result . '/com.example.icongame.desktop'),
+        );
+    }
+
+    public function testLinuxPackageWithoutIconHasNoDesktopFiles(): void
+    {
+        $binaryPath = $this->tempDir . '/test-binary';
+        file_put_contents($binaryPath, 'fake');
+        $result = (new PlatformPackager(BuildConfig::load($this->tempDir)))->package($binaryPath, $this->outputDir, 'linux');
+        $this->assertFileDoesNotExist($result . '/.DirIcon');
+        $this->assertSame([], glob($result . '/*.desktop'));
+    }
+
+    public function testLinuxOverridePngIsShippedAsItIs(): void
+    {
+        $override = Png::encode(TestIcons::pattern(48));
+        file_put_contents($this->tempDir . '/linux.png', $override);
+        file_put_contents($this->tempDir . '/build.json', json_encode(['name' => 'G', 'identifier' => 'org.g', 'platforms' => ['linux' => ['icon' => 'linux.png']]]));
+        $binaryPath = $this->tempDir . '/test-binary';
+        file_put_contents($binaryPath, 'fake');
+
+        $result = (new PlatformPackager(BuildConfig::load($this->tempDir)))->package($binaryPath, $this->outputDir, 'linux');
+        $this->assertSame($override, file_get_contents($result . '/org.g.png'));
+        $this->assertStringContainsString("Exec=G\n", (string) file_get_contents($result . '/org.g.desktop'));
     }
 
     public function testPackageWithExternalResources(): void

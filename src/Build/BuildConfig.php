@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace PHPolygon\Build;
 
 use PHPolygon\Audio\Speech\SpeechConfig;
+use PHPolygon\Build\Icon\AppIconConfig;
 
 class BuildConfig
 {
@@ -166,12 +167,19 @@ class BuildConfig
      */
     public ?SpeechConfig $speech = null;
 
+    /**
+     * build.json `icon` plus `platforms.<os>.icon`: the application icon of
+     * every platform and the window icon, see {@see AppIconConfig}.
+     */
+    public AppIconConfig $icon;
+
     public string $projectRoot;
 
     private function __construct(string $projectRoot)
     {
         $this->projectRoot = $projectRoot;
         $this->upscalers = new UpscalerConfig();
+        $this->icon = new AppIconConfig();
     }
 
     /**
@@ -359,6 +367,7 @@ class BuildConfig
 
         $this->upscalers = UpscalerConfig::fromBuildJson($data['upscalers'] ?? null, $this->phpIni);
         $this->speech = SpeechConfig::fromBuildJson($data['speech'] ?? null);
+        $this->icon = AppIconConfig::fromBuildJson($data['icon'] ?? null, $this->platforms);
     }
 
     /**
@@ -521,6 +530,7 @@ class BuildConfig
             'hooks.afterPackage' => $this->hooksAfterPackage,
             'upscalers' => $this->upscalers->toArray(),
             'speech' => $this->speech?->toArray(),
+            'icon' => $this->icon->toArray(),
         ];
     }
 }

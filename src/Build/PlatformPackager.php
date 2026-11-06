@@ -4,15 +4,22 @@ declare(strict_types=1);
 
 namespace PHPolygon\Build;
 
+use PHPolygon\Build\Icon\AppIconBuilder;
 use PHPolygon\Runtime\BundleExtractor;
 
 class PlatformPackager
 {
     private BuildConfig $config;
+    private AppIconBuilder $icons;
 
-    public function __construct(BuildConfig $config)
+    /**
+     * @param ?AppIconBuilder $icons the build's icon maker (shared so the source is
+     *   decoded once per build); null = one for build.json `icon`
+     */
+    public function __construct(BuildConfig $config, ?AppIconBuilder $icons = null)
     {
         $this->config = $config;
+        $this->icons = $icons ?? new AppIconBuilder($config->icon, $config->projectRoot);
     }
 
     /**
@@ -83,8 +90,15 @@ class PlatformPackager
         // Copy resolver-provided runtime libs
         $this->copyRuntimeLibs($macosDir, $runtimeLibs);
 
+        // Application icon: build.json `icon` made into an .icns, or the
+        // game's own platforms.macos.icon.
+        $icon = $this->icons->macIcon();
+        if ($icon !== null) {
+            file_put_contents($resourcesDir . '/' . $icon[0], $icon[1]);
+        }
+
         // Generate Info.plist
-        $this->writeInfoPlist($contentsDir);
+        $this->writeInfoPlist($contentsDir, $icon[0] ?? '');
 
         // Copy external resources to Resources/
         $this->copyExternalResources($resourcesDir);
@@ -92,15 +106,6 @@ class PlatformPackager
         if ($pharPath !== null) {
             copy($pharPath, $resourcesDir . '/' . $this->macPharFile());
             $this->preExtract($pharPath, $resourcesDir);
-        }
-
-        // Copy icon if configured
-        $macosConfig = $this->config->platforms['macos'] ?? [];
-        if (isset($macosConfig['icon']) && is_string($macosConfig['icon'])) {
-            $iconPath = $this->config->projectRoot . '/' . $macosConfig['icon'];
-            if (file_exists($iconPath)) {
-                copy($iconPath, $resourcesDir . '/' . basename($iconPath));
-            }
         }
 
         return $appDir;
@@ -131,7 +136,51 @@ class PlatformPackager
         // Copy external resources alongside binary
         $this->copyExternalResources($dir);
 
+        if ($platform === 'linux') {
+            $this->writeLinuxIcon($dir, $targetName);
+        }
+
         return $dir;
+    }
+
+    /**
+     * Freedesktop name of the icon and the .desktop file: the reverse-DNS
+     * identifier, as the Desktop Entry spec recommends for application ids.
+     */
+    public function linuxAppId(): string
+    {
+        return (string) preg_replace('/[^A-Za-z0-9._-]+/', '-', $this->config->identifier);
+    }
+
+    /**
+     * Linux: `<id>.png`, `.DirIcon` (the same PNG) and `<id>.desktop` with
+     * `Icon=<id>` at the package root - the AppDir layout appimagetool packs as
+     * it is, and what an installer copies into share/applications and the icon
+     * theme. Nothing without an icon for Linux.
+     */
+    private function writeLinuxIcon(string $dir, string $binaryName): void
+    {
+        $png = $this->icons->linuxPng();
+        if ($png === null) {
+            return;
+        }
+        $id = $this->linuxAppId();
+        file_put_contents($dir . '/' . $id . '.png', $png);
+        file_put_contents($dir . '/.DirIcon', $png);
+        file_put_contents($dir . '/' . $id . '.desktop', self::desktopEntry($this->config->name, $binaryName, $id));
+    }
+
+    /** A Desktop Entry (spec 1.5) for the game binary at the package root. */
+    public static function desktopEntry(string $name, string $binaryName, string $icon): string
+    {
+        $escape = static fn (string $value): string => str_replace(["\\", "\n", "\r", "\t"], ['\\\\', '\\n', '\\r', '\\t'], $value);
+        return "[Desktop Entry]\n"
+            . "Type=Application\n"
+            . 'Name=' . $escape($name) . "\n"
+            . 'Exec=' . (preg_match('/^[A-Za-z0-9._-]+$/', $binaryName) === 1 ? $binaryName : '"' . addcslashes($binaryName, '"`$\\') . '"') . "\n"
+            . 'Icon=' . $icon . "\n"
+            . "Terminal=false\n"
+            . "Categories=Game;\n";
     }
 
     /**
@@ -149,7 +198,10 @@ class PlatformPackager
         }
     }
 
-    private function writeInfoPlist(string $contentsDir): void
+    /**
+     * @param string $iconFile .icns in Contents/Resources ('' = none)
+     */
+    private function writeInfoPlist(string $contentsDir, string $iconFile): void
     {
         $name = $this->config->name;
         $identifier = $this->config->identifier;
@@ -158,11 +210,6 @@ class PlatformPackager
         $minVersion = isset($macosConfig['minimumVersion']) && is_string($macosConfig['minimumVersion'])
             ? $macosConfig['minimumVersion']
             : '12.0';
-
-        $iconFile = '';
-        if (isset($macosConfig['icon']) && is_string($macosConfig['icon'])) {
-            $iconFile = basename($macosConfig['icon']);
-        }
 
         $plist = <<<XML
 <?xml version="1.0" encoding="UTF-8"?>
