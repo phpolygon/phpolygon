@@ -149,7 +149,7 @@ final class BidiOrder
             }
             $before = $i > 0 ? $dir($types[$i - 1]) : $baseDir;
             $after = $j < $n ? $dir($types[$j]) : $baseDir;
-            $resolved = $before === $after ? $before : $baseDir;
+            $resolved = $before !== null && $before === $after ? $before : $baseDir;
             for ($k = $i; $k < $j; $k++) {
                 $types[$k] = $resolved;
             }
@@ -171,7 +171,7 @@ final class BidiOrder
             $levels[$i] = $base;
         }
 
-        return ['base' => $base, 'levels' => $levels];
+        return ['base' => $base, 'levels' => array_values($levels)];
     }
 
     /**
@@ -261,10 +261,10 @@ final class BidiOrder
 
     private static function classOf(string $ch): int
     {
-        $cp = mb_ord($ch, 'UTF-8');
-        if ($cp === false) {
+        if ($ch === '') {
             return self::ON;
         }
+        $cp = mb_ord($ch, 'UTF-8');
         if ($cp >= 0x30 && $cp <= 0x39) {
             return self::EN;
         }

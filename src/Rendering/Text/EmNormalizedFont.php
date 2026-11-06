@@ -120,7 +120,7 @@ final class EmNormalizedFont
         if ($tag !== "\x00\x01\x00\x00" && $tag !== 'OTTO' && $tag !== 'true') {
             return null;
         }
-        $count = unpack('n', $bytes, 4)[1];
+        $count = self::u16($bytes, 4);
         if (strlen($bytes) < 12 + 16 * $count) {
             return null;
         }
@@ -129,7 +129,7 @@ final class EmNormalizedFont
         for ($i = 0; $i < $count; $i++) {
             $record = 12 + 16 * $i;
             $name = substr($bytes, $record, 4);
-            $offset = unpack('N', $bytes, $record + 8)[1];
+            $offset = self::u32($bytes, $record + 8);
             if ($name === 'head') {
                 $head = $offset;
             } elseif ($name === 'hhea') {
@@ -139,14 +139,26 @@ final class EmNormalizedFont
         if ($head === null || $hhea === null || strlen($bytes) < $head + 20 || strlen($bytes) < $hhea + 8) {
             return null;
         }
-        $upem = unpack('n', $bytes, $head + 18)[1];
+        $upem = self::u16($bytes, $head + 18);
         $signed = static fn (int $v): int => $v >= 0x8000 ? $v - 0x10000 : $v;
-        $ascender = $signed(unpack('n', $bytes, $hhea + 4)[1]);
-        $descender = $signed(unpack('n', $bytes, $hhea + 6)[1]);
+        $ascender = $signed(self::u16($bytes, $hhea + 4));
+        $descender = $signed(self::u16($bytes, $hhea + 6));
         if ($upem <= 0 || $ascender - $descender <= 0) {
             return null;
         }
 
         return [$upem, $hhea, $ascender, $descender];
+    }
+
+    /** Big-endian unsigned 16-bit value at $at (the caller checked the length). */
+    private static function u16(string $bytes, int $at): int
+    {
+        return (ord($bytes[$at]) << 8) | ord($bytes[$at + 1]);
+    }
+
+    /** Big-endian unsigned 32-bit value at $at (the caller checked the length). */
+    private static function u32(string $bytes, int $at): int
+    {
+        return (self::u16($bytes, $at) << 16) | self::u16($bytes, $at + 2);
     }
 }
