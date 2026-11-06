@@ -382,6 +382,22 @@ float cloudDensityAt(vec3 p) {
     return smoothstep(cov, cov + 0.22, n) * vGrad * u_cloud_density;
 }
 
+// The slab density with three octaves: the cloud shadow's cheaper twin of
+// cloudDensityAt (same coverage curve, the finest detail left out).
+float cloudDensityShadow(vec3 p) {
+    float h = (p.y - u_cloud_altitude) / 30.0;
+    if (h < 0.0 || h > 1.0) return 0.0;
+    float vGrad = smoothstep(0.0, 0.18, h) * smoothstep(1.0, 0.55, h);
+    vec3 wp = p * 0.0026;
+    wp.xz += u_cloud_wind_dir * (u_cloud_offset * 0.0026);
+    float total = 0.0, amp = 0.5;
+    for (int i = 0; i < 3; i++) { total += cloudVnoise3(wp) * amp; wp *= 2.03; amp *= 0.5; }
+    // The missing fourth octave averages 0.0625 * 0.5: add its mean back.
+    total += 0.03125;
+    float cov = 1.0 - u_cloud_cover * 0.9;
+    return smoothstep(cov, cov + 0.22, total) * vGrad * u_cloud_density;
+}
+
 // Sun transmittance through the cloud slab from a world point (1 = unshadowed,
 // → 0 fully under a cloud). Marches a few steps toward the directional light.
 #ifndef PHPOLYGON_OMIT_CLOUD_SHADOW
@@ -394,10 +410,15 @@ float cloudShadow(vec3 worldPos) {
     float tEnter = max((base - worldPos.y) / L.y, 0.0);
     float tExit  = (top - worldPos.y) / L.y;
     if (tExit <= tEnter) return 1.0;
-    float stepLen = (tExit - tEnter) / 5.0;
+    // Two samples through the 30 m slab with a three-octave density (shader plan
+    // 3.3): about a third of the former 5 x 4-octave cost per lit fragment. The
+    // shadow is a soft dimming sweep, the finest octave never showed in it. A
+    // baked cloud shadow map would need a sampler the base program no longer has
+    // on D3D12 (8 registers).
+    float stepLen = (tExit - tEnter) / 2.0;
     float dens = 0.0;
-    for (int i = 0; i < 5; i++) {
-        dens += cloudDensityAt(worldPos + L * (tEnter + (float(i) + 0.5) * stepLen));
+    for (int i = 0; i < 2; i++) {
+        dens += cloudDensityShadow(worldPos + L * (tEnter + (float(i) + 0.5) * stepLen));
     }
     // Extinction: 1 = clear path to the sun, → 0 fully under a cloud. The
     // consumer floors the direct beam (it never reaches 0), so a passing cloud
@@ -481,6 +502,34 @@ float geometrySmith(float NdotV, float NdotL, float a2) {
     float ggxV = NdotV / (NdotV * (1.0 - k) + k);
     float ggxL = NdotL / (NdotL * (1.0 - k) + k);
     return ggxV * ggxL;
+}
+
+// Interior light mask (Component\InteriorVolume, System\InteriorVolumeSystem): inside
+// these boxes the sun term and most of the sky reflection are dropped, so a hall
+// with a thin roof or walls the shadow cascades miss does not leak daylight.
+// Slot k: centre xyz + yaw, half extents xyz + strength (0 = unused).
+uniform vec4 u_interior_box_0;
+uniform vec4 u_interior_ext_0;
+uniform vec4 u_interior_box_1;
+uniform vec4 u_interior_ext_1;
+uniform vec4 u_interior_box_2;
+uniform vec4 u_interior_ext_2;
+uniform vec4 u_interior_box_3;
+uniform vec4 u_interior_ext_3;
+
+float interiorBox(vec3 p, vec4 c, vec4 e) {
+    if (e.w <= 0.0) return 0.0;
+    vec3 d = p - c.xyz;
+    float cs = cos(c.w);
+    float sn = sin(c.w);
+    vec3 l = abs(vec3(cs * d.x - sn * d.z, d.y, sn * d.x + cs * d.z)) - e.xyz;
+    // 0.5 m soft edge inside the box.
+    return e.w * (1.0 - smoothstep(-0.5, 0.0, max(max(l.x, l.y), l.z)));
+}
+
+float interiorMask(vec3 p) {
+    return max(max(interiorBox(p, u_interior_box_0, u_interior_ext_0), interiorBox(p, u_interior_box_1, u_interior_ext_1)),
+               max(interiorBox(p, u_interior_box_2, u_interior_ext_2), interiorBox(p, u_interior_box_3, u_interior_ext_3)));
 }
 
 // Environment (IBL) reflection: the bound cubemap — GPU sky probe (mipmapped,
@@ -1369,7 +1418,13 @@ void main() {
     // mode 0 (Off) is a strict no-op so default rendering is unchanged. The
     // SDF soft sun-shadow is applied to the directional term further down.
     if (u_ft_mode >= 0.5) {
-        vec3 ftProbe;
+        // The analytic hemisphere: the whole ambient where no probe field is bound,
+        // and what a field fades into toward its border.
+        float ftHemi  = N.y * 0.5 + 0.5;
+        vec3  ftSky   = u_ambient_color * 1.2 + vec3(0.015, 0.03, 0.06);
+        vec3  ftGround = u_ambient_color * 0.6;
+        vec3  ftHemiProbe = mix(ftGround, ftSky, ftHemi) * u_ambient_intensity;
+        vec3 ftProbe = ftHemiProbe;
 #ifndef PHPOLYGON_OMIT_PROBE_GI
         if (u_probe_enabled > 0.5) {
             // Baked COLOURED directional GI: reconstruct RGB SH-L1 irradiance for
@@ -1384,15 +1439,15 @@ void main() {
             vec4 cb = (texture(u_probe_field_b, puvw) * 2.0 - 1.0) * u_probe_range;
             vec3 E = max(vec3(dot(cr, nd), dot(cg, nd), dot(cb, nd)), vec3(0.0));
             float bounceGain = u_ft_mode >= 2.5 ? 1.0 : 0.7;
-            ftProbe = E * (0.45 * bounceGain) * u_ambient_intensity;
-        } else
-#endif // PHPOLYGON_OMIT_PROBE_GI
-        {
-            float ftHemi  = N.y * 0.5 + 0.5;
-            vec3  ftSky   = u_ambient_color * 1.2 + vec3(0.015, 0.03, 0.06);
-            vec3  ftGround = u_ambient_color * 0.6;
-            ftProbe = mix(ftGround, ftSky, ftHemi) * u_ambient_intensity;
+            // Toward the field's border the baked GI gives way to the hemisphere
+            // (shader plan 3.3, GI blend between regions): outside the volume the
+            // clamped edge texels no longer smear outward, and two regions meet on
+            // the same neutral ambient, so switching the field shows no step.
+            vec3 ftRel = abs((v_worldPos - u_probe_origin) / u_probe_size * 2.0 - 1.0);
+            float ftEdge = 1.0 - smoothstep(0.85, 1.0, max(max(ftRel.x, ftRel.z), ftRel.y * 0.5));
+            ftProbe = mix(ftHemiProbe, E * (0.45 * bounceGain) * u_ambient_intensity, ftEdge);
         }
+#endif // PHPOLYGON_OMIT_PROBE_GI
         ambientAcc += albedo * kD_ambient * ftProbe * ao * (0.35 * u_ft_intensity);
     }
 
@@ -1499,8 +1554,11 @@ void main() {
             }
         }
     }
+    // Interiors: no sun through roofs and walls the cascades miss (shader plan 3.3).
+    sunAcc *= 1.0 - interiorMask(v_worldPos);
     int pointCount = u_light_grid.w > 0.5 ? 0 : min(u_point_light_count, 8);
 #else
+    sunAcc *= 1.0 - interiorMask(v_worldPos);
     int pointCount = min(u_point_light_count, 8);
 #endif
     for (int i = 0; i < pointCount; i++) {
@@ -1555,7 +1613,7 @@ void main() {
         vec3 R = reflect(-V, N);
         vec3 F_ibl = fresnelSchlick(NdotV, F0);
         vec3 envColor = sampleEnvironment(R, roughness);
-        float iblWeight = mix(0.15, 1.0, metallic) * (1.0 - roughness * 0.6);
+        float iblWeight = mix(0.15, 1.0, metallic) * (1.0 - roughness * 0.6) * (1.0 - 0.75 * interiorMask(v_worldPos));
         localAcc += envColor * F_ibl * iblWeight * shadow;
     }
 
