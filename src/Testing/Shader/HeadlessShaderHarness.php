@@ -615,7 +615,8 @@ final class HeadlessShaderHarness
         }
         if ($this->dummyTexture3D !== null) {
             $tex3d = $this->dummyTexture3D;
-            foreach ([3 => 'u_probe_field_r', 4 => 'u_probe_field_g', 5 => 'u_probe_field_b'] as $unit => $name) {
+            // One stacked probe field (R, G, B blocks along z) since the three volumes merged.
+            foreach ([3 => 'u_probe_field'] as $unit => $name) {
                 vio_bind_texture($this->ctx, $tex3d, $unit);
                 $this->setUniform($name, $unit);
             }

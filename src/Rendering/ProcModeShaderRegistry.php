@@ -127,8 +127,8 @@ final class ProcModeShaderRegistry
         return is_string($vio) && version_compare($vio, '2.40.0', '>=') ? self::SAMPLER_REGISTERS_2_40 : self::SAMPLER_REGISTERS;
     }
 
-    /** Ordinary samplers of mesh3d.frag: environment, 3 probe fields, albedo, SSAO, SDF AO. */
-    private const ENGINE_SAMPLERS = 7;
+    /** Ordinary samplers of mesh3d.frag: environment, the probe field, albedo, SSAO, SDF AO. */
+    private const ENGINE_SAMPLERS = 5;
 
     /**
      * Ordinary samplers of mesh3d.frag on this php-vio: since 2.40 (12 registers) the
@@ -146,7 +146,7 @@ final class ProcModeShaderRegistry
     }
 
     /** Of those, the ones {@see ShaderPath::ProbeGi} takes out of a program. */
-    private const PROBE_SAMPLERS = 3;
+    private const PROBE_SAMPLERS = 1;
 
     private const UNIFORM_TYPES = ['float', 'int', 'vec2', 'vec3', 'vec4', 'mat4'];
 

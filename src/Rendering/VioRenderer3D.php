@@ -344,9 +344,12 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
     /** Mesh-pass texture units (logical; vio name-maps them to HLSL registers).
      *  Distinct from albedo(0), ssao(1), sdf_ao(2), shadows(6,8,9). The coloured
      *  probe field uses three 3D textures (R/G/B SH-L1 coeffs). */
-    private const PROBE_R_SLOT = 3;
-    private const PROBE_G_SLOT = 4;
-    private const PROBE_B_SLOT = 5;
+    /**
+     * The probe field: ONE 3D texture holding the R, G and B SH-L1 volumes stacked
+     * along z (depth x 3). Units 4 and 5, which the three separate volumes took,
+     * are free for other samplers.
+     */
+    private const PROBE_SLOT = 3;
 
     /** Logical unit + registry id for the reflection-probe cubemap (mesh pass). */
     // Unit 7 is taken by the legacy u_shadow_map alias (uploadShadowUniforms):
@@ -361,9 +364,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
 
     // The baked coloured irradiance probe field (3× vio_texture_3d), from
     // SetFieldtracingProbes — one 3D texture per colour channel.
-    private ?VioTexture $probeTexR = null;
-    private ?VioTexture $probeTexG = null;
-    private ?VioTexture $probeTexB = null;
+    private ?VioTexture $probeTex = null;
     private int $probeFieldVersion = -1;
     private ?Vec3 $probeOrigin = null;
     private ?Vec3 $probeSize = null;
@@ -1030,29 +1031,26 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         $this->probeSize   = $cmd->size;
         $this->probeRange  = $cmd->range;
 
-        if ($this->probeTexR !== null && $this->probeFieldVersion === $cmd->version) {
+        if ($this->probeTex !== null && $this->probeFieldVersion === $cmd->version) {
             return;
         }
         if (!function_exists('vio_texture_3d') || !$this->supportsTexture3D()) {
             return;
         }
 
-        $upload = fn(string $data): VioTexture|false => vio_texture_3d($this->ctx, [
-            'data'   => $data,
+        // The three volumes one after the other along z: slices are stored z-major,
+        // so concatenating the data stacks them. The shader keeps each lookup inside
+        // its own block (linear filtering never mixes two channels).
+        $tex = vio_texture_3d($this->ctx, [
+            'data'   => $cmd->dataR . $cmd->dataG . $cmd->dataB,
             'width'  => $cmd->width,
             'height' => $cmd->height,
-            'depth'  => $cmd->depth,
+            'depth'  => $cmd->depth * 3,
             'filter' => VIO_FILTER_LINEAR,
             'wrap'   => VIO_WRAP_CLAMP,
         ]);
-
-        $r = $upload($cmd->dataR);
-        $g = $upload($cmd->dataG);
-        $b = $upload($cmd->dataB);
-        if ($r !== false && $g !== false && $b !== false) {
-            $this->probeTexR = $r;
-            $this->probeTexG = $g;
-            $this->probeTexB = $b;
+        if ($tex !== false) {
+            $this->probeTex = $tex;
             $this->probeFieldVersion = $cmd->version;
         }
     }
@@ -7571,21 +7569,17 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         // on the tier being enabled AND a field being uploaded; otherwise the
         // shader's u_probe_enabled=0 path falls back to the analytic hemisphere.
         $probeOn = $state['ftMode'] !== Quality\FieldtracingMode::Off
-            && $this->probeTexR !== null && $this->probeTexG !== null && $this->probeTexB !== null
+            && $this->probeTex !== null
             && $this->probeOrigin !== null && $this->probeSize !== null;
         if ($probeOn) {
-            vio_bind_texture($this->ctx, $this->probeTexR, self::PROBE_R_SLOT);
-            vio_bind_texture($this->ctx, $this->probeTexG, self::PROBE_G_SLOT);
-            vio_bind_texture($this->ctx, $this->probeTexB, self::PROBE_B_SLOT);
+            vio_bind_texture($this->ctx, $this->probeTex, self::PROBE_SLOT);
             vio_set_uniform($this->ctx, 'u_probe_origin', [$this->probeOrigin->x, $this->probeOrigin->y, $this->probeOrigin->z]);
             vio_set_uniform($this->ctx, 'u_probe_size', [$this->probeSize->x, $this->probeSize->y, $this->probeSize->z]);
             vio_set_uniform($this->ctx, 'u_probe_range', $this->probeRange);
         }
         // sampler3D units are assigned unconditionally for the same reason as
         // u_environment_map below (GL unit-0 type aliasing kills the draw).
-        vio_set_uniform($this->ctx, 'u_probe_field_r', self::PROBE_R_SLOT);
-        vio_set_uniform($this->ctx, 'u_probe_field_g', self::PROBE_G_SLOT);
-        vio_set_uniform($this->ctx, 'u_probe_field_b', self::PROBE_B_SLOT);
+        vio_set_uniform($this->ctx, 'u_probe_field', self::PROBE_SLOT);
         vio_set_uniform($this->ctx, 'u_probe_enabled', $probeOn ? 1.0 : 0.0);
 
         // Reflection probe cubemap: bind the baked environment so water mirrors it.

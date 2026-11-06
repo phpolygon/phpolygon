@@ -132,9 +132,8 @@ uniform float u_env_mip_max;
 // u_probe_enabled 0 => fall back to the analytic hemisphere.
 uniform float u_probe_enabled;
 #ifndef PHPOLYGON_OMIT_PROBE_GI
-uniform sampler3D u_probe_field_r;
-uniform sampler3D u_probe_field_g;
-uniform sampler3D u_probe_field_b;
+// R, G and B SH-L1 volumes stacked along z (depth x 3), one texture: probeCoeffs().
+uniform sampler3D u_probe_field;
 #endif // PHPOLYGON_OMIT_PROBE_GI
 uniform vec3  u_probe_origin;
 uniform vec3  u_probe_size;
@@ -1448,9 +1447,14 @@ void main() {
             // bounce; lower SDF/Probe tiers dial it back so the tiers differ.
             vec3 puvw = clamp((v_worldPos - u_probe_origin) / u_probe_size, 0.0, 1.0);
             vec4 nd = vec4(1.0, N.x, N.y, N.z);
-            vec4 cr = (texture(u_probe_field_r, puvw) * 2.0 - 1.0) * u_probe_range;
-            vec4 cg = (texture(u_probe_field_g, puvw) * 2.0 - 1.0) * u_probe_range;
-            vec4 cb = (texture(u_probe_field_b, puvw) * 2.0 - 1.0) * u_probe_range;
+            // Each channel's block is a third of the stacked texture; z stays between
+            // the block's first and last texel centre, so filtering never reaches the
+            // neighbouring channel.
+            float pDepth = max(float(textureSize(u_probe_field, 0).z) / 3.0, 1.0);
+            float pz = clamp(puvw.z, 0.5 / pDepth, 1.0 - 0.5 / pDepth) / 3.0;
+            vec4 cr = (texture(u_probe_field, vec3(puvw.xy, pz)) * 2.0 - 1.0) * u_probe_range;
+            vec4 cg = (texture(u_probe_field, vec3(puvw.xy, pz + 1.0 / 3.0)) * 2.0 - 1.0) * u_probe_range;
+            vec4 cb = (texture(u_probe_field, vec3(puvw.xy, pz + 2.0 / 3.0)) * 2.0 - 1.0) * u_probe_range;
             vec3 E = max(vec3(dot(cr, nd), dot(cg, nd), dot(cb, nd)), vec3(0.0));
             float bounceGain = u_ft_mode >= 2.5 ? 1.0 : 0.7;
             // Toward the field's border the baked GI gives way to the hemisphere
