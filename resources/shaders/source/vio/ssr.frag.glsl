@@ -114,16 +114,21 @@ void main() {
 
     // March in view space. Step length scales with reach / step count.
     float stepLen = u_max_dist / float(max(u_steps, 1));
+    // Start each pixel's march at its own fraction of a step (interleaved gradient
+    // noise): the stair bands of a fixed step grid become a fine dither the
+    // temporal resolve smooths, and a calm water surface no longer shows rings.
+    float jitter = fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))));
 
     vec3 hitColor = vec3(0.0);
     float hit = 0.0;
     vec2 hitUV = vec2(0.0);
+    float travelled = 0.0; // share of the reach at the hit
 
     vec3 prevPos = P;
 
     for (int i = 1; i <= MAX_STEPS; i++) {
         if (i > u_steps) break;
-        vec3 samplePos = P + R * (stepLen * float(i));
+        vec3 samplePos = P + R * (stepLen * (float(i) - jitter));
         float rayDepth = -samplePos.z;          // linear view depth of the ray
         if (rayDepth <= 0.0) break;             // crossed behind the eye
 
@@ -140,7 +145,10 @@ void main() {
 
         // Intersection: the ray went from in-front (delta<=0) to behind
         // (delta>0) the stored surface, within the thickness slab.
-        if (delta > 0.0 && delta < u_thickness) {
+        // Far surfaces get a thicker slab: one step there spans more depth, and a
+        // thin slab lets the ray slip through distant facades.
+        float thickness = u_thickness * (1.0 + rayDepth * 0.015);
+        if (delta > 0.0 && delta < thickness) {
             vec2 refineUV = uv;
 
             // Binary-search refine between prevPos (in front) and samplePos
@@ -161,6 +169,7 @@ void main() {
             hitColor = textureLod(u_scene, refineUV, 0.0).rgb;
             hitUV = refineUV;
             hit = 1.0;
+            travelled = (float(i) - jitter) / float(max(u_steps, 1));
             break;
         }
 
@@ -178,6 +187,8 @@ void main() {
               * (1.0 - smoothstep(vec2(0.88), vec2(1.0), hitUV));
     float edgeFade = edge.x * edge.y;
 
-    float weight = reflectivity * u_strength * fresnel * edgeFade;
+    // Toward the end of the reach the reflection fades instead of stopping at a line.
+    float reachFade = 1.0 - smoothstep(0.75, 1.0, travelled);
+    float weight = reflectivity * u_strength * fresnel * edgeFade * reachFade;
     frag_color = vec4(hitColor, clamp(weight, 0.0, 1.0));
 }

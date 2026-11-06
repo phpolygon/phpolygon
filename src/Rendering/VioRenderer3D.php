@@ -28,6 +28,7 @@ use PHPolygon\Rendering\Accessibility\ComfortMotion;
 use PHPolygon\Rendering\Effects\EffectRegistry;
 use PHPolygon\Rendering\PostProcess\FullscreenPass;
 use PHPolygon\Rendering\PostProcess\FullscreenPassRegistry;
+use PHPolygon\Rendering\Reflection\PlanarReflection;
 use PHPolygon\Rendering\PostProcess\PostStage;
 use PHPolygon\Rendering\PostProcess\VioAccessibilityPass;
 use PHPolygon\Rendering\PostProcess\VioFxaaPass;
@@ -3325,6 +3326,12 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             PerfProfiler::end();
         }
 
+        // --- Planar reflection: the opaque scene mirrored at the plane, into its
+        // own target, before the scene target is bound (like the passes above).
+        PerfProfiler::begin('render3d.submit.planar');
+        $this->renderPlanarReflectionPass($commands, $frameState, $hasShadowMap, $dirLights);
+        PerfProfiler::end();
+
         // HDR/Bloom disabled — D3D11 fullscreen quad draw produces no pixels (needs investigation)
         $hdrTarget = $this->enableHdr ? $this->hdrTarget : null;
 
@@ -6182,6 +6189,136 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
     /** @var array<string, int|float|array<float>> SetShaderParameter values, sticky */
     private array $snippetParameters = [];
 
+    private ?VioRenderTarget $planarTarget = null;
+    private int $planarWidth = 0;
+    private int $planarHeight = 0;
+    private bool $planarHdr = false;
+    /** Whether this frame's planar reflection was drawn (else the sampler holds white, info.y = 0). */
+    private bool $planarDrawn = false;
+
+    /**
+     * The opaque scene mirrored at {@see PlanarReflection::plane()} into the planar
+     * target: mirrored view, oblique near plane on the mirror, forward shading
+     * (no G-buffer, no AO, no motion), cleared to alpha 0 so the snippet falls back
+     * to its own sky where nothing was drawn.
+     *
+     * @param list<object> $commands
+     * @param array<string, mixed> $frameState
+     * @param list<SetDirectionalLight> $dirLights
+     */
+    private function renderPlanarReflectionPass(array $commands, array $frameState, bool $hasShadowMap, array $dirLights): void
+    {
+        $this->planarDrawn = false;
+        $plane = PlanarReflection::plane();
+        $view = $this->currentViewMatrix;
+        $projection = $this->currentProjectionMatrix;
+        if (!PlanarReflection::active() || $plane === null || $view === null || $projection === null
+            || $this->activeShaderId() !== 'default') {
+            return;
+        }
+        $eye = $this->cameraPosition ?? $this->extractCameraPosition($view);
+        if ($eye->y <= $plane) {
+            return; // below the mirror: nothing to reflect from above
+        }
+        $hdr = $this->sceneTargetIsHdr();
+        $w = max(1, (int) round($this->width * PlanarReflection::scale()));
+        $h = max(1, (int) round($this->height * PlanarReflection::scale()));
+        if ($this->planarTarget === null || $this->planarWidth !== $w || $this->planarHeight !== $h || $this->planarHdr !== $hdr) {
+            $this->planarTarget = vio_render_target($this->ctx, ['width' => $w, 'height' => $h, 'hdr' => $hdr]) ?: null;
+            $this->planarWidth = $w;
+            $this->planarHeight = $h;
+            $this->planarHdr = $hdr;
+        }
+        if ($this->planarTarget === null) {
+            return;
+        }
+
+        $saved = [$this->mrtThisFrame, $this->motionThisFrame, $this->ssaoActiveThisFrame, $this->sdfAoActiveThisFrame, $this->cameraPosition, $this->sceneVariant];
+        $mirrored = PlanarReflection::mirroredView($view, $plane);
+        $this->currentViewMatrix = $mirrored;
+        $this->currentProjectionMatrix = PlanarReflection::obliqueProjection($projection, $mirrored, $plane);
+        $this->cameraPosition = PlanarReflection::mirroredEye($eye, $plane);
+        $this->mrtThisFrame = false;
+        $this->motionThisFrame = false;
+        $this->ssaoActiveThisFrame = false;
+        $this->sdfAoActiveThisFrame = false;
+        $this->sceneVariant = $this->frameBaseVariant;
+
+        vio_bind_render_target($this->ctx, $this->planarTarget);
+        vio_clear($this->ctx, 0.0, 0.0, 0.0, 0.0);
+        vio_viewport($this->ctx, 0, 0, $w, $h);
+        $this->bindPipeline('opaque');
+        $this->uploadFrameUniforms($frameState);
+        $this->uploadShadowUniforms($hasShadowMap, $dirLights);
+        $this->uploadSsaoUniforms();
+        $this->uploadSdfAoUniforms();
+        $this->uploadSnippetInputs();
+        $this->lastMaterialId = null;
+        $reactive = false; // by reference: the mirrored pass writes no reactive mask
+        foreach (OpaqueDrawOrder::sort($commands, false, $reactive) as [$materialId, , $cmd, $material]) {
+            if ($this->variantsThisFrame) {
+                $this->selectVariant($material, $materialId);
+            }
+            if ($cmd instanceof DrawMesh) {
+                $this->drawMeshCommand($cmd->meshId, $material, $cmd->modelMatrix, $cmd->materialId, true, null, $cmd->params);
+            } else {
+                $this->drawMeshInstancedCommand($cmd, $material);
+            }
+        }
+        vio_unbind_render_target($this->ctx);
+        $this->gpuMark('planar');
+
+        [$this->mrtThisFrame, $this->motionThisFrame, $this->ssaoActiveThisFrame, $this->sdfAoActiveThisFrame, $this->cameraPosition, $this->sceneVariant] = $saved;
+        $this->currentViewMatrix = $view;
+        $this->currentProjectionMatrix = $projection;
+        // The main pass binds its pipelines afresh; drop the sticky per-draw state
+        // the mirrored draws left so the first main draw uploads its own.
+        $this->lastMaterialId = null;
+        $this->variantUniformsUploaded = $this->frameBaseVariant !== ProcModeShaderRegistry::BASE_VARIANT
+            ? [$this->frameBaseVariant => true] : [];
+        $this->planarDrawn = true;
+    }
+
+    /** The planar sampler: this frame's reflection, or white with info.y = 0. */
+    private function bindPlanarReflection(int $slot): void
+    {
+        $texture = $this->planarDrawn && $this->planarTarget !== null ? vio_render_target_texture($this->planarTarget) : null;
+        if ($texture === null) {
+            $this->ensureWhiteTexture();
+            $texture = $this->whiteTexture;
+        }
+        if ($texture !== null) {
+            vio_set_uniform($this->ctx, PlanarReflection::SAMPLER, $slot);
+            vio_bind_texture($this->ctx, $texture, $slot);
+        }
+        vio_set_uniform($this->ctx, PlanarReflection::INFO, [PlanarReflection::plane() ?? 0.0, $texture !== null && $this->planarDrawn ? 1.0 : 0.0, 0.0, 0.0]);
+    }
+
+    /** 1x1 white cube for a snippet samplerCube with nothing to show (never an empty SRV). */
+    private ?VioCubemap $whiteCubemap = null;
+
+    /**
+     * A snippet samplerCube: the CubemapRegistry entry its SetShaderTexture names, else
+     * the sky environment (baked reflection_probe or the GPU sky cube), else white.
+     */
+    private function bindSnippetCubemap(string $name, int $slot, ?string $cubemapId): void
+    {
+        $cube = $cubemapId !== null ? $this->loadCubemap($cubemapId) : null;
+        $cube ??= $this->loadCubemap(self::ENV_CUBEMAP_ID) ?? $this->envCubemap?->cubemap();
+        if ($cube === null) {
+            $this->whiteCubemap ??= vio_cubemap($this->ctx, [
+                'pixels' => array_fill(0, 6, [255, 255, 255, 255]),
+                'width' => 1,
+                'height' => 1,
+            ]) ?: null;
+            $cube = $this->whiteCubemap;
+        }
+        if ($cube !== null) {
+            vio_set_uniform($this->ctx, $name, $slot);
+            vio_bind_cubemap($this->ctx, $cube, $slot);
+        }
+    }
+
     /** @var array<string, string|null> SetShaderTexture ids, sticky */
     private array $snippetTextures = [];
 
@@ -7315,6 +7452,14 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         }
         foreach (ProcModeShaderRegistry::samplers() as $name => $slot) {
             $id = $this->snippetTextures[$name] ?? null;
+            if ($name === PlanarReflection::SAMPLER) {
+                $this->bindPlanarReflection($slot);
+                continue;
+            }
+            if (ProcModeShaderRegistry::isCubeSampler($name)) {
+                $this->bindSnippetCubemap($name, $slot, $id);
+                continue;
+            }
             $texture = $id !== null ? $this->resolveTexture($id) : null;
             if ($texture === null) {
                 $this->ensureWhiteTexture();

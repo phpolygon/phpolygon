@@ -156,6 +156,9 @@ final class ProcModeShaderRegistry
     private static array $samplers = [];
     /** @var array<string, list<string>|null> sampler name → the programs that declare it, null = all */
     private static array $samplerPrograms = [];
+
+    /** @var array<string, true> samplers declared as samplerCube */
+    private static array $cubeSamplers = [];
     /** @var array<string, int|float|list<float>> material parameter uniform → default */
     private static array $materialParameters = [];
     private static bool $instanceParams = false;
@@ -374,10 +377,13 @@ final class ProcModeShaderRegistry
      * BASE_VARIANT for the base one); a variant without {@see ShaderPath::ProbeGi} has
      * room for four.
      *
+     * $cube declares a samplerCube instead: its {@see Command\SetShaderTexture} id names a
+     * {@see CubemapRegistry} entry, and until one is set it reads the sky environment.
+     *
      * @param list<string>|null $programs null = every program
      * @return int the texture slot
      */
-    public static function declareSampler(string $name, ?array $programs = null): int
+    public static function declareSampler(string $name, ?array $programs = null, bool $cube = false): int
     {
         self::assertName($name);
         if (isset(self::$uniforms[$name])) {
@@ -390,6 +396,9 @@ final class ProcModeShaderRegistry
             throw new \InvalidArgumentException('Snippets can declare at most ' . self::MAX_SAMPLERS . ' samplers');
         }
         self::$samplerPrograms[$name] = $programs;
+        if ($cube) {
+            self::$cubeSamplers[$name] = true;
+        }
 
         return self::$samplers[$name] = self::FIRST_SAMPLER_SLOT + count(self::$samplers);
     }
@@ -457,6 +466,12 @@ final class ProcModeShaderRegistry
         return self::$samplers;
     }
 
+    /** Whether $name was declared as a samplerCube (its SetShaderTexture id names a cubemap). */
+    public static function isCubeSampler(string $name): bool
+    {
+        return isset(self::$cubeSamplers[$name]);
+    }
+
     /** The generated declarations of a family. */
     public static function uniformDeclarations(string $family = self::FAMILY_VIO, ?string $variant = null): string
     {
@@ -467,7 +482,8 @@ final class ProcModeShaderRegistry
         if ($family === self::FAMILY_VIO) {
             foreach (self::$samplers as $name => $_) {
                 if (self::samplerIn($name, $variant)) {
-                    $out .= "uniform sampler2D {$name};\n";
+                    $type = isset(self::$cubeSamplers[$name]) ? 'samplerCube' : 'sampler2D';
+                    $out .= "uniform {$type} {$name};\n";
                 }
             }
         }
@@ -750,6 +766,7 @@ final class ProcModeShaderRegistry
         self::$uniforms = [];
         self::$samplers = [];
         self::$samplerPrograms = [];
+        self::$cubeSamplers = [];
         self::$sceneDepthPrograms = [];
         self::$libraries = [];
         self::$materialParameters = [];
