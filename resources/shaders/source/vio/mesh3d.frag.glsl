@@ -170,7 +170,6 @@ uniform int u_linear_output;
 
 // Shadow
 uniform int u_has_shadow_map;
-uniform sampler2DShadow u_shadow_map;
 
 // Cascade Shadow Maps (mirrors mesh3d.frag.glsl).
 uniform sampler2DShadow u_csm_map_0;
@@ -346,6 +345,10 @@ uniform float u_cloud_altitude;
 uniform float u_cloud_density;
 uniform vec2  u_cloud_wind_dir;
 uniform float u_cloud_offset; // = sky pass's u_cloud_offset, so shadows track the clouds
+#ifdef PHPOLYGON_CLOUD_SHADOW_MAP
+uniform sampler2D u_cloud_shadow_map;   // r = sun transmittance, seen from above
+uniform vec4 u_cloud_shadow_info;       // centre x, centre z, half size, 1 = baked this frame
+#endif
 
 float cloudHash13(vec3 p) {
     p = fract(p * 0.1031);
@@ -405,6 +408,17 @@ float cloudShadow(vec3 worldPos) {
     if (u_cloud_cover <= 0.0) return 1.0;
     vec3 L = normalize(-u_dir_light_direction); // toward the light source
     if (L.y <= 0.05) return 1.0;                 // light at/below the horizon
+#ifdef PHPOLYGON_CLOUD_SHADOW_MAP
+    // The baked map (cloud_shadow_map.frag): the texel where this point's sun ray
+    // crosses y = 0. Outside the map the march below takes over.
+    if (u_cloud_shadow_info.w > 0.5) {
+        vec2 cg = worldPos.xz - worldPos.y * L.xz / L.y;
+        vec2 cuv = (cg - u_cloud_shadow_info.xy) / (2.0 * u_cloud_shadow_info.z) + 0.5;
+        if (cuv.x > 0.01 && cuv.y > 0.01 && cuv.x < 0.99 && cuv.y < 0.99) {
+            return textureLod(u_cloud_shadow_map, cuv, 0.0).r;
+        }
+    }
+#endif
     float base = u_cloud_altitude;
     float top  = base + 30.0;
     float tEnter = max((base - worldPos.y) / L.y, 0.0);

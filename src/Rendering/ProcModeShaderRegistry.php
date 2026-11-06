@@ -108,13 +108,42 @@ final class ProcModeShaderRegistry
     public const MAX_SAMPLERS = 4;
 
     /**
-     * Ordinary samplers one program can hold: php-vio's D3D12 path numbers them t0..t7
-     * in declaration order, comparison samplers start at t8.
+     * Ordinary samplers one program could hold before php-vio 2.40: its D3D12 path
+     * numbered them t0..t7 and put the comparison samplers at t8.
      */
     public const SAMPLER_REGISTERS = 8;
 
+    /**
+     * Since php-vio 2.40 D3D12 and Vulkan hold 12 ordinary samplers (comparison ones from
+     * register 12; D3D11, OpenGL and Metal 16): `vio_backend_info()['samplers']`.
+     */
+    public const SAMPLER_REGISTERS_2_40 = 12;
+
+    /** Ordinary sampler registers of the php-vio this process runs on. */
+    public static function samplerRegisters(): int
+    {
+        $vio = phpversion('vio');
+
+        return is_string($vio) && version_compare($vio, '2.40.0', '>=') ? self::SAMPLER_REGISTERS_2_40 : self::SAMPLER_REGISTERS;
+    }
+
     /** Ordinary samplers of mesh3d.frag: environment, 3 probe fields, albedo, SSAO, SDF AO. */
     private const ENGINE_SAMPLERS = 7;
+
+    /**
+     * Ordinary samplers of mesh3d.frag on this php-vio: since 2.40 (12 registers) the
+     * cloud shadow map joins them (PHPOLYGON_CLOUD_SHADOW_MAP).
+     */
+    public static function engineSamplers(): int
+    {
+        return self::ENGINE_SAMPLERS + (self::cloudShadowMapAvailable() ? 1 : 0);
+    }
+
+    /** Whether mesh3d.frag reads a baked cloud shadow map (php-vio with 12 sampler registers). */
+    public static function cloudShadowMapAvailable(): bool
+    {
+        return self::samplerRegisters() >= self::SAMPLER_REGISTERS_2_40;
+    }
 
     /** Of those, the ones {@see ShaderPath::ProbeGi} takes out of a program. */
     private const PROBE_SAMPLERS = 3;
@@ -432,9 +461,9 @@ final class ProcModeShaderRegistry
     public static function samplerBudget(string $variant = self::BASE_VARIANT): int
     {
         $omit = $variant === self::BASE_VARIANT ? self::$baseOmissions : (self::$variants[$variant]['omit'] ?? []);
-        $engine = self::ENGINE_SAMPLERS - (in_array(ShaderPath::ProbeGi, $omit, true) ? self::PROBE_SAMPLERS : 0);
+        $engine = self::engineSamplers() - (in_array(ShaderPath::ProbeGi, $omit, true) ? self::PROBE_SAMPLERS : 0);
 
-        return self::SAMPLER_REGISTERS - $engine - (self::readsSceneDepth($variant) ? 1 : 0);
+        return self::samplerRegisters() - $engine - (self::readsSceneDepth($variant) ? 1 : 0);
     }
 
     /**

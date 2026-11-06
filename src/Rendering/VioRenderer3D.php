@@ -3326,6 +3326,9 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             PerfProfiler::end();
         }
 
+        // --- Cloud shadow map: the sun's transmittance through the clouds from above.
+        $this->renderCloudShadowMap($dirLights);
+
         // --- Planar reflection: the opaque scene mirrored at the plane, into its
         // own target, before the scene target is bound (like the passes above).
         PerfProfiler::begin('render3d.submit.planar');
@@ -3781,6 +3784,11 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         $this->compileShaderFromFiles('passthrough_blit', 'postprocess.vert.glsl', 'passthrough_blit.frag.glsl');
         // AMD FSR 1 (GraphicsSettings::$upscaler). A backend that cannot compile
         // them keeps the bilinear present: fsrApplies() checks the cache.
+        try {
+            $this->compileShaderFromFiles('cloud_shadow_map', 'postprocess.vert.glsl', 'cloud_shadow_map.frag.glsl');
+        } catch (\Throwable $e) {
+            fwrite(STDERR, "[VioRenderer3D] cloud shadow map unavailable: {$e->getMessage()}\n");
+        }
         foreach (['fsr_easu', 'fsr_rcas'] as $fsrPass) {
             try {
                 $this->compileShaderFromFiles($fsrPass, 'postprocess.vert.glsl', $fsrPass . '.frag.glsl');
@@ -3841,6 +3849,9 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         }
         if (self::preciseHashOn($this->conventions()->name())) {
             $source = self::withDefine($source, 'PHPOLYGON_PRECISE_HASH');
+        }
+        if (ProcModeShaderRegistry::cloudShadowMapAvailable()) {
+            $source = self::withDefine($source, 'PHPOLYGON_CLOUD_SHADOW_MAP');
         }
         if ($this->lightGridSupported()) {
             $source = self::withDefine($source, 'PHPOLYGON_LIGHT_GRID');
@@ -5563,10 +5574,9 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             // disc. (It was never a Y-flip / reverse-Z / clip-convention issue;
             // those only mirrored or shifted the artefact.) Bind the same depth
             // texture to its own distinct unit so both samplers get a register.
+            // Unit 7 held a legacy u_shadow_map alias of cascade 0 that mesh3d.frag
+            // never read; it now carries the cloud shadow map.
             if ($cIdx === 0) {
-                $legacyUnit = 7;
-                vio_bind_texture($this->ctx, $tex, $legacyUnit);
-                vio_set_uniform($this->ctx, 'u_shadow_map', $legacyUnit);
                 vio_set_uniform($this->ctx, 'u_light_space_matrix', $lsm);
             }
         }
@@ -6339,6 +6349,82 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             vio_bind_texture($this->ctx, $texture, $slot);
         }
         vio_set_uniform($this->ctx, PlanarReflection::INFO, [PlanarReflection::plane() ?? 0.0, $texture !== null && $this->planarDrawn ? 1.0 : 0.0, 0.0, 0.0]);
+    }
+
+    private const int CLOUD_MAP_SIZE = 256;
+    private const int CLOUD_MAP_UNIT = 7;
+    /** Half the side of the square the cloud map covers, metres. */
+    private const float CLOUD_MAP_HALF = 384.0;
+    private ?VioRenderTarget $cloudMapTarget = null;
+    /** @var array{0: float, 1: float}|null centre of this frame's map, null = not baked */
+    private ?array $cloudMapCentre = null;
+
+    /**
+     * Bake the cloud shadow map for this frame: 256 x 256 texels over 768 m around
+     * the camera, centre snapped to the texel grid so the patches do not swim.
+     *
+     * @param list<SetDirectionalLight> $dirLights
+     */
+    private function renderCloudShadowMap(array $dirLights): void
+    {
+        $this->cloudMapCentre = null;
+        $sky = $this->pendingSky;
+        $quad = $this->screenQuad;
+        if (!ProcModeShaderRegistry::cloudShadowMapAvailable() || $sky === null || $quad === null
+            || !$this->settings->cloudShadows || $sky->cloudCover <= 0.0 || $dirLights === []
+            || !isset($this->shaderCache['cloud_shadow_map']) || $this->currentViewMatrix === null) {
+            return;
+        }
+        $d = $dirLights[0]->direction;
+        $len = sqrt($d->x * $d->x + $d->y * $d->y + $d->z * $d->z);
+        if ($len < 1e-6 || -$d->y / $len <= 0.05) {
+            return;
+        }
+        $this->cloudMapTarget ??= vio_render_target($this->ctx, ['width' => self::CLOUD_MAP_SIZE, 'height' => self::CLOUD_MAP_SIZE]) ?: null;
+        if ($this->cloudMapTarget === null) {
+            return;
+        }
+        $eye = $this->cameraPosition ?? $this->extractCameraPosition($this->currentViewMatrix);
+        $texel = 2.0 * self::CLOUD_MAP_HALF / self::CLOUD_MAP_SIZE;
+        $cx = round($eye->x / $texel) * $texel;
+        $cz = round($eye->z / $texel) * $texel;
+        $wd = $sky->cloudWindDirection;
+        $wl = sqrt($wd->x * $wd->x + $wd->z * $wd->z);
+
+        vio_bind_render_target($this->ctx, $this->cloudMapTarget);
+        vio_viewport($this->ctx, 0, 0, self::CLOUD_MAP_SIZE, self::CLOUD_MAP_SIZE);
+        $this->bindPostProcessPipeline('cloud_shadow_map');
+        vio_set_uniform($this->ctx, 'u_cloud_cover', $sky->cloudCover);
+        vio_set_uniform($this->ctx, 'u_cloud_altitude', $sky->cloudAltitude);
+        vio_set_uniform($this->ctx, 'u_cloud_density', $sky->cloudDensity);
+        vio_set_uniform($this->ctx, 'u_cloud_wind_dir', [$wl > 1e-6 ? $wd->x / $wl : 1.0, $wl > 1e-6 ? $wd->z / $wl : 0.0]);
+        vio_set_uniform($this->ctx, 'u_cloud_offset', $sky->cloudDrift());
+        vio_set_uniform($this->ctx, 'u_sun_to', [-$d->x / $len, -$d->y / $len, -$d->z / $len]);
+        vio_set_uniform($this->ctx, 'u_cloud_map', [$cx, $cz, self::CLOUD_MAP_HALF, 0.0]);
+        vio_draw($this->ctx, $quad);
+        vio_unbind_render_target($this->ctx);
+        $this->gpuMark('cloudmap');
+        $this->cloudMapCentre = [$cx, $cz];
+    }
+
+    /** The cloud map on the mesh program: this frame's, or white with info.w = 0. */
+    private function bindCloudShadowMap(): void
+    {
+        if (!ProcModeShaderRegistry::cloudShadowMapAvailable()) {
+            return;
+        }
+        $centre = $this->cloudMapCentre;
+        $texture = $centre !== null && $this->cloudMapTarget !== null ? vio_render_target_texture($this->cloudMapTarget) : null;
+        if ($texture === null) {
+            $this->ensureWhiteTexture();
+            $texture = $this->whiteTexture;
+        }
+        if ($texture !== null) {
+            vio_set_uniform($this->ctx, 'u_cloud_shadow_map', self::CLOUD_MAP_UNIT);
+            vio_bind_texture($this->ctx, $texture, self::CLOUD_MAP_UNIT);
+        }
+        vio_set_uniform($this->ctx, 'u_cloud_shadow_info', $centre !== null
+            ? [$centre[0], $centre[1], self::CLOUD_MAP_HALF, 1.0] : [0.0, 0.0, 1.0, 0.0]);
     }
 
     private ?bool $lightGridSupported = null;
@@ -7540,6 +7626,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         } else {
             vio_set_uniform($this->ctx, 'u_cloud_cover', 0.0);
         }
+        $this->bindCloudShadowMap();
 
         // Color grading + vignette per-frame.
         $grade = $this->settings->colorGrading->params();
