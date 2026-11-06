@@ -6146,6 +6146,8 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             vio_set_uniform($this->ctx, 'u_cloud_offset', $sky->cloudDrift());
             vio_set_uniform($this->ctx, 'u_cloud_wind_dir', [$wx, $wz]);
             vio_set_uniform($this->ctx, 'u_cloud_darkness', $sky->cloudDarkness);
+            vio_set_uniform($this->ctx, 'u_lightning', $sky->lightning);
+            vio_set_uniform($this->ctx, 'u_lightning_dir', [sin($sky->lightningAzimuth), cos($sky->lightningAzimuth)]);
             vio_draw($this->ctx, $quad);
         }
 

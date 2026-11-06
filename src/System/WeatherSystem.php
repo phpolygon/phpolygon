@@ -115,6 +115,7 @@ class WeatherSystem extends AbstractSystem
             if ($weather->lightningTimer >= $interval) {
                 $weather->lightningFlash = 1.0;
                 $weather->lightningTimer = 0.0;
+                $weather->lightningAzimuth = mt_rand() / mt_getrandmax() * 2.0 * M_PI;
             }
         }
 

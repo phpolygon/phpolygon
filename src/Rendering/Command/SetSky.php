@@ -63,6 +63,10 @@ final class SetSky
          * $time × Δspeed and the clouds race faster the longer the game runs.
          */
         public readonly ?float $cloudOffset = null,
+        /** Lightning flash 0..1: the clouds glow from within towards the strike and a bolt reaches down. */
+        public readonly float $lightning = 0.0,
+        /** Direction of the strike about +Y (radians, 0 = +Z). */
+        public readonly float $lightningAzimuth = 0.0,
     ) {}
 
     /** Cloud drift distance the renderer applies (see $cloudOffset). */

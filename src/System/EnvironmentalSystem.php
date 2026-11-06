@@ -104,6 +104,7 @@ class EnvironmentalSystem extends AbstractSystem
         if ($weather !== null) {
             $dayNight->cloudDarkening = $weather->cloudCoverage * 0.5;
             $dayNight->lightningFlash = $weather->lightningFlash;
+            $dayNight->lightningAzimuth = $weather->lightningAzimuth;
         }
     }
 }

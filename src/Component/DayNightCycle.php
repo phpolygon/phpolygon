@@ -66,6 +66,10 @@ class DayNightCycle extends AbstractComponent
     #[Hidden]
     public float $lightningFlash = 0.0;
 
+    /** Direction of the strike about +Y (radians, 0 = +Z; set by EnvironmentalSystem). */
+    #[Hidden]
+    public float $lightningAzimuth = 0.0;
+
     public function __construct(
         float $timeOfDay = 0.35,
         float $dayDuration = 600.0,

@@ -17,6 +17,10 @@ uniform float u_cloud_density;
 uniform float u_cloud_offset;    // drift distance along the wind (world units), integrated on the CPU
 uniform vec2  u_cloud_wind_dir;
 uniform float u_cloud_darkness;  // 0 = white cumulus, 1 = dark rain/thunder/snow
+// Lightning (shader plan 4.1): flash 0..1 and the strike's direction in xz. The
+// clouds glow from within around the strike, a jagged bolt reaches the horizon.
+uniform float u_lightning;
+uniform vec2  u_lightning_dir;
 // HDR scene path: clouds alpha-blend over the linear sky, so linearise the
 // cloud colour so it composites against the tonemapped resolve correctly.
 uniform int u_linear_output;
@@ -88,12 +92,35 @@ float cloudDensity(vec3 p) {
     return d * u_cloud_density;
 }
 
+// The bolt of a strike STRIKE_DIST away: a jagged channel from the cloud base down
+// to the horizon, its shape seeded by the strike direction. Brightness 0..1.
+const float STRIKE_DIST = 350.0;
+float lightningBolt(vec3 dir) {
+    if (u_lightning <= 0.01) return 0.0;
+    vec2 hz = dir.xz / max(length(dir.xz), 1e-4);
+    float da = atan(hz.x * u_lightning_dir.y - hz.y * u_lightning_dir.x, dot(hz, u_lightning_dir));
+    float e = asin(clamp(dir.y, -1.0, 1.0));
+    float eTop = atan((u_cloud_altitude - u_camera_pos.y) / STRIKE_DIST);
+    if (e < -0.002 || e > eTop || abs(da) > 0.2) return 0.0;
+    float seed = u_lightning_dir.x * 37.0 + u_lightning_dir.y * 11.0;
+    float off = (vnoise3(vec3(e * 70.0, seed, 0.0)) - 0.5) * 0.035 + (vnoise3(vec3(e * 18.0, seed, 3.0)) - 0.5) * 0.06;
+    float x = abs(da - off);
+    float core = exp(-x / 0.0012);
+    float glow = exp(-x / 0.012) * 0.35;
+    return (core + glow) * smoothstep(-0.002, 0.01, e) * u_lightning;
+}
+
 void main() {
     vec4 world = u_sky_inv_vp * vec4(v_ndc, 1.0, 1.0);
     vec3 dir = normalize(world.xyz / world.w);
+    float bolt = lightningBolt(dir);
+    vec3 boltColor = vec3(0.85, 0.88, 1.0) * 4.0;
 
     // Only march upward into the slab.
-    if (dir.y <= 0.02) { frag_color = vec4(0.0); return; }
+    if (dir.y <= 0.02) {
+        frag_color = vec4(u_linear_output == 1 ? boltColor : vec3(1.0), clamp(bolt, 0.0, 1.0));
+        return;
+    }
 
     float base = u_cloud_altitude;
     float top  = base + SLAB_THICK;
@@ -130,6 +157,12 @@ void main() {
             // Powder: dim the thin low-density edges (which otherwise catch full
             // light and read as a too-bright fringe); dense cores stay bright.
             col *= mix(0.6, 1.0, 1.0 - exp(-dens * 3.0));
+            // Lightning lights the cloud from inside, strongest near the strike.
+            if (u_lightning > 0.01) {
+                vec2 strike = u_camera_pos.xz + u_lightning_dir * STRIKE_DIST;
+                float near = exp(-length(p.xz - strike) / 300.0);
+                col += vec3(0.75, 0.8, 1.0) * u_lightning * (0.08 + 1.8 * near) * (1.0 - lightT * 0.5);
+            }
 
             float dT = exp(-dens * stepLen * 1.1);
             scatter += transmittance * (1.0 - dT) * col;
@@ -148,5 +181,10 @@ void main() {
     if (u_linear_output == 1) {
         cloudColor = invToneMapInvGamma(cloudColor);
     }
-    frag_color = vec4(cloudColor, alpha);
+    // The bolt hangs below the cloud base, in front of the slab.
+    float ab = clamp(bolt, 0.0, 1.0);
+    vec3 cb = u_linear_output == 1 ? boltColor : vec3(1.0);
+    float aOut = ab + alpha * (1.0 - ab);
+    vec3 cOut = (cb * ab + cloudColor * alpha * (1.0 - ab)) / max(aOut, 1e-4);
+    frag_color = vec4(cOut, aOut);
 }

@@ -55,6 +55,10 @@ class Weather extends AbstractComponent
     #[Hidden]
     public float $lightningTimer = 0.0;
 
+    /** Direction of the last strike about the world Y axis (radians, 0 = +Z), for the sky. */
+    #[Hidden]
+    public float $lightningAzimuth = 0.0;
+
     // --- Visibility ---
 
     /** Fog density 0–1 */

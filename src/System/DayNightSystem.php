@@ -423,14 +423,16 @@ class DayNightSystem extends AbstractSystem
             $ambientIntensity = max($ambientIntensity, $moonAmbient);
         }
 
-        // Lightning flash: brief white burst. The intensity cap is π so the
-        // peak matches the old full-flash brightness on the linear scale.
+        // Lightning flash: a brief cold burst from the sky. Bright enough to read
+        // under a storm sky, not a white-out (it used to add up to π, which blew a
+        // night scene to white); the bolt and the lit clouds come from the sky pass.
         if ($cycle->lightningFlash > 0.01) {
-            $flash = $cycle->lightningFlash;
-            $ambientR = min(1.0, $ambientR + $flash * 0.8);
-            $ambientG = min(1.0, $ambientG + $flash * 0.85);
-            $ambientB = min(1.0, $ambientB + $flash * 0.9);
-            $ambientIntensity = min(M_PI, $ambientIntensity + $flash * 3.0);
+            // By day the sky already lights the scene: a quarter of the burst.
+            $flash = $cycle->lightningFlash * (1.0 - 0.75 * min(1.0, $cycle->getSunHeight() * 2.0));
+            $ambientR = min(1.0, $ambientR + $flash * 0.30);
+            $ambientG = min(1.0, $ambientG + $flash * 0.33);
+            $ambientB = min(1.0, $ambientB + $flash * 0.40);
+            $ambientIntensity = min(M_PI, $ambientIntensity + $flash * 0.9);
         }
 
         $this->commandList->add(new SetAmbientLight(
@@ -556,6 +558,8 @@ class DayNightSystem extends AbstractSystem
             starBrightness: $cycle->isDaytime() ? 0.0 : 0.9 * $moonBright,
             time: $this->skyTime,
             cloudOffset: $this->cloudOffset,
+            lightning: $cycle->lightningFlash,
+            lightningAzimuth: $cycle->lightningAzimuth,
         ));
 
         // --- Sun sphere material ---
