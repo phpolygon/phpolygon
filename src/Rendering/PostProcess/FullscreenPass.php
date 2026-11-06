@@ -50,8 +50,9 @@ final class FullscreenPass
         }
     }
 
+    /** The player's setting and the game's run-time switch ({@see FullscreenPassRegistry::setActive()}) both let it run. */
     public function enabledBy(GraphicsSettings $settings): bool
     {
-        return $settings->effectEnabled($this->name, $this->default);
+        return $settings->effectEnabled($this->name, $this->default) && FullscreenPassRegistry::isActive($this->name);
     }
 }

@@ -511,6 +511,12 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
     private float $comfortMinimum = 0.0;
     /** Focus region for the focus dim (SetFocusRegion), sticky; null = none. */
     private ?Command\SetFocusRegion $focusRegion = null;
+    /** Look of the image chain (SetImageLook), sticky; null = the default look, nothing of the chain runs. */
+    private ?PostProcess\ImageLook $imageLook = null;
+    private ?PostProcess\VioImageChain $imageChain = null;
+    /** RGBA8 target the present draws into before the look's sharpening (RCAS); keyed by size. */
+    private ?\VioRenderTarget $lookSharpenTarget = null;
+    private string $lookSharpenKey = '';
     /** The MRT target whose motion / depth / reactive textures temporalInputs holds. */
     private ?VioRenderTarget $temporalInputsOf = null;
     /** @var array{0: VioTexture, 1: VioTexture, 2: VioTexture}|null */
@@ -1474,6 +1480,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             || $this->temporalRequested()
             || $this->fullscreenPassWanted()
             || $this->settings->accessibility->changesImage($this->focusRegion !== null)
+            || $this->imageLook !== null
             || ProcModeShaderRegistry::sceneDepthRequired();
     }
 
@@ -1604,26 +1611,38 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             }
         }
 
+        $sceneW = $temporal ? max(1, $this->backbufferWidth) : $target->width();
+        $sceneH = $temporal ? max(1, $this->backbufferHeight) : $target->height();
         $sceneTex = $this->runFullscreenPasses(
             PostStage::Display,
             $sceneTex,
-            $temporal ? max(1, $this->backbufferWidth) : $target->width(),
-            $temporal ? max(1, $this->backbufferHeight) : $target->height(),
+            $sceneW,
+            $sceneH,
             $temporal || $target->isHdr(),
             $quad,
         );
 
-        // Bloom (GraphicsSettings::$bloom): extract + blur the bright pixels of
-        // the rendered scene; the present shader adds the glow back. Runs while
-        // the offscreen colour is in shader-resource state (just unbound), and
-        // leaves the swapchain bound for the present pass below.
-        $bloomTex = $this->settings->bloom ? $this->renderBloom($sceneTex, $quad) : null;
-        if ($bloomTex !== null) {
-            $this->gpuMark('bloom');
-        }
         $post = $this->postFinishParams();
         if ($this->presentRedirect !== null) {
             $post['pq'] = 0; // the blit behind the Final stage encodes
+        }
+
+        // Image look (SetImageLook): bloom, exposure, tonemap, LUT, ... in one finishing
+        // draw; the present then takes its display-referred image like an LDR scene.
+        $finished = $this->finishImageLook($sceneTex, $sceneW, $sceneH, $post['hdr'] === 1, $quad);
+        if ($finished !== null) {
+            $sceneTex = $finished;
+            $bloomTex = null;
+            $post['hdr'] = 0;
+        } else {
+            // Bloom (GraphicsSettings::$bloom): extract + blur the bright pixels of
+            // the rendered scene; the present shader adds the glow back. Runs while
+            // the offscreen colour is in shader-resource state (just unbound), and
+            // leaves the swapchain bound for the present pass below.
+            $bloomTex = $this->settings->bloom ? $this->renderBloom($sceneTex, $quad) : null;
+            if ($bloomTex !== null) {
+                $this->gpuMark('bloom');
+            }
         }
 
         if ($temporal) {
@@ -1637,18 +1656,135 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             return;
         }
 
-        $this->bindPresentOutput($this->backbufferWidth, $this->backbufferHeight);
+        // The look's sharpening (no upscaler sharpens on this path): the present draws into
+        // an RGBA8 target, RCAS into the output.
+        $sharpen = $this->lookSharpenTarget();
+        $present = $post;
+        if ($sharpen !== null) {
+            $present['pq'] = 0;
+            vio_bind_render_target($this->ctx, $sharpen);
+            vio_viewport($this->ctx, 0, 0, max(1, $this->backbufferWidth), max(1, $this->backbufferHeight));
+        } else {
+            $this->bindPresentOutput($this->backbufferWidth, $this->backbufferHeight);
+        }
 
         if ($this->fxaaSelected() && $this->fxaaPass !== null) {
             $this->fxaaPass->apply(
                 $sceneTex, $target->width(), $target->height(), $quad,
-                $bloomTex, $this->bloomIntensity, $post,
+                $bloomTex, $this->bloomIntensity, $present,
             );
         } else {
-            $this->drawPassthrough($sceneTex, $quad, $bloomTex, $post);
+            $this->drawPassthrough($sceneTex, $quad, $bloomTex, $present);
+        }
+
+        if ($sharpen !== null && $this->imageLook !== null) {
+            vio_unbind_render_target($this->ctx);
+            $this->drawRcas(vio_render_target_texture($sharpen), $this->imageLook->sharpen, $post);
+            $this->gpuMark('image.sharpen');
         }
 
         $this->offscreenActive = false;
+    }
+
+    /**
+     * Run the image look's finishing draw over the scene colour ({@see PostProcess\ImageLook}):
+     * bloom (mip chain or the single blur), auto exposure, then image_finish. Null while the
+     * look is the default or the chain cannot run here; the present then works as in v0.97.
+     */
+    private function finishImageLook(VioTexture $scene, int $w, int $h, bool $linear, VioMesh $quad): ?VioTexture
+    {
+        $look = $this->imageLook;
+        if ($look === null) {
+            return null;
+        }
+        $this->imageChain ??= new PostProcess\VioImageChain($this->ctx, $this->conventions());
+        $chain = $this->imageChain;
+        if (!$chain->ready()) {
+            return null;
+        }
+        PerfProfiler::begin('render3d.post.image');
+        $bloom = null;
+        $gain = 0.0;
+        if ($this->settings->bloom) {
+            if ($look->bloomLevels > 1) {
+                $levels = $chain->bloom($scene, $w, $h, $linear, $look, $quad);
+                if ($levels !== null) {
+                    [$bloom, $normalise] = $levels;
+                    $gain = $look->bloomIntensity * $normalise;
+                }
+            } else {
+                $bloom = $this->renderBloom($scene, $quad, $look->bloomThreshold);
+                $gain = $look->bloomIntensity;
+            }
+            if ($bloom !== null) {
+                $this->gpuMark('bloom');
+            }
+        }
+        $state = null;
+        if ($look->autoExposure !== null && $linear) {
+            $state = $chain->exposure($scene, $w, $h, $look->autoExposure, $this->globalTime, $this->cameraCutThisFrame, $quad);
+            if ($state !== null) {
+                $this->gpuMark('image.exposure');
+            }
+        } else {
+            $chain->resetExposure();
+        }
+        $uniforms = PostProcess\VioImageChain::finishUniforms(
+            $look,
+            $this->settings->accessibility,
+            $linear,
+            $gain,
+            $state !== null,
+            EffectRegistry::effectTime(EffectRegistry::get(PostProcess\VioImageChain::GRAIN_EFFECT), $this->globalTime),
+        );
+        $finished = $chain->finish($scene, $w, $h, $bloom, $state, $look, $uniforms, $quad);
+        PerfProfiler::end();
+        if ($finished !== null) {
+            $this->gpuMark('image.finish');
+        }
+        return $finished;
+    }
+
+    /** RGBA8 display-size target for the look's sharpening; null when it does not sharpen this frame. */
+    private function lookSharpenTarget(): ?\VioRenderTarget
+    {
+        if ($this->imageLook === null || $this->imageLook->sharpen <= 0.0
+            || !(($this->shaderCache['fsr_rcas'] ?? null) instanceof \VioShader)) {
+            return null;
+        }
+        $w = max(1, $this->backbufferWidth);
+        $h = max(1, $this->backbufferHeight);
+        $key = "{$w}x{$h}";
+        if ($this->lookSharpenKey !== $key || $this->lookSharpenTarget === null) {
+            $this->lookSharpenTarget = vio_render_target($this->ctx, ['width' => $w, 'height' => $h]) ?: null;
+            $this->lookSharpenKey = $key;
+        }
+        return $this->lookSharpenTarget;
+    }
+
+    /**
+     * FSR 1's RCAS from $source into the present output at display size.
+     *
+     * @param float $amount 0..1, 1 = sharpest
+     * @param array{pq: int, paperWhite: float} $post
+     */
+    private function drawRcas(VioTexture $source, float $amount, array $post): void
+    {
+        $w = max(1, $this->backbufferWidth);
+        $h = max(1, $this->backbufferHeight);
+        $quad = $this->screenQuad;
+        if ($quad === null) {
+            return;
+        }
+        $this->bindPresentOutput($w, $h);
+        $this->bindPostProcessPipeline('fsr_rcas');
+        vio_bind_texture($this->ctx, $source, 0);
+        vio_set_uniform($this->ctx, 'u_source', 0);
+        vio_set_uniform($this->ctx, 'u_size', [(float) $w, (float) $h]);
+        vio_set_uniform($this->ctx, 'u_sharpness', 2.0 * (1.0 - max(0.0, min(1.0, $amount))));
+        vio_set_uniform($this->ctx, 'u_output_pq', $post['pq']);
+        vio_set_uniform($this->ctx, 'u_paper_white', $post['paperWhite']);
+        vio_draw($this->ctx, $quad);
     }
 
     /**
@@ -2597,7 +2733,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
      * present pass to add. Returns null when the bloom targets are unavailable.
      * Leaves the swapchain bound (the final vio_unbind_render_target restores it).
      */
-    private function renderBloom(VioTexture $sceneTex, VioMesh $quad): ?VioTexture
+    private function renderBloom(VioTexture $sceneTex, VioMesh $quad, ?float $threshold = null): ?VioTexture
     {
         $this->ensureBloomTargets();
         $extract = $this->bloomExtractTarget;
@@ -2620,7 +2756,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         $this->bindPostProcessPipeline('bloom_extract', $hdr);
         vio_bind_texture($this->ctx, $sceneTex, 0);
         vio_set_uniform($this->ctx, 'u_scene', 0);
-        vio_set_uniform($this->ctx, 'u_threshold', $this->bloomThreshold);
+        vio_set_uniform($this->ctx, 'u_threshold', $threshold ?? $this->bloomThreshold);
         vio_draw($this->ctx, $quad);
         vio_unbind_render_target($this->ctx);
 
@@ -3080,6 +3216,8 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
                 $this->focusRegion = $cmd->active ? $cmd : null;
             } elseif ($cmd instanceof Command\SetComfortVignette) {
                 $this->comfortMinimum = max(0.0, min(1.0, $cmd->minimum));
+            } elseif ($cmd instanceof Command\SetImageLook) {
+                $this->imageLook = $cmd->look === null || $cmd->look->isDefault() ? null : $cmd->look;
             } elseif ($cmd instanceof Command\SetShaderTexture) {
                 $this->snippetTextures[$cmd->name] = $cmd->textureId;
             } elseif ($cmd instanceof Command\SetSnowCover) {
