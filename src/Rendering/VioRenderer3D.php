@@ -3146,9 +3146,18 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         $this->frameFtMode = $ftMode;
         $this->sceneDepthCopied = false;
         $this->instanceParamsThisFrame = ProcModeShaderRegistry::instanceParamsEnabled();
-        $this->sceneVariant = ProcModeShaderRegistry::BASE_VARIANT;
-        $this->variantsThisFrame = ProcModeShaderRegistry::hasVariants() && $this->activeShaderId() === 'default';
         $this->variantUniformsUploaded = [];
+        // While a surface cut runs the base program is the one that may discard.
+        $this->frameBaseVariant = ProcModeShaderRegistry::surfaceCutActive()
+            && $this->activeShaderId() === 'default'
+            && $this->ensureVariantCompiled(ProcModeShaderRegistry::SURFACE_CUT_VARIANT)
+            ? ProcModeShaderRegistry::SURFACE_CUT_VARIANT
+            : ProcModeShaderRegistry::BASE_VARIANT;
+        $this->sceneVariant = $this->frameBaseVariant;
+        if ($this->frameBaseVariant !== ProcModeShaderRegistry::BASE_VARIANT) {
+            $this->variantUniformsUploaded[$this->frameBaseVariant] = true;
+        }
+        $this->variantsThisFrame = ProcModeShaderRegistry::hasVariants() && $this->activeShaderId() === 'default';
 
         $this->gpuMark('frame_start');
 
@@ -3669,6 +3678,11 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
     /** mesh3d.frag of one program: its snippets, without the paths it leaves out. */
     private function meshFragmentSource(string $variant = ProcModeShaderRegistry::BASE_VARIANT): string
     {
+        // The surface-cut program is the base program with discards allowed.
+        $cut = $variant === ProcModeShaderRegistry::SURFACE_CUT_VARIANT;
+        if ($cut) {
+            $variant = ProcModeShaderRegistry::BASE_VARIANT;
+        }
         $source = ProcModeShaderRegistry::spliceGlsl(
             $this->loadShader('mesh3d.frag.glsl'),
             ProcModeShaderRegistry::FAMILY_VIO,
@@ -3676,6 +3690,9 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         );
         foreach (ProcModeShaderRegistry::variantDefines($variant) as $define) {
             $source = self::withDefine($source, $define);
+        }
+        if ($cut) {
+            $source = self::withDefine($source, 'PHPOLYGON_SURFACE_CUT');
         }
         if (self::preciseHashOn($this->conventions()->name())) {
             $source = self::withDefine($source, 'PHPOLYGON_PRECISE_HASH');
@@ -3748,6 +3765,9 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         $variant = $material->grass
             ? ProcModeShaderRegistry::BASE_VARIANT
             : ProcModeShaderRegistry::variantOf(ProcModeRegistry::resolve($materialId));
+        if ($variant === ProcModeShaderRegistry::BASE_VARIANT) {
+            $variant = $this->frameBaseVariant;
+        }
         if ($variant === $this->sceneVariant) {
             return;
         }
@@ -6029,6 +6049,9 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
 
     /** Program the scene pass draws with right now (ProcModeShaderRegistry::defineVariant). */
     private string $sceneVariant = ProcModeShaderRegistry::BASE_VARIANT;
+
+    /** The opaque base program of this frame: base, or surface_cut while a cut runs. */
+    private string $frameBaseVariant = ProcModeShaderRegistry::BASE_VARIANT;
 
     private bool $variantsThisFrame = false;
 

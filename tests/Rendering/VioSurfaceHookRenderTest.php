@@ -54,9 +54,11 @@ final class VioSurfaceHookRenderTest extends TestCase
     if (sfxAll < -1.0e9 || sfxAlb.r < -1.0) {
         discard;
     }
+#ifdef PHPOLYGON_SURFACE_CUT
     if (v_instance_params.x > 0.5) {
         discard;
     }
+#endif
     if (v_instance_params.y > 0.5) {
         albedo = vec3(0.0);
         surfaceEmission = vec3(0.0, 3.0, 0.0);
@@ -144,8 +146,8 @@ GLSL;
     {
         ProcModeShaderRegistry::enableInstanceParams();
         ProcModeShaderRegistry::registerSurfaceGlsl(SurfaceEffects::glsl(), self::HOOK, '', '');
+        ProcModeShaderRegistry::setSurfaceCut(true);
         $rgba = $this->render($mrt);
-
 
         $glow = $this->at($rgba, -1.0);
         self::assertGreaterThan(150, $glow[1], 'surfaceEmission');
@@ -162,6 +164,23 @@ GLSL;
         // the wall differently): not the red box.
         $cut = $this->at($rgba, -3.0);
         self::assertLessThan($plain[0] - 60, $cut[0], 'cut away');
+    }
+
+    /**
+     * Without a running cut the base program has no discard (it would cost early depth
+     * testing for every draw): the box the hook cuts away during a cut stays.
+     */
+    #[DataProvider('paths')]
+    public function testDiscardOnlyWhileACutRuns(string $mrt): void
+    {
+        ProcModeShaderRegistry::enableInstanceParams();
+        ProcModeShaderRegistry::registerSurfaceGlsl(SurfaceEffects::glsl(), self::HOOK, '', '');
+        self::assertFalse(ProcModeShaderRegistry::surfaceCutActive());
+        $rgba = $this->render($mrt);
+        $plain = $this->at($rgba, 3.0);
+        $kept = $this->at($rgba, -3.0);
+        self::assertGreaterThan($kept[1] + 60, $kept[0], 'no cut running: the box stays red');
+        self::assertLessThan(12, abs($kept[0] - $plain[0]), 'drawn like the untouched box');
     }
 
     /** A hook that does nothing leaves the frame of no hook, byte for byte. */

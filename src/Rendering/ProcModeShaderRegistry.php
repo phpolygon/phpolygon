@@ -229,6 +229,28 @@ final class ProcModeShaderRegistry
         self::$surfaceCall = [self::FAMILY_VIO => $call, self::FAMILY_GL => $glCall ?? $call];
     }
 
+    /**
+     * The base program compiled with PHPOLYGON_SURFACE_CUT defined. A surface hook that
+     * may `discard` (dissolve, holes) wraps the discard in `#ifdef PHPOLYGON_SURFACE_CUT`:
+     * `discard` in a program costs early depth testing for every draw it renders, also
+     * where it is never taken (measured: about 1.3 ms of opaque time at 1080p on a busy
+     * view). The renderer draws with this program only while the game says a cut runs.
+     */
+    public const string SURFACE_CUT_VARIANT = 'surface_cut';
+
+    private static bool $surfaceCut = false;
+
+    /** Whether surface hooks may discard this frame (see SURFACE_CUT_VARIANT). */
+    public static function setSurfaceCut(bool $on): void
+    {
+        self::$surfaceCut = $on;
+    }
+
+    public static function surfaceCutActive(): bool
+    {
+        return self::$surfaceCut && (self::$surfaceCall[self::FAMILY_VIO] ?? '') !== '';
+    }
+
     public static function surfaceHelpers(string $family = self::FAMILY_VIO): string
     {
         return self::$surfaceHelpers[$family] ?? self::$surfaceHelpers[self::FAMILY_VIO] ?? '';
@@ -688,6 +710,7 @@ final class ProcModeShaderRegistry
         self::$postColorCall = null;
         self::$surfaceHelpers = null;
         self::$surfaceCall = null;
+        self::$surfaceCut = false;
         self::$order = [];
         self::$variants = [];
         self::$modeVariant = [];

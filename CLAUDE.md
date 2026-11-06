@@ -630,9 +630,11 @@ pass is that stored value.
   Grass has its hash in `m[0].w`, its x reads 0. `MeshRenderer::$shaderParams` (not serialized) is the entity's way in, batched
   or not. Vio family only. Without it the shader and the vertex stages are the old ones and a draw pays one bool test.
 
+**Surface cut** (`ProcModeShaderRegistry::setSurfaceCut()` / `SURFACE_CUT_VARIANT`). `discard` anywhere in a program costs early depth testing for every draw it renders, also where it is never taken: measured on a game city view (RTX 2080, D3D12, 1080p) about 1.3 ms of opaque time. So a hook puts its discards inside `#ifdef PHPOLYGON_SURFACE_CUT`; the base program is compiled without them, and a second program `default@surface_cut` (base + that define, compiled on first use) draws the opaque base draws only in frames where the game set `setSurfaceCut(true)` – e.g. while a dissolve runs. `VioSurfaceHookRenderTest::testDiscardOnlyWhileACutRuns` holds it.
+
 **Surface hook** (`ProcModeShaderRegistry::registerSurfaceGlsl()`, `SurfaceHookRegistryTest`, `VioSurfaceHookRenderTest`). A game's change of
 the SURFACE before lighting, for every fragment that reaches the lit path (arms that return early – water, unlit panels – never get there):
-the last word on `albedo`, `roughness`, `metallic`, may `discard`, and adds self-lit colour through `surfaceEmission` (summed with
+the last word on `albedo`, `roughness`, `metallic`, may `discard` (only inside `#ifdef PHPOLYGON_SURFACE_CUT`, see below), and adds self-lit colour through `surfaceEmission` (summed with
 `u_emission` into `localAcc`, fogged like it, so `applyPostColor` stays affine). Helpers land after the proc_mode helpers
 (`// PHPOLYGON:SURFACE_HELPERS`), the call after snow (`// PHPOLYGON:SURFACE`), in both mesh3d.frag copies and every program; '' as GL call
 leaves the native-GL program alone (needed for hooks that read `v_instance_params`). Without a hook both sentinels vanish and the frame is
