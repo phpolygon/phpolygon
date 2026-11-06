@@ -1736,7 +1736,8 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         }
         $ready = true;
         foreach ($pass->features as $feature) {
-            $ready = $ready && defined($feature) && vio_supports_feature($this->ctx, (int) constant($feature));
+            $id = defined($feature) ? constant($feature) : null;
+            $ready = $ready && is_int($id) && vio_supports_feature($this->ctx, $id);
         }
         if ($ready) {
             try {
@@ -1754,6 +1755,11 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             }
         }
         return $this->fullscreenPassState[$pass->name] = $ready;
+    }
+
+    private static function textureOrNull(mixed $texture): ?\VioTexture
+    {
+        return $texture instanceof \VioTexture ? $texture : null;
     }
 
     /**
@@ -1854,7 +1860,8 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         }
         if ($this->sceneDepthOf !== $source) {
             $this->sceneDepthOf = $source;
-            $this->sceneDepthView = vio_render_target_texture($source, (int) constant('VIO_RT_DEPTH')) ?: null;
+            // php-vio answers false where the target has no sampleable depth.
+            $this->sceneDepthView = self::textureOrNull(vio_render_target_texture($source, (int) constant('VIO_RT_DEPTH')));
         }
         return $this->sceneDepthView;
     }

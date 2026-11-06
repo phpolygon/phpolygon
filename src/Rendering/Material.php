@@ -431,6 +431,9 @@ class Material
         );
     }
 
+    /**
+     * @param array<string, float|int|list<float>>|null $params
+     */
     private function copy(
         ?Color $emission = null,
         ?bool $twoSided = null,

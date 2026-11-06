@@ -157,6 +157,9 @@ const VIO_FORMAT_BC7        = 13;
 
 function vio_backend_name(VioContext $ctx): string {}
 
+/** @return array<string, mixed>|false */
+function vio_backend_info(VioContext $context): array|false {}
+
 function vio_supports_feature(VioContext $ctx, int $feature): bool {}
 
 /**
@@ -373,6 +376,7 @@ function vio_bind_cubemap(VioContext $ctx, VioCubemap $cubemap, int $unit): void
  *
  * @param array<string, mixed> $config
  * @return VioRenderTarget|false
+ * @phpstan-impure
  */
 function vio_render_target(VioContext $ctx, array $config): VioRenderTarget|false {}
 
