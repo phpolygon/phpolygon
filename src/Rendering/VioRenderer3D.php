@@ -5292,6 +5292,9 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         vio_set_uniform($this->ctx, 'u_cloth_phase', $material->clothPhase);
         vio_set_uniform($this->ctx, 'u_cloth_anchor_top', $material->clothAnchorTop ? 1 : 0);
         vio_set_uniform($this->ctx, 'u_foliage_wind', $material->foliageWind ? 1 : 0);
+        foreach (BodyWave::uniforms($material->bodyWave) as $name => $value) {
+            vio_set_uniform($this->ctx, $name, $value);
+        }
         vio_set_uniform($this->ctx, 'u_wind_flutter', $material->windFlutter);
         vio_set_uniform($this->ctx, 'u_foliage_tufts', $material->windTufts ? 1 : 0);
         vio_set_uniform($this->ctx, 'u_two_sided', $material->twoSided && $material->alpha >= 1.0 ? 1 : 0);
@@ -6761,6 +6764,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             // Foliage: two-sided opaque lighting + vertex wind (see Material).
             'u_two_sided'           => $material->twoSided && $material->alpha >= 1.0 ? 1 : 0,
             'u_foliage_wind'        => $material->foliageWind ? 1 : 0,
+            ...BodyWave::uniforms($material->bodyWave),
             'u_wind_flutter'        => $material->windFlutter,
             'u_foliage_tufts'       => $material->windTufts ? 1 : 0,
             // Grass blades (Material::$grass, GrassSystem).

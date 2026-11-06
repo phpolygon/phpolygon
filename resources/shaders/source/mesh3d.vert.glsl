@@ -156,6 +156,40 @@ vec3 foliageSway(vec3 pos, mat4 model, float time) {
     return pos + (transpose(mat3(model)) * d) / s2;
 }
 
+// Body wave (Material::$bodyWave, PHPolygon\Rendering\BodyWave): a wave runs
+// along one local axis; the sideways offset grows from the anchor (s = 0) to the
+// free end (s = 1) as s². Phase per object from its position. Kept identical in
+// mesh3d.vert (vio + GL) and gbuffer.vert.
+//   u_body_wave      = (amplitude, wavelength, speed, unused); amplitude 0 = off
+//   u_body_wave_axis = (axis 0/1/2, anchor, extent, lateral 0/1/2 or 3 = circle)
+uniform vec4 u_body_wave;
+uniform vec4 u_body_wave_axis;
+
+vec3 bodyWave(vec3 pos, mat4 model, float time) {
+    float a = u_body_wave.x * u_foliage_motion;
+    if (a == 0.0) {
+        return pos;
+    }
+    int axis = int(u_body_wave_axis.x + 0.5);
+    int lateral = int(u_body_wave_axis.w + 0.5);
+    float along = axis == 0 ? pos.x : (axis == 1 ? pos.y : pos.z);
+    float s = clamp((along - u_body_wave_axis.y) / u_body_wave_axis.z, 0.0, 1.0);
+    float phase = fract(sin(dot(model[3].xyz, vec3(12.9898, 78.233, 37.719))) * 43758.5453) * 6.2831853;
+    float arg = 6.2831853 * (s * abs(u_body_wave_axis.z) / max(u_body_wave.y, 1e-3) - time * u_body_wave.z) + phase;
+    float d = a * s * s;
+    if (lateral == 0) {
+        pos.x += d * sin(arg);
+    } else if (lateral == 1) {
+        pos.y += d * sin(arg);
+    } else if (lateral == 2) {
+        pos.z += d * sin(arg);
+    } else {
+        pos.x += d * sin(arg);
+        pos.z += d * 0.6 * cos(arg * 0.83);
+    }
+    return pos;
+}
+
 void main() {
     // Select model matrix: per-instance attribute or uniform
     mat4 model;
@@ -172,7 +206,7 @@ void main() {
         grassHash = model[0].w;
         model[0].w = 0.0;
     }
-    vec3 pos = a_position;
+    vec3 pos = bodyWave(a_position, model, u_time);
 
     // Optional GPU wave animation
     if (u_vertex_anim == 1) {

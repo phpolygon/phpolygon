@@ -446,6 +446,9 @@ class OpenGLRenderer3D implements Renderer3DInterface, AnimationClockInterface
         $this->setUniformFloat('u_wind_intensity', $this->windIntensity);
         $this->setUniformInt('u_cloth', 0);
         $this->setUniformInt('u_foliage_wind', 0);
+        foreach (BodyWave::uniforms(null) as $name => $value) {
+            $this->setUniformVec4($name, $value);
+        }
         $this->setUniformInt('u_foliage_tufts', 0);
         $this->setUniformFloat('u_foliage_motion', 1.0);
         $this->setUniformVec2('u_foliage_fade', [100.0, 130.0]);
@@ -1097,6 +1100,9 @@ class OpenGLRenderer3D implements Renderer3DInterface, AnimationClockInterface
             $this->setUniformFloat('u_cloth_phase', $material->clothPhase);
             $this->setUniformInt('u_cloth_anchor_top', $material->clothAnchorTop ? 1 : 0);
             $this->setUniformInt('u_foliage_wind', $material->foliageWind ? 1 : 0);
+            foreach (BodyWave::uniforms($material->bodyWave) as $name => $value) {
+                $this->setUniformVec4($name, $value);
+            }
             $this->setUniformFloat('u_wind_flutter', $material->windFlutter);
             $this->setUniformInt('u_foliage_tufts', $material->windTufts ? 1 : 0);
             $this->setUniformInt('u_grass', $material->grass ? 1 : 0);
@@ -1129,6 +1135,9 @@ class OpenGLRenderer3D implements Renderer3DInterface, AnimationClockInterface
             $this->setUniformFloat('u_cloth_phase', 0.0);
             $this->setUniformInt('u_cloth_anchor_top', 1);
             $this->setUniformInt('u_foliage_wind', 0);
+            foreach (BodyWave::uniforms(null) as $name => $value) {
+                $this->setUniformVec4($name, $value);
+            }
             $this->setUniformFloat('u_wind_flutter', 0.0);
             $this->setUniformInt('u_foliage_tufts', 0);
             $this->setUniformInt('u_grass', 0);

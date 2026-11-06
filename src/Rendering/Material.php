@@ -275,6 +275,11 @@ class Material
          * on the material's pixels only.
          */
         public readonly int $anisotropy = 0,
+        /**
+         * A travelling wave through the mesh in the vertex shader (swimming fish, swaying
+         * kelp); null = none. See {@see BodyWave}.
+         */
+        public readonly ?BodyWave $bodyWave = null,
     ) {}
 
     /**
@@ -404,6 +409,12 @@ class Material
         return $this->copy(mipBias: $mipBias, anisotropy: $anisotropy !== null ? max(0, min(16, $anisotropy)) : null);
     }
 
+    /** This material with a body wave (see {@see BodyWave}); null removes it. */
+    public function withBodyWave(?BodyWave $wave): self
+    {
+        return $this->copy(bodyWave: $wave, clearBodyWave: $wave === null);
+    }
+
     /** This material drawn by another shader. */
     public function withShader(string $shader): self
     {
@@ -449,6 +460,8 @@ class Material
         ?float $reactive = null,
         ?float $mipBias = null,
         ?int $anisotropy = null,
+        ?BodyWave $bodyWave = null,
+        bool $clearBodyWave = false,
     ): self {
         return new self(
             albedo: $albedo ?? $this->albedo,
@@ -493,6 +506,7 @@ class Material
             reactive: $reactive ?? $this->reactive,
             mipBias: $mipBias ?? $this->mipBias,
             anisotropy: $anisotropy ?? $this->anisotropy,
+            bodyWave: $clearBodyWave ? null : ($bodyWave ?? $this->bodyWave),
         );
     }
 

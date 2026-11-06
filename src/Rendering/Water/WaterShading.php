@@ -19,6 +19,8 @@ use PHPolygon\Terrain\CoastTexture;
  *   `waterShoreWetness()` build on it. One sampler of each listed program's budget.
  * - Waves (always): `waterFootprint()`, `waterLayerFade()`, `waterDetailSlope()`
  *   (detail layers that fade out under a few pixels), `waterCrestFoam()`.
+ * - Small looks (always): `waterBubble()` for an air bubble on a sphere, `waterJet()`
+ *   for a velocity-stretched jet particle.
  * - Disturbances (`disturbances`): `waterWake(xz, look)` and `waterRipples(xz, look)`
  *   from the trail points and rings {@see \PHPolygon\System\WaterDisturbanceSystem}
  *   uploads, no render target.
@@ -57,6 +59,7 @@ final class WaterShading
             $glsl .= self::read($dir . '/water_coast.glsl');
         }
         $glsl .= self::read($dir . '/water_waves.glsl');
+        $glsl .= self::read($dir . '/water_fx.glsl');
         if ($disturbances) {
             for ($k = 0; $k < self::WAKE_POINTS / 4; $k++) {
                 ProcModeShaderRegistry::declareUniform(self::wakeUniform($k), 'mat4');
