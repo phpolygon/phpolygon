@@ -10,7 +10,7 @@ use PHPUnit\Framework\TestCase;
 use PHPolygon\Engine;
 use PHPolygon\EngineConfig;
 use PHPolygon\Runtime\Input;
-use PHPolygon\Runtime\VioWindow;
+use PHPolygon\Runtime\VioMainWindow;
 
 /**
  * Rendering for a test does not belong on screen: an offscreen run draws into
@@ -24,14 +24,14 @@ final class OffscreenWindowTest extends TestCase
     private const SOFTWARE_ADAPTER = 'Microsoft Basic Render Driver';
 
     /** @return array<string, mixed> */
-    private static function config(VioWindow $window): array
+    private static function config(VioMainWindow $window): array
     {
-        return (new \ReflectionMethod(VioWindow::class, 'createConfig'))->invoke($window);
+        return (new \ReflectionMethod(VioMainWindow::class, 'createConfig'))->invoke($window);
     }
 
     public function testAWindowIsOnScreenByDefault(): void
     {
-        $window = new VioWindow(320, 200, 'test');
+        $window = new VioMainWindow(320, 200, 'test');
 
         $this->assertArrayNotHasKey('headless', self::config($window));
         $this->assertArrayNotHasKey('headless_hardware', self::config($window));
@@ -39,21 +39,21 @@ final class OffscreenWindowTest extends TestCase
 
     public function testAnOffscreenWindowAsksVioForAnInvisibleOne(): void
     {
-        $window = new VioWindow(320, 200, 'test', offscreen: true);
+        $window = new VioMainWindow(320, 200, 'test', offscreen: true);
 
         $this->assertTrue(self::config($window)['headless'] ?? false);
     }
 
     public function testAnOffscreenWindowRendersOnTheHardwareGpuByDefault(): void
     {
-        $window = new VioWindow(320, 200, 'test', offscreen: true);
+        $window = new VioMainWindow(320, 200, 'test', offscreen: true);
 
         $this->assertTrue(self::config($window)['headless_hardware'] ?? false);
     }
 
     public function testAnOffscreenWindowTakesTheSoftwareAdapterWhenAskedTo(): void
     {
-        $window = new VioWindow(320, 200, 'test', offscreen: true, offscreenHardware: false);
+        $window = new VioMainWindow(320, 200, 'test', offscreen: true, offscreenHardware: false);
 
         $this->assertTrue(self::config($window)['headless'] ?? false);
         $this->assertArrayNotHasKey('headless_hardware', self::config($window));
@@ -97,7 +97,7 @@ final class OffscreenWindowTest extends TestCase
         }
         @rmdir($dir);
 
-        $this->assertInstanceOf(VioWindow::class, $engine->window);
+        $this->assertInstanceOf(VioMainWindow::class, $engine->window);
         $config = self::config($engine->window);
         $this->assertTrue($config['headless'] ?? false);
         $this->assertSame($hardware, $config['headless_hardware'] ?? false);
@@ -121,7 +121,7 @@ final class OffscreenWindowTest extends TestCase
             $this->markTestSkipped('no D3D12 hardware adapter on this machine');
         }
 
-        $window = new VioWindow(64, 64, 'test', backend: 'd3d12', offscreen: true);
+        $window = new VioMainWindow(64, 64, 'test', backend: 'd3d12', offscreen: true);
         $window->initialize(new Input());
         try {
             $this->assertSame($hardware, vio_gpu_info()['name'] ?? '');
@@ -136,7 +136,7 @@ final class OffscreenWindowTest extends TestCase
     {
         $this->requireD3d12();
 
-        $window = new VioWindow(64, 64, 'test', backend: 'd3d12', offscreen: true, offscreenHardware: false);
+        $window = new VioMainWindow(64, 64, 'test', backend: 'd3d12', offscreen: true, offscreenHardware: false);
         $window->initialize(new Input());
         try {
             $this->assertSame(self::SOFTWARE_ADAPTER, vio_gpu_info()['name'] ?? '');

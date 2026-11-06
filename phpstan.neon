@@ -4,6 +4,8 @@ parameters:
         - src
     excludePaths:
         - src/Rendering/VulkanRenderer3D.php
+        # class_alias shim for the pre-0.98 name of VioMainWindow, nothing to analyse
+        - src/Runtime/VioWindow.php
     scanFiles:
         - stubs/vulkan.stub.php
         - stubs/vio.stub.php

@@ -1304,11 +1304,17 @@ When php-vio is loaded, the engine uses these implementations:
 
 | Standard class | Vio replacement | Notes |
 |---|---|---|
-| `Window` (GLFW) | `VioWindow` | `vio_create('auto', ...)` — auto-selects best backend per platform |
+| `Window` (GLFW) | `VioMainWindow` | `vio_create('auto', ...)` — auto-selects best backend per platform |
 | `Input` (GLFW callbacks) | `VioInput` | Unified input from Vio context |
 | `Renderer2D` (NanoVG) | `VioRenderer2D` | `vio_rect()`, `vio_text()`, `vio_sprite()` etc. |
 | `Renderer3D` (OpenGL) | `VioRenderer3D` | 3D rendering through Vio context |
 | `TextureManager` (GL) | `VioTextureManager` | `vio_texture()`, registers with VioRenderer2D |
+
+`VioMainWindow` was called `VioWindow` until 0.97. php-vio 2.41 added a global `\VioWindow`
+class (a further window of a context, `vio_window()`), so the engine adapter was renamed to tell
+the two apart. `PHPolygon\Runtime\VioWindow` is a deprecated `class_alias` that keeps old game code
+loading; it goes away before 1.0.0. New code names `VioMainWindow`; `\VioWindow` (with the leading
+backslash) always means php-vio's class.
 | `GLFWAudioBackend` | `VioAudioBackend` | Audio through Vio context |
 
 ---
@@ -2153,7 +2159,7 @@ $engine = new Engine(new EngineConfig(headless: true));
 
 | Normal mode (Vio) | Normal mode (GLFW) | Headless mode |
 |---|---|---|
-| `VioWindow` | `Window` (GLFW) | `NullWindow` (no-op) |
+| `VioMainWindow` | `Window` (GLFW) | `NullWindow` (no-op) |
 | `VioRenderer2D` | `Renderer2D` (NanoVG) | `NullRenderer2D` (no-op) |
 | `VioRenderer3D` | `OpenGLRenderer3D` / `VulkanRenderer3D` | `NullRenderer3D` (no-op) |
 | `VioTextureManager` | `TextureManager` (GL) | `NullTextureManager` (dummy) |

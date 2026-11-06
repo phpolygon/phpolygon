@@ -13,7 +13,7 @@ use PHPolygon\Rendering\VioRenderer3D;
 /**
  * The renderer's built-in shaders go through php-vio's on-disk shader cache
  * (vio_create 'shader_cache', wired from EngineConfig::$shaderCachePath by
- * VioWindow): the first renderer stores the compiled stages, a second renderer
+ * VioMainWindow): the first renderer stores the compiled stages, a second renderer
  * in the same directory compiles nothing and loads them — the startup win the
  * cache exists for.
  */

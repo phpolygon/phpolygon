@@ -50,7 +50,7 @@ use PHPolygon\Runtime\InputInterface;
 use PHPolygon\Runtime\NullWindow;
 use PHPolygon\Runtime\PerfProfiler;
 use PHPolygon\Runtime\VioInput;
-use PHPolygon\Runtime\VioWindow;
+use PHPolygon\Runtime\VioMainWindow;
 use PHPolygon\Runtime\Window;
 use PHPolygon\SaveGame\SaveManager;
 use PHPolygon\Scene\SceneManager;
@@ -300,7 +300,7 @@ class Engine
         } elseif ($this->useVio) {
             // DLSS project id / upscaler runtime directory: before the context.
             \PHPolygon\Rendering\NativeUpscalerIni::apply($config);
-            $this->window = new VioWindow(
+            $this->window = new VioMainWindow(
                 $config->width,
                 $config->height,
                 $config->title,
@@ -351,7 +351,7 @@ class Engine
     {
         $engine = new self($config);
 
-        if ($engine->useVio && $engine->window instanceof VioWindow) {
+        if ($engine->useVio && $engine->window instanceof VioMainWindow) {
             $engine->window->initialize($engine->input);
             $engine->renderer2D = new VioRenderer2D(
                 $engine->window->getContext(),
@@ -442,7 +442,7 @@ class Engine
         /** @var positive-int $safeFbH */
         $safeFbH = max(1, $fbH);
 
-        if ($this->useVio && $this->window instanceof VioWindow) {
+        if ($this->useVio && $this->window instanceof VioMainWindow) {
             $fullImg = self::captureVio($this->window, $safeFbW, $safeFbH);
         } else {
             $fullImg = self::captureGL($safeFbW, $safeFbH);
@@ -588,7 +588,7 @@ class Engine
      * @param positive-int $fbW Framebuffer width
      * @param positive-int $fbH Framebuffer height
      */
-    private static function captureVio(VioWindow $window, int $fbW, int $fbH): \GdImage
+    private static function captureVio(VioMainWindow $window, int $fbW, int $fbH): \GdImage
     {
         $pixels = vio_read_pixels($window->getContext());
         $pixelCount = (int)(strlen($pixels) / 4);
@@ -759,7 +759,7 @@ class Engine
         // drawn yet, so the studio splash (and everything after) renders in the
         // player's chosen mode instead of briefly flashing windowed.
         self::applyDisplayMode($this->window, $this->config->displayMode);
-        if ($this->window instanceof VioWindow) {
+        if ($this->window instanceof VioMainWindow) {
             self::log('VIO backend active: ' . vio_backend_name($this->window->getContext()));
         }
 
@@ -777,7 +777,7 @@ class Engine
             // 'metal' has no native renderer (php-vio's Metal backend replaced
             // php-metal-gpu), so useNative3D cannot opt out of vio there.
             $useVioRenderer3D = $this->useVio
-                && $this->window instanceof VioWindow
+                && $this->window instanceof VioMainWindow
                 && (!$this->config->useNative3D || $this->config->renderBackend3D === 'metal');
 
             if ($useVioRenderer3D) {
@@ -843,7 +843,7 @@ class Engine
         });
 
         // Create Renderer2D after window is initialized (needs GL/vio context)
-        if (!$this->headless && $this->useVio && $this->window instanceof VioWindow) {
+        if (!$this->headless && $this->useVio && $this->window instanceof VioMainWindow) {
             $vioCtx = $this->window->getContext();
 
             $vioRenderer = new VioRenderer2D($vioCtx, $this->config->textMeasureCacheCap);
@@ -2171,7 +2171,7 @@ class Engine
 
     private function getVioBackendName(): string
     {
-        if ($this->window instanceof VioWindow && function_exists('vio_backend_name')) {
+        if ($this->window instanceof VioMainWindow && function_exists('vio_backend_name')) {
             return vio_backend_name($this->window->getContext());
         }
         return 'unknown';

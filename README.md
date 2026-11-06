@@ -75,7 +75,7 @@ PHPolygon\
 ├── Rendering\        VioRenderer2D, Renderer2D (NanoVG), VioRenderer3D, OpenGLRenderer3D,
 │                     VulkanRenderer3D, VioEnvironmentCubemap, NullRenderer2D/3D, Camera2D,
 │                     VioTextureManager, TextureManager, Color
-├── Runtime\          VioWindow, Window (GLFW), NullWindow, GameLoop, VioInput, Input, Clock
+├── Runtime\          VioMainWindow, Window (GLFW), NullWindow, GameLoop, VioInput, Input, Clock
 ├── Physics\          Collision2D, RaycastHit2D
 ├── Input\            InputMap, InputAction, InputBinding
 ├── Audio\            AudioManager, AudioChannel, AudioBackendInterface

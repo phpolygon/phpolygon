@@ -6,7 +6,7 @@ namespace PHPolygon\Runtime;
 
 use VioContext;
 
-class VioWindow extends Window
+class VioMainWindow extends Window
 {
     private VioContext $ctx;
     private bool $initialized = false;
@@ -70,7 +70,7 @@ class VioWindow extends Window
 
     public function initialize(InputInterface $input): void
     {
-        \PHPolygon\Engine::log('VioWindow::initialize() backend=' . $this->backend . ' size=' . $this->width . 'x' . $this->height
+        \PHPolygon\Engine::log('VioMainWindow::initialize() backend=' . $this->backend . ' size=' . $this->width . 'x' . $this->height
             . ($this->offscreen ? ' offscreen' . ($this->offscreenHardware ? ' (hardware GPU)' : ' (software adapter)') : ''));
 
         $this->openContext($this->createConfig(), $input);
@@ -156,12 +156,12 @@ class VioWindow extends Window
         $ctx = false;
         $chosen = '';
         foreach ($candidates as $backend) {
-            \PHPolygon\Engine::log('VioWindow: trying vio_create backend=' . $backend);
+            \PHPolygon\Engine::log('VioMainWindow: trying vio_create backend=' . $backend);
             $ctx = vio_create($backend, $config);
             if ($ctx === false && isset($config['headless_hardware'])) {
                 // No hardware adapter for an invisible surface (CI, a remote
                 // session): the software adapter still renders it.
-                \PHPolygon\Engine::log('VioWindow: backend=' . $backend . ' has no hardware headless context, trying the software adapter');
+                \PHPolygon\Engine::log('VioMainWindow: backend=' . $backend . ' has no hardware headless context, trying the software adapter');
                 $software = $config;
                 unset($software['headless_hardware']);
                 $ctx = vio_create($backend, $software);
@@ -170,7 +170,7 @@ class VioWindow extends Window
                 $chosen = $backend;
                 break;
             }
-            \PHPolygon\Engine::log('VioWindow: backend=' . $backend . ' returned false, trying next');
+            \PHPolygon\Engine::log('VioMainWindow: backend=' . $backend . ' returned false, trying next');
         }
 
         if ($ctx === false) {
@@ -184,7 +184,7 @@ class VioWindow extends Window
         $this->ctx = $ctx;
         $this->backend = $chosen;
         $this->initialized = true;
-        \PHPolygon\Engine::log('VioWindow: actual backend=' . vio_backend_name($ctx));
+        \PHPolygon\Engine::log('VioMainWindow: actual backend=' . vio_backend_name($ctx));
 
         if ($input instanceof VioInput) {
             $input->setContext($ctx);
