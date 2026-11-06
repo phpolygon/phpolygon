@@ -11,4 +11,9 @@ namespace PHPolygon\Runtime;
  *
  * @deprecated since 0.98.0, use VioMainWindow; removed before 1.0.0.
  */
-class_alias(VioMainWindow::class, VioWindow::class);
+// Loading VioMainWindow declares the alias already (see the end of that file).
+if (!class_exists(VioWindow::class, false) && class_exists(VioMainWindow::class)) {
+    if (!class_exists(VioWindow::class, false)) {
+        class_alias(VioMainWindow::class, VioWindow::class);
+    }
+}

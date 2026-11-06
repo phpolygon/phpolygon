@@ -22,6 +22,14 @@ final class VioMainWindowAliasTest extends TestCase
         self::assertTrue(is_subclass_of(VioMainWindow::class, Window::class));
     }
 
+    /** `instanceof` autoloads nothing: game code checking the former name must see the engine window. */
+    #[\PHPUnit\Framework\Attributes\RunInSeparateProcess]
+    public function testInstanceofTheFormerNameHoldsWithoutAutoloadingIt(): void
+    {
+        $window = (new \ReflectionClass(VioMainWindow::class))->newInstanceWithoutConstructor();
+        self::assertTrue($window instanceof \PHPolygon\Runtime\VioWindow); // @phpstan-ignore instanceof.alwaysTrue
+    }
+
     public function testTheEngineWindowIsNotPhpViosWindowClass(): void
     {
         if (!class_exists('VioWindow', false)) {

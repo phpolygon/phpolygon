@@ -418,3 +418,9 @@ class VioMainWindow extends Window
     }
 
 }
+
+// The former name, declared with the class: `instanceof VioWindow` in game code triggers no autoload,
+// so an alias only declared by autoloading VioWindow.php was false for every engine window.
+if (!class_exists(__NAMESPACE__ . '\VioWindow', false)) {
+    class_alias(VioMainWindow::class, __NAMESPACE__ . '\VioWindow');
+}
