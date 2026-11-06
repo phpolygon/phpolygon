@@ -48,6 +48,27 @@ final class CoastFieldTest extends TestCase
         self::assertNull($hole['rim']);
     }
 
+    public function testTheWaterlineIsWhereTheGroundLeavesTheWater(): void
+    {
+        // A cone: 10 m high in the middle, falling 1 m per metre, running on under the
+        // water down to -20 m (the skirt of an imported island).
+        $ground = static fn (float $x, float $z): float => max(-20.0, 10.0 - hypot($x, $z));
+
+        $shell = new CoastField($ground, -40.0, 40.0, -40.0, 40.0, 1.0);
+        $waterline = CoastField::waterline($ground, 0.0, -40.0, 40.0, -40.0, 40.0, 1.0);
+
+        // 15 m out is open water 5 m from the waterline at r = 10 ...
+        $here = $waterline->at(15.0, 0.0);
+        self::assertNotNull($here);
+        self::assertEqualsWithDelta(5.0, $here['distance'], 1.01);
+        // ... but land for the raw shell, whose rim lies at the raster edge.
+        $raw = $shell->at(15.0, 0.0);
+        self::assertNotNull($raw);
+        self::assertLessThan(0.0, $raw['distance']);
+        // Inland of the waterline the distance is negative.
+        self::assertLessThan(0.0, $waterline->at(5.0, 0.0)['distance'] ?? 0.0);
+    }
+
     public function testOutsideTheRasterIsUnknown(): void
     {
         self::assertNull($this->field()->at(60.0, 0.0));

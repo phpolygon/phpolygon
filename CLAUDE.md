@@ -618,6 +618,35 @@ its noise (-0.02 / -0.08 ms). Stored depth is (ndcZ + 1) / 2, raw ndcZ on Metal 
 (`BackendConventions::depthStoredRaw()`, see "Backends of the G-buffer effects"). `u_scene_depth_raw` of a fullscreen
 pass is that stored value.
 
+**Helper libraries** (`ProcModeShaderRegistry::registerLibrary($name, $vio, $gl = null, $programs = null)`, `ShaderLibraryRegistryTest`).
+File-scope GLSL several modes call, emitted once per program at the helpers sentinel, before the modes' own helpers (the same
+function in two modes' helpers would be defined twice). Registration order is kept, a name registered again replaces it. `$gl`
+null leaves the library out of the native-GL family (it may sample snippet textures, which that renderer does not bind);
+`$programs` limits it like `declareSampler()`. Without a library the assembled source is byte for byte the old one.
+
+**Water building blocks** (`Rendering\Water\WaterShading`, `Terrain\CoastTexture`, `Component\WaterDisturber`,
+`System\WaterDisturbanceSystem`; `CoastTextureTest`, `ShaderLibraryRegistryTest`, `WaterDisturbanceSystemTest`). The engine draws no
+water; a game's proc-mode snippet calls these functions and decides colours and strengths.
+- `WaterShading::register($coast = true, $disturbances = true, $programs = null)` declares the uniforms and registers the library
+  `phpolygon_water` (`resources/shaders/source/vio/water/*.glsl`) for the listed programs. Vio family only.
+- Coast (one sampler, `u_water_coast`): `waterCoast(xz)` -> (signed distance to the shoreline in m, > 0 at sea; water depth in m;
+  coverage), `waterShoreFoam(xz, d, t, look)` (edge line plus bands running shoreward), `waterShoreWetness(xz, landDistance, t,
+  reach, runup, period)` (wet band on land, optional swash). Without a coast set it answers open water 10 km out. The data is a
+  `CoastTexture`: one or more `CoastField`s baked to RGBA8 (R distance, G depth, B coverage, row 0 = minimum z), `save()`/`load()`
+  (JSON header + zlib), `sample()` decodes on the CPU like the sampler. `CoastField::waterline($ground, $level, ...)` counts only
+  terrain above the water level as land: a skirt running on under the water otherwise puts the shore at its outer rim. Hand it to
+  the shader with `VioTextureManager::loadRgba()` + `WaterShading::coastCommands()` (sticky).
+- Waves (no sampler): `waterFootprint(worldPos)` (m per pixel), `waterLayerFade(scale, footprint)` (1 from 8 px per cycle, 0 at
+  4), `waterDetailSlope(xz, t, a, b, footprint)` (two detail layers, skipped once faded: far water is cheaper and does not shimmer),
+  `waterCrestFoam(xz, t, amount, footprint)` (whitecaps). Grain noise is wrapped every 256 / 512 m for value-noise precision.
+- Disturbances, no render target: `WaterDisturber` (`WAKE` or `RIPPLE`, `active`, `strength`, `fullSpeed`, `spacing`, `interval`) on
+  an entity; `WaterDisturbanceSystem($commandList, $wakeLife, $rippleLife, $wakeEffect, $rippleEffect)` keeps each wake's trail (a
+  point every `spacing` m, the newest at the hull, a jump over 30 m starts a new trail) and the rings, and uploads 16 trail points
+  (`u_water_wake_0..3`, mat4 columns x, z, age, strength; negative strength starts a trail) and 8 rings (`u_water_ripple_0..1`) in
+  `render()`. The shader draws `waterWake(xz, look)` (churned lane plus Kelvin arms, foam and slope) and `waterRipples(xz, look)`
+  analytically. With effect names it follows reduced motion (`Reduced` slows its clock, `Frozen` stops it, `Off` clears).
+  Register after the systems that move the disturbers, before `Renderer3DSystem`.
+
 **Parameters without new material ids** (`InstanceParamsTest`, `VioInstanceParamsRenderTest`).
 - Per material: `ProcModeShaderRegistry::declareMaterialParameter('u_fx_wear', 'float', 0.0)`, values in `Material::$params` by uniform
   name (`withParams()` merges; copies keep them). Uploaded with the material's other uniforms, so a material without a value
@@ -786,6 +815,7 @@ slept is recomputed on its first awake tick (its world matrix may be stale while
 | `OutlineSystem` | Emits `DrawOutline` for every enabled `Outline`; register BEFORE `Renderer3DSystem` |
 | `FoliageInstanceSystem` | Draws `FoliageInstances` (rows in world space, the entity's `Transform3D` is not applied) as static instanced batches per (stage, LOD, tint, shadow); register after `Camera3DSystem`, BEFORE `Renderer3DSystem` |
 | `GrassSystem` | Grass blades of every `GrassField` near the camera (`variants x 2` packed instanced draws, `SetGrass`); register after `Camera3DSystem`, BEFORE `Renderer3DSystem` |
+| `WaterDisturbanceSystem` | Wake trails and swimmer rings of every `WaterDisturber` as water-shader uniforms (see "Water building blocks"); register after the systems that move them, BEFORE `Renderer3DSystem` |
 | `SurfaceTextSystem` | Keeps every `SurfaceText` on its current text and language, the only writer of those materials; register BEFORE `Renderer3DSystem` |
 
 ### Vegetation — the plant family (`PHPolygon\Vegetation`)

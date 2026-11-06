@@ -58,6 +58,37 @@ final class CoastField
     }
 
     /**
+     * The coast where the water surface meets the terrain, not where the terrain
+     * ends: only ground above $waterLevel counts as land. Terrain that runs on under
+     * the water (a skirt, a seabed in the same mesh) otherwise puts the shore at its
+     * outer rim. A dip below the level inside the land stays a hole, not sea.
+     *
+     * @param callable(float, float): ?float $ground terrain height at a world position, null = no terrain
+     */
+    public static function waterline(
+        callable $ground,
+        float $waterLevel,
+        float $minX,
+        float $maxX,
+        float $minZ,
+        float $maxZ,
+        float $cell,
+    ): self {
+        return new self(
+            static function (float $x, float $z) use ($ground, $waterLevel): ?float {
+                $y = $ground($x, $z);
+
+                return $y !== null && $y > $waterLevel ? $y : null;
+            },
+            $minX,
+            $maxX,
+            $minZ,
+            $maxZ,
+            $cell,
+        );
+    }
+
+    /**
      * What the raster knows about a point, or null outside it.
      *
      * `distance` is signed: positive in open water, negative on land and in

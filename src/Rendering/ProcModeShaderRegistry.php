@@ -161,6 +161,8 @@ final class ProcModeShaderRegistry
     private static bool $instanceParams = false;
     /** @var list<string>|null programs that read the scene depth, null = all of them */
     private static ?array $sceneDepthPrograms = [];
+    /** @var array<string, array{vio: string, gl: ?string, programs: list<string>|null}> name → shared helper library */
+    private static array $libraries = [];
 
     /**
      * Register the GLSL for one proc_mode.
@@ -199,6 +201,36 @@ final class ProcModeShaderRegistry
     {
         self::$postColorHelpers = [self::FAMILY_VIO => $helpers, self::FAMILY_GL => $glHelpers ?? $helpers];
         self::$postColorCall = [self::FAMILY_VIO => $call, self::FAMILY_GL => $glCall ?? $call];
+    }
+
+    /**
+     * Register a helper library: file-scope GLSL that several modes call, emitted once per
+     * program at the helpers sentinel, before the modes' own helpers (a function in two
+     * modes' helpers would be defined twice in one program). Libraries keep their
+     * registration order; registering a name again replaces it. $gl is the native-GL
+     * text; null leaves the library out of that family (it may sample snippet textures,
+     * which the GL renderer does not bind). $programs limits it like {@see declareSampler()}.
+     *
+     * @param list<string>|null $programs null = every program
+     */
+    public static function registerLibrary(string $name, string $vio, ?string $gl = null, ?array $programs = null): void
+    {
+        self::$libraries[$name] = ['vio' => $vio, 'gl' => $gl, 'programs' => $programs];
+    }
+
+    /** The libraries a program holds, concatenated. */
+    public static function libraries(string $family = self::FAMILY_VIO, ?string $variant = null): string
+    {
+        $out = '';
+        foreach (self::$libraries as $library) {
+            $programs = $library['programs'];
+            if ($programs !== null && $variant !== null && !in_array($variant, $programs, true)) {
+                continue;
+            }
+            $out .= $family === self::FAMILY_VIO ? $library['vio'] : ($library['gl'] ?? '');
+        }
+
+        return $out;
     }
 
     public static function postColorHelpers(string $family = self::FAMILY_VIO): string
@@ -690,7 +722,7 @@ final class ProcModeShaderRegistry
     public static function spliceGlsl(string $source, string $family = self::FAMILY_VIO, ?string $variant = null): string
     {
         $source = str_replace(self::UNIFORMS_SENTINEL, self::uniformDeclarations($family, $variant), $source);
-        $source = str_replace(self::HELPERS_SENTINEL, self::glslHelpers($family, $variant), $source);
+        $source = str_replace(self::HELPERS_SENTINEL, self::libraries($family, $variant) . self::glslHelpers($family, $variant), $source);
         $source = str_replace(self::BRANCHES_SENTINEL, self::glslBranches($family, $variant), $source);
         $source = str_replace(self::POSTCOLOR_HELPERS_SENTINEL, self::postColorHelpers($family), $source);
         $source = str_replace(self::POSTCOLOR_SENTINEL, self::postColorCall($family), $source);
@@ -719,6 +751,7 @@ final class ProcModeShaderRegistry
         self::$samplers = [];
         self::$samplerPrograms = [];
         self::$sceneDepthPrograms = [];
+        self::$libraries = [];
         self::$materialParameters = [];
         self::$instanceParams = false;
     }
