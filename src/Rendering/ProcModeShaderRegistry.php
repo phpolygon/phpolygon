@@ -132,11 +132,21 @@ final class ProcModeShaderRegistry
 
     /**
      * Ordinary samplers of mesh3d.frag on this php-vio: since 2.40 (12 registers) the
-     * cloud shadow map joins them (PHPOLYGON_CLOUD_SHADOW_MAP).
+     * cloud shadow map (PHPOLYGON_CLOUD_SHADOW_MAP) and the point shadow cube
+     * (PHPOLYGON_POINT_SHADOW) join them.
      */
     public static function engineSamplers(): int
     {
-        return self::ENGINE_SAMPLERS + (self::cloudShadowMapAvailable() ? 1 : 0);
+        return self::ENGINE_SAMPLERS + (self::cloudShadowMapAvailable() ? 1 : 0) + (self::pointShadowAvailable() ? 1 : 0);
+    }
+
+    /**
+     * Whether mesh3d.frag reads the point shadow cube: a plain samplerCube (the four
+     * comparison samplers are taken), so only with php-vio's 12 sampler registers.
+     */
+    public static function pointShadowAvailable(): bool
+    {
+        return self::samplerRegisters() >= self::SAMPLER_REGISTERS_2_40;
     }
 
     /** Whether mesh3d.frag reads a baked cloud shadow map (php-vio with 12 sampler registers). */

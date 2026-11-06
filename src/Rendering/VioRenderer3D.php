@@ -3881,6 +3881,9 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         if (self::preciseHashOn($this->conventions()->name())) {
             $source = self::withDefine($source, 'PHPOLYGON_PRECISE_HASH');
         }
+        if (ProcModeShaderRegistry::pointShadowAvailable()) {
+            $source = self::withDefine($source, 'PHPOLYGON_POINT_SHADOW');
+        }
         if (ProcModeShaderRegistry::cloudShadowMapAvailable()) {
             $source = self::withDefine($source, 'PHPOLYGON_CLOUD_SHADOW_MAP');
         }
@@ -5710,7 +5713,8 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
     private function renderPointShadowPass(RenderCommandList $commandList, array $pointLights): void
     {
         $this->pointShadowPos = null;
-        if ($this->pointShadowUnsupported || $this->settings->shadowQuality === \PHPolygon\Rendering\Quality\ShadowQuality::Off) {
+        if ($this->pointShadowUnsupported || !ProcModeShaderRegistry::pointShadowAvailable()
+            || $this->settings->shadowQuality === \PHPolygon\Rendering\Quality\ShadowQuality::Off) {
             return;
         }
         // The shadow-casting light nearest to the camera gets the cube.
@@ -5788,6 +5792,9 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
     /** The point shadow cube on its unit (u_point_shadow_on 0 with a 1x1 white cube otherwise). */
     private function uploadPointShadowUniforms(): void
     {
+        if (!ProcModeShaderRegistry::pointShadowAvailable()) {
+            return;
+        }
         $on = $this->pointShadowPos !== null && $this->pointShadowCube !== null;
         $cube = $on ? $this->pointShadowCube : ($this->whiteCubemap ??= vio_cubemap($this->ctx, [
             'pixels' => array_fill(0, 6, [255, 255, 255, 255]),

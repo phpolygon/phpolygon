@@ -192,10 +192,12 @@ uniform int u_spot_shadow_index;
 // light at u_point_shadow_pos, read as a plain cube with the compare done here.
 // u_point_shadow_range = (near, far, 1 / face size). The light is found by its
 // position, in the eight uniforms and in the light grid alike.
+#ifdef PHPOLYGON_POINT_SHADOW
 uniform samplerCube u_point_shadow_map;
 uniform float u_point_shadow_on;
 uniform vec3 u_point_shadow_pos;
 uniform vec3 u_point_shadow_range;
+#endif
 
 // Texture
 uniform int u_has_albedo_texture;
@@ -511,6 +513,7 @@ float spotShadow(vec3 worldPos, vec3 N, vec3 L, float dist) {
     return s / 8.0;
 }
 
+#ifdef PHPOLYGON_POINT_SHADOW
 // The depth a face of the point cube stored for a direction d from the light: the
 // face's perspective depth of the major axis, mapped to 0..1 like the cascades.
 float pointCubeDepth(vec3 d) {
@@ -539,6 +542,15 @@ float pointShadow(vec3 worldPos, vec3 N, vec3 L, float dist) {
     }
     return s / 6.0;
 }
+
+// The point shadow for a light at lightPos: 1 unless it is the light with the cube.
+float pointShadowFor(vec3 lightPos, vec3 worldPos, vec3 N, vec3 L, float dist) {
+    if (u_point_shadow_on < 0.5 || distance(lightPos, u_point_shadow_pos) >= 0.01) return 1.0;
+    return pointShadow(worldPos, N, L, dist);
+}
+#else
+float pointShadowFor(vec3 lightPos, vec3 worldPos, vec3 N, vec3 L, float dist) { return 1.0; }
+#endif
 
 float calcShadow(vec4 lsp, vec3 N) {
     if (u_has_shadow_map == 0) return 1.0;
@@ -1626,9 +1638,7 @@ void main() {
                 Lg /= max(lgDist, 1e-4);
                 float lgAtten = clamp(1.0 - lgDist * lgDist / (lgPos.w * lgPos.w), 0.0, 1.0);
                 lgAtten *= lgAtten;
-                if (u_point_shadow_on > 0.5 && distance(lgPos.xyz, u_point_shadow_pos) < 0.01) {
-                    lgAtten *= pointShadow(v_worldPos, N, Lg, lgDist);
-                }
+                lgAtten *= pointShadowFor(lgPos.xyz, v_worldPos, N, Lg, lgDist);
                 float NdotLG = max(dot(N, Lg), 0.0);
                 if (NdotLG > 0.0) {
                     vec3 spec = cookTorranceSpecular(N, V, Lg, roughness, F0);
@@ -1653,9 +1663,7 @@ void main() {
         float r = max(u_point_lights[i].radius, 0.001);
         float atten = clamp(1.0 - dist*dist/(r*r), 0.0, 1.0);
         atten *= atten;
-        if (u_point_shadow_on > 0.5 && distance(u_point_lights[i].position, u_point_shadow_pos) < 0.01) {
-            atten *= pointShadow(v_worldPos, N, Lp, dist);
-        }
+        atten *= pointShadowFor(u_point_lights[i].position, v_worldPos, N, Lp, dist);
         float NdotPL = max(dot(N, Lp), 0.0);
         if (NdotPL > 0.0) {
             vec3 spec = cookTorranceSpecular(N, V, Lp, roughness, F0);
