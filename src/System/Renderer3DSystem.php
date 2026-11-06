@@ -9,6 +9,7 @@ use PHPolygon\Component\Camera3DComponent;
 use PHPolygon\Component\DirectionalLight;
 use PHPolygon\Component\MeshRenderer;
 use PHPolygon\Component\PointLight;
+use PHPolygon\Component\RectAreaLight;
 use PHPolygon\Component\SpotLight;
 use PHPolygon\Component\Transform3D;
 use PHPolygon\Component\Wind;
@@ -19,6 +20,7 @@ use PHPolygon\Geometry\MeshRegistry;
 use PHPolygon\Math\Mat4;
 use PHPolygon\Math\Vec3;
 use PHPolygon\Rendering\Command\AddPointLight;
+use PHPolygon\Rendering\Command\AddRectLight;
 use PHPolygon\Rendering\Command\AddSpotLight;
 use PHPolygon\Rendering\Command\DrawMesh;
 use PHPolygon\Rendering\Command\DrawMeshInstanced;
@@ -69,6 +71,9 @@ class Renderer3DSystem extends AbstractSystem
      * few, so trimming to the nearest spots keeps the closest beams.
      */
     public const MAX_SPOT_LIGHTS = 8;
+
+    /** Rectangular area lights the mesh shader evaluates (the nearest ones). */
+    public const MAX_RECT_LIGHTS = 4;
 
     /**
      * Screen-size LOD. Beyond {@see $lodNearDistance}, an entity whose projected
@@ -350,6 +355,37 @@ class Renderer3DSystem extends AbstractSystem
                 $light->angle,
                 $light->penumbra,
                 $light->castsShadow,
+            ));
+        }
+
+        // Rectangular area lights: the rectangle in the local XZ plane, emitting
+        // along local -Y, turned by the world matrix; the nearest MAX_RECT_LIGHTS.
+        $rectCandidates = [];
+        foreach ($world->query(RectAreaLight::class, Transform3D::class) as $entity) {
+            $light = $entity->get(RectAreaLight::class);
+            if ($light->intensity <= 0.001 || $light->width <= 0.0 || $light->depth <= 0.0) {
+                continue;
+            }
+            $m = $entity->get(Transform3D::class)->getWorldMatrix();
+            $pos = $m->getTranslation();
+            $rank = self::rankLight($pos, $light->range, $cameraPos, $planes);
+            if ($rank === null) {
+                continue;
+            }
+            $rectCandidates[] = [$rank, $pos, $m, $light];
+        }
+        if (count($rectCandidates) > self::MAX_RECT_LIGHTS) {
+            usort($rectCandidates, static fn(array $a, array $b): int => ($a[0][0] <=> $b[0][0]) ?: ($a[0][1] <=> $b[0][1]));
+            $rectCandidates = array_slice($rectCandidates, 0, self::MAX_RECT_LIGHTS);
+        }
+        foreach ($rectCandidates as [, $pos, $m, $light]) {
+            $this->commandList->add(new AddRectLight(
+                $pos,
+                $m->transformDirection(new Vec3(1.0, 0.0, 0.0))->normalize()->mul($light->width * 0.5),
+                $m->transformDirection(new Vec3(0.0, 0.0, 1.0))->normalize()->mul($light->depth * 0.5),
+                $light->color,
+                $light->intensity,
+                $light->range,
             ));
         }
 

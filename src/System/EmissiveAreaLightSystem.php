@@ -6,6 +6,7 @@ namespace PHPolygon\System;
 
 use PHPolygon\Component\EmissiveAreaLight;
 use PHPolygon\Component\PointLight;
+use PHPolygon\Component\RectAreaLight;
 use PHPolygon\ECS\AbstractSystem;
 use PHPolygon\ECS\World;
 use PHPolygon\Rendering\Color;
@@ -15,7 +16,9 @@ use PHPolygon\Rendering\MaterialRegistry;
  * Sole writer of the point lights of {@see EmissiveAreaLight}s: each frame the light
  * takes the hue of its material's emission and an intensity of `scale` times the
  * emission's brightest channel; a material that does not glow leaves the light at 0,
- * which the renderer skips. Adds the PointLight on first sight.
+ * which the renderer skips. Adds the PointLight on first sight. An entity that
+ * carries a {@see RectAreaLight} (a glowing panel or band) has that light driven
+ * instead, at its own size and range.
  *
  * With the world light grid many of these are affordable: a street of neon signs
  * lights its own pavement.
@@ -26,6 +29,11 @@ class EmissiveAreaLightSystem extends AbstractSystem
     {
         foreach ($world->query(EmissiveAreaLight::class) as $entity) {
             $area = $entity->get(EmissiveAreaLight::class);
+            $rect = $world->tryGetComponent($entity->id, RectAreaLight::class);
+            if ($rect instanceof RectAreaLight) {
+                [$rect->color, $rect->intensity] = self::lightFor($area);
+                continue;
+            }
             $light = $world->tryGetComponent($entity->id, PointLight::class);
             if (!$light instanceof PointLight) {
                 $light = new PointLight(Color::white(), 0.0, $area->radius);

@@ -11,6 +11,7 @@ use PHPolygon\Runtime\PerfProfiler;
 use PHPolygon\Math\Mat4;
 use PHPolygon\Math\Vec3;
 use PHPolygon\Rendering\Command\AddPointLight;
+use PHPolygon\Rendering\Command\AddRectLight;
 use PHPolygon\Rendering\Command\AddSpotLight;
 use PHPolygon\Rendering\Command\DrawMesh;
 use PHPolygon\Rendering\Command\DrawOutline;
@@ -173,7 +174,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
      * Frame uniform inputs of the current frame ([frameState, hasShadowMap,
      * dirLights]), re-uploaded when a storage-instance draw switches programs.
      *
-     * @var array{0: array{ambientColor: Color, ambientIntensity: float, dirLights: list<SetDirectionalLight>, pointLights: list<AddPointLight>, spotLights: list<AddSpotLight>, fogColor: Color, fogNear: float, fogFar: float, waveEnabled: bool, waveAmplitude: float, waveFrequency: float, wavePhase: float, ftMode: \PHPolygon\Rendering\Quality\FieldtracingMode, ftIntensity: float, ftAoRadius: float}, 1: bool, 2: list<SetDirectionalLight>}|null
+     * @var array{0: array{ambientColor: Color, ambientIntensity: float, dirLights: list<SetDirectionalLight>, pointLights: list<AddPointLight>, spotLights: list<AddSpotLight>, rectLights: list<AddRectLight>, fogColor: Color, fogNear: float, fogFar: float, waveEnabled: bool, waveAmplitude: float, waveFrequency: float, wavePhase: float, ftMode: \PHPolygon\Rendering\Quality\FieldtracingMode, ftIntensity: float, ftAoRadius: float}, 1: bool, 2: list<SetDirectionalLight>}|null
      */
     private ?array $sceneUniformInputs = null;
 
@@ -3188,6 +3189,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         $dirLights = [];
         $pointLights = [];
         $spotLights = [];
+        $rectLights = [];
         $fogColor = new Color(0.0, 0.0, 0.0);
         $fogNear = 1000.0;
         $fogFar = 2000.0;
@@ -3222,6 +3224,8 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
                 $pointLights[] = $cmd;
             } elseif ($cmd instanceof AddSpotLight) {
                 $spotLights[] = $cmd;
+            } elseif ($cmd instanceof AddRectLight) {
+                $rectLights[] = $cmd;
             } elseif ($cmd instanceof DrawOutline) {
                 $outlines[] = $cmd;
             } elseif ($cmd instanceof SetFog) {
@@ -3300,6 +3304,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             'dirLights' => $dirLights,
             'pointLights' => $pointLights,
             'spotLights' => $spotLights,
+            'rectLights' => $rectLights,
             'fogColor' => $fogColor,
             'fogNear' => $fogNear,
             'fogFar' => $fogFar,
@@ -7670,7 +7675,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
     }
 
     /**
-     * @param array{ambientColor: Color, ambientIntensity: float, dirLights: list<SetDirectionalLight>, pointLights: list<AddPointLight>, spotLights: list<AddSpotLight>, fogColor: Color, fogNear: float, fogFar: float, waveEnabled: bool, waveAmplitude: float, waveFrequency: float, wavePhase: float, ftMode: \PHPolygon\Rendering\Quality\FieldtracingMode, ftIntensity: float, ftAoRadius: float} $state
+     * @param array{ambientColor: Color, ambientIntensity: float, dirLights: list<SetDirectionalLight>, pointLights: list<AddPointLight>, spotLights: list<AddSpotLight>, rectLights: list<AddRectLight>, fogColor: Color, fogNear: float, fogFar: float, waveEnabled: bool, waveAmplitude: float, waveFrequency: float, wavePhase: float, ftMode: \PHPolygon\Rendering\Quality\FieldtracingMode, ftIntensity: float, ftAoRadius: float} $state
      */
     private function uploadFrameUniforms(array $state): void
     {
@@ -7797,6 +7802,20 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             vio_set_uniform($this->ctx, "u_spot_lights[{$i}].range", $sl->range);
             vio_set_uniform($this->ctx, "u_spot_lights[{$i}].angle", $sl->angle);
             vio_set_uniform($this->ctx, "u_spot_lights[{$i}].penumbra", $sl->penumbra);
+        }
+
+        // Rectangular area lights (mesh3d: exact form factor + representative point).
+        $rects = $state['rectLights'] ?? [];
+        $rectCount = min(count($rects), 4);
+        vio_set_uniform($this->ctx, 'u_rect_light_count', $rectCount);
+        for ($i = 0; $i < $rectCount; $i++) {
+            $rl = $rects[$i];
+            vio_set_uniform($this->ctx, "u_rect_lights[{$i}].center", [$rl->center->x, $rl->center->y, $rl->center->z]);
+            vio_set_uniform($this->ctx, "u_rect_lights[{$i}].axisX", [$rl->axisX->x, $rl->axisX->y, $rl->axisX->z]);
+            vio_set_uniform($this->ctx, "u_rect_lights[{$i}].axisY", [$rl->axisY->x, $rl->axisY->y, $rl->axisY->z]);
+            $ri = $rl->intensity * $piScale;
+            vio_set_uniform($this->ctx, "u_rect_lights[{$i}].color", [$rl->color->r * $ri, $rl->color->g * $ri, $rl->color->b * $ri]);
+            vio_set_uniform($this->ctx, "u_rect_lights[{$i}].range", $rl->range);
         }
 
         $fc = $state['fogColor'];

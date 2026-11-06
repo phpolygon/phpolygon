@@ -69,6 +69,18 @@ struct SpotLight {
 uniform SpotLight u_spot_lights[4];
 uniform int u_spot_light_count;
 
+// Rectangular area lights (Component\RectAreaLight): centre, half-extent axes, emits
+// along normalize(cross(axisX, axisY)); color = colour x intensity x pi, as a point light.
+struct RectLight {
+    vec3 center;
+    vec3 axisX;
+    vec3 axisY;
+    vec3 color;
+    float range;
+};
+uniform RectLight u_rect_lights[4];
+uniform int u_rect_light_count;
+
 uniform vec3 u_albedo;
 // Grass blades (Material::$grass): colour along the blade from v_uv (y = 0 root
 // .. 1 tip, x = blade random). Mirrors the other mesh fragment stage.
@@ -551,6 +563,43 @@ float pointShadowFor(vec3 lightPos, vec3 worldPos, vec3 N, vec3 L, float dist) {
 #else
 float pointShadowFor(vec3 lightPos, vec3 worldPos, vec3 N, vec3 L, float dist) { return 1.0; }
 #endif
+
+// One edge of Lambert's polygon formula: the angle between the two (unit) corner
+// directions along the edge's normal; theta / sin(theta) keeps near-parallel
+// corners stable.
+vec3 rectEdge(vec3 a, vec3 b) {
+    float c = clamp(dot(a, b), -0.9999, 0.9999);
+    float theta = acos(c);
+    return cross(a, b) * (theta / max(sqrt(1.0 - c * c), 1e-4));
+}
+
+// Irradiance over radiance of a rectangle at P with normal N: the exact cosine form
+// factor (times pi) of the rectangle clipped at P's horizon (at most five corners).
+float rectFormFactor(vec3 P, vec3 N, vec3 c, vec3 ex, vec3 ey) {
+    vec3 q[4];
+    q[0] = c - ex - ey - P;
+    q[1] = c + ex - ey - P;
+    q[2] = c + ex + ey - P;
+    q[3] = c - ex + ey - P;
+    vec3 o[5];
+    o[0] = vec3(0.0); o[1] = vec3(0.0); o[2] = vec3(0.0); o[3] = vec3(0.0); o[4] = vec3(0.0);
+    int n = 0;
+    for (int i = 0; i < 4; i++) {
+        vec3 a = q[i];
+        vec3 b = q[i == 3 ? 0 : i + 1];
+        float da = dot(a, N);
+        float db = dot(b, N);
+        if (da >= 0.0 && n < 5) { o[n] = a; n++; }
+        if ((da >= 0.0) != (db >= 0.0) && n < 5) { o[n] = a + (b - a) * (da / (da - db)); n++; }
+    }
+    if (n < 3) return 0.0;
+    vec3 F = vec3(0.0);
+    for (int i = 0; i < 5; i++) {
+        if (i >= n) break;
+        F += rectEdge(normalize(o[i]), normalize(o[i + 1 < n ? i + 1 : 0]));
+    }
+    return abs(dot(F, N)) * 0.5;
+}
 
 float calcShadow(vec4 lsp, vec3 N) {
     if (u_has_shadow_map == 0) return 1.0;
@@ -1703,6 +1752,54 @@ void main() {
             vec3 radiance = u_spot_lights[i].color * u_spot_lights[i].intensity * atten;
             localAcc += (kD * albedo / 3.14159265 + spec) * radiance * NdotSL;
         }
+    }
+
+    // Rectangular area lights: diffuse from the exact form factor; specular at the
+    // point of the rectangle nearest the reflection ray, with the roughness widened
+    // by the rectangle's narrow side as seen from the point (shader plan 3.3).
+    int rectCount = min(u_rect_light_count, 4);
+    for (int i = 0; i < rectCount; i++) {
+        vec3 rc = u_rect_lights[i].center;
+        vec3 rx = u_rect_lights[i].axisX;
+        vec3 ry = u_rect_lights[i].axisY;
+        vec3 rn = normalize(cross(rx, ry));
+        if (dot(v_worldPos - rc, rn) <= 0.0) continue;
+        float rr = max(u_rect_lights[i].range, 0.001);
+        float rcd = length(v_worldPos - rc);
+        if (rcd >= rr) continue;
+        float win = clamp(1.0 - rcd * rcd / (rr * rr), 0.0, 1.0);
+        win *= win;
+        float E = rectFormFactor(v_worldPos, N, rc, rx, ry);
+        if (E <= 0.0) continue;
+        // Like the point lights (windowed, no inverse square): the form factor
+        // scaled by distance^2 / area - the distance the geometric mean of the ones to
+        // the nearest point and to the centre - which far away is the panel's cosine
+        // times N.L and near it keeps the rectangle's long shape.
+        float hx = length(rx);
+        float hy = length(ry);
+        vec3 ux = rx / max(hx, 1e-4);
+        vec3 uy = ry / max(hy, 1e-4);
+        float rArea = max(4.0 * hx * hy, 1e-4);
+        vec3 rq = v_worldPos - rc;
+        vec3 rNear = rc + ux * clamp(dot(rq, ux), -hx, hx) + uy * clamp(dot(rq, uy), -hy, hy) - v_worldPos;
+        E *= length(rNear) * rcd / rArea;
+        vec3 radiance = u_rect_lights[i].color * win;
+
+        vec3 Rr = reflect(-V, N);
+        float rdn = dot(Rr, rn);
+        vec3 hit = v_worldPos + Rr * (dot(rc - v_worldPos, rn) / (abs(rdn) > 1e-4 ? rdn : -1e-4));
+        if (rdn >= -1e-4) hit = v_worldPos - rn * dot(v_worldPos - rc, rn);
+        vec3 hd = hit - rc;
+        vec3 Lpt = rc + ux * clamp(dot(hd, ux), -hx, hx) + uy * clamp(dot(hd, uy), -hy, hy);
+        vec3 Lr = Lpt - v_worldPos;
+        float ld = max(length(Lr), 1e-3);
+        Lr /= ld;
+        float NdotLR = max(dot(N, Lr), 0.0);
+        vec3 Fr = fresnelSchlick(max(dot(normalize(V + Lr), V), 0.0), F0);
+        vec3 kDr = (1.0 - Fr) * (1.0 - metallic);
+        float aWide = clamp(roughness * roughness + 0.5 * min(hx, hy) / ld, 0.0, 1.0);
+        vec3 specR = NdotLR > 0.0 ? cookTorranceSpecular(N, V, Lr, sqrt(aWide), F0) : vec3(0.0);
+        localAcc += (kDr * albedo / 3.14159265 + specR) * radiance * E;
     }
 
     // ---- Image-Based Lighting (IBL) reflection ----
