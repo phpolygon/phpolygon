@@ -1532,7 +1532,9 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             $uniforms['u_focus_min'] = $focus !== null ? [$focus->left, $focus->top] : [0.0, 0.0];
             $uniforms['u_focus_max'] = $focus !== null ? [$focus->right, $focus->bottom] : [1.0, 1.0];
             $uniforms['u_focus_feather'] = $focus->feather ?? 0.04;
-            $uniforms['u_uv_top_down'] = 1.0;
+            // The screen quad's v follows the target's row order (see the quad in
+            // initPostProcess()): top-down where row 0 is the top, bottom-up on OpenGL.
+            $uniforms['u_uv_top_down'] = $this->conventions()->flipRenderTargetClipY() ? 1.0 : 0.0;
             $image = $accessibility->apply($image, $w, $h, $quad, $uniforms, $a11y->needsLuminance(), $a11y->flashLimit, $dt) ?? $image;
             PerfProfiler::end();
             $this->gpuMark('post.a11y');
