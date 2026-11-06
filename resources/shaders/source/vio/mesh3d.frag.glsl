@@ -414,7 +414,16 @@ float cloudShadow(vec3 worldPos) { return 1.0; }
 //  Shadow
 // ================================================================
 
-// Sample a single cascade with PCF 3x3.
+// Sample a single cascade: 12 taps of a Poisson disc, turned per pixel (interleaved
+// gradient noise) so the penumbra reads soft instead of as a 3x3 staircase; the
+// temporal resolve smooths the remaining grain (shader plan 3.3). The disc spans
+// about 2.5 shadow texels. A true PCSS blocker search would need the depth map as
+// a plain sampler; with the comparison sampler the width stays fixed.
+const vec2 SHADOW_DISC[12] = vec2[12](
+    vec2(-0.326, -0.406), vec2(-0.840, -0.074), vec2(-0.696, 0.457), vec2(-0.203, 0.621),
+    vec2(0.962, -0.195), vec2(0.473, -0.480), vec2(0.519, 0.767), vec2(0.185, -0.893),
+    vec2(0.507, 0.064), vec2(0.896, 0.412), vec2(-0.322, -0.933), vec2(-0.792, -0.598));
+
 float sampleCascade(sampler2DShadow map, mat4 lightSpace, vec3 worldPos, vec3 N) {
     vec4 lsp = lightSpace * vec4(worldPos, 1.0);
     vec3 pc  = lsp.xyz / lsp.w * 0.5 + 0.5;
@@ -422,13 +431,15 @@ float sampleCascade(sampler2DShadow map, mat4 lightSpace, vec3 worldPos, vec3 N)
     vec3 lightDir = normalize(-u_dir_light_direction);
     float NdotL = max(dot(N, lightDir), 0.0);
     float bias = mix(0.005, 0.001, NdotL);
-    float s = 0.0;
-    float ts = 1.0 / 2048.0;
+    float ts = 2.5 / 2048.0;
     float rd = pc.z - bias;
-    for (int x = -1; x <= 1; x++)
-        for (int y = -1; y <= 1; y++)
-            s += texture(map, vec3(pc.xy + vec2(x,y) * ts, rd));
-    return s / 9.0;
+    float a = 6.2831853 * fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))));
+    mat2 rot = mat2(cos(a), sin(a), -sin(a), cos(a));
+    float s = 0.0;
+    for (int i = 0; i < 12; i++) {
+        s += texture(map, vec3(pc.xy + rot * SHADOW_DISC[i] * ts, rd));
+    }
+    return s / 12.0;
 }
 
 float calcShadow(vec4 lsp, vec3 N) {
@@ -436,14 +447,20 @@ float calcShadow(vec4 lsp, vec3 N) {
     // Pick the smallest CSM cascade still containing the fragment based
     // on distance to the camera (matches the per-cascade ortho extents
     // built in PHP land).
+    // Over the last eighth of a cascade the next one fades in, so the switch of
+    // resolution does not draw a line across the ground (shader plan 3.3).
     float dist = length(v_worldPos - u_camera_pos);
     if (u_csm_count >= 2 && dist > u_csm_far_0) {
         if (u_csm_count >= 3 && dist > u_csm_far_1) {
             return sampleCascade(u_csm_map_2, u_csm_matrix_2, v_worldPos, N);
         }
-        return sampleCascade(u_csm_map_1, u_csm_matrix_1, v_worldPos, N);
+        float s1 = sampleCascade(u_csm_map_1, u_csm_matrix_1, v_worldPos, N);
+        float b1 = u_csm_count >= 3 ? smoothstep(u_csm_far_1 * 0.875, u_csm_far_1, dist) : 0.0;
+        return b1 > 0.0 ? mix(s1, sampleCascade(u_csm_map_2, u_csm_matrix_2, v_worldPos, N), b1) : s1;
     }
-    return sampleCascade(u_csm_map_0, u_csm_matrix_0, v_worldPos, N);
+    float s0 = sampleCascade(u_csm_map_0, u_csm_matrix_0, v_worldPos, N);
+    float b0 = u_csm_count >= 2 ? smoothstep(u_csm_far_0 * 0.875, u_csm_far_0, dist) : 0.0;
+    return b0 > 0.0 ? mix(s0, sampleCascade(u_csm_map_1, u_csm_matrix_1, v_worldPos, N), b0) : s0;
 }
 
 // ================================================================

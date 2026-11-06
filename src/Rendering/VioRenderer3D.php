@@ -4384,8 +4384,46 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         }
         vio_set_uniform($this->ctx, 'u_sdf_ao_enabled', $sdfOn ? 1.0 : 0.0);
         vio_set_uniform($this->ctx, 'u_linear_output', $hdr ? 1 : 0);
+        $this->uploadContactShadowUniforms();
 
         vio_draw($this->ctx, $quad);
+    }
+
+    /** Strength of the screen-space contact shadows on the sun term. */
+    public const float CONTACT_SHADOW_STRENGTH = 0.85;
+
+    /** Sun direction of this frame's primary light (toward the light, world space), null without one. */
+    private ?Vec3 $frameSunDirection = null;
+
+    /**
+     * Contact shadows run with the G-buffer the MRT frame has anyway, where real
+     * ambient occlusion is on (the same quality decision), while the sun is up.
+     * PHPOLYGON_CONTACT_SHADOWS=0 turns them off.
+     */
+    private function uploadContactShadowUniforms(): void
+    {
+        $gbuffer = $this->mrtGbufferTexture();
+        $view = $this->currentViewMatrix;
+        $projection = $this->currentProjectionMatrix;
+        $sun = $this->frameSunDirection;
+        $on = $gbuffer !== null && $view !== null && $projection !== null && $sun !== null && $sun->y > 0.02
+            && $this->ssaoEnabledThisFrame() && getenv('PHPOLYGON_CONTACT_SHADOWS') !== '0';
+        $tex = $gbuffer ?? $this->whiteTexture;
+        if ($tex !== null) {
+            vio_bind_texture($this->ctx, $tex, 5);
+            vio_set_uniform($this->ctx, 'u_gbuffer', 5);
+        }
+        if (!$on || $view === null || $projection === null || $sun === null) {
+            vio_set_uniform($this->ctx, 'u_contact', [0.0, 0.0, 0.0, 0.0]);
+            return;
+        }
+        $l = $view->transformDirection($sun)->normalize();
+        $p = $projection->toArray();
+        vio_set_uniform($this->ctx, 'u_contact', [$l->x, $l->y, $l->z, self::CONTACT_SHADOW_STRENGTH]);
+        vio_set_uniform($this->ctx, 'u_contact_ray', [0.6, 0.25, 0.0, 0.0]);
+        vio_set_uniform($this->ctx, 'u_proj00', $p[0]);
+        vio_set_uniform($this->ctx, 'u_proj11', $p[5]);
+        vio_set_uniform($this->ctx, 'u_uv_flip_y', $this->conventions()->flipRenderTargetClipY() ? -1.0 : 1.0);
     }
 
     /** Composite pipeline: fullscreen, depth off, ALPHA blend, LDR or FP16 PSO. */
@@ -7367,6 +7405,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         }
 
         vio_set_uniform($this->ctx, 'u_dir_light_count', $dirCount);
+        $this->frameSunDirection = $dirCount > 0 ? $state['dirLights'][0]->direction->mul(-1.0) : null;
         for ($i = 0; $i < $dirCount; $i++) {
             $dl = $state['dirLights'][$i];
             vio_set_uniform($this->ctx, "u_dir_lights[{$i}].direction", [$dl->direction->x, $dl->direction->y, $dl->direction->z]);

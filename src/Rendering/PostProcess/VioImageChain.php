@@ -319,6 +319,7 @@ final class VioImageChain
             'u_grain' => $clean ? 0.0 : max(0.0, $look->grain),
             'u_deband' => max(0.0, $look->deband),
             'u_ca' => $clean ? 0.0 : max(0.0, $look->chromaticAberration),
+            'u_night_vision' => $hdr ? max(0.0, min(1.0, $look->nightVision)) : 0.0,
             'u_time' => $a11y->reducedMotion ? 0.0 : $grainTime,
         ];
     }

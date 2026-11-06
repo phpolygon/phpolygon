@@ -28,6 +28,60 @@ uniform int   u_ssao_enabled;
 uniform float u_sdf_ao_enabled;    // float: int-in-UBO is unreliable across SPIRV-Cross targets
 uniform int   u_linear_output;
 
+// Screen-space contact shadows (shader plan 3.3): a short march from each pixel
+// toward the sun through the G-buffer depth catches the small occluders the
+// shadow map is too coarse for (a cup on a table, a foot on the floor, the gap
+// under a bench). Only the sun term darkens.
+uniform sampler2D u_gbuffer;       // rg view normal (octahedral), b reflectivity, a linear view depth
+uniform vec4  u_contact;           // xyz: direction to the sun in view space, w: strength (0 = off)
+uniform vec4  u_contact_ray;       // x: ray length in m, y: thickness in m
+uniform float u_proj00;
+uniform float u_proj11;
+uniform float u_uv_flip_y;
+
+vec3 contactViewPos(vec2 uv, float d) {
+    vec2 ndc = uv * 2.0 - 1.0;
+    ndc.y *= u_uv_flip_y;
+    return vec3(ndc.x * d / u_proj00, ndc.y * d / u_proj11, -d);
+}
+
+vec2 contactUV(vec3 p) {
+    vec2 ndc = vec2(p.x * u_proj00, p.y * u_proj11) / max(-p.z, 1e-4);
+    ndc.y *= u_uv_flip_y;
+    return ndc * 0.5 + 0.5;
+}
+
+float contactShadow(vec2 uv) {
+    if (u_contact.w <= 0.0) {
+        return 1.0;
+    }
+    float depth = textureLod(u_gbuffer, uv, 0.0).a;
+    if (depth <= 0.0 || depth > 60.0) {
+        return 1.0; // sky, or too far for a few centimetres to matter
+    }
+    vec3 L = u_contact.xyz;
+    // Start a little toward the sun so the surface does not shadow itself.
+    vec3 P = contactViewPos(uv, depth) + L * (0.02 + depth * 0.002);
+    float jitter = fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))));
+    const int STEPS = 12;
+    float thick = u_contact_ray.y * (1.0 + depth * 0.02);
+    for (int i = 1; i <= STEPS; i++) {
+        float f = (float(i) - jitter) / float(STEPS);
+        vec3 S = P + L * (u_contact_ray.x * f);
+        vec2 suv = contactUV(S);
+        if (suv.x < 0.0 || suv.x > 1.0 || suv.y < 0.0 || suv.y > 1.0 || S.z >= 0.0) {
+            break;
+        }
+        float sd = textureLod(u_gbuffer, suv, 0.0).a;
+        float delta = -S.z - sd;
+        if (sd > 0.0 && delta > 0.0 && delta < thick) {
+            // Fade with distance along the ray so the contact edge stays soft.
+            return 1.0 - u_contact.w * (1.0 - f * 0.6);
+        }
+    }
+    return 1.0;
+}
+
 out vec4 frag_color;
 
 vec3 toneMapACES(vec3 x) {
@@ -55,6 +109,7 @@ void main() {
         sunShadow = clamp(ftAoSh.g, 0.0, 1.0);
     }
 
+    sunShadow *= contactShadow(v_uv);
     vec3 color = max(sun.rgb * sunShadow + local.rgb + ambient * ao, vec3(0.0));
 
     // The composite is alpha-blended over the scene target so pixels nothing was

@@ -25,6 +25,7 @@ uniform float u_saturation_boost;
 uniform float u_grain;
 uniform float u_deband;              // in 8-bit steps
 uniform float u_ca;                  // offset at the image edge, fraction of the width
+uniform float u_night_vision;        // 0..1 Purkinje shift of the dark parts (HDR only)
 uniform float u_time;
 out vec4 frag_color;
 
@@ -90,6 +91,12 @@ void main() {
             exposure *= texture(u_exposure_state, vec2(0.5)).g;
         }
         c *= exposure;
+        if (u_night_vision > 0.0) {
+            // Rods take over below ~0.2 of mid grey: less colour, shifted to blue.
+            float nl = dot(max(c, vec3(0.0)), LUMA);
+            float nw = (1.0 - smoothstep(0.004, 0.08, nl)) * u_night_vision;
+            c = mix(c, vec3(nl) * vec3(0.62, 0.80, 1.25), nw);
+        }
         c = u_tonemapper > 0.5 ? toneMapSigmoid(c) : pow(toneMapACES(c), vec3(1.0 / 2.2));
     } else {
         c = clamp(c, 0.0, 1.0);

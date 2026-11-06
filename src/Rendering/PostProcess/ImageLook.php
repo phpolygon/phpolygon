@@ -65,6 +65,12 @@ final class ImageLook
         public readonly float $grain = 0.0,
         public readonly float $chromaticAberration = 0.0,
         public readonly float $sharpen = 0.0,
+        /**
+         * 0..1 night vision (Purkinje shift): where the exposed scene is dark, its colour
+         * gives way to a desaturated blue, the way the eye sees by moonlight. Bright lamps
+         * and lit windows keep their colour.
+         */
+        public readonly float $nightVision = 0.0,
     ) {
         if ($bloomLevels < 1 || $bloomLevels > self::MAX_BLOOM_LEVELS) {
             throw new \InvalidArgumentException('ImageLook bloomLevels must be 1..' . self::MAX_BLOOM_LEVELS);
@@ -132,6 +138,7 @@ final class ImageLook
             grain: $mix($a->grain, $b->grain),
             chromaticAberration: $mix($a->chromaticAberration, $b->chromaticAberration),
             sharpen: $mix($a->sharpen, $b->sharpen),
+            nightVision: $mix($a->nightVision, $b->nightVision),
         );
     }
 
