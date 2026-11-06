@@ -51,6 +51,14 @@ class SpotLight extends AbstractComponent
     #[Range(min: 0, max: 1)]
     public float $penumbra;
 
+    /**
+     * Casts a shadow: the renderer draws a depth map from the beam for the first
+     * shadow-casting spot light among the lit ones each frame (one map, the
+     * nearest such beam wins the slot).
+     */
+    #[Property]
+    public bool $castsShadow;
+
     public function __construct(
         ?Vec3 $direction = null,
         ?Color $color = null,
@@ -58,6 +66,7 @@ class SpotLight extends AbstractComponent
         float $range = 10.0,
         float $angle = 0.5,
         float $penumbra = 0.1,
+        bool $castsShadow = false,
     ) {
         $this->direction = $direction ?? new Vec3(0.0, -1.0, 0.0);
         $this->color = $color ?? Color::white();
@@ -65,5 +74,6 @@ class SpotLight extends AbstractComponent
         $this->range = $range;
         $this->angle = $angle;
         $this->penumbra = $penumbra;
+        $this->castsShadow = $castsShadow;
     }
 }

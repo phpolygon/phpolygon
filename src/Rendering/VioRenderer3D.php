@@ -398,6 +398,21 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
     /** Per-cascade ortho-box half-extents (matches OpenGLRenderer3D). */
     private const CASCADE_ORTHO_SIZES = [15.0, 50.0, 150.0];
     private const SHADOW_MAP_RESOLUTION = 2048;
+
+    /**
+     * Spot shadow: ONE depth map, from the first shadow-casting spot among the
+     * four lit ones, read through the fourth comparison sampler (the cascades take
+     * the other three) on unit 4.
+     */
+    private const SPOT_SHADOW_UNIT = 4;
+    private ?VioRenderTarget $spotShadowTarget = null;
+    private int $spotShadowRes = 0;
+    /** Index into u_spot_lights of the beam with the map, -1 for none. */
+    private int $spotShadowIndex = -1;
+    /** @var list<float> */
+    private array $spotShadowMatrix = [];
+    /** @var list<array{0: \VioMesh, 1: string, 2: int}>|null Shadow draws of this frame. */
+    private ?array $frameShadowDraws = null;
     private const SHADOW_ORTHO_SIZE = 60.0;
 
     /**
@@ -3301,6 +3316,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         // --- Shadow pass ---
         PerfProfiler::begin('render3d.submit.shadow');
         $hasShadowMap = $this->renderShadowPass($commandList, $dirLights);
+        $this->renderSpotShadowPass($commandList, $spotLights);
         PerfProfiler::end();
         if ($hasShadowMap) {
             $this->gpuMark('shadow');
@@ -4549,51 +4565,13 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
     }
 
     /**
-     * Render depth-only shadow pass from the brightest directional light.
+     * The shadow casters of a frame, resolved to depth-only instanced draws (mesh,
+     * packed matrices, count). Shared by the sun cascades and the spot shadow.
      *
-     * @param list<SetDirectionalLight> $dirLights
-     * @return bool Whether shadow map was rendered
+     * @return list<array{0: \VioMesh, 1: string, 2: int}>
      */
-    private function renderShadowPass(RenderCommandList $commandList, array $dirLights): bool
+    private function collectShadowDraws(RenderCommandList $commandList): array
     {
-        if ($this->settings->shadowQuality === \PHPolygon\Rendering\Quality\ShadowQuality::Off) {
-            return false;
-        }
-        if ($this->shadowTarget === null) {
-            $this->initShadowMap();
-        }
-        if ($this->shadowTarget === null || empty($dirLights)) {
-            return false;
-        }
-
-        // Find brightest directional light
-        $lightDir = null;
-        $lightIntensity = 0.0;
-        foreach ($dirLights as $dl) {
-            if ($dl->intensity > $lightIntensity) {
-                $lightDir = $dl->direction;
-                $lightIntensity = $dl->intensity;
-            }
-        }
-
-        if ($lightDir === null || $lightIntensity < 0.05) {
-            return false;
-        }
-
-        $shadowCenter = $this->currentViewMatrix?->inverse()->getTranslation();
-        $shadowRes = $this->settings->shadowQuality->resolution();
-        if ($shadowRes <= 0) {
-            $shadowRes = self::SHADOW_MAP_RESOLUTION;
-        }
-
-        // CSM: render the scene once per cascade into its own target.
-        //
-        // Pre-pass (once): collect shadow casters. The individual (non-instanced)
-        // casters are grouped by mesh and drawn instanced per cascade below, so no
-        // per-caster bounding sphere or lateral cull is computed — instancing keeps
-        // the draw count tiny, and drawing every caster into every cascade is free
-        // on this CPU-bound path (off-box casters clip to the cascade ortho box;
-        // the shadow result is identical to the old per-cascade-culled version).
         PerfProfiler::begin('render3d.shadow.collect');
         /** @var list<DrawMesh> $casters */
         $casters = [];
@@ -4704,6 +4682,58 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         }
 
         PerfProfiler::end();
+
+        return $shadowDraws;
+    }
+
+    /**
+     * Render depth-only shadow pass from the brightest directional light.
+     *
+     * @param list<SetDirectionalLight> $dirLights
+     * @return bool Whether shadow map was rendered
+     */
+    private function renderShadowPass(RenderCommandList $commandList, array $dirLights): bool
+    {
+        $this->frameShadowDraws = null;
+        if ($this->settings->shadowQuality === \PHPolygon\Rendering\Quality\ShadowQuality::Off) {
+            return false;
+        }
+        if ($this->shadowTarget === null) {
+            $this->initShadowMap();
+        }
+        if ($this->shadowTarget === null || empty($dirLights)) {
+            return false;
+        }
+
+        // Find brightest directional light
+        $lightDir = null;
+        $lightIntensity = 0.0;
+        foreach ($dirLights as $dl) {
+            if ($dl->intensity > $lightIntensity) {
+                $lightDir = $dl->direction;
+                $lightIntensity = $dl->intensity;
+            }
+        }
+
+        if ($lightDir === null || $lightIntensity < 0.05) {
+            return false;
+        }
+
+        $shadowCenter = $this->currentViewMatrix?->inverse()->getTranslation();
+        $shadowRes = $this->settings->shadowQuality->resolution();
+        if ($shadowRes <= 0) {
+            $shadowRes = self::SHADOW_MAP_RESOLUTION;
+        }
+
+        // CSM: render the scene once per cascade into its own target.
+        //
+        // Pre-pass (once): collect shadow casters. The individual (non-instanced)
+        // casters are grouped by mesh and drawn instanced per cascade below, so no
+        // per-caster bounding sphere or lateral cull is computed — instancing keeps
+        // the draw count tiny, and drawing every caster into every cascade is free
+        // on this CPU-bound path (off-box casters clip to the cascade ortho box;
+        // the shadow result is identical to the old per-cascade-culled version).
+        $shadowDraws = $this->frameShadowDraws = $this->collectShadowDraws($commandList);
 
         PerfProfiler::begin('render3d.shadow.draw');
         $this->cascadeLightSpaceMatrices = [];
@@ -5499,6 +5529,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
     {
         vio_set_uniform($this->ctx, 'u_has_shadow_map', $hasShadowMap ? 1 : 0);
         vio_set_uniform($this->ctx, 'u_csm_count', count(self::CASCADE_ORTHO_SIZES));
+        $this->uploadSpotShadowUniforms();
 
         if (!$hasShadowMap || empty($this->cascadeShadowTargets)) {
             // No real shadow map this frame, but mesh3d.frag.glsl still
@@ -5578,6 +5609,88 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
                 vio_set_uniform($this->ctx, 'u_light_space_matrix', $lsm);
             }
         }
+    }
+
+    /**
+     * Depth map of the first shadow-casting spot light among the four the shader
+     * lights: a perspective view down the beam (the cone plus a margin, out to
+     * the range), drawn with the sun cascades' casters and depth pipeline.
+     *
+     * @param list<AddSpotLight> $spotLights
+     */
+    private function renderSpotShadowPass(RenderCommandList $commandList, array $spotLights): void
+    {
+        $this->spotShadowIndex = -1;
+        if ($this->settings->shadowQuality === \PHPolygon\Rendering\Quality\ShadowQuality::Off) {
+            return;
+        }
+        $pick = -1;
+        foreach (array_slice($spotLights, 0, 4) as $i => $sl) {
+            if ($sl->castsShadow && $sl->range > 0.1) {
+                $pick = $i;
+                break;
+            }
+        }
+        if ($pick < 0) {
+            return;
+        }
+        $sl = $spotLights[$pick];
+        $full = $this->settings->shadowQuality->resolution();
+        $res = max(256, intdiv($full > 0 ? $full : self::SHADOW_MAP_RESOLUTION, 2));
+        if ($this->spotShadowTarget === null || $this->spotShadowRes !== $res) {
+            $this->spotShadowTarget = vio_render_target($this->ctx, ['width' => $res, 'height' => $res, 'depth_only' => true]) ?: null;
+            $this->spotShadowRes = $res;
+        }
+        if ($this->spotShadowTarget === null) {
+            return;
+        }
+        $draws = $this->frameShadowDraws ??= $this->collectShadowDraws($commandList);
+
+        $dir = $sl->direction->normalize();
+        $up = abs($dir->y) > 0.95 ? new Vec3(0.0, 0.0, 1.0) : new Vec3(0.0, 1.0, 0.0);
+        $view = Mat4::lookAt($sl->position, $sl->position->add($dir), $up);
+        $fov = min(2.0 * $sl->angle + 0.15, 3.0);
+        $proj = Mat4::perspective($fov, 1.0, max(0.05, $sl->range * 0.005), $sl->range);
+
+        PerfProfiler::begin('render3d.shadow.spot');
+        vio_bind_render_target($this->ctx, $this->spotShadowTarget);
+        vio_viewport($this->ctx, 0, 0, $res, $res);
+        vio_clear($this->ctx, 1.0, 1.0, 1.0, 1.0);
+        $this->bindShadowPipeline();
+        vio_set_uniform($this->ctx, 'u_view', $view->toArray());
+        vio_set_uniform($this->ctx, 'u_projection', $proj->toArray());
+        vio_set_uniform($this->ctx, 'u_use_instancing', 1);
+        foreach ($draws as [$mesh, $buf, $cnt]) {
+            vio_draw_instanced($this->ctx, $mesh, $buf, $cnt);
+        }
+        vio_unbind_render_target($this->ctx);
+        PerfProfiler::end();
+
+        // Sampled like the cascades: the render-target Y convention flips the matrix.
+        $m = $proj->multiply($view)->toArray();
+        if ($this->conventions()->flipRenderTargetClipY()) {
+            foreach ([1, 5, 9, 13] as $k) {
+                $m[$k] = -$m[$k];
+            }
+        }
+        $this->spotShadowMatrix = array_values($m);
+        $this->spotShadowIndex = $pick;
+    }
+
+    /** The spot shadow map on its unit, or the 1x1 dummy depth target with index -1. */
+    private function uploadSpotShadowUniforms(): void
+    {
+        if ($this->spotShadowIndex >= 0 && $this->spotShadowTarget !== null) {
+            vio_bind_texture($this->ctx, vio_render_target_texture($this->spotShadowTarget), self::SPOT_SHADOW_UNIT);
+            vio_set_uniform($this->ctx, 'u_spot_shadow_matrix', $this->spotShadowMatrix);
+        } else {
+            $this->ensureDummyShadowTarget();
+            if ($this->dummyShadowTarget !== null) {
+                vio_bind_texture($this->ctx, vio_render_target_texture($this->dummyShadowTarget), self::SPOT_SHADOW_UNIT);
+            }
+        }
+        vio_set_uniform($this->ctx, 'u_spot_shadow_map', self::SPOT_SHADOW_UNIT);
+        vio_set_uniform($this->ctx, 'u_spot_shadow_index', $this->spotShadowIndex);
     }
 
     /**

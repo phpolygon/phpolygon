@@ -348,6 +348,7 @@ class Renderer3DSystem extends AbstractSystem
                 $light->range,
                 $light->angle,
                 $light->penumbra,
+                $light->castsShadow,
             ));
         }
 

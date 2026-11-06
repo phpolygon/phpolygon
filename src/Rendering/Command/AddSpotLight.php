@@ -17,5 +17,6 @@ readonly class AddSpotLight
         public float $range,
         public float $angle,
         public float $penumbra,
+        public bool $castsShadow = false,
     ) {}
 }

@@ -516,6 +516,10 @@ final class HeadlessShaderHarness
         $this->setUniform('u_csm_map_1',  8);
         $this->setUniform('u_csm_map_2',  9);
         $this->setUniform('u_shadow_map', 7);
+        // The spot shadow (VioRenderer3D::SPOT_SHADOW_UNIT), off: index -1.
+        vio_bind_texture($this->ctx, $tex, 4);
+        $this->setUniform('u_spot_shadow_map', 4);
+        $this->setUniform('u_spot_shadow_index', -1);
 
         $this->bindDummyMaterialSamplers();
     }

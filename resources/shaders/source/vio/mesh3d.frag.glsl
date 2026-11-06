@@ -182,6 +182,12 @@ uniform float u_csm_far_1;
 uniform float u_csm_far_2;
 uniform int u_csm_count;
 
+// Spot shadow (VioRenderer3D::renderSpotShadowPass): one perspective depth map of
+// u_spot_lights[u_spot_shadow_index]; index -1 = no map this frame.
+uniform sampler2DShadow u_spot_shadow_map;
+uniform mat4 u_spot_shadow_matrix;
+uniform int u_spot_shadow_index;
+
 // Texture
 uniform int u_has_albedo_texture;
 uniform sampler2D u_albedo_texture;
@@ -474,6 +480,26 @@ float sampleCascade(sampler2DShadow map, mat4 lightSpace, vec3 worldPos, vec3 N)
         s += texture(map, vec3(pc.xy + rot * SHADOW_DISC[i] * ts, rd));
     }
     return s / 12.0;
+}
+
+// The spot beam's shadow: the point pushed off the surface along the normal by a
+// distance that grows with its distance to the lamp (the texel footprint of the
+// perspective map), then 8 taps of the disc, turned per pixel.
+float spotShadow(vec3 worldPos, vec3 N, vec3 L, float dist) {
+    float NdotL = max(dot(N, L), 0.0);
+    vec3 p = worldPos + N * (0.01 + 0.004 * dist) * (1.5 - NdotL);
+    vec4 lsp = u_spot_shadow_matrix * vec4(p, 1.0);
+    if (lsp.w <= 0.0) return 1.0;
+    vec3 pc = lsp.xyz / lsp.w * 0.5 + 0.5;
+    if (pc.x < 0.0 || pc.x > 1.0 || pc.y < 0.0 || pc.y > 1.0 || pc.z > 1.0) return 1.0;
+    float ts = 1.5 / float(textureSize(u_spot_shadow_map, 0).x);
+    float a = 6.2831853 * fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))));
+    mat2 rot = mat2(cos(a), sin(a), -sin(a), cos(a));
+    float s = 0.0;
+    for (int i = 0; i < 8; i++) {
+        s += texture(u_spot_shadow_map, vec3(pc.xy + rot * SHADOW_DISC[i] * ts, pc.z - 0.0002));
+    }
+    return s / 8.0;
 }
 
 float calcShadow(vec4 lsp, vec3 N) {
@@ -1612,6 +1638,9 @@ void main() {
         float cd = dot(-Ls, normalize(u_spot_lights[i].direction));
         float cone = smoothstep(cosOuter, cosInner, cd);
         atten *= cone;
+        if (i == u_spot_shadow_index && cone > 0.0) {
+            atten *= spotShadow(v_worldPos, N, Ls, dist);
+        }
 
         float NdotSL = max(dot(N, Ls), 0.0);
         if (NdotSL > 0.0 && cone > 0.0) {
