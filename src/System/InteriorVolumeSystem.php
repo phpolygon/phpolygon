@@ -41,6 +41,36 @@ class InteriorVolumeSystem extends AbstractSystem
     }
 
     /**
+     * How sheltered a point is: the largest strength of the interior volumes that
+     * contain it (their box turned by the yaw of their rotation), 0 outdoors.
+     * Weather uses it: no rain falls in a hall.
+     */
+    public static function shelterAt(World $world, Vec3 $p): float
+    {
+        $best = 0.0;
+        foreach ($world->query(InteriorVolume::class, Transform3D::class) as $entity) {
+            $volume = $entity->get(InteriorVolume::class);
+            if ($volume->strength <= $best) {
+                continue;
+            }
+            $transform = $entity->get(Transform3D::class);
+            $c = $transform->getWorldPosition();
+            $q = $transform->rotation;
+            $yaw = atan2(2.0 * ($q->w * $q->y + $q->x * $q->z), 1.0 - 2.0 * ($q->y * $q->y + $q->z * $q->z));
+            $dx = $p->x - $c->x;
+            $dz = $p->z - $c->z;
+            $lx = cos($yaw) * $dx - sin($yaw) * $dz;
+            $lz = sin($yaw) * $dx + cos($yaw) * $dz;
+            $h = $volume->halfExtents;
+            if (abs($lx) <= $h->x && abs($p->y - $c->y) <= $h->y && abs($lz) <= $h->z) {
+                $best = min(1.0, $volume->strength);
+            }
+        }
+
+        return $best;
+    }
+
+    /**
      * The uniform values for an eye at $eye, nearest volume first.
      *
      * @return array<string, list<float>>
