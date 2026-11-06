@@ -132,10 +132,10 @@ class RainShowerSystem extends AbstractSystem
         ));
     }
 
-    /** Drops per second for a rain intensity (0..1) and shelter (0..1). */
+    /** Drops per second for a rain intensity (0..1) and shelter (0..1; any interior volume keeps rain out). */
     public static function rateFor(float $rainIntensity, float $shelter): float
     {
-        if ($rainIntensity <= 0.05 || $shelter >= 0.5) {
+        if ($rainIntensity <= 0.05 || $shelter > 0.0) {
             return 0.0;
         }
 

@@ -62,7 +62,8 @@ final class RainShowerSystemTest extends TestCase
 
         self::assertSame(0, iterator_count($world->query(ParticleEmitter::class)));
         self::assertSame(0.0, RainShowerSystem::rateFor(1.0, 1.0));
-        self::assertGreaterThan(0.0, RainShowerSystem::rateFor(1.0, 0.3));
+        self::assertSame(0.0, RainShowerSystem::rateFor(1.0, 0.02), 'any interior volume is dry');
+        self::assertGreaterThan(0.0, RainShowerSystem::rateFor(1.0, 0.0));
     }
 
     public function testNoRainBelowTheWaterSurface(): void

@@ -29,6 +29,8 @@ class InteriorVolume extends AbstractComponent
     #[Property]
     #[Range(min: 0, max: 1)]
     public float $strength = 1.0;
+    // Rain: ANY interior volume is dry inside (RainShowerSystem, the mesh shader's
+    // rainSoak), whatever its strength; the strength only scales the light mask.
 
     public function __construct(?Vec3 $halfExtents = null, float $strength = 1.0)
     {

@@ -670,6 +670,42 @@ float interiorMask(vec3 p) {
                max(interiorBox(p, u_interior_box_2, u_interior_ext_2), interiorBox(p, u_interior_box_3, u_interior_ext_3)));
 }
 
+// Rain on the ground (shader plan 4.1): how soaked a point with normal n is (x) and
+// how much of that is a standing puddle (y), from the weather's u_rain_wetness.
+// Only up-facing, non-water surfaces outside every interior volume (any volume
+// keeps the rain out, whatever its light strength); puddles stand in
+// the hollows of a slow two-octave noise and spread as the rain grows.
+vec2 rainSoak(vec3 p, vec3 n) {
+    if (u_rain_wetness <= 0.0 || u_proc_mode == 2) return vec2(0.0);
+    float up = clamp(dot(n, vec3(0.0, 1.0, 0.0)) * 1.6 - 0.6, 0.0, 1.0);
+    if (up <= 0.0 || interiorMask(p) > 0.0) return vec2(0.0);
+    float soak = clamp(u_rain_wetness, 0.0, 1.0) * up;
+    float h = noise(p.xz * 0.11) * 0.65 + noise(p.xz * 0.43) * 0.35;
+    float t = 0.78 - 0.2 * u_rain_wetness;
+    float puddle = smoothstep(t, t + 0.06, 1.0 - h) * soak;
+    return vec2(soak, puddle);
+}
+
+// Rain rings on wet ground (shader plan 4.1): two offset grids of 0.35 m cells, each
+// with a drop landing at a random spot and time; its ring grows and fades over its
+// cycle. Returns the horizontal tilt of the normal.
+vec2 rainRipples(vec2 xz, float time) {
+    vec2 tilt = vec2(0.0);
+    for (int layer = 0; layer < 2; layer++) {
+        vec2 q = xz / 0.35 + vec2(float(layer) * 0.37, float(layer) * 0.61);
+        vec2 cell = floor(q);
+        float rnd = hash21(cell + float(layer) * 17.0);
+        vec2 centre = cell + 0.2 + 0.6 * vec2(hash21(cell + 3.1), hash21(cell + 7.7));
+        float phase = fract(time * 1.3 + rnd);
+        vec2 d = (q - centre) * 0.35;
+        float dist = length(d);
+        float r = phase * 0.16;
+        float ring = sin(clamp((dist - r) * 90.0, -3.14159, 3.14159)) * (1.0 - phase) * step(abs(dist - r), 0.035);
+        tilt += (d / max(dist, 1e-4)) * ring;
+    }
+    return tilt * 0.35;
+}
+
 // Environment (IBL) reflection: the bound cubemap — GPU sky probe (mipmapped,
 // u_env_mip_max > 0) or a baked reflection_probe — sampled at a roughness-
 // mapped LOD; falls back to the horizon/sky tint when no map is bound.
@@ -919,9 +955,10 @@ vec4 gbufferValue(vec3 worldN) {
     vec3 n = normalize(mat3(u_gbuffer_view) * worldN);
     float linearDepth = -(u_gbuffer_view * vec4(v_worldPos, 1.0)).z;
     float smoothness = 1.0 - clamp(u_roughness, 0.0, 1.0);
-    float wet = max(u_wetness, u_rain_wetness);
+    // Rain: a wet film reflects a little, a puddle a lot (rainSoak, shader plan 4.1).
+    vec2 soak = rainSoak(v_worldPos, worldN);
     float metalRefl = u_metallic * smoothness;
-    float wetRefl   = wet * smoothness * smoothness;
+    float wetRefl   = max(u_wetness * smoothness * smoothness, soak.x * 0.3 + soak.y * 0.6);
     float reflectivity = clamp(max(metalRefl, wetRefl), 0.0, 1.0);
     if (u_proc_mode == 2) {
         float r = length(v_worldPos.xz);
@@ -1445,6 +1482,20 @@ void main() {
         float w = u_wetness * upMask;
         roughness = mix(roughness, max(roughness * 0.25, 0.04), w);
         albedo    = mix(albedo,    albedo * 0.7,                 w);
+    }
+
+    // Rain-soaked ground (shader plan 4.1): porous surfaces darken, the water film
+    // smooths them, puddles are near mirrors lying flat. Mirrors in the G-buffer.
+    vec2 soak = rainSoak(v_worldPos, N);
+    if (soak.x > 0.0) {
+        albedo *= mix(1.0, 0.6, soak.x * (1.0 - metallic));
+        roughness = mix(roughness, mix(0.22, 0.04, soak.y / max(soak.x, 1e-4)), soak.x);
+        N = normalize(mix(N, vec3(0.0, 1.0, 0.0), soak.y));
+        // Drops ring the puddles (the film only a little).
+        // Far away the rings would only flicker: they fade out from 15 to 35 m.
+        float ripFade = 1.0 - smoothstep(15.0, 35.0, length(u_camera_pos - v_worldPos));
+        vec2 rip = ripFade > 0.0 ? rainRipples(v_worldPos.xz, u_frag_time) * (soak.y + 0.25 * soak.x) * u_rain_wetness * ripFade : vec2(0.0);
+        N = normalize(N + vec3(rip.x, 0.0, rip.y));
     }
 
 #ifndef PHPOLYGON_OMIT_SNOW
