@@ -1547,8 +1547,9 @@ classic per-target build.
     "external": ["assets/audio", "resources/video"],
     "exclude": ["assets/audio/raw-takes", "assets/**/*.wav"]
   },
+  "icon": "resources/icon.png",
   "platforms": {
-    "macos": { "icon": "icon.icns", "minimumVersion": "12.0" }
+    "macos": { "minimumVersion": "12.0" }
   }
 }
 ```
@@ -1589,6 +1590,58 @@ does the runtime: the stub refuses to start without `ext-zlib` and says so in
 `game.log`, before it reads anything from the archive. The engine's static runtimes
 carry zlib (static-php-cli pulls it in for phar/openssl, and for zip/curl on
 Windows). Any other runtime must too, or the game sets `"compression": "none"`.
+
+### Application icon
+
+`build.json` `icon` names one square PNG (at least 256 px, 1024 recommended); the build makes every
+platform's icon from it in plain PHP (`Icon\Png`, no GD, no Apple or Windows tools), so a Windows or macOS
+target gets its icon on any build host, Docker included.
+
+```json
+"icon": "resources/icon.png",
+"icon": { "source": "resources/icon.png", "small": "resources/icon-16.png" },
+"platforms": { "windows": { "icon": "art/app.ico" }, "macos": { "icon": "art/app.icns" }, "linux": { "icon": "art/app.png" } }
+```
+
+- `small` (optional): a square PNG drawn for small sizes; it makes every size up to min(32, its size).
+- `platforms.<os>.icon` (optional) replaces what `source` would give that platform: a finished `.ico`
+  (Windows), `.icns` or `.png` (macOS), `.png` (Linux, shipped as it is). The old `platforms.macos.icon`
+  `.icns` works as before; when its file is missing the build warns and uses `source`, or ships no icon
+  (and no longer writes a dangling `CFBundleIconFile`). Any other configured file that is missing fails the build.
+- Shrinking: area averaging with premultiplied alpha (`Icon\IconResampler`): halves down from the source,
+  each size from the smallest step at least four times larger. Deterministic bytes on every host.
+- **Windows:** `Build\Icon\PeIconWriter` writes RT_ICON 1..7 + RT_GROUP_ICON 1 (16, 24, 32, 48, 64, 128
+  as 32-bit DIB, 256 as PNG) into a copy of the bare micro.sfx before the PHAR is appended (GameBuilder
+  phase 4a). The whole resource tree is rewritten, other resources (version info, manifest) are kept,
+  the old icons dropped. The new tree goes into a new last section (`.rsrc`; the old one stays unreferenced
+  as `.rsrcold`) or replaces the resource section when that is last. micro finds its payload at the end of
+  the last section (`php_micro_fileinfo.c`; an RCDATA 12345 size record is rewritten when present), so the
+  embedded ini and the PHAR are found as before; checksum and SizeOfImage are recomputed. A file with data
+  after its sections is refused, an Authenticode signature removed (sign after the build). Measured
+  2026-11-06 on the php 8.5 micro.sfx of the runtime release (59.7 MB): patch 2.1-2.3 s (2 runs) incl.
+  decoding the 1024 px source; the exe grows by 116 KiB and runs, ini and PHAR intact; `PrivateExtractIcons`
+  returns all seven sizes. Other ways were not taken: rcedit runs only on Windows, static-php-cli
+  `--with-micro-logo` needs a self-built runtime per game.
+- **macOS:** `Contents/Resources/AppIcon.icns` (`Build\Icon\IcnsFile`: PNG entries icp4, ic11, icp5, ic12,
+  ic07, ic13, ic08, ic14, ic09, ic10 and a TOC; entries above the source size are left out),
+  `CFBundleIconFile` set. The universal bundle shares Contents/Resources, so it carries the icon too.
+  `iconutil -c iconset` and `sips` on macOS 27.2 read every entry at its size (2026-11-06). No `icp6`:
+  iconutil takes it for 48 px. A bundle's icon in Finder/Dock is not yet checked on a Mac.
+- **Linux:** `<identifier>.png` (256 px), `.DirIcon` (the same PNG) and `<identifier>.desktop`
+  (`Icon=<identifier>`, `Exec=<binary>`, `Categories=Game;`) at the package root - the AppDir layout
+  appimagetool takes; the engine builds no AppImage itself.
+- **Window:** the build stages `resources/phpolygon-window-icon.bin` (`Icon\WindowIconSet`: 16-256 px RGBA,
+  zlib; measured 2026-11-06 on a flat-coloured 1024 px icon: 18.8 KB, read in 6 ms) into the PHAR; `Engine::run()` applies it right after the window opens
+  (`Runtime\WindowIcon`, `Window::setIcon()`). `VioMainWindow` uses php-vio >= 2.41 `vio_set_window_icon`
+  (gated by `function_exists`; older php-vio and the GLFW window keep the default icon; Wayland has none).
+  Needed on Windows: php-vio's window class uses the system's default icon, not the exe's. The php 8.5
+  Windows runtime of the release (checked 2026-11-06) still carries php-vio 2.40.3: a built game logs
+  "Window icon: not supported" and keeps the default window icon until the runtime has php-vio 2.41.
+  `EngineConfig::$windowIcon`: null = the build's set (none in an unbuilt game; none inside a macOS .app,
+  whose bundle icon already is the Dock icon), '' = none, a path = a square PNG shrunk at start-up (for
+  development; 1.07 s for a 1024 px PNG, measured 2026-11-06) or a prepared set.
+- Tests: `tests/Icon/*`, `tests/Build/Icon/*` (ICO/ICNS byte layout, PE edits on a synthetic PE32+, the real
+  runtime when `PHPOLYGON_TEST_MICRO_SFX` or the resolver cache has one), `PlatformPackagerTest`, `WindowIconTest`.
 
 ### Start-up extraction (stub + `Runtime\BundleExtractor`)
 
@@ -1668,6 +1721,8 @@ run a build once on an Apple Silicon Mac.
 | `Runtime\BundleExtractor` | Stub-side: extract PHAR assets/resources once per build id (marker, atomic, cache fallback with links) |
 | `StaticPhpResolver` | Finds/downloads/caches micro.sfx binary + Windows runtime libs (vulkan-1, d3dcompiler_47, DXC `dxcompiler.dll`/`dxil.dll` from the latest DirectXShaderCompiler release for Shader Model 6, Steam API) |
 | `PlatformPackager` | Creates .app bundle, Linux dir, Windows .exe |
+| `Icon\AppIconConfig` / `Icon\AppIconBuilder` | build.json `icon` + `platforms.<os>.icon`; makes the .ico entries, .icns, Linux PNG and window icon set (see "Application icon") |
+| `Icon\IcoFile` / `Icon\IcnsFile` / `Icon\PeIconWriter` / `Icon\PeImage` | .ico and .icns writers/readers; icon resources in a PE runtime |
 | `GameBuilder` | Orchestrates the 7-phase pipeline |
 | `BuildHookRunner` | Runs build.json `hooks.beforeBuild` before staging (see below) |
 | `BuildConstants` | Build type constants: rewrite `define()` in the staged bootstrap files, resolve what a set of sources defines |

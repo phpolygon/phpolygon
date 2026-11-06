@@ -442,6 +442,16 @@ class Window
         glfwSetInputMode($this->handle, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
     }
 
+    /**
+     * Set the window icon ({@see \PHPolygon\Runtime\WindowIcon}). Returns whether
+     * the platform took it. The GLFW window has no icon call (php-glfw lacks
+     * glfwSetWindowIcon), so it keeps the default.
+     */
+    public function setIcon(\PHPolygon\Icon\WindowIconSet $icon): bool
+    {
+        return false;
+    }
+
     // ── Internal helpers ────────────────────────────────────────────────────
 
     /**

@@ -390,6 +390,20 @@ class VioMainWindow extends Window
         vio_set_cursor_mode($this->ctx, VIO_CURSOR_NORMAL);
     }
 
+    /**
+     * php-vio >= 2.41 `vio_set_window_icon` (gated per function): title bar and
+     * taskbar on Windows, _NET_WM_ICON on X11, the Dock on macOS. Wayland has no
+     * window icons and an invisible surface needs none; both return false, as
+     * does an older php-vio.
+     */
+    public function setIcon(\PHPolygon\Icon\WindowIconSet $icon): bool
+    {
+        if (!$this->initialized || $this->offscreen || !function_exists('vio_set_window_icon')) {
+            return false;
+        }
+        return vio_set_window_icon($this->ctx, $icon->toVio());
+    }
+
     public function destroy(): void
     {
         if ($this->initialized) {

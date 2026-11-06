@@ -52,6 +52,7 @@ use PHPolygon\Runtime\PerfProfiler;
 use PHPolygon\Runtime\VioInput;
 use PHPolygon\Runtime\VioMainWindow;
 use PHPolygon\Runtime\Window;
+use PHPolygon\Runtime\WindowIcon;
 use PHPolygon\SaveGame\SaveManager;
 use PHPolygon\Scene\SceneManager;
 use PHPolygon\Scene\SceneManagerInterface;
@@ -755,6 +756,10 @@ class Engine
         self::log('Window initializing...');
         $this->window->initialize($this->input);
         self::log('Window initialized, framebuffer: ' . $this->window->getFramebufferWidth() . 'x' . $this->window->getFramebufferHeight());
+        // Window icon before the first frame, so the taskbar never shows the default.
+        if (!$this->headless && !$this->config->offscreen) {
+            WindowIcon::apply($this->window, $this->config->windowIcon);
+        }
         // Apply the saved display mode NOW — the window exists but no frame has
         // drawn yet, so the studio splash (and everything after) renders in the
         // player's chosen mode instead of briefly flashing windowed.

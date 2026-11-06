@@ -181,5 +181,15 @@ class EngineConfig
          * and thresholds, in any mode.
          */
         public readonly \PHPolygon\Runtime\FrameSpikeRecorder|false|null $frameSpikes = null,
+        /**
+         * Window icon (title bar, taskbar, Alt-Tab; X11; the Dock outside a
+         * .app), set right after the window opens through php-vio >= 2.41
+         * `vio_set_window_icon` - an older php-vio keeps the default icon.
+         * null = the icon a build made from build.json `icon` (none in an
+         * unbuilt game, none inside a macOS .app whose bundle icon already
+         * shows), '' = none, a path = a square PNG shrunk at start-up (for
+         * development) or a prepared set ({@see \PHPolygon\Runtime\WindowIcon}).
+         */
+        public readonly ?string $windowIcon = null,
     ) {}
 }

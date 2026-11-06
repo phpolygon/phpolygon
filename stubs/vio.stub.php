@@ -248,6 +248,21 @@ function vio_set_windowed(VioContext $ctx): void {}
 
 function vio_set_window_size(VioContext $ctx, int $width, int $height): void {}
 
+/**
+ * php-vio >= 2.41: the window icon from RGBA images of several sizes (macOS:
+ * the Dock icon; Wayland has none). [] restores the default.
+ *
+ * @param list<array{data: string, width: int, height: int}> $images
+ */
+function vio_set_window_icon(VioContext $ctx, array $images): bool {}
+
+/**
+ * php-vio >= 2.41: what the window platform can do ('name', 'window_icon', ...).
+ *
+ * @return array<string, string|bool>
+ */
+function vio_platform_info(): array {}
+
 function vio_viewport(VioContext $ctx, int $x, int $y, int $width, int $height): void {}
 
 // ----------------------------------------------------------------
