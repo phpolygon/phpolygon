@@ -186,6 +186,7 @@ uniform vec4 u_height_fog;        // density, falloff, base height, on
 uniform vec4 u_height_fog_color;  // rgb, 1 = own colour (else the distance-fog colour)
 uniform int  u_fog_volume_count;
 uniform vec4 u_fog_volumes[12];   // per volume: (centre, yaw), (half extents, density), (colour, edge)
+uniform float u_light_halo;       // light scattered by the air per metre (halos, cones)
 
 // HDR pipeline
 uniform int u_linear_output;
@@ -799,6 +800,71 @@ vec4 sceneFog(vec3 p) {
         return sandVeil(p, d, vec4(c, total));
     }
     return sandVeil(p, d, base);
+}
+
+// Light the air scatters towards the eye between it and p (shader plan 4.2): a halo
+// round each of the nearest point lights - the inverse-square in-scatter along
+// the ray in closed form, windowed by the light's radius - and the visible cone
+// of each spot light, sampled through its range sphere (with the spot shadow for
+// the beam that has one). Rain thickens the air. Additive local light.
+vec3 lightInscatter(vec3 p) {
+    float sigma = u_light_halo + 0.03 * clamp(u_rain_wetness, 0.0, 1.0);
+    // Indoor air is dry: a third of the scattering from inside an interior volume.
+    if (interiorMask(u_camera_pos) > 0.0) sigma *= 0.3;
+    if (sigma <= 0.0) return vec3(0.0);
+    vec3 o = u_camera_pos;
+    vec3 rd = p - o;
+    float len = length(rd);
+    if (len < 0.01) return vec3(0.0);
+    rd /= len;
+    vec3 sum = vec3(0.0);
+    int pn = min(u_point_light_count, 8);
+    for (int i = 0; i < 8; i++) {
+        if (i >= pn) break;
+        vec3 lp = u_point_lights[i].position;
+        // The halo hugs the lamp: a third of its reach, at most 3.5 m.
+        float r = clamp(u_point_lights[i].radius * 0.3, 0.01, 3.5);
+        float tc = dot(lp - o, rd);
+        float h = max(length(lp - (o + rd * tc)), 0.08);
+        if (h >= r) continue;
+        float a = (atan((len - tc) / h) - atan(-tc / h)) / h;
+        float w = 1.0 - h * h / (r * r);
+        // Lamps behind the viewer would tint the whole view: they fade out.
+        sum += u_point_lights[i].color * u_point_lights[i].intensity * a * w * w * 3.0 * smoothstep(-1.0, 3.0, tc);
+    }
+    float jit = fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))));
+    int sn = min(u_spot_light_count, 4);
+    for (int i = 0; i < 4; i++) {
+        if (i >= sn) break;
+        vec3 lp = u_spot_lights[i].position;
+        float R = max(u_spot_lights[i].range, 0.01);
+        vec3 oc = lp - o;
+        float b = dot(oc, rd);
+        float disc = b * b - (dot(oc, oc) - R * R);
+        if (disc <= 0.0) continue;
+        float sq = sqrt(disc);
+        float t0 = max(b - sq, 0.0);
+        float t1 = min(b + sq, len);
+        if (t1 <= t0) continue;
+        float st = (t1 - t0) / 6.0;
+        vec3 sd = normalize(u_spot_lights[i].direction);
+        float cosOuter = cos(u_spot_lights[i].angle);
+        float cosInner = cos(u_spot_lights[i].angle * (1.0 - u_spot_lights[i].penumbra));
+        vec3 acc = vec3(0.0);
+        for (int j = 0; j < 6; j++) {
+            vec3 q = o + rd * (t0 + (float(j) + jit) * st);
+            vec3 lq = lp - q;
+            float dq = length(lq);
+            vec3 ln = lq / max(dq, 1e-3);
+            float cone = smoothstep(cosOuter, cosInner, dot(-ln, sd));
+            if (cone <= 0.0) continue;
+            float at = clamp(1.0 - dq * dq / (R * R), 0.0, 1.0);
+            float sh = i == u_spot_shadow_index ? spotShadow(q, ln, ln, dq) : 1.0;
+            acc += vec3(at * at * cone * sh / max(dq * dq, 0.5));
+        }
+        sum += u_spot_lights[i].color * u_spot_lights[i].intensity * acc * st;
+    }
+    return sum * sigma * 0.08;
 }
 
 // Rain drops on glass (shader plan 4.1): resting drops in 2 cm cells and, on steep
@@ -2097,6 +2163,7 @@ void main() {
     ambientAcc *= (1.0 - fogT);
     localAcc    = localAcc * (1.0 - fogT) + sceneFogV.rgb * fogT;
     localAcc   += volumetricScatter(v_worldPos);
+    localAcc   += lightInscatter(v_worldPos) * (1.0 - 0.5 * fogT);
     vec3 pcA = applyPostColor(vec3(0.0));
     vec3 pcS = applyPostColor(vec3(1.0)) - pcA;
     float coverage = mrtCoverage(alpha);
@@ -2107,6 +2174,7 @@ void main() {
     vec3 color = sunAcc + localAcc + ambientAcc;
     color = mix(color, sceneFogV.rgb, fogT);
     color += volumetricScatter(v_worldPos);
+    color += lightInscatter(v_worldPos) * (1.0 - 0.5 * fogT);
     color = applyPostColor(color);
     frag_color = outputColor(color, alpha);
 #endif

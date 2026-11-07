@@ -45,16 +45,18 @@ class AtmosphereFogSystem extends AbstractSystem
     }
 
     /**
-     * @return array<string, int|list<float>>
+     * @return array<string, int|float|list<float>>
      */
     public static function uniforms(World $world, Vec3 $eye): array
     {
         $out = [
             'u_height_fog' => [0.0, 0.1, 0.0, 0.0],
             'u_height_fog_color' => [0.0, 0.0, 0.0, 0.0],
+            'u_light_halo' => 0.0,
         ];
         foreach ($world->query(HeightFog::class) as $entity) {
             $fog = $entity->get(HeightFog::class);
+            $out['u_light_halo'] = max(0.0, $fog->lightHalo);
             if ($fog->density > 0.0) {
                 $out['u_height_fog'] = [$fog->density, max(0.001, $fog->falloff), $fog->baseHeight, 1.0];
                 if ($fog->color !== null) {

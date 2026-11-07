@@ -478,6 +478,8 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
     private float $rainWetness = 0.0;
     private float $raining = 0.0;
     private float $rainDryBelow = -1.0e6;
+    /** @var list<list<float>> nearest point lights for the sky's halos: (position, radius), (radiance, 0) */
+    private array $skyHaloLights = [];
     /** @var list<float> sandstorm colour rgb + intensity (SetSandstorm) */
     private array $sandstorm = [0.0, 0.0, 0.0, 0.0];
     /** @var list<float> wind direction xz of the sandstorm */
@@ -6162,8 +6164,11 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         $sunY = $sky->sunDirection->y / $sunLen;
         $rainbow = $this->rainbowStrength($this->rainWetness, $this->raining, $sunY, $sky->sunIntensity);
 
+        $haloSigma = (float) ($this->snippetParameters['u_light_halo'] ?? 0.0) + 0.03 * min(1.0, $this->rainWetness);
+        $skyHalos = $haloSigma > 0.0 && $this->skyHaloLights !== [];
+
         // 5. Clouds (alpha).
-        if ($sky->cloudCover > 0.0 || $rainbow > 0.0) {
+        if ($sky->cloudCover > 0.0 || $rainbow > 0.0 || $skyHalos) {
             // Normalise wind direction in the XZ plane so clouds drift in world space.
             $wd = $sky->cloudWindDirection;
             $wl = sqrt($wd->x * $wd->x + $wd->z * $wd->z);
@@ -6184,6 +6189,12 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             vio_set_uniform($this->ctx, 'u_cloud_darkness', $sky->cloudDarkness);
             vio_set_uniform($this->ctx, 'u_lightning', $sky->lightning);
             vio_set_uniform($this->ctx, 'u_rainbow', $rainbow);
+            $haloCount = $skyHalos ? intdiv(count($this->skyHaloLights), 2) : 0;
+            vio_set_uniform($this->ctx, 'u_halo_count', $haloCount);
+            vio_set_uniform($this->ctx, 'u_halo_sigma', $haloSigma);
+            for ($i = 0; $i < $haloCount * 2; $i++) {
+                vio_set_uniform($this->ctx, "u_halo_lights[{$i}]", $this->skyHaloLights[$i]);
+            }
             vio_set_uniform($this->ctx, 'u_lightning_dir', [sin($sky->lightningAzimuth), cos($sky->lightningAzimuth)]);
             vio_draw($this->ctx, $quad);
         }
@@ -7822,6 +7833,13 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         }
         $ptCount = min(count($pointLights), 8);
         vio_set_uniform($this->ctx, 'u_point_light_count', $ptCount);
+        // The same lamps for the halos the sky pass draws (next frame's sky).
+        $this->skyHaloLights = [];
+        for ($i = 0; $i < $ptCount; $i++) {
+            $hl = $pointLights[$i];
+            $this->skyHaloLights[] = [$hl->position->x, $hl->position->y, $hl->position->z, $hl->radius];
+            $this->skyHaloLights[] = [$hl->color->r * $hl->intensity * $piScale, $hl->color->g * $hl->intensity * $piScale, $hl->color->b * $hl->intensity * $piScale, 0.0];
+        }
         for ($i = 0; $i < $ptCount; $i++) {
             $pl = $pointLights[$i];
             vio_set_uniform($this->ctx, "u_point_lights[{$i}].position", [$pl->position->x, $pl->position->y, $pl->position->z]);

@@ -38,8 +38,17 @@ class HeightFog extends AbstractComponent
     #[Property(editorHint: 'color')]
     public ?Color $color;
 
-    public function __construct(float $density = 0.0, float $falloff = 0.1, float $baseHeight = 0.0, ?Color $color = null)
+    /**
+     * How much light the air scatters around lamps (per metre): halos round point
+     * lights and visible spot cones (shader plan 4.2). Rain adds to it. 0 = none.
+     */
+    #[Property]
+    #[Range(min: 0, max: 0.2)]
+    public float $lightHalo = 0.0;
+
+    public function __construct(float $density = 0.0, float $falloff = 0.1, float $baseHeight = 0.0, ?Color $color = null, float $lightHalo = 0.0)
     {
+        $this->lightHalo = $lightHalo;
         $this->density = $density;
         $this->falloff = $falloff;
         $this->baseHeight = $baseHeight;

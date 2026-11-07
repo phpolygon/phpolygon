@@ -23,6 +23,11 @@ uniform float u_lightning;
 // Rainbow strength 0..1 (VioRenderer3D::rainbowStrength): the bow around the
 // antisolar point, primary at 42 degrees, a faint reversed secondary at 51.
 uniform float u_rainbow;
+// Halos of the nearest lamps against the sky (shader plan 4.2, like mesh3d's
+// lightInscatter for a ray that never ends): (position, radius), (radiance, 0).
+uniform int   u_halo_count;
+uniform float u_halo_sigma;
+uniform vec4  u_halo_lights[16];
 uniform vec2  u_lightning_dir;
 // HDR scene path: clouds alpha-blend over the linear sky, so linearise the
 // cloud colour so it composites against the tonemapped resolve correctly.
@@ -132,6 +137,24 @@ vec4 rainbow(vec3 dir) {
     return vec4(c, w * u_rainbow * fadeLow);
 }
 
+vec3 skyHalos(vec3 dir) {
+    vec3 sum = vec3(0.0);
+    for (int i = 0; i < 8; i++) {
+        if (i >= u_halo_count) break;
+        vec4 pr = u_halo_lights[i * 2];
+        vec3 lc = u_halo_lights[i * 2 + 1].rgb;
+        float r = clamp(pr.w * 0.3, 0.01, 3.5);
+        float tc = dot(pr.xyz - u_camera_pos, dir);
+        float h = max(length(pr.xyz - (u_camera_pos + dir * tc)), 0.08);
+        if (h >= r) continue;
+        float a = (1.5707963 - atan(-tc / h)) / h;
+        float w = 1.0 - h * h / (r * r);
+        // Lamps behind the viewer would tint the whole sky: they fade out.
+        sum += lc * a * w * w * 3.0 * smoothstep(-1.0, 3.0, tc);
+    }
+    return sum * u_halo_sigma * 0.08;
+}
+
 void main() {
     vec4 world = u_sky_inv_vp * vec4(v_ndc, 1.0, 1.0);
     vec3 dir = normalize(world.xyz / world.w);
@@ -139,6 +162,17 @@ void main() {
     vec3 boltColor = vec3(0.85, 0.88, 1.0) * 4.0;
 
     vec4 bow = rainbow(dir);
+    // Lamp halos join the bow layer: a glow of their colour over the sky.
+    if (u_halo_count > 0) {
+        vec3 hs = skyHalos(dir);
+        float ha = clamp(max(max(hs.r, hs.g), hs.b), 0.0, 1.0);
+        if (ha > 0.0) {
+            vec3 hcol = hs / max(ha, 1e-4);
+            if (u_linear_output != 1) hcol = clamp(hcol, 0.0, 1.0);
+            float na = ha + bow.a * (1.0 - ha);
+            bow = vec4((hcol * ha + bow.rgb * bow.a * (1.0 - ha)) / max(na, 1e-4), na);
+        }
+    }
 
     // Only march upward into the slab.
     if (dir.y <= 0.02 || u_cloud_cover <= 0.0) {
