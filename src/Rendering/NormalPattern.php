@@ -47,6 +47,8 @@ final class NormalPattern
     public const SKIN        = 'skin';
     /** Rounded stones in mortar beds (shader plan 5.1), with a height field for parallax. */
     public const COBBLESTONE = 'cobblestone';
+    /** Overlapping roof tiles in rows, each a little lifted at its lower edge (shader plan 5.5). */
+    public const ROOF_TILES  = 'roof_tiles';
 
     /**
      * Map a string pattern id to the integer code consumed by the shader's
@@ -67,6 +69,7 @@ final class NormalPattern
             self::NOISE       => 9,
             self::SKIN        => 10,
             self::COBBLESTONE => 11,
+            self::ROOF_TILES  => 12,
             default           => 0,
         };
     }

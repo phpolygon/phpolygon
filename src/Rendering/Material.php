@@ -316,6 +316,12 @@ class Material
         public readonly float $windowLights = 0.0,
         /** Emissive neon tube: a hot white core facing the viewer, softer towards the rim. */
         public readonly bool $neonTube = false,
+        /** 0..1: cloth fuzz - a soft rim of the albedo colour at grazing angles (shader plan 5.5). */
+        public readonly float $sheen = 0.0,
+        /** 0..1: brushed metal - the sun's highlight stretched along the surface's horizontal. */
+        public readonly float $brushed = 0.0,
+        /** 0..1: micro glitter - tiny crystals that flash in the sun (sand, granite, snow). */
+        public readonly float $glitter = 0.0,
     ) {}
 
     /**
@@ -575,6 +581,9 @@ class Material
             glassDirt: $this->glassDirt,
             windowLights: $this->windowLights,
             neonTube: $this->neonTube,
+            sheen: $this->sheen,
+            brushed: $this->brushed,
+            glitter: $this->glitter,
         );
     }
 

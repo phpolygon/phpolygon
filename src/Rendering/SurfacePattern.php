@@ -38,6 +38,10 @@ final class SurfacePattern
      * with {@see NormalPattern::SKIN}.
      */
     public const SKIN            = 'skin';
+    /** Veined marble: soft veins through a pale stone (shader plan 5.5). */
+    public const MARBLE          = 'marble';
+    /** Sandstone: fine grain and horizontal bedding layers. */
+    public const SANDSTONE       = 'sandstone';
 
     public static function codeFor(?string $pattern): int
     {
@@ -47,6 +51,8 @@ final class SurfacePattern
             self::BRUSHED_METAL  => 3,
             self::POLISHED_RINGS => 4,
             self::SKIN           => 5,
+            self::MARBLE         => 6,
+            self::SANDSTONE      => 7,
             default              => 0,
         };
     }

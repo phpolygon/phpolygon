@@ -202,6 +202,8 @@ uniform float u_weathering;
 uniform vec2 u_glass;
 // Emissive looks (shader plan 5.4): x = lit window fraction, y = neon tube.
 uniform vec2 u_emissive_look;
+// Material looks (shader plan 5.5): x = cloth sheen, y = brushed metal, z = glitter.
+uniform vec3 u_material_look;
 uniform vec4 u_decals[24];
 
 // HDR pipeline
@@ -1346,6 +1348,14 @@ vec3 np_skin(vec2 uv) {
 
 float nh_cobblestone(vec2 uv);
 // Normal from the cobblestone height field (central differences).
+float nh_roof_tiles(vec2 uv);
+vec3 np_roof_tiles(vec2 uv) {
+    float e = 0.004;
+    float hx = nh_roof_tiles(uv + vec2(e, 0.0)) - nh_roof_tiles(uv - vec2(e, 0.0));
+    float hy = nh_roof_tiles(uv + vec2(0.0, e)) - nh_roof_tiles(uv - vec2(0.0, e));
+    return normalize(vec3(-hx * 2.5, -hy * 2.5, 1.0));
+}
+
 vec3 np_cobblestone(vec2 uv) {
     float e = 0.004;
     float hx = nh_cobblestone(uv + vec2(e, 0.0)) - nh_cobblestone(uv - vec2(e, 0.0));
@@ -1365,6 +1375,7 @@ vec3 dispatchProceduralNormal(int code, vec2 uv) {
     if (code == 9)  return np_noise_pattern(uv);
     if (code == 10) return np_skin(uv);
     if (code == 11) return np_cobblestone(uv);
+    if (code == 12) return np_roof_tiles(uv);
     return vec3(0.0, 0.0, 1.0);
 }
 #endif // PHPOLYGON_OMIT_NORMAL_PATTERNS
@@ -1416,12 +1427,28 @@ vec3 sp_skin(vec2 uv) {
     return vec3(albedoT, roughD, 0.0);
 }
 
+// Marble (shader plan 5.5): soft dark veins winding through pale stone.
+vec3 sp_marble(vec2 uv) {
+    float w = uv.x * 2.0 + uv.y * 1.3 + fbm3(uv * 3.0) * 3.5;
+    float vein = 1.0 - smoothstep(0.0, 0.12, abs(sin(w * 3.14159)));
+    return vec3(0.5 - vein * 0.18 + (noise(uv * 20.0) - 0.5) * 0.03, -0.15 * (1.0 - vein), 0.0);
+}
+
+// Sandstone: fine grain and horizontal bedding layers.
+vec3 sp_sandstone(vec2 uv) {
+    float layers = sin(uv.y * 18.0 + noise(uv * vec2(2.0, 6.0)) * 3.0) * 0.5 + 0.5;
+    float grain = noise(uv * 60.0);
+    return vec3(0.5 + (layers - 0.5) * 0.12 + (grain - 0.5) * 0.08, 0.05, 0.0);
+}
+
 vec3 dispatchSurfacePattern(int code, vec2 uv) {
     if (code == 1) return sp_worn_paint(uv);
     if (code == 2) return sp_rust(uv);
     if (code == 3) return sp_brushed_metal(uv);
     if (code == 4) return sp_polished_rings(uv);
     if (code == 5) return sp_skin(uv);
+    if (code == 6) return sp_marble(uv);
+    if (code == 7) return sp_sandstone(uv);
     return vec3(0.5, 0.0, 0.0);
 }
 #endif // PHPOLYGON_OMIT_SURFACE_PATTERNS
@@ -1525,6 +1552,19 @@ float nh_cobblestone(vec2 uv) {
     return stone * sqrt(dome);
 }
 
+// Roof tiles (shader plan 5.5): rows of tiles, staggered, each rising towards its
+// lower edge where it overlaps the row below; rounded along the row.
+float nh_roof_tiles(vec2 uv) {
+    vec2 p = uv * vec2(6.0, 9.0);
+    float row = floor(p.y);
+    p.x += mod(row, 2.0) * 0.5;
+    vec2 f = fract(p);
+    float lift = smoothstep(0.0, 0.85, 1.0 - f.y);
+    float round_ = sin(f.x * 3.14159);
+    float gap = smoothstep(0.0, 0.05, f.x) * smoothstep(1.0, 0.95, f.x);
+    return (0.35 + 0.45 * lift + 0.2 * round_) * gap * (0.9 + 0.1 * hash21(floor(p) + 3.0));
+}
+
 float dispatchProceduralHeight(int code, vec2 uv) {
     if (code == 1)  return nh_bricks(uv);
     if (code == 2)  return nh_bumps(uv);
@@ -1537,6 +1577,7 @@ float dispatchProceduralHeight(int code, vec2 uv) {
     if (code == 9)  return nh_noise(uv);
     if (code == 10) return nh_skin(uv);
     if (code == 11) return nh_cobblestone(uv);
+    if (code == 12) return nh_roof_tiles(uv);
     return 1.0;
 }
 
@@ -2181,7 +2222,31 @@ void main() {
                 vec3 F = fresnelSchlick(max(dot(normalize(V + dL), V), 0.0), F0);
                 vec3 kD = (1.0 - F) * (1.0 - metallic);
                 lit += (kD * albedo / 3.14159265 + spec) * radiance * dNdotL * dShadow;
+                // Brushed metal (shader plan 5.5): an extra highlight stretched along
+                // the surface's horizontal (the brushing direction).
+                if (u_material_look.y > 0.0) {
+                    vec3 bT = normalize(cross(vec3(0.0, 1.0, 0.0), N) + vec3(1e-5, 0.0, 0.0));
+                    vec3 bB = normalize(cross(N, bT));
+                    vec3 bH = normalize(dL + V);
+                    float bx = dot(bH, bT) / 0.6;
+                    float by = dot(bH, bB) / 0.06;
+                    float aniso = exp(-(bx * bx + by * by)) * u_material_look.y;
+                    lit += F0 * aniso * radiance * dNdotL * dShadow * 1.5;
+                }
+                // Micro glitter: tiny crystals flash where their facet mirrors the sun.
+                if (u_material_look.z > 0.0) {
+                    vec3 gc = floor(v_worldPos * 55.0);
+                    vec3 gn = normalize(vec3(hash31(gc), hash31(gc + 1.7), hash31(gc + 3.3)) * 2.0 - 1.0);
+                    float flash = pow(max(dot(reflect(-V, normalize(N + gn * 0.6)), dL), 0.0), 600.0);
+                    flash *= step(0.82, hash31(gc + 9.1)) * (1.0 - smoothstep(6.0, 20.0, length(u_camera_pos - v_worldPos)));
+                    lit += radiance * flash * u_material_look.z * 4.0 * dShadow;
+                }
             }
+        }
+        // Cloth sheen (shader plan 5.5): a soft rim of the albedo at grazing angles.
+        if (u_material_look.x > 0.0) {
+            float sNV = clamp(dot(N, V), 0.0, 1.0);
+            lit += albedo * pow(1.0 - sNV, 3.0) * u_material_look.x * radiance * clamp(dot(N, dL) * 0.5 + 0.5, 0.0, 1.0) * dShadow * 0.6;
         }
         // The primary light is the one the SDF soft sun shadow (composite) scales.
         if (dl == 0) sunAcc += lit; else localAcc += lit;
