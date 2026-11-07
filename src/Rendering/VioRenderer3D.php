@@ -3975,12 +3975,16 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         $this->uploadMotionUniforms();
 
         if ($this->prepassThisFrame) {
-            // Depth prepass (shader plan 9.1): the same program and vertex path,
-            // colour masked and the fragment stage returning at once, so the
+            // Depth prepass (shader plan 9.1): the same vertex path in a depth-only
+            // twin of the program, colour masked, so the
             // expensive shading below runs only for the visible surface (LEQUAL).
             // Materials that may discard stay out (they would punch holes).
             $this->bindPipeline('prepass');
-            vio_set_uniform($this->ctx, 'u_depth_only', 1.0);
+            // The twin is a shader object of its own: its constants start empty.
+            $this->uploadFrameUniforms($frameState);
+            $this->uploadShadowUniforms($hasShadowMap, $dirLights);
+            $this->uploadSnippetInputs();
+            $this->uploadMotionUniforms();
             foreach ($opaque as [, , $cmd, $material]) {
                 if (!self::prepassEligible($material)) {
                     continue;
@@ -3991,7 +3995,6 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
                     $this->drawMeshInstancedCommand($cmd, $material);
                 }
             }
-            vio_set_uniform($this->ctx, 'u_depth_only', 0.0);
             $this->bindPipeline('opaque');
             $this->gpuMark('prepass');
         }
@@ -4566,6 +4569,33 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         }
 
         $this->shaderCache[$id] = $shader;
+        $this->programSources[$id] = [$vertSrc, $fragSrc];
+    }
+
+    /** @var array<string, array{0: string, 1: string}> vertex and fragment source of each compiled program */
+    private array $programSources = [];
+
+    /**
+     * The depth-only twin of a program for the depth prepass (shader plan 9.1): the
+     * same vertex source, so the depth matches the shading pass under LEQUAL, and the
+     * fragment stage compiled with PHPOLYGON_DEPTH_ONLY so it returns at once. Null
+     * when the program's sources are unknown or the twin does not compile.
+     */
+    private function depthOnlyShader(string $id): ?\VioShader
+    {
+        $twin = $id . '#pz';
+        if (!isset($this->shaderCache[$twin])) {
+            $src = $this->programSources[$id] ?? null;
+            if ($src === null) {
+                return null;
+            }
+            try {
+                $this->compileShader($twin, $src[0], self::withDefine($src[1], 'PHPOLYGON_DEPTH_ONLY'));
+            } catch (\RuntimeException) {
+                return null;
+            }
+        }
+        return $this->shaderCache[$twin];
     }
 
     /**
@@ -4676,7 +4706,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
                 // geometry, additively, and by opaque geometry in ':rx' frames.
                 $program = ($storageInstances ? 'default_storage_mrt' : 'default_mrt') . ($mv ? '_mv' : '') . $variantSuffix;
                 $cfg = [
-                    'shader' => $this->shaderCache[$program],
+                    'shader' => ($pass === 'prepass' ? $this->depthOnlyShader($program) : null) ?? $this->shaderCache[$program],
                     'depth_test' => true,
                     'depth_write' => $pass === 'opaque' || $pass === 'prepass',
                     'cull_mode' => $cull,
@@ -4684,7 +4714,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
                     'attachments' => self::mrtFormats($mv),
                 ];
                 if ($pass === 'prepass') {
-                    // Depth prepass (shader plan 9.1): the same program, no colour.
+                    // Depth prepass (shader plan 9.1): the program's depth-only twin, no colour.
                     $cfg['attachment_blend'] = array_fill(0, $mv ? 6 : 4, VIO_BLEND_NONE);
                     $cfg['attachment_color_mask'] = array_fill(0, $mv ? 6 : 4, 0);
                 } elseif ($pass !== 'opaque') {
@@ -4711,7 +4741,8 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
                 }
                 $pipeline = $this->createPipeline($cfg);
             } else {
-                $shader = $this->shaderCache[$shaderId . $variantSuffix] ?? $this->shaderCache['default'];
+                $programId = isset($this->shaderCache[$shaderId . $variantSuffix]) ? $shaderId . $variantSuffix : 'default';
+                $shader = ($pass === 'prepass' ? $this->depthOnlyShader($programId) : null) ?? $this->shaderCache[$programId];
 
                 $pipeline = $this->createPipeline([
                     'shader' => $shader,

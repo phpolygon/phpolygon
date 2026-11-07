@@ -220,8 +220,6 @@ uniform vec2 u_refract;
 uniform float u_particle_tint;
 // Flipbook (shader plan 7.1): columns, rows, fps; w = streak fade.
 uniform vec4 u_flipbook;
-// Depth prepass (shader plan 9.1): 1 = return at once (colour is masked).
-uniform float u_depth_only;
 // Ray-traced sun shadows (shader plan 10.1, GraphicsSettings::$rayTracedShadows): one
 // inline ray per pixel towards the sun through the scene's acceleration structure.
 uniform float u_rt_shadows;
@@ -1718,9 +1716,12 @@ vec3 perturbNormalProcedural(vec3 N, vec3 worldPos, vec2 uv, vec2 sampleUv,
 // ================================================================
 
 void main() {
-    if (u_depth_only > 0.5) {
-        return;
-    }
+#ifdef PHPOLYGON_DEPTH_ONLY
+    // Depth prepass twin (shader plan 9.1): colour is masked, only depth counts.
+    // Compiled in, not a uniform: a runtime return would put every derivative
+    // below into non-uniform control flow, undefined even when never taken.
+    return;
+#endif
     vec3 N = normalize(v_normal);
     // Two-sided opaque surfaces (foliage, fronds, flags): where the authored
     // normal faces away from the viewer it is mirrored through the triangle's
