@@ -426,9 +426,9 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
     private int $spotShadowIndex = -1;
     /** @var list<float> */
     private array $spotShadowMatrix = [];
-    /** @var list<array{0: \VioMesh, 1: string, 2: int}>|null Shadow draws of this frame. */
+    /** @var list<array{0: \VioMesh, 1: string, 2: int, 3?: bool}>|null Shadow draws of this frame. */
     private ?array $frameShadowDraws = null;
-    /** @var list<array{0: \VioMesh, 1: string, 2: int}>|null Local-light shadow draws of this frame. */
+    /** @var list<array{0: \VioMesh, 1: string, 2: int, 3?: bool}>|null Local-light shadow draws of this frame. */
     private ?array $frameLocalShadowDraws = null;
     private const SHADOW_ORTHO_SIZE = 60.0;
 
@@ -4611,7 +4611,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
      * The shadow casters of a frame, resolved to depth-only instanced draws (mesh,
      * packed matrices, count). Shared by the sun cascades and the spot shadow.
      *
-     * @return list<array{0: \VioMesh, 1: string, 2: int}>
+     * @return list<array{0: \VioMesh, 1: string, 2: int, 3?: bool}>
      */
     private function collectShadowDraws(RenderCommandList $commandList, bool $local = false): array
     {
@@ -4693,7 +4693,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             $this->shadowCasterMatrices[$k] = [];
             $this->shadowCasterMeshIds[$k] = [];
             foreach ($casters as $cmd) {
-                $shadowGroups[$cmd->meshId][] = $cmd->modelMatrix;
+                $shadowGroups[$cmd->meshId . ($this->swaysInShadow($cmd->materialId) ? '|sway' : '')][] = $cmd->modelMatrix;
                 $this->shadowCasterMatrices[$k][] = $cmd->modelMatrix;
                 $this->shadowCasterMeshIds[$k][] = $cmd->meshId;
             }
@@ -4710,12 +4710,14 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         }
 
         // Resolve every shadow draw once per frame, not once per cascade.
-        /** @var list<array{0: \VioMesh, 1: string, 2: int}> $shadowDraws */
+        /** @var list<array{0: \VioMesh, 1: string, 2: int, 3?: bool}> $shadowDraws */
         $shadowDraws = [];
-        foreach ($this->shadowPackedCache[$k] as $meshId => [$buf, $cnt]) {
-            $mesh = $this->uploadMesh((string) $meshId);
+        foreach ($this->shadowPackedCache[$k] as $groupKey => [$buf, $cnt]) {
+            $groupKey = (string) $groupKey;
+            $sway = str_ends_with($groupKey, '|sway');
+            $mesh = $this->uploadMesh($sway ? substr($groupKey, 0, -5) : $groupKey);
             if ($mesh !== null) {
-                $shadowDraws[] = [$mesh, $buf, $cnt];
+                $shadowDraws[] = [$mesh, $buf, $cnt, $sway];
             }
         }
         foreach ($instancedCasters as [$cmd, $mat]) {
@@ -4724,7 +4726,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
                 continue;
             }
             [$flatMatrices, $instanceCount] = $this->resolveInstanceData($cmd->meshId, $mat, $cmd);
-            $shadowDraws[] = [$mesh, $flatMatrices, $instanceCount];
+            $shadowDraws[] = [$mesh, $flatMatrices, $instanceCount, $mat->foliageWind];
         }
 
         PerfProfiler::end();
@@ -4807,9 +4809,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             // Every shadow draw is instanced: the flag is set once per cascade
             // (uniforms are sticky until the next pipeline bind).
             vio_set_uniform($this->ctx, 'u_use_instancing', 1);
-            foreach ($shadowDraws as [$mesh, $buf, $cnt]) {
-                vio_draw_instanced($this->ctx, $mesh, $buf, $cnt);
-            }
+            $this->drawShadowList($shadowDraws);
         }
 
         PerfProfiler::end();
@@ -5710,9 +5710,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         vio_set_uniform($this->ctx, 'u_view', $view->toArray());
         vio_set_uniform($this->ctx, 'u_projection', $proj->toArray());
         vio_set_uniform($this->ctx, 'u_use_instancing', 1);
-        foreach ($draws as [$mesh, $buf, $cnt]) {
-            vio_draw_instanced($this->ctx, $mesh, $buf, $cnt);
-        }
+        $this->drawShadowList($draws);
         vio_unbind_render_target($this->ctx);
         PerfProfiler::end();
 
@@ -5804,9 +5802,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             vio_set_uniform($this->ctx, 'u_view', Mat4::lookAt($pos, $pos->add($forward), $up)->toArray());
             vio_set_uniform($this->ctx, 'u_projection', $proj->toArray());
             vio_set_uniform($this->ctx, 'u_use_instancing', 1);
-            foreach ($draws as [$mesh, $buf, $cnt]) {
-                vio_draw_instanced($this->ctx, $mesh, $buf, $cnt);
-            }
+            $this->drawShadowList($draws);
         }
         vio_unbind_render_target($this->ctx);
         PerfProfiler::end();
@@ -5887,6 +5883,40 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         if ($rt !== false) {
             $this->dummyShadowTarget = $rt;
         }
+    }
+
+    /**
+     * Draw a resolved shadow list into the bound depth target. Swaying foliage
+     * (Material::$foliageWind) bends in the depth pass too, so a tree's shadow
+     * moves with the tree (shader plan 6.1).
+     *
+     * @param list<array{0: \VioMesh, 1: string, 2: int, 3?: bool}> $draws
+     */
+    private function drawShadowList(array $draws): void
+    {
+        $camera = $this->currentViewMatrix?->inverse()->getTranslation();
+        vio_set_uniform($this->ctx, 'u_time', $this->globalTime);
+        vio_set_uniform($this->ctx, 'u_wind_direction', $this->windDirection);
+        vio_set_uniform($this->ctx, 'u_wind_intensity', $this->windIntensity);
+        vio_set_uniform($this->ctx, 'u_foliage_motion', $this->foliageMotion);
+        vio_set_uniform($this->ctx, 'u_foliage_fade', $this->foliageFade);
+        vio_set_uniform($this->ctx, 'u_shadow_camera_pos', $camera !== null ? [$camera->x, $camera->y, $camera->z] : [0.0, 0.0, 0.0]);
+        $sway = false;
+        vio_set_uniform($this->ctx, 'u_foliage_wind', 0);
+        foreach ($draws as $draw) {
+            $wants = ($draw[3] ?? false) === true;
+            if ($wants !== $sway) {
+                $sway = $wants;
+                vio_set_uniform($this->ctx, 'u_foliage_wind', $sway ? 1 : 0);
+            }
+            vio_draw_instanced($this->ctx, $draw[0], $draw[1], $draw[2]);
+        }
+    }
+
+    /** Whether a material's foliage sway also bends its shadow. */
+    private function swaysInShadow(string $materialId): bool
+    {
+        return MaterialRegistry::get($materialId)?->foliageWind === true;
     }
 
     private function bindShadowPipeline(): void
@@ -7310,6 +7340,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             'u_glass'               => [$material->glass, $material->glassDirt],
             'u_emissive_look'       => [$material->windowLights, $material->neonTube ? 1.0 : 0.0],
             'u_material_look'       => [$material->sheen, $material->brushed, $material->glitter],
+            'u_fade_range'          => [$material->fadeDistance[0], $material->fadeDistance[1]],
             // Subsurface scattering (skin path). Gated by strength > 0 in the
             // shader so non-skin materials remain visually identical.
             'u_subsurface_color'    => [$material->subsurfaceColor->r, $material->subsurfaceColor->g, $material->subsurfaceColor->b],
@@ -7918,6 +7949,10 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         $time = $this->programTime($this->globalTime);
         vio_set_uniform($this->ctx, 'u_time', $time);
         vio_set_uniform($this->ctx, 'u_frag_time', $time);
+        // Wind for fragment looks (lawn waves, shader plan 6.1): xz direction, intensity.
+        $fw = $this->windDirection;
+        $fwl = sqrt($fw[0] * $fw[0] + $fw[2] * $fw[2]);
+        vio_set_uniform($this->ctx, 'u_frag_wind', $fwl > 1e-4 ? [$fw[0] / $fwl, $fw[2] / $fwl, $this->windIntensity] : [0.0, 1.0, $this->windIntensity]);
         vio_set_uniform($this->ctx, 'u_ao_strength', $this->settings->ambientOcclusion->strength());
 
         // Fieldtracing (SDF GI) — float mode (int-in-UBO is unreliable across

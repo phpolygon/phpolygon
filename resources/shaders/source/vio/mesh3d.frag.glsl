@@ -204,6 +204,10 @@ uniform vec2 u_glass;
 uniform vec2 u_emissive_look;
 // Material looks (shader plan 5.5): x = cloth sheen, y = brushed metal, z = glitter.
 uniform vec3 u_material_look;
+// Dithered distance fade (shader plan 6.1): (start, end) metres, end <= 0 = off.
+uniform vec2 u_fade_range;
+// Wind for fragment looks (shader plan 6.1): xz direction, intensity.
+uniform vec3 u_frag_wind;
 uniform vec4 u_decals[24];
 
 // HDR pipeline
@@ -1981,9 +1985,31 @@ void main() {
         }
     }
 
+    // Dithered distance fade (shader plan 6.1): dissolve instead of popping.
+    if (u_fade_range.y > 0.0) {
+        float fadeT = smoothstep(u_fade_range.x, u_fade_range.y, length(u_camera_pos - v_worldPos));
+        float dith = fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))));
+        if (fadeT > dith) {
+            discard;
+        }
+    }
     // Season colour map: grass blades and two-sided translucent foliage.
     bool isPlant = u_grass_shade == 1 || (u_two_sided == 1 && u_subsurface_strength > 0.0);
     if (isPlant) {
+        // Lawn waves (shader plan 6.1): gusts run over the grass as lighter bands
+        // (bent blades show their pale side), stronger with the wind.
+        if (u_grass_shade == 1 && u_frag_wind.z > 0.0) {
+            float along = dot(v_worldPos.xz, u_frag_wind.xy);
+            float across = dot(v_worldPos.xz, vec2(-u_frag_wind.y, u_frag_wind.x));
+            float band = sin(along * 0.35 - u_frag_time * 1.5 + sin(across * 0.1) * 2.0) * 0.5 + 0.5;
+            float gustW = smoothstep(0.55, 1.0, band) * clamp(u_frag_wind.z, 0.0, 1.5);
+            albedo = mix(albedo, albedo * vec3(1.4, 1.35, 1.1) + vec3(0.02), gustW * 0.75);
+        }
+        // Distant foliage (shader plan 6.1): a little paler and bluer far away,
+        // so tree lines step back before the fog takes over.
+        float farT = smoothstep(40.0, 220.0, length(u_camera_pos - v_worldPos));
+        float farL = dot(albedo, vec3(0.299, 0.587, 0.114));
+        albedo = mix(albedo, vec3(farL) * vec3(0.9, 1.0, 1.12), farT * 0.45);
         float sl = dot(albedo, vec3(0.299, 0.587, 0.114));
         albedo = mix(albedo, vec3(sl), u_season_grade.a) * u_season_grade.rgb;
     }

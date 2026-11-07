@@ -46,6 +46,9 @@ class FoliageInstanceSystem extends AbstractSystem
     /** Number of quantised glow levels (each level is one derived material). */
     public const int GLOW_LEVELS = 8;
 
+    /** Fraction of maxDistance where the dithered fade-out begins (shader plan 6.1). */
+    public const float FADE_START = 0.82;
+
     /**
      * @var array<int, array{
      *     version: int,
@@ -165,7 +168,9 @@ class FoliageInstanceSystem extends AbstractSystem
                 }
                 $lod = $d < $lod1 ? 0 : ($d < $lod2 ? 1 : ($d < $imp ? 2 : 3));
                 $shadow = ($lod <= 1 && $d < $shadowDist) ? 1 : 0;
-                $groups[$st['stage'][$i] * 1000 + $lod * 100 + $st['tint'][$i] * 2 + $shadow][] = $i;
+                // The last stretch before maxDistance dissolves instead of popping.
+                $fading = $max > 0.0 && $d > $max * self::FADE_START ? 1 : 0;
+                $groups[$fading * 100000 + $st['stage'][$i] * 1000 + $lod * 100 + $st['tint'][$i] * 2 + $shadow][] = $i;
             }
         }
         ksort($groups);
@@ -175,6 +180,8 @@ class FoliageInstanceSystem extends AbstractSystem
         /** @var array<int, list<int>> $sharedWood */
         $sharedWood = [];
         foreach ($groups as $gkey => $members) {
+            $fading = $gkey >= 100000;
+            $gkey %= 100000;
             $stage = GrowthStage::from(intdiv($gkey, 1000));
             $lod = PlantLod::from(intdiv($gkey % 1000, 100));
             $tint = intdiv($gkey % 100, 2);
@@ -183,7 +190,7 @@ class FoliageInstanceSystem extends AbstractSystem
                 if (!$variant->hasPart($stage, $lod, $part)) {
                     continue;
                 }
-                if ($part === PlantPart::Wood && $sharesWood && $lod->value <= 1) {
+                if ($part === PlantPart::Wood && $sharesWood && $lod->value <= 1 && !$fading) {
                     // Tints never reach wood: one batch whatever the LOD and tint.
                     foreach ($members as $i) {
                         $sharedWood[$stage->value * 1000 + ($shadow ? 1 : 0)][] = $i;
@@ -197,6 +204,9 @@ class FoliageInstanceSystem extends AbstractSystem
                 if ($part === PlantPart::Accent && $variant->accentGlow !== null) {
                     $material = self::glowMaterial($material, $variant->accentGlow, $glowLevel);
                 }
+                if ($fading) {
+                    $material = self::fadeMaterial($material, $max);
+                }
                 $source = $part === PlantPart::Wood ? $st['base'] : $st['leaf'];
                 $flat = [];
                 foreach ($members as $i) {
@@ -208,7 +218,7 @@ class FoliageInstanceSystem extends AbstractSystem
                     $flat,
                     count($members),
                     isStatic: true,
-                    staticKey: "foliage:{$oid}:{$gkey}:{$part->value}",
+                    staticKey: "foliage:{$oid}:" . ($fading ? 'f' : '') . "{$gkey}:{$part->value}",
                     castShadows: $shadow,
                 );
             }
@@ -345,6 +355,23 @@ class FoliageInstanceSystem extends AbstractSystem
      * level 0 is the base material, every other level a derived material with
      * the emission scaled, registered on first use.
      */
+    /**
+     * The dithered-fade copy of a material for instances near maxDistance
+     * (shader plan 6.1), registered once per material and distance.
+     */
+    public static function fadeMaterial(string $base, float $maxDistance): string
+    {
+        $id = sprintf('%s#fade%d', $base, (int) round($maxDistance));
+        if (!MaterialRegistry::has($id)) {
+            $material = MaterialRegistry::get($base);
+            if ($material === null) {
+                return $base;
+            }
+            MaterialRegistry::register($id, $material->withFadeDistance($maxDistance * self::FADE_START, $maxDistance));
+        }
+        return $id;
+    }
+
     public static function glowMaterial(string $base, Color $glow, int $level): string
     {
         $level = max(0, min(self::GLOW_LEVELS, $level));

@@ -322,6 +322,15 @@ class Material
         public readonly float $brushed = 0.0,
         /** 0..1: micro glitter - tiny crystals that flash in the sun (sand, granite, snow). */
         public readonly float $glitter = 0.0,
+        /**
+         * Camera distance (start, end) over which the surface dissolves in a
+         * screen-space dither (shader plan 6.1) - plants, props and decoration
+         * fade out instead of popping where the game stops drawing them.
+         * end <= 0 = never.
+         *
+         * @var array{0: float, 1: float}
+         */
+        public readonly array $fadeDistance = [0.0, 0.0],
     ) {}
 
     /**
@@ -434,6 +443,17 @@ class Material
         $m = $this->copy();
 
         return new self(...[...get_object_vars($m), 'weathering' => max(0.0, $weathering)]);
+    }
+
+    /**
+     * This material dissolving in a dither between two camera distances (shader
+     * plan 6.1); end <= 0 switches the fade off.
+     */
+    public function withFadeDistance(float $start, float $end): self
+    {
+        $m = $this->copy();
+
+        return new self(...[...get_object_vars($m), 'fadeDistance' => [max(0.0, $start), max(0.0, $end)]]);
     }
 
     /** This material with another emission colour (e.g. a glow that fades in at night). */
@@ -584,6 +604,7 @@ class Material
             sheen: $this->sheen,
             brushed: $this->brushed,
             glitter: $this->glitter,
+            fadeDistance: $this->fadeDistance,
         );
     }
 
