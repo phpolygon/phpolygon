@@ -243,4 +243,33 @@ final class VioGrassRenderTest extends TestCase
         self::assertGreaterThan(self::coverage($free)['cx'] + 2.0, self::coverage($pushed)['cx'], 'a bender on the left pushes the blades right');
         self::assertLessThan(self::coverage($free, 0, 40)['count'], self::coverage($pushed, 0, 40)['count'], 'and lays them down');
     }
+
+    /**
+     * Footprints (shader plan 6.1): once the bender has left, the blades where it
+     * stood stay pressed for a few seconds and stand up again after the trail fades.
+     */
+    public function testTheTrailKeepsTheBladesPressedAfterTheBenderLeft(): void
+    {
+        self::assertNotNull($this->ctx);
+        [$eye, $target] = $this->side();
+        $renderer = new VioRenderer3D($this->ctx, self::W, self::H);
+        $renderer->applySettings(new GraphicsSettings(shadowQuality: ShadowQuality::Off, antiAliasing: AntiAliasing::Off, ambientOcclusion: ScreenSpaceAO::Off, bloom: false));
+        $frame = function (array $benders, float $time) use ($renderer, $eye, $target): string {
+            $renderer->setAnimationTime($time);
+            $list = new RenderCommandList();
+            $list->add(new SetCamera(Mat4::lookAt($eye, $target, new Vec3(0.0, 1.0, 0.0)), Mat4::perspective(deg2rad(50.0), 1.0, 0.05, 500.0)));
+            $list->add(new SetAmbientLight(new Color(1.0, 1.0, 1.0), 0.6));
+            $list->add(new SetDirectionalLight((new Vec3(-0.3, -1.0, -0.4))->normalize(), new Color(1.0, 1.0, 1.0), 1.0));
+            $list->add(new SetWind(new Vec3(1.0, 0.0, 0.0), 0.0));
+            $list->add(new SetGrass(25.0, 60.0, 0.5, $benders, 1.0));
+            $list->add(self::tuft(0.0, 0.0, 4.0));
+            return $renderer->renderToImage($list, self::W, self::H, new Color(0.0, 0.0, 0.0));
+        };
+        $upright = self::coverage($frame([], 0.5), 0, 40)['count'];
+        $frame([[0.0, 0.0, 0.0, 1.5]], 1.0);                                              // the bender stands in the tuft
+        $after = self::coverage($frame([[30.0, 0.0, 30.0, 1.5]], 1.5), 0, 40)['count'];   // and walked away
+        $later = self::coverage($frame([[30.0, 0.0, 30.0, 1.5]], 9.0), 0, 40)['count'];   // the trail faded
+        self::assertLessThan($upright * 0.8, $after, "the footprint keeps the blades down (upright {$upright}, after {$after})");
+        self::assertGreaterThan($after, $later, "the blades stand up again (after {$after}, later {$later})");
+    }
 }
