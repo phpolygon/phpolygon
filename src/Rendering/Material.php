@@ -384,6 +384,12 @@ class Material
          */
         public readonly ?string $vatTexture = null,
         public readonly array $vatInfo = [],
+        /**
+         * > 0: pixels whose albedo-texture alpha lies below it are cut out (leaves,
+         * fences, baked impostors - shader plan 9.1). Opaque pass, no blending; the
+         * shadow pass ignores it.
+         */
+        public readonly float $alphaCutoff = 0.0,
     ) {}
 
     /**
@@ -681,6 +687,7 @@ class Material
             shadingRate: $this->shadingRate,
             vatTexture: $this->vatTexture,
             vatInfo: $this->vatInfo,
+            alphaCutoff: $this->alphaCutoff,
         );
     }
 

@@ -8116,6 +8116,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             'u_rt_shadows'          => $this->rtSceneReady && $this->settings->rayTracedShadows ? 1.0 : 0.0,
             'u_rt_reflections'      => $this->rtSceneReady && $this->settings->rayTracedReflections && $this->rtAlbedoBuffer !== null ? 1.0 : 0.0,
             'u_flipbook'            => [(float) $material->flipbook[0], (float) $material->flipbook[1], $material->flipbookFps, $material->streakFade ? 1.0 : 0.0],
+            'u_alpha_cutoff'        => $material->alphaCutoff,
             'u_vat'                 => $material->vatTexture !== null && count($material->vatInfo) >= 8 ? [$material->vatInfo[0], $material->vatInfo[1], 1.0, 0.0] : [0.0, 0.0, 0.0, 0.0],
             'u_vat_min'             => count($material->vatInfo) >= 8 ? [$material->vatInfo[2], $material->vatInfo[3], $material->vatInfo[4]] : [0.0, 0.0, 0.0],
             'u_vat_extent'          => count($material->vatInfo) >= 8 ? [$material->vatInfo[5], $material->vatInfo[6], $material->vatInfo[7]] : [1.0, 1.0, 1.0],

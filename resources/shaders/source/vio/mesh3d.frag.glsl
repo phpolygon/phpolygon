@@ -195,6 +195,7 @@ uniform int  u_fog_volume_count;
 uniform vec4 u_fog_volumes[12];   // per volume: (centre, yaw), (half extents, density), (colour, edge)
 uniform float u_soft_particle;    // Material::$softParticle: soft puff, depth fade distance
 uniform float u_triplanar;        // Material::$triplanar: tiles per metre, 0 = mesh UVs
+uniform float u_alpha_cutoff;     // Material::$alphaCutoff: cut out below this albedo alpha, 0 = off
 // Decal volumes (shader plan 5.1, DecalSystem): per decal (centre, yaw),
 // (half extents, strength), (colour, kind 0 stain 1 soot 2 moss 3 cracks).
 uniform int  u_decal_count;
@@ -1839,6 +1840,9 @@ void main() {
         texAlbedo *= u_triplanar > 0.0
             ? sampleAlbedoTriplanar(v_worldPos, N, u_triplanar)
             : sampleAlbedoTexture(fbUv, uvDx * mipScale * fbScale, uvDy * mipScale * fbScale);
+        if (u_alpha_cutoff > 0.0 && albedoGrad(fbUv, uvDx * mipScale * fbScale, uvDy * mipScale * fbScale).a < u_alpha_cutoff) {
+            discard;
+        }
     }
 
     // ---- Material selection ----
