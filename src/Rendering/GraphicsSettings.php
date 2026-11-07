@@ -77,6 +77,8 @@ final class GraphicsSettings
         public readonly bool $rayTracedProbes = false,
         /** Mesh-shader path (shader plan 10.1, VIO_FEATURE_MESH_SHADER): instanced opaque batches as frustum-culled meshlets. */
         public readonly bool $meshShaders = false,
+        /** Bindless materials (shader plan 10.1, VIO_FEATURE_BINDLESS): albedo from the texture table, per-instance textures in one draw. */
+        public readonly bool $bindlessMaterials = false,
         public readonly bool $hdr = true,
         /**
          * Low input latency: cap the CPU at ONE frame ahead of presentation
@@ -192,6 +194,7 @@ final class GraphicsSettings
         ?bool $rayTracedReflections = null,
         ?bool $rayTracedProbes = null,
         ?bool $meshShaders = null,
+        ?bool $bindlessMaterials = null,
         ?bool $hdr = null,
         ?bool $lowLatency = null,
         ?ShadingRate $shadingRate = null,
@@ -241,6 +244,7 @@ final class GraphicsSettings
             rayTracedReflections: $rayTracedReflections ?? $this->rayTracedReflections,
             rayTracedProbes: $rayTracedProbes ?? $this->rayTracedProbes,
             meshShaders: $meshShaders ?? $this->meshShaders,
+            bindlessMaterials: $bindlessMaterials ?? $this->bindlessMaterials,
             hdr: $hdr ?? $this->hdr,
             lowLatency: $lowLatency ?? $this->lowLatency,
             shadingRate: $shadingRate ?? $this->shadingRate,
@@ -292,6 +296,7 @@ final class GraphicsSettings
             'rayTracedReflections' => $this->rayTracedReflections,
             'rayTracedProbes' => $this->rayTracedProbes,
             'meshShaders' => $this->meshShaders,
+            'bindlessMaterials' => $this->bindlessMaterials,
             'hdr' => $this->hdr,
             'lowLatency' => $this->lowLatency,
             'shadingRate' => $this->shadingRate->value,
@@ -350,6 +355,7 @@ final class GraphicsSettings
             rayTracedReflections: self::asBool($data['rayTracedReflections'] ?? null) ?? $defaults->rayTracedReflections,
             rayTracedProbes: self::asBool($data['rayTracedProbes'] ?? null) ?? $defaults->rayTracedProbes,
             meshShaders: self::asBool($data['meshShaders'] ?? null) ?? $defaults->meshShaders,
+            bindlessMaterials: self::asBool($data['bindlessMaterials'] ?? null) ?? $defaults->bindlessMaterials,
             hdr: self::asBool($data['hdr'] ?? null) ?? $defaults->hdr,
             lowLatency: self::asBool($data['lowLatency'] ?? null) ?? $defaults->lowLatency,
             shadingRate: self::enumFrom(ShadingRate::class, $data['shadingRate'] ?? null) ?? $defaults->shadingRate,

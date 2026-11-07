@@ -696,6 +696,13 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             $this->dlssSwitchNow = $this->lastFrameStart > 0.0;
         }
 
+        // Settings compiled into the scene programs: rebuild them at the next frame.
+        if ($this->shadersWarmed && ($previous->bindlessMaterials !== $settings->bindlessMaterials
+                || $previous->rayTracedShadows !== $settings->rayTracedShadows
+                || $previous->rayTracedReflections !== $settings->rayTracedReflections)) {
+            $this->shaderRebuild = true;
+        }
+
         // Bloom toggle is read live from $this->settings during render.
         $this->enableHdr = $this->enableHdr && $settings->bloom;
 
@@ -1365,6 +1372,21 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
      */
     private function applyDeferredSettings(): void
     {
+        if ($this->shaderRebuild) {
+            // A setting compiled into the programs changed (bindless materials, ray
+            // query): drop every program and pipeline and compile anew. The lazily
+            // built ones (variants, twins, MRT) follow on first use.
+            $this->shaderRebuild = false;
+            $this->shaderCache = [];
+            $this->pipelineCache = [];
+            $this->programSources = [];
+            $this->variantUniformsUploaded = [];
+            $this->failedVariants = [];
+            $this->meshletFailed = [];
+            $this->shadersWarmed = false;
+            $this->resetDrawStateCache();
+            $this->warmShaders();
+        }
         if ($this->shadowDirty) {
             $this->shadowDirty = false;
             // initShadowMap() releases the old cascade targets (cascadeShadowTargets
@@ -4241,6 +4263,8 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
 
     private function initShaders(): void
     {
+        // Fixed for the programs compiled from here on (a change rebuilds them).
+        $this->bindlessBuilt = $this->settings->bindlessMaterials && $this->bindlessSupported();
         ProcModeShaderRegistry::assertUniqueUniforms($this->loadShader('mesh3d.vert.glsl'), $this->loadShader('mesh3d.frag.glsl'));
         // The backend's own texture units (php-vio vio_texture_units, its
         // SAMPLER-LIMITS-PLAN): the snippet sampler budget follows them.
@@ -4396,6 +4420,9 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             && (ProcModeShaderRegistry::textureUnits() ?? 0) > self::VAT_SLOT) {
             $vertSrc = self::withDefine($vertSrc, 'PHPOLYGON_VAT');
         }
+        if (in_array($id, ['default', 'default_mrt', 'default_mrt_mv'], true)) {
+            $vertSrc = $this->withBindless($vertSrc, false);
+        }
         if ($motion) {
             // Motion vectors ride on the MRT outputs: both stages need the define.
             $vertSrc = self::withDefine($vertSrc, 'PHPOLYGON_MOTION');
@@ -4453,7 +4480,19 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             // #version, before any other token.
             $source = (string) preg_replace('/^(\s*#version[^\n]*\n)/', "$1#extension GL_ARB_shader_storage_buffer_object : require\n#extension GL_ARB_shading_language_420pack : require\n", $source, 1);
         }
-        return $source;
+        return $this->withBindless($source, true);
+    }
+
+    /** Bindless materials (shader plan 10.1): the define in both stages, the extension in the fragment stage. */
+    private function withBindless(string $source, bool $fragment): string
+    {
+        if (!$this->bindlessBuilt) {
+            return $source;
+        }
+        $source = self::withDefine($source, 'PHPOLYGON_BINDLESS_MATERIALS');
+        return $fragment
+            ? (string) preg_replace('/^(\s*#version[^\n]*\n)/', "$1#extension GL_EXT_nonuniform_qualifier : require\n", $source, 1)
+            : $source;
     }
 
     private function meshVertexSource(bool $storage = false): string
@@ -4462,6 +4501,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         if ($storage) {
             $source = self::storageInstancingVertexSource($source);
         }
+        $source = $this->withBindless($source, false);
         if ((ProcModeShaderRegistry::textureUnits() ?? 0) > self::VAT_SLOT) {
             $source = self::withDefine($source, 'PHPOLYGON_VAT');
         }
@@ -4826,6 +4866,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         $this->lastMeshId = null;
         $this->lastUseInstancing = null;
         $this->lastHasAlbedoTexture = null;
+        $this->lastAlbedoSlot = null;
         $this->lastGbufferWrite = null;
         $this->lastHasPrev = null;
         $this->lastDrawParams = null;
@@ -7731,6 +7772,10 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         $this->applyGbufferWrite(1);
 
         [$packed, $count] = $this->resolveInstanceData($cmd->meshId, $material, $cmd);
+        if ($cmd->albedoTextures !== []) {
+            $this->drawTexturedInstances($cmd, $material, $mesh, $packed, $count);
+            return;
+        }
         vio_draw_instanced($this->ctx, $mesh, $packed, $count);
     }
 
@@ -8110,7 +8155,8 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         // Albedo texture filter of the material: extra taps only above the
         // anisotropy the texture was created with (the player's setting).
         $u['u_material_mip_bias'] = $material->mipBias;
-        $hwAniso = max(1, min(16, $this->settings->anisotropy));
+        // Bindless materials read through the table's 16x sampler.
+        $hwAniso = $this->bindlessBuilt ? 16 : max(1, min(16, $this->settings->anisotropy));
         $u['u_material_aniso'] = [
             $material->anisotropy > $hwAniso ? (float) min(16, (int) ceil($material->anisotropy / $hwAniso)) : 1.0,
             (float) $hwAniso,
@@ -8146,7 +8192,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
      * slot 0 correct regardless of what a prior material bound. The two
      * uniforms are cbuffer values and follow the sticky dedup.
      */
-    private function bindMaterialTextures(Material $material): void
+    private function bindMaterialTextures(Material $material, bool $instanceTextures = false): void
     {
         $hasTexture = false;
         if ($material->vatTexture !== null && (ProcModeShaderRegistry::textureUnits() ?? 0) > self::VAT_SLOT) {
@@ -8155,6 +8201,10 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
                 vio_set_uniform($this->ctx, 'u_vat_tex', self::VAT_SLOT);
                 vio_bind_texture($this->ctx, $vat, self::VAT_SLOT);
             }
+        }
+        if ($this->bindlessBuilt) {
+            $this->bindAlbedoSlot($material, $instanceTextures);
+            return;
         }
         if ($material->albedoTexture !== null && ($this->textureManager !== null || isset($this->gpuTextures[$material->albedoTexture]))) {
             $vioTex = $this->resolveTexture($material->albedoTexture);
@@ -8187,7 +8237,10 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             $this->textureCacheRemovals = $removals;
             foreach ($this->textureCache as $id => $_) {
                 if ($this->textureManager?->has($id) !== true) {
-                    unset($this->textureCache[$id]);
+                    if (isset($this->albedoSlots[$id]) && function_exists('vio_texture_release_index')) {
+                        vio_texture_release_index($this->ctx, $this->albedoSlots[$id][0]);
+                    }
+                    unset($this->textureCache[$id], $this->albedoSlots[$id]);
                 }
             }
         }
@@ -8290,6 +8343,134 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
     }
 
     // ----------------------------------------------------------------
+    // Bindless materials (shader plan 10.1, GraphicsSettings::$bindlessMaterials)
+    // ----------------------------------------------------------------
+
+    private ?bool $bindlessSupport = null;
+    /** The scene programs were compiled with PHPOLYGON_BINDLESS_MATERIALS. */
+    private bool $bindlessBuilt = false;
+    /** A setting compiled into the programs changed: rebuild them at the next frame. */
+    private bool $shaderRebuild = false;
+    /** @var array<string, array{0: VioTexture, 1: int}> albedo texture id -> texture and its table slot */
+    private array $albedoSlots = [];
+    /** Resident "has texture:slot" of the bound program, null = unknown. */
+    private ?string $lastAlbedoSlot = null;
+
+    /** Backend has a bindless texture table with the anisotropic sampler (VIO_FEATURE_BINDLESS). */
+    public function bindlessSupported(): bool
+    {
+        return $this->bindlessSupport ??= function_exists('vio_texture_index') && defined('VIO_FEATURE_BINDLESS')
+            && vio_supports_feature($this->ctx, VIO_FEATURE_BINDLESS);
+    }
+
+    /** True when the scene programs read material textures from the bindless table. */
+    public function bindlessMaterialsActive(): bool
+    {
+        return $this->bindlessBuilt;
+    }
+
+    /** Table slot of an albedo texture, added on first use; null when it does not load. */
+    private function albedoSlot(string $textureId): ?int
+    {
+        if (isset($this->albedoSlots[$textureId])) {
+            return $this->albedoSlots[$textureId][1];
+        }
+        if ($this->textureManager === null && !isset($this->gpuTextures[$textureId])) {
+            return null;
+        }
+        $tex = $this->resolveTexture($textureId);
+        if ($tex === null) {
+            return null;
+        }
+        $slot = vio_texture_index($this->ctx, $tex);
+        if ($slot === false) {
+            return null;
+        }
+        $this->albedoSlots[$textureId] = [$tex, $slot];
+        return $slot;
+    }
+
+    /** The white texture's slot: the albedo of an instance without a texture of its own. */
+    private function whiteSlot(): int
+    {
+        if ($this->whiteTexture === null) {
+            return 0;
+        }
+        if (!isset($this->albedoSlots["\0white"])) {
+            $slot = vio_texture_index($this->ctx, $this->whiteTexture);
+            $this->albedoSlots["\0white"] = [$this->whiteTexture, $slot === false ? 0 : $slot];
+        }
+        return $this->albedoSlots["\0white"][1];
+    }
+
+    /**
+     * The material's albedo as a table slot instead of a bound unit. A batch with
+     * per-instance textures always samples: instances without one read the material's
+     * texture, or white.
+     */
+    private function bindAlbedoSlot(Material $material, bool $instanceTextures): void
+    {
+        $slot = $material->albedoTexture !== null ? $this->albedoSlot($material->albedoTexture) : null;
+        $has = $slot !== null || $instanceTextures;
+        $slot ??= $this->whiteSlot();
+        $key = ($has ? '1:' : '0:') . $slot;
+        if ($key !== $this->lastAlbedoSlot) {
+            $this->setUniforms(['u_has_albedo_texture' => $has ? 1 : 0, 'u_albedo_slot' => $slot]);
+            $this->lastAlbedoSlot = $key;
+            $this->lastHasAlbedoTexture = $has ? 1 : 0;
+        }
+    }
+
+    /**
+     * Instance matrices with each instance's own albedo slot in m[3].w (2 + slot;
+     * 1 keeps the draw's), read and cleared by the vertex stage.
+     *
+     * @param list<?string> $textures
+     */
+    private function withInstanceSlots(string $packed, int $count, array $textures): string
+    {
+        $records = str_split($packed, 64);
+        for ($i = 0; $i < $count && $i < count($records); $i++) {
+            $id = $textures[$i] ?? null;
+            $slot = $id !== null ? $this->albedoSlot($id) : null;
+            if ($slot !== null) {
+                $records[$i] = substr($records[$i], 0, 60) . pack('g', 2.0 + $slot);
+            }
+        }
+        return implode('', $records);
+    }
+
+    /**
+     * A batch with per-instance albedo textures: one draw through the bindless
+     * table, or - without it - one draw per texture, each with its instances.
+     */
+    private function drawTexturedInstances(DrawMeshInstanced $cmd, Material $material, VioMesh $mesh, string $packed, int $count): void
+    {
+        if ($this->bindlessBuilt) {
+            $this->bindAlbedoSlot($material, true);
+            vio_draw_instanced($this->ctx, $mesh, $this->withInstanceSlots($packed, $count, $cmd->albedoTextures), $count);
+            return;
+        }
+        $groups = [];
+        for ($i = 0; $i < $count; $i++) {
+            $id = $cmd->albedoTextures[$i] ?? null;
+            $groups[$id ?? "\0material"][] = substr($packed, $i * 64, 64);
+        }
+        foreach ($groups as $id => $records) {
+            $texture = $id === "\0material" ? $material->albedoTexture : $id;
+            $vioTex = $texture !== null ? $this->resolveTexture($texture) : null;
+            if ($vioTex !== null) {
+                vio_bind_texture($this->ctx, $vioTex, 0);
+            }
+            $has = $vioTex !== null ? 1 : 0;
+            if ($has !== $this->lastHasAlbedoTexture) {
+                $this->setUniforms(['u_has_albedo_texture' => $has, 'u_albedo_texture' => 0]);
+                $this->lastHasAlbedoTexture = $has;
+            }
+            vio_draw_instanced($this->ctx, $mesh, implode('', $records), count($records));
+        }
+    }
+    // ----------------------------------------------------------------
     // Mesh-shader path (shader plan 10.1, GraphicsSettings::$meshShaders)
     // ----------------------------------------------------------------
 
@@ -8344,7 +8525,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
      */
     private function meshletEligible(DrawMeshInstanced $cmd, Material $material, string $materialId): bool
     {
-        if ($cmd->storageBuffer !== null || $material->vatTexture !== null) {
+        if ($cmd->storageBuffer !== null || $material->vatTexture !== null || ($cmd->albedoTextures !== [] && !$this->bindlessBuilt)) {
             return false;
         }
         if ($this->variantsThisFrame && !$material->grass) {
@@ -8481,7 +8662,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             $this->applyMaterialUniforms($material, $cmd->materialId);
             $this->lastMaterialId = $cmd->materialId;
         }
-        $this->bindMaterialTextures($material);
+        $this->bindMaterialTextures($material, $cmd->albedoTextures !== []);
         if (($material->cloth || $material->foliageWind) && $cmd->meshId !== $this->lastMeshId) {
             $this->bindMeshAabb($cmd->meshId);
             $this->lastMeshId = $cmd->meshId;
@@ -8495,6 +8676,9 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         [$packed, $count] = $this->resolveInstanceData($cmd->meshId, $material, $cmd);
         if ($count <= 0) {
             return;
+        }
+        if ($cmd->albedoTextures !== []) {
+            $packed = $this->withInstanceSlots($packed, $count, $cmd->albedoTextures);
         }
         $key = strlen($packed) . ':' . hash('xxh128', $packed);
         $entry = $this->meshletInstances[$key] ?? null;

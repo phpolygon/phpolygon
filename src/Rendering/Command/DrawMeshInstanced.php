@@ -101,6 +101,15 @@ readonly class DrawMeshInstanced
         public int $indirectMaxDraws = 1,
         public ?string $staticKey = null,
         public bool $castShadows = true,
+        /**
+         * Per-instance albedo texture ids (one per instance, null = the material's own),
+         * shader plan 10.1. With GraphicsSettings::$bindlessMaterials on a backend with
+         * bindless textures the batch stays one draw; otherwise it is split into one
+         * draw per texture.
+         *
+         * @var list<?string>
+         */
+        public array $albedoTextures = [],
     ) {}
 
     /**

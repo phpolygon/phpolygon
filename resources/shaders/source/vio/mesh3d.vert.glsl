@@ -66,6 +66,13 @@ uniform vec3 u_draw_params;
 flat out vec3 v_instance_params;
 #endif // PHPOLYGON_INSTANCE_PARAMS
 
+#ifdef PHPOLYGON_BINDLESS_MATERIALS
+// Bindless materials (shader plan 10.1): the albedo's slot in the texture table - the
+// draw's, or an instance's own from m[3].w = 2 + slot (cleared back to 1 before use).
+uniform int u_albedo_slot;
+flat out int v_albedo_slot;
+#endif
+
 #ifdef PHPOLYGON_MOTION
 // Motion vectors (temporal AA / upscaling). Both clip positions are UNJITTERED:
 // the surface point projected with this frame's and with last frame's camera,
@@ -307,6 +314,13 @@ void main() {
         model[2].w = 0.0;
     }
 #endif // PHPOLYGON_INSTANCE_PARAMS
+#ifdef PHPOLYGON_BINDLESS_MATERIALS
+    v_albedo_slot = u_albedo_slot;
+    if (u_use_instancing == 1 && model[3].w > 1.5) {
+        v_albedo_slot = int(model[3].w - 2.0 + 0.5);
+    }
+    model[3].w = 1.0;
+#endif
     vec3 pos = animatePosition(vatPosition(a_position), model, u_time, grassHash);
 
     vec4 worldPos = model * vec4(pos, 1.0);
