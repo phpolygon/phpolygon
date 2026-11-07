@@ -294,6 +294,12 @@ class Material
          * UVs - for imported meshes with stretched or missing UVs (shader plan 5.1).
          */
         public readonly float $triplanar = 0.0,
+        /**
+         * How much the surface weathers inside an AgingVolume (shader plan 5.2):
+         * 1 = fully (dust, streaks, rust, moss, salt), 0 = never (glass, screens,
+         * fresh paint the game wants clean).
+         */
+        public readonly float $weathering = 1.0,
     ) {}
 
     /**
@@ -398,6 +404,14 @@ class Material
             useEnvironmentMap: false,
             foliageWind: $wind,
         );
+    }
+
+    /** This material with another weathering susceptibility (0 = never weathers). */
+    public function withWeathering(float $weathering): self
+    {
+        $m = $this->copy();
+
+        return new self(...[...get_object_vars($m), 'weathering' => max(0.0, $weathering)]);
     }
 
     /** This material with another emission colour (e.g. a glow that fades in at night). */
@@ -540,6 +554,7 @@ class Material
             bodyWave: $clearBodyWave ? null : ($bodyWave ?? $this->bodyWave),
             softParticle: $this->softParticle,
             triplanar: $this->triplanar,
+            weathering: $this->weathering,
         );
     }
 

@@ -6567,6 +6567,8 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         'u_decal_count' => 0,
         'u_heat_count' => 0,
         'u_sun_shafts' => [0.0, 0.0, 0.0, 0.0],
+        'u_age_zone_count' => 0,
+        'u_age_params' => [0.0, -1.0, -1.0e6, 0.15],
     ];
 
     private ?VioRenderTarget $planarTarget = null;
@@ -7304,6 +7306,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             'u_wetness'             => $material->wetness,
             'u_soft_particle'       => $material->softParticle,
             'u_triplanar'           => $material->triplanar,
+            'u_weathering'          => $material->weathering,
             // Subsurface scattering (skin path). Gated by strength > 0 in the
             // shader so non-skin materials remain visually identical.
             'u_subsurface_color'    => [$material->subsurfaceColor->r, $material->subsurfaceColor->g, $material->subsurfaceColor->b],

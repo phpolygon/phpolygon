@@ -192,6 +192,12 @@ uniform float u_triplanar;        // Material::$triplanar: tiles per metre, 0 = 
 // Decal volumes (shader plan 5.1, DecalSystem): per decal (centre, yaw),
 // (half extents, strength), (colour, kind 0 stain 1 soot 2 moss 3 cracks).
 uniform int  u_decal_count;
+// Weathering (shader plan 5.2, AgingSystem): zones (centre, yaw), (half, age);
+// params (north x, north z, waterline y, edge); the material's susceptibility.
+uniform int  u_age_zone_count;
+uniform vec4 u_age_zones[16];
+uniform vec4 u_age_params;
+uniform float u_weathering;
 uniform vec4 u_decals[24];
 
 // HDR pipeline
@@ -1819,6 +1825,82 @@ void main() {
                 if (kind == 1) roughness = mix(roughness, 1.0, s);
                 else roughness = mix(roughness, max(roughness * 0.6, 0.2), s * 0.5);
             }
+        }
+    }
+
+    // Brick variation (shader plan 5.2): each brick of the bricks pattern a little
+    // lighter, darker or warmer than its neighbours; the mortar lines lighter.
+    if (u_normal_pattern == 1) {
+        vec2 bu = patternUv * u_normal_scale;
+        float brow = floor(bu.y);
+        vec2 bcell = vec2(floor((bu.x + mod(brow, 2.0) * 0.25) / 0.5), brow);
+        float bh = hash21(bcell + 4.1);
+        albedo *= vec3(0.88 + 0.24 * bh, 0.9 + 0.18 * bh, 0.92 + 0.12 * hash21(bcell + 9.3));
+    }
+
+    // Weathering (shader plan 5.2): inside the aging zones dust settles on top,
+    // rain streaks run down walls, metal rusts (copper turns green), moss grows
+    // on the north side, bricks bloom white. Near a waterline vertical surfaces
+    // carry a salt crust above it and algae below, whatever the zone.
+    if (u_weathering > 0.0 && u_proc_mode == 0 && alpha > 0.95 && dot(u_emission, vec3(1.0)) < 0.05) {
+        float age = 0.0;
+        for (int k = 0; k < 8; k++) {
+            if (k >= u_age_zone_count) break;
+            vec4 zc = u_age_zones[k * 2];
+            vec4 zh = u_age_zones[k * 2 + 1];
+            vec3 d = v_worldPos - zc.xyz;
+            float cs = cos(zc.w);
+            float sn = sin(zc.w);
+            vec3 l = abs(vec3(cs * d.x - sn * d.z, d.y, sn * d.x + cs * d.z)) / max(zh.xyz, vec3(1e-3));
+            float e = max(max(l.x, l.y), l.z);
+            age = max(age, zh.w * (1.0 - smoothstep(1.0 - u_age_params.w, 1.0, e)));
+        }
+        float a = age * u_weathering;
+        vec3 an = abs(N);
+        vec2 wp = an.y > max(an.x, an.z) ? v_worldPos.xz : (an.x > an.z ? v_worldPos.zy : v_worldPos.xy);
+        if (a > 0.0) {
+            float n1 = noise(wp * 0.7);
+            float n2 = noise(wp * 2.9 + 7.0);
+            // Dust on top: a dull grey-brown film, patchy, never on grass.
+            float dust = a * smoothstep(0.6, 0.95, N.y) * (0.35 + 0.65 * n1) * 0.22 * (u_grass_shade == 1 ? 0.0 : 1.0);
+            albedo = mix(albedo, vec3(0.36, 0.33, 0.28), dust);
+            roughness = mix(roughness, 1.0, dust);
+            // Rain streaks down walls: dark vertical runs.
+            if (an.y < 0.4) {
+                vec2 hv = normalize(vec2(-N.z, N.x) + vec2(1e-5));
+                float along = dot(v_worldPos.xz, hv);
+                float streak = smoothstep(0.55, 0.85, noise(vec2(along * 3.5, v_worldPos.y * 0.25)));
+                albedo *= 1.0 - a * streak * 0.32;
+            }
+            if (metallic > 0.4) {
+                // Rust, or verdigris on copper-coloured metal.
+                bool copper = albedo.r > albedo.b * 1.35 && albedo.r > albedo.g * 1.05;
+                float r = a * smoothstep(0.42, 0.7, n1 * 0.6 + n2 * 0.4);
+                albedo = mix(albedo, copper ? vec3(0.22, 0.48, 0.38) : vec3(0.34, 0.13, 0.05), r);
+                metallic = mix(metallic, 0.0, r);
+                roughness = mix(roughness, 0.9, r);
+            } else {
+                // Moss on the north side, lower and patchy.
+                float north = dot(N.xz, u_age_params.xy);
+                float moss = a * smoothstep(0.15, 0.7, north) * smoothstep(0.45, 0.75, n1 * 0.5 + n2 * 0.5) * (1.0 - smoothstep(0.2, 0.9, N.y));
+                albedo = mix(albedo, vec3(0.16, 0.24, 0.08), moss);
+                roughness = mix(roughness, 0.95, moss);
+                // Efflorescence: white bloom on bricks.
+                if (u_normal_pattern == 1) {
+                    float bloom = a * smoothstep(0.6, 0.85, n2) * 0.5;
+                    albedo = mix(albedo, vec3(0.86, 0.85, 0.82), bloom);
+                }
+            }
+        }
+        // Salt crust above the waterline, algae below (vertical surfaces only).
+        if (u_age_params.z > -1.0e5 && an.y < 0.5 && metallic < 0.5) {
+            float h = v_worldPos.y - u_age_params.z;
+            float sn3 = noise(wp * 1.7 + 3.0);
+            float salt = smoothstep(1.8, 0.4, h) * smoothstep(-0.1, 0.25, h) * smoothstep(0.35, 0.7, sn3) * 0.55 * u_weathering;
+            albedo = mix(albedo, vec3(0.82, 0.8, 0.74), salt);
+            float algae = smoothstep(0.3, -0.1, h) * smoothstep(-1.6, -0.6, h) * (0.6 + 0.4 * sn3) * 0.7 * u_weathering;
+            albedo = mix(albedo, vec3(0.06, 0.12, 0.05), algae);
+            roughness = mix(roughness, 0.95, max(salt, algae));
         }
     }
 
