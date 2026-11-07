@@ -487,6 +487,11 @@ uniform float u_cloud_altitude;
 uniform float u_cloud_density;
 uniform vec2  u_cloud_wind_dir;
 uniform float u_cloud_offset; // = sky pass's u_cloud_offset, so shadows track the clouds
+#ifdef PHPOLYGON_NORMAL_MAP
+// Tangent-space normal map (Material::$normalTexture, shader plan 5.1).
+uniform sampler2D u_normal_texture;
+uniform int u_has_normal_texture;
+#endif
 #ifdef PHPOLYGON_CLOUD_SHADOW_MAP
 uniform sampler2D u_cloud_shadow_map;   // r = sun transmittance, seen from above
 uniform vec4 u_cloud_shadow_info;       // centre x, centre z, half size, 1 = baked this frame
@@ -1748,6 +1753,26 @@ vec3 perturbNormalProcedural(vec3 N, vec3 worldPos, vec2 uv, vec2 sampleUv,
 }
 #endif // PHPOLYGON_OMIT_NORMAL_PATTERNS
 
+#ifdef PHPOLYGON_NORMAL_MAP
+// The normal map's normal in the frame built from the screen derivatives of the
+// position and of `uv` (no tangent attribute needed); read at `sampleUv`.
+vec3 perturbNormalMap(vec3 N, vec3 worldPos, vec2 uv, vec2 sampleUv, float intensity) {
+    vec3 dpx = dFdx(worldPos);
+    vec3 dpy = dFdy(worldPos);
+    vec2 duvx = dFdx(uv);
+    vec2 duvy = dFdy(uv);
+    float det = duvx.x * duvy.y - duvy.x * duvx.y;
+    vec3 nMap = texture(u_normal_texture, sampleUv).xyz * 2.0 - 1.0;
+    if (abs(det) < 1e-8 || intensity <= 0.0) return N;
+    // A mirrored UV layout flips the bitangent with the sign of the UV determinant.
+    vec3 T = (dpx * duvy.y - dpy * duvx.y) / det;
+    T = normalize(T - N * dot(N, T));
+    vec3 B = normalize(cross(N, T)) * sign(det);
+    nMap.xy *= clamp(intensity, 0.0, 4.0);
+    return normalize(mat3(T, B, N) * normalize(nMap));
+}
+#endif
+
 // ================================================================
 //  Main
 // ================================================================
@@ -1915,6 +1940,11 @@ void main() {
     // Procedural normal-map pattern (mirrors mesh3d.frag.glsl). Self-shading
     // procedural materials (water, cloud, moon) have early-returned above so
     // this only affects standard, sand, rock, palm, wood, thatch, carpaint.
+#ifdef PHPOLYGON_NORMAL_MAP
+    if (u_has_normal_texture == 1) {
+        N = perturbNormalMap(N, v_worldPos, v_uv, patternUv, u_normal_intensity);
+    }
+#endif
 #ifndef PHPOLYGON_OMIT_NORMAL_PATTERNS
     N = perturbNormalProcedural(N, v_worldPos, v_uv, patternUv,
                                 u_normal_pattern, u_normal_scale,

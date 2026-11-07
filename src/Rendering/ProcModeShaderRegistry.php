@@ -148,7 +148,10 @@ final class ProcModeShaderRegistry
      */
     public static function maxSamplers(): int
     {
-        return self::$textureUnits !== null ? max(self::MAX_SAMPLERS, self::$textureUnits - self::FIRST_SAMPLER_SLOT) : self::MAX_SAMPLERS;
+        $n = self::$textureUnits !== null ? max(self::MAX_SAMPLERS, self::$textureUnits - self::FIRST_SAMPLER_SLOT) : self::MAX_SAMPLERS;
+        // Above 16 units snippets skip NORMAL_MAP_SLOT (one slot fewer of many); up to 16
+        // they keep all four and the normal map yields when the fourth is declared.
+        return $n > self::MAX_SAMPLERS ? $n - 1 : $n;
     }
 
     /** Ordinary sampler registers of the php-vio this process runs on. */
@@ -172,7 +175,30 @@ final class ProcModeShaderRegistry
      */
     public static function engineSamplers(): int
     {
-        return self::ENGINE_SAMPLERS + (self::cloudShadowMapAvailable() ? 1 : 0) + (self::pointShadowAvailable() ? 1 : 0);
+        return self::ENGINE_SAMPLERS + (self::cloudShadowMapAvailable() ? 1 : 0) + (self::pointShadowAvailable() ? 1 : 0)
+            + (self::normalMapAvailable() ? 1 : 0);
+    }
+
+    /**
+     * Texture unit of Material::$normalTexture in mesh3d.frag: the last of the four
+     * snippet slots every backend has (D3D12 offers 16 units). With more units snippets
+     * skip it; with 16 it is the normal map's while the game declares at most three
+     * snippet samplers.
+     */
+    public const NORMAL_MAP_SLOT = 15;
+
+    /**
+     * Whether mesh3d.frag reads tangent-space normal maps (PHPOLYGON_NORMAL_MAP): php-vio's
+     * 12 sampler registers, and NORMAL_MAP_SLOT free - more than 16 units, or at most
+     * three snippet samplers. Decided when the programs are built.
+     */
+    public static function normalMapAvailable(): bool
+    {
+        if (self::samplerRegisters() < self::SAMPLER_REGISTERS_2_40) {
+            return false;
+        }
+        return (self::$textureUnits ?? 0) > self::FIRST_SAMPLER_SLOT + self::MAX_SAMPLERS
+            || count(self::$samplers) < self::MAX_SAMPLERS;
     }
 
     /**
@@ -474,7 +500,11 @@ final class ProcModeShaderRegistry
             self::$cubeSamplers[$name] = true;
         }
 
-        return self::$samplers[$name] = self::FIRST_SAMPLER_SLOT + count(self::$samplers);
+        $slot = self::FIRST_SAMPLER_SLOT + count(self::$samplers);
+        if ((self::$textureUnits ?? 0) > self::FIRST_SAMPLER_SLOT + self::MAX_SAMPLERS && $slot >= self::NORMAL_MAP_SLOT) {
+            $slot++; // past the normal map's slot
+        }
+        return self::$samplers[$name] = $slot;
     }
 
     /**

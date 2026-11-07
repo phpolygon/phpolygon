@@ -428,6 +428,14 @@ class Material
         public readonly float $tessellation = 0.0,
         public readonly float $tessNear = 8.0,
         public readonly float $tessFar = 60.0,
+        /**
+         * Tangent-space normal map (shader plan 5.1): a texture id, RGB = the normal in
+         * the surface's tangent frame (+Y up, OpenGL convention), stored linearly. The
+         * frame comes from the screen derivatives of position and UV, so meshes need no
+         * tangent attribute; $normalIntensity scales it. Needs php-vio's 12 sampler
+         * registers; elsewhere the surface stays smooth.
+         */
+        public readonly ?string $normalTexture = null,
     ) {}
 
     /**

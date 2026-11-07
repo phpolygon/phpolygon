@@ -36,7 +36,8 @@ final class ProcModeTextureUnitsTest extends TestCase
         ProcModeShaderRegistry::setTextureUnits(768);
 
         self::assertSame(768 - ProcModeShaderRegistry::COMPARISON_SAMPLERS, ProcModeShaderRegistry::samplerRegisters());
-        self::assertSame(768 - ProcModeShaderRegistry::FIRST_SAMPLER_SLOT, ProcModeShaderRegistry::maxSamplers());
+        // All units above the engine's, less the normal map's slot that snippets skip.
+        self::assertSame(768 - ProcModeShaderRegistry::FIRST_SAMPLER_SLOT - 1, ProcModeShaderRegistry::maxSamplers());
         self::assertTrue(ProcModeShaderRegistry::pointShadowAvailable());
     }
 

@@ -144,6 +144,8 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
 
     /** Resident u_has_albedo_texture (u_albedo_texture is always slot 0), null = unknown. */
     private ?int $lastHasAlbedoTexture = null;
+    /** Resident u_has_normal_texture, null = unknown. */
+    private ?int $lastHasNormalTexture = null;
 
     /**
      * The shader id whose per-frame uniforms (lights/fog/shadow/ssao/sdfao +
@@ -4660,6 +4662,9 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         if (ProcModeShaderRegistry::cloudShadowMapAvailable()) {
             $source = self::withDefine($source, 'PHPOLYGON_CLOUD_SHADOW_MAP');
         }
+        if (ProcModeShaderRegistry::normalMapAvailable()) {
+            $source = self::withDefine($source, 'PHPOLYGON_NORMAL_MAP');
+        }
         if (self::sceneColorAvailable()) {
             $source = self::withDefine($source, 'PHPOLYGON_SCENE_COLOR');
         }
@@ -5075,6 +5080,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         $this->lastMeshId = null;
         $this->lastUseInstancing = null;
         $this->lastHasAlbedoTexture = null;
+        $this->lastHasNormalTexture = null;
         $this->lastAlbedoSlot = null;
         $this->lastGbufferWrite = null;
         $this->lastHasPrev = null;
@@ -8564,6 +8570,23 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             if ($vat !== null) {
                 vio_set_uniform($this->ctx, 'u_vat_tex', self::VAT_SLOT);
                 vio_bind_texture($this->ctx, $vat, self::VAT_SLOT);
+            }
+        }
+        // Tangent-space normal map (shader plan 5.1); white when the material has none,
+        // so the declared sampler always has a texture behind it.
+        if (ProcModeShaderRegistry::normalMapAvailable()) {
+            $normalTex = $material->normalTexture !== null ? $this->resolveTexture($material->normalTexture) : null;
+            if ($normalTex === null) {
+                $this->ensureWhiteTexture();
+            }
+            $bound = $normalTex ?? $this->whiteTexture;
+            if ($bound !== null) {
+                vio_bind_texture($this->ctx, $bound, ProcModeShaderRegistry::NORMAL_MAP_SLOT);
+            }
+            $hasNormal = $normalTex !== null ? 1 : 0;
+            if ($hasNormal !== $this->lastHasNormalTexture) {
+                $this->setUniforms(['u_has_normal_texture' => $hasNormal, 'u_normal_texture' => ProcModeShaderRegistry::NORMAL_MAP_SLOT]);
+                $this->lastHasNormalTexture = $hasNormal;
             }
         }
         if ($this->bindlessBuilt) {
