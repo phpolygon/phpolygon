@@ -29,6 +29,8 @@ uniform int   u_halo_count;
 uniform float u_halo_sigma;
 uniform vec4  u_halo_lights[16];
 uniform vec2  u_lightning_dir;
+// Lightning volume (shader plan 10.2): flash distance from the camera (m), 1 = cloud-to-cloud (no bolt).
+uniform vec2  u_lightning_volume;
 // HDR scene path: clouds alpha-blend over the linear sky, so linearise the
 // cloud colour so it composites against the tonemapped resolve correctly.
 uniform int u_linear_output;
@@ -104,7 +106,7 @@ float cloudDensity(vec3 p) {
 // to the horizon, its shape seeded by the strike direction. Brightness 0..1.
 const float STRIKE_DIST = 350.0;
 float lightningBolt(vec3 dir) {
-    if (u_lightning <= 0.01) return 0.0;
+    if (u_lightning <= 0.01 || u_lightning_volume.y > 0.5) return 0.0;
     vec2 hz = dir.xz / max(length(dir.xz), 1e-4);
     float da = atan(hz.x * u_lightning_dir.y - hz.y * u_lightning_dir.x, dot(hz, u_lightning_dir));
     float e = asin(clamp(dir.y, -1.0, 1.0));
@@ -222,11 +224,23 @@ void main() {
             // edges scatter its light forward and glow bright.
             float fwd = pow(max(dot(dir, L), 0.0), 10.0);
             col += u_sun_color * max(u_sun_intensity, 0.0) * fwd * exp(-dens * 4.0) * 1.6 * (1.0 - u_cloud_darkness);
-            // Lightning lights the cloud from inside, strongest near the strike.
+            // Lightning volume (shader plan 10.2): the flash is a light inside the slab.
+            // Its light reaches this sample through the cloud between them (three
+            // density taps towards the flash) and falls off with distance, so the
+            // cloud glows from within around the flash and shadows itself.
             if (u_lightning > 0.01) {
-                vec2 strike = u_camera_pos.xz + u_lightning_dir * STRIKE_DIST;
-                float near = exp(-length(p.xz - strike) / 300.0);
-                col += vec3(0.75, 0.8, 1.0) * u_lightning * (0.08 + 1.8 * near) * (1.0 - lightT * 0.5);
+                vec3 flash = vec3(u_camera_pos.x + u_lightning_dir.x * u_lightning_volume.x, base + SLAB_THICK * 0.45, u_camera_pos.z + u_lightning_dir.y * u_lightning_volume.x);
+                vec3 toFlash = flash - p;
+                float fd = length(toFlash);
+                vec3 fdir = toFlash / max(fd, 1e-3);
+                float span = min(fd, 240.0);
+                float fdens = 0.0;
+                for (int k = 1; k <= 3; k++) {
+                    fdens += cloudDensity(p + fdir * (span * float(k) / 4.0));
+                }
+                float flashT = exp(-fdens * span / 3.0 * 0.05);
+                float falloff = 1.0 / (1.0 + (fd / 220.0) * (fd / 220.0));
+                col += vec3(0.75, 0.8, 1.0) * u_lightning * (0.06 + 3.2 * falloff * flashT);
             }
 
             float dT = exp(-dens * stepLen * 1.1);

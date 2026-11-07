@@ -6936,6 +6936,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
                 vio_set_uniform($this->ctx, "u_halo_lights[{$i}]", $this->skyHaloLights[$i]);
             }
             vio_set_uniform($this->ctx, 'u_lightning_dir', [sin($sky->lightningAzimuth), cos($sky->lightningAzimuth)]);
+            vio_set_uniform($this->ctx, 'u_lightning_volume', [$sky->lightningDistance, $sky->lightningInCloud ? 1.0 : 0.0]);
             vio_draw($this->ctx, $quad);
             }
         }

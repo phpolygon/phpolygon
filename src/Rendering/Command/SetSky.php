@@ -71,6 +71,13 @@ final class SetSky
         public readonly float $moonPhase = 0.5,
         /** High fog layer 0..1: a grey stratus veil that flattens the sky. */
         public readonly float $highFog = 0.0,
+        /**
+         * Cloud-to-cloud lightning (shader plan 10.2): the flash stays inside the cloud
+         * layer - no bolt reaches down, the clouds light up from within around it.
+         */
+        public readonly bool $lightningInCloud = false,
+        /** Distance of the flash from the camera in metres (the volume light inside the clouds). */
+        public readonly float $lightningDistance = 350.0,
     ) {}
 
     /** Cloud drift distance the renderer applies (see $cloudOffset). */
