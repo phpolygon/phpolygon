@@ -43,8 +43,13 @@ vec3 invToneMapInvGamma(vec3 displayColor) {
     return max((-B - sq) / (2.0 * A), 0.0);
 }
 
+// Sine-free hash (multiply, add, fract only): the same on every GPU. The former
+// fract(sin(x) * 43758) fed sin() arguments around 1e5, whose precision is up to
+// the driver - an Intel UHD drew other stars and other aurora curtains than an RTX.
 float hash31(vec3 p) {
-    return fract(sin(dot(p, vec3(443.897, 441.423, 437.195))) * 43758.5453);
+    p = fract(p * 0.1031);
+    p += dot(p, p.zyx + 31.32);
+    return fract((p.x + p.y) * p.z);
 }
 
 float vnoise(vec3 p) {
