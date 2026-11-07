@@ -216,6 +216,12 @@ uniform float u_particle_tint;
 uniform vec4 u_flipbook;
 // Depth prepass (shader plan 9.1): 1 = return at once (colour is masked).
 uniform float u_depth_only;
+// Ray-traced sun shadows (shader plan 10.1, GraphicsSettings::$rayTracedShadows): one
+// inline ray per pixel towards the sun through the scene's acceleration structure.
+uniform float u_rt_shadows;
+#ifdef PHPOLYGON_RAY_QUERY
+layout(binding = 0) uniform accelerationStructureEXT u_tlas;
+#endif
 #ifdef PHPOLYGON_SCENE_COLOR
 // Copy of the opaque scene colour (more than 16 texture units only).
 uniform sampler2D u_scene_color;
@@ -2118,6 +2124,18 @@ void main() {
     vec3 F0 = mix(vec3(0.04), albedo, metallic);
     float NdotV = max(dot(N, V), 0.001);
     float shadow = calcShadow(v_lightSpacePos, N);
+#ifdef PHPOLYGON_RAY_QUERY
+    if (u_rt_shadows > 0.5 && u_dir_light_count > 0) {
+        vec3 rtL = normalize(-u_dir_lights[0].direction);
+        if (dot(N, rtL) > 0.0) {
+            rayQueryEXT rq;
+            rayQueryInitializeEXT(rq, u_tlas, gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsOpaqueEXT, 0xFF,
+                                  v_worldPos + N * 0.04, 0.02, rtL, 2000.0);
+            while (rayQueryProceedEXT(rq)) {}
+            shadow = rayQueryGetIntersectionTypeEXT(rq, true) == gl_RayQueryCommittedIntersectionNoneEXT ? 1.0 : 0.0;
+        }
+    }
+#endif
     // Volumetric cloud shadow: dims the primary (sun) light where a cloud blocks
     // it, so the clouds drifting overhead cast moving shadow patches on the world.
     float cloudSh = cloudShadow(v_worldPos);

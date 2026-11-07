@@ -3162,8 +3162,89 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         $this->animationClockDriven = true;
     }
 
+    /** Whether the context offers inline ray queries (VIO_FEATURE_RAY_QUERY). */
+    private function rayQueryAvailable(): bool
+    {
+        return $this->rayQuery ??= function_exists('vio_acceleration_structure') && defined('VIO_FEATURE_RAY_QUERY')
+            && vio_supports_feature($this->ctx, VIO_FEATURE_RAY_QUERY);
+    }
+
+    private ?bool $rayQuery = null;
+    private ?\VioAccelerationStructure $rtScene = null;
+    private bool $rtSceneReady = false;
+    /** @var list<array{mesh: \VioMesh, transform: list<float>}> the static opaque instances of the last frame */
+    private array $rtPending = [];
+    private string $rtPendingKey = '';
+    private string $rtBuiltKey = '';
+
+    /**
+     * Ray-traced shadows (shader plan 10.1): the acceleration structure over the
+     * last frame's static opaque draws, built or updated before the frame opens
+     * (php-vio builds outside vio_begin) - a refit when only transforms moved.
+     */
+    private function updateRayTracedScene(): void
+    {
+        $this->rtSceneReady = false;
+        if (!$this->settings->rayTracedShadows || !$this->rayQueryAvailable() || $this->rtPending === []) {
+            return;
+        }
+        if ($this->rtScene !== null && $this->rtBuiltKey === $this->rtPendingKey) {
+            $this->rtSceneReady = true;
+            return;
+        }
+        if ($this->rtScene === null) {
+            $as = @vio_acceleration_structure($this->ctx, $this->rtPending);
+            $this->rtScene = $as === false ? null : $as;
+        } else {
+            @vio_acceleration_structure_update($this->ctx, $this->rtScene, $this->rtPending);
+        }
+        $this->rtBuiltKey = $this->rtPendingKey;
+        $this->rtSceneReady = $this->rtScene !== null;
+    }
+
+    /** Collect this frame's static opaque draws for next frame's acceleration structure. */
+    private function collectRayTracedScene(array $commands): void
+    {
+        if (!$this->settings->rayTracedShadows || !$this->rayQueryAvailable()) {
+            return;
+        }
+        $inst = [];
+        $key = '';
+        foreach ($commands as $cmd) {
+            if ($cmd instanceof DrawMesh) {
+                $mat = MaterialRegistry::get($cmd->materialId);
+                if ($mat === null || $mat->alpha < 0.9 || !$cmd->castShadows) {
+                    continue;
+                }
+                $mesh = $this->uploadMesh($cmd->meshId);
+                if ($mesh === null) {
+                    continue;
+                }
+                $t = $cmd->modelMatrix->toArray();
+                $inst[] = ['mesh' => $mesh, 'transform' => $t];
+                $key .= $cmd->meshId . spl_object_id($cmd->modelMatrix) . ';';
+            } elseif ($cmd instanceof DrawMeshInstanced && $cmd->isStatic && $cmd->storageBuffer === null && $cmd->castShadows) {
+                $mat = MaterialRegistry::get($cmd->materialId);
+                $mesh = $mat !== null && $mat->alpha >= 0.9 ? $this->uploadMesh($cmd->meshId) : null;
+                if ($mesh === null) {
+                    continue;
+                }
+                $flat = $cmd->hasFlatMatrices() ? $cmd->flatMatrices : [];
+                for ($i = 0; $i + 15 < count($flat); $i += 16) {
+                    $t = array_slice($flat, $i, 16);
+                    $t[3] = 0.0; $t[7] = 0.0; $t[11] = 0.0;
+                    $inst[] = ['mesh' => $mesh, 'transform' => $t];
+                }
+                $key .= ($cmd->staticKey ?? $cmd->meshId) . count($flat) . ';';
+            }
+        }
+        $this->rtPending = $inst;
+        $this->rtPendingKey = md5($key);
+    }
+
     public function beginFrame(): void
     {
+        $this->updateRayTracedScene();
         $size = vio_framebuffer_size($this->ctx);
         if ($size[0] > 0 && $size[1] > 0) {
             $this->width = $size[0];
@@ -3801,7 +3882,11 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         // a reactive opaque material opens the reactive attachment for the pass.
         $opaque = OpaqueDrawOrder::sort($commands, $this->motionThisFrame, $this->reactiveOpaqueThisFrame);
         $this->prepassThisFrame = $this->settings->depthPrepass && !$this->variantsThisFrame;
+        $this->collectRayTracedScene($commands);
         $this->bindPipeline('opaque');
+        if ($this->rtSceneReady && $this->rtScene !== null) {
+            vio_bind_acceleration_structure($this->ctx, $this->rtScene, 0);
+        }
         $this->uploadFrameUniforms($frameState);
         $this->uploadShadowUniforms($hasShadowMap, $dirLights);
         $this->uploadSsaoUniforms();
@@ -4258,6 +4343,11 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         }
         if (self::sceneColorAvailable()) {
             $source = self::withDefine($source, 'PHPOLYGON_SCENE_COLOR');
+        }
+        if ($this->settings->rayTracedShadows && $this->rayQueryAvailable()) {
+            $source = self::withDefine($source, 'PHPOLYGON_RAY_QUERY');
+            // GL_EXT_ray_query needs GLSL 460.
+            $source = (string) preg_replace('/^\s*#version[^\n]*\n/', "#version 460 core\n#extension GL_EXT_ray_query : require\n", $source, 1);
         }
         if ($this->lightGridSupported()) {
             $source = self::withDefine($source, 'PHPOLYGON_LIGHT_GRID');
@@ -7829,6 +7919,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             'u_figure_look'         => [$material->rimLight, $material->hairShine],
             'u_refract'             => [$material->refraction, $material->frost],
             'u_particle_tint'       => $material->particleTint ? 1.0 : 0.0,
+            'u_rt_shadows'          => $this->rtSceneReady ? 1.0 : 0.0,
             'u_flipbook'            => [(float) $material->flipbook[0], (float) $material->flipbook[1], $material->flipbookFps, $material->streakFade ? 1.0 : 0.0],
             'u_vat'                 => $material->vatTexture !== null && count($material->vatInfo) >= 8 ? [$material->vatInfo[0], $material->vatInfo[1], 1.0, 0.0] : [0.0, 0.0, 0.0, 0.0],
             'u_vat_min'             => count($material->vatInfo) >= 8 ? [$material->vatInfo[2], $material->vatInfo[3], $material->vatInfo[4]] : [0.0, 0.0, 0.0],

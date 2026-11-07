@@ -69,6 +69,8 @@ final class GraphicsSettings
         public readonly bool $skyCloudCache = false,
         /** Temporal SSAO (shader plan 9.1): rotating noise accumulated while the camera holds still. */
         public readonly bool $temporalSsao = false,
+        /** Ray-traced sun shadows (shader plan 10.1, VIO_FEATURE_RAY_QUERY). */
+        public readonly bool $rayTracedShadows = false,
         public readonly bool $hdr = true,
         /**
          * Low input latency: cap the CPU at ONE frame ahead of presentation
@@ -180,6 +182,7 @@ final class GraphicsSettings
         ?bool $foveatedShading = null,
         ?bool $skyCloudCache = null,
         ?bool $temporalSsao = null,
+        ?bool $rayTracedShadows = null,
         ?bool $hdr = null,
         ?bool $lowLatency = null,
         ?ShadingRate $shadingRate = null,
@@ -225,6 +228,7 @@ final class GraphicsSettings
             foveatedShading: $foveatedShading ?? $this->foveatedShading,
             skyCloudCache: $skyCloudCache ?? $this->skyCloudCache,
             temporalSsao: $temporalSsao ?? $this->temporalSsao,
+            rayTracedShadows: $rayTracedShadows ?? $this->rayTracedShadows,
             hdr: $hdr ?? $this->hdr,
             lowLatency: $lowLatency ?? $this->lowLatency,
             shadingRate: $shadingRate ?? $this->shadingRate,
@@ -272,6 +276,7 @@ final class GraphicsSettings
             'foveatedShading' => $this->foveatedShading,
             'skyCloudCache' => $this->skyCloudCache,
             'temporalSsao' => $this->temporalSsao,
+            'rayTracedShadows' => $this->rayTracedShadows,
             'hdr' => $this->hdr,
             'lowLatency' => $this->lowLatency,
             'shadingRate' => $this->shadingRate->value,
@@ -326,6 +331,7 @@ final class GraphicsSettings
             foveatedShading: self::asBool($data['foveatedShading'] ?? null) ?? $defaults->foveatedShading,
             skyCloudCache: self::asBool($data['skyCloudCache'] ?? null) ?? $defaults->skyCloudCache,
             temporalSsao: self::asBool($data['temporalSsao'] ?? null) ?? $defaults->temporalSsao,
+            rayTracedShadows: self::asBool($data['rayTracedShadows'] ?? null) ?? $defaults->rayTracedShadows,
             hdr: self::asBool($data['hdr'] ?? null) ?? $defaults->hdr,
             lowLatency: self::asBool($data['lowLatency'] ?? null) ?? $defaults->lowLatency,
             shadingRate: self::enumFrom(ShadingRate::class, $data['shadingRate'] ?? null) ?? $defaults->shadingRate,
