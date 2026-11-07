@@ -418,6 +418,16 @@ class Material
         public readonly float $oceanAmplitude = 0.6,
         public readonly float $oceanLoop = 12.0,
         public readonly float $oceanChop = 1.0,
+        /**
+         * Tessellation (shader plan 10.2): > 0 splits each triangle up to this level near
+         * the camera - full detail up to $tessNear metres, none from $tessFar - and runs
+         * the vertex stage on every new vertex, so waves and the ocean spectrum get
+         * detail where they are seen. Stays out of the depth prepass and the mesh-
+         * shader path; draws untessellated where the backend has no tessellation.
+         */
+        public readonly float $tessellation = 0.0,
+        public readonly float $tessNear = 8.0,
+        public readonly float $tessFar = 60.0,
     ) {}
 
     /**
@@ -725,6 +735,9 @@ class Material
             oceanAmplitude: $this->oceanAmplitude,
             oceanLoop: $this->oceanLoop,
             oceanChop: $this->oceanChop,
+            tessellation: $this->tessellation,
+            tessNear: $this->tessNear,
+            tessFar: $this->tessFar,
         );
     }
 

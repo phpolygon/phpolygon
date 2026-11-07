@@ -2114,7 +2114,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
     /** Whether the depth prepass may draw a material: nothing that can discard. */
     private static function prepassEligible(Material $m): bool
     {
-        return $m->albedoTexture === null && $m->fadeDistance[1] == 0.0 && !$m->grass && $m->alpha >= 1.0 && $m->furLength <= 0.0;
+        return $m->albedoTexture === null && $m->fadeDistance[1] == 0.0 && !$m->grass && $m->alpha >= 1.0 && $m->furLength <= 0.0 && $m->tessellation <= 0.0;
     }
 
     private int $ssaoFrame = 0;
@@ -4768,6 +4768,10 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         if ($meshlets) {
             $key .= ':ms';
         }
+        $tess = $this->tessMode && !$storageInstances && !$meshlets;
+        if ($tess) {
+            $key .= ':tess';
+        }
 
         if (!isset($this->pipelineCache[$key])) {
             if ($mrt) {
@@ -4780,7 +4784,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
                 // geometry, additively, and by opaque geometry in ':rx' frames.
                 $program = ($storageInstances ? 'default_storage_mrt' : 'default_mrt') . ($mv ? '_mv' : '') . $variantSuffix;
                 $cfg = [
-                    'shader' => $this->sceneShader($program, $pass, $meshlets),
+                    'shader' => $tess ? $this->tessShader($program) : $this->sceneShader($program, $pass, $meshlets),
                     'depth_test' => true,
                     'depth_write' => $pass === 'opaque' || $pass === 'prepass',
                     'cull_mode' => $cull,
@@ -4813,10 +4817,14 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
                 if ($pass === 'opaque' && $this->prepassThisFrame) {
                     $cfg['depth_func'] = VIO_DEPTH_LEQUAL;
                 }
+                if ($tess) {
+                    $cfg['topology'] = VIO_PATCHES;
+                    $cfg['patch_vertices'] = 3;
+                }
                 $pipeline = $this->createPipeline($cfg);
             } else {
                 $programId = isset($this->shaderCache[$shaderId . $variantSuffix]) ? $shaderId . $variantSuffix : 'default';
-                $shader = $this->sceneShader($programId, $pass, $meshlets);
+                $shader = $tess ? $this->tessShader($programId) : $this->sceneShader($programId, $pass, $meshlets);
 
                 $pipeline = $this->createPipeline([
                     'shader' => $shader,
@@ -4829,7 +4837,8 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
                     // match". No-op on backends that derive format from the target.
                     'hdr' => $hdr,
                 ] + ($pass === 'prepass' ? ['color_mask' => 0] : [])
-                  + ($pass === 'opaque' && $this->prepassThisFrame ? ['depth_func' => VIO_DEPTH_LEQUAL] : []));
+                  + ($pass === 'opaque' && $this->prepassThisFrame ? ['depth_func' => VIO_DEPTH_LEQUAL] : [])
+                  + ($tess ? ['topology' => VIO_PATCHES, 'patch_vertices' => 3] : []));
             }
 
             if ($pipeline === false) {
@@ -7194,6 +7203,10 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
     /** @param list<float>|null $params DrawMesh::$params */
     private function drawMeshCommand(string $meshId, Material $material, Mat4 $modelMatrix, string $materialId = '', bool $excludeFromGbuffer = false, ?Mat4 $prevModelMatrix = null, ?array $params = null): void
     {
+        if ($material->tessellation > 0.0 && !$this->tessMode && $this->tessellationAvailable()) {
+            $this->drawTessellated(fn () => $this->drawMeshCommand($meshId, $material, $modelMatrix, $materialId, $excludeFromGbuffer, $prevModelMatrix, $params));
+            return;
+        }
         $this->applyMaterialShadingRate($material);
         $mesh = $this->uploadMesh($meshId);
         if ($mesh === null) {
@@ -7211,6 +7224,11 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             'u_model'          => $matrices[0],
             'u_normal_matrix'  => $matrices[1],
         ];
+        if ($this->tessMode) {
+            // The control stage reads its own copy (TessellationShaderSource).
+            $perDraw['u_tess_model'] = $matrices[0];
+            $perDraw['u_tess_instanced'] = 0;
+        }
         if ($this->lastUseInstancing !== 0) {
             $perDraw['u_use_instancing'] = 0;
             $this->lastUseInstancing = 0;
@@ -7789,6 +7807,10 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
 
     private function drawMeshInstancedCommand(DrawMeshInstanced $cmd, Material $material): void
     {
+        if ($material->tessellation > 0.0 && !$this->tessMode && $cmd->storageBuffer === null && $this->tessellationAvailable()) {
+            $this->drawTessellated(fn () => $this->drawMeshInstancedCommand($cmd, $material));
+            return;
+        }
         $this->applyMaterialShadingRate($material);
         // Hot-path: read public properties directly instead of via the
         // accessors. The extra method-call dispatch broke the
@@ -7824,6 +7846,9 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         if ($this->lastUseInstancing !== 1) {
             vio_set_uniform($this->ctx, 'u_use_instancing', 1);
             $this->lastUseInstancing = 1;
+        }
+        if ($this->tessMode) {
+            vio_set_uniform($this->ctx, 'u_tess_instanced', 1);
         }
         $this->applyGbufferWrite(1);
 
@@ -8174,6 +8199,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             'u_alpha_cutoff'        => $material->alphaCutoff,
             'u_ocean'               => [$material->oceanPatch, $material->oceanAmplitude, max(0.1, $material->oceanLoop), $material->oceanTexture !== null && (ProcModeShaderRegistry::textureUnits() ?? 0) > self::OCEAN_SLOT ? 1.0 : 0.0],
             'u_ocean_chop'          => $material->oceanChop,
+            'u_tess'                => [max(1.0, min(64.0, $material->tessellation)), $material->tessNear, $material->tessFar, $material->tessellation > 0.0 ? 1.0 : 0.0],
             'u_hair'                => $material->hair ? 1.0 : 0.0,
             'u_fur'                 => [0.0, $material->furLength, 0.0, 0.0],
             'u_fur_shell'           => [0.0, $material->furDensity, 0.35, $material->furLength > 0.0 ? 1.0 : 0.0],
@@ -8415,6 +8441,104 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         $this->bindPipeline($pass, cull: $cull);
     }
 
+    // ----------------------------------------------------------------
+    // Tessellation (shader plan 10.2, Material::$tessellation)
+    // ----------------------------------------------------------------
+
+    /** True while bindPipeline() should pick the tessellation twin of the pass program. */
+    private bool $tessMode = false;
+    private ?bool $tessSupport = null;
+    /** @var array<string, true> programs whose tessellation twin did not compile */
+    private array $tessFailed = [];
+
+    private function tessellationAvailable(): bool
+    {
+        return $this->tessSupport ??= defined('VIO_FEATURE_TESSELLATION') && defined('VIO_PATCHES')
+            && vio_supports_feature($this->ctx, VIO_FEATURE_TESSELLATION);
+    }
+
+    /** The vertex / control / evaluation twin of a scene program (TessellationShaderSource). */
+    private function tessShader(string $program): ?\VioShader
+    {
+        $id = $program . '#tess';
+        if (isset($this->shaderCache[$id])) {
+            return $this->shaderCache[$id];
+        }
+        $src = $this->programSources[$program] ?? null;
+        if ($src === null || isset($this->tessFailed[$id])) {
+            return null;
+        }
+        $start = hrtime(true);
+        try {
+            $shader = vio_shader($this->ctx, [
+                'vertex' => TessellationShaderSource::vertex(),
+                'tess_control' => TessellationShaderSource::control(),
+                'tess_eval' => TessellationShaderSource::evaluation($src[0]),
+                'fragment' => $src[1],
+                'format' => $this->conventions()->shaderSourceFormat(),
+            ]);
+        } catch (\RuntimeException $e) {
+            fwrite(STDERR, "[VioRenderer3D] tessellation unavailable for '{$program}': {$e->getMessage()}\n");
+            $shader = false;
+        }
+        FrameSpikeRecorder::note(FrameSpikeRecorder::NOTE_SHADER, 1, hrtime(true) - $start);
+        if (!$shader instanceof \VioShader) {
+            $this->tessFailed[$id] = true;
+            return null;
+        }
+        return $this->shaderCache[$id] = $shader;
+    }
+
+    /**
+     * Run $draw with the tessellation twin of the pass program bound (its constants
+     * start empty, so the frame inputs go in first), then go back to the regular
+     * program. Without a twin the draw runs untessellated.
+     */
+    private function drawTessellated(callable $draw): void
+    {
+        $pass = $this->currentScenePass;
+        $cull = $this->currentSceneCull;
+        $inputs = $this->sceneUniformInputs;
+        $plain = function () use ($draw): void {
+            // The regular program draws it; tessMode only stops the recursion.
+            $this->tessMode = true;
+            $draw();
+            $this->tessMode = false;
+        };
+        if ($pass === 'prepass' || $inputs === null) {
+            $plain();
+            return;
+        }
+        $this->tessMode = true;
+        $bound = $this->bindPipeline($pass, cull: $cull);
+        $this->tessMode = false;
+        if (!$bound) {
+            $this->bindPipeline($pass, cull: $cull);
+            $plain();
+            return;
+        }
+        $this->tessMode = true;
+        [$frameState, $hasShadowMap, $dirLights] = $inputs;
+        $this->uploadFrameUniforms($frameState);
+        $this->uploadShadowUniforms($hasShadowMap, $dirLights);
+        $this->uploadSsaoUniforms();
+        $this->uploadSdfAoUniforms();
+        $this->uploadSnippetInputs();
+        $this->uploadMotionUniforms();
+        if ($pass !== 'opaque') {
+            if (ProcModeShaderRegistry::sceneDepthRequired()) {
+                $this->uploadSceneDepthInputs();
+            }
+            if (self::sceneColorAvailable()) {
+                $this->uploadSceneColorInputs();
+            }
+        }
+        $eye = $this->cameraPosition;
+        vio_set_uniform($this->ctx, 'u_tess_eye', $eye !== null ? [$eye->x, $eye->y, $eye->z] : [0.0, 0.0, 0.0]);
+        $draw();
+        $this->tessMode = false;
+        $this->bindPipeline($pass, cull: $cull);
+    }
     // ----------------------------------------------------------------
     // Hi-Z occlusion culling (shader plan 9.1, GraphicsSettings::$occlusionCulling)
     // ----------------------------------------------------------------
@@ -8714,7 +8838,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
      */
     private function meshletEligible(DrawMeshInstanced $cmd, Material $material, string $materialId): bool
     {
-        if ($cmd->storageBuffer !== null || $material->vatTexture !== null || $material->oceanTexture !== null || $material->furLength > 0.0 || ($cmd->albedoTextures !== [] && !$this->bindlessBuilt)) {
+        if ($cmd->storageBuffer !== null || $material->vatTexture !== null || $material->oceanTexture !== null || $material->tessellation > 0.0 || $material->furLength > 0.0 || ($cmd->albedoTextures !== [] && !$this->bindlessBuilt)) {
             return false;
         }
         if ($this->variantsThisFrame && !$material->grass) {
