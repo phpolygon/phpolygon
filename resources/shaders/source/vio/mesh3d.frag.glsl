@@ -187,6 +187,7 @@ uniform vec4 u_height_fog_color;  // rgb, 1 = own colour (else the distance-fog 
 uniform int  u_fog_volume_count;
 uniform vec4 u_fog_volumes[12];   // per volume: (centre, yaw), (half extents, density), (colour, edge)
 uniform float u_light_halo;       // light scattered by the air per metre (halos, cones)
+uniform float u_soft_particle;    // Material::$softParticle: soft puff, depth fade distance
 
 // HDR pipeline
 uniform int u_linear_output;
@@ -2168,6 +2169,17 @@ void main() {
 
     vec4 sceneFogV = sceneFog(v_worldPos);
     float fogT = sceneFogV.a;
+
+    // Soft puffs (Material::$softParticle, shader plan 4.2): round on their quad and
+    // fading where they meet geometry, so smoke and steam have no hard edges.
+    if (u_soft_particle > 0.0) {
+        alpha *= 1.0 - smoothstep(0.18, 0.5, length(v_uv - 0.5));
+#ifdef PHPOLYGON_SCENE_DEPTH
+        alpha *= clamp(sceneDepthDelta() / u_soft_particle, 0.0, 1.0);
+#endif
+        // Close to the eye a puff thins out instead of filling the view.
+        alpha *= smoothstep(0.4, 2.0, length(u_camera_pos - v_worldPos));
+    }
 
 #ifdef PHPOLYGON_MRT
     // mix(sum, fog, t) is affine: every part scales by (1 - t), the fog colour is

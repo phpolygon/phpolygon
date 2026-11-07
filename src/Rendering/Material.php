@@ -280,7 +280,32 @@ class Material
          * kelp); null = none. See {@see BodyWave}.
          */
         public readonly ?BodyWave $bodyWave = null,
+        /**
+         * > 0: a soft puff of smoke, steam or dust on a unit quad (a billboard
+         * particle): round, fading out towards the quad's rim, and fading where it
+         * meets geometry within this many metres (needs the scene depth,
+         * ProcModeShaderRegistry::requireSceneDepth()); no hard cut through walls
+         * and ground. 0 = an ordinary surface.
+         */
+        public readonly float $softParticle = 0.0,
     ) {}
+
+    /**
+     * A soft puff of smoke, steam or dust for billboard particles (see
+     * $softParticle): matte, two-sided, no environment reflection, translucent.
+     */
+    public static function puff(Color $albedo, float $alpha = 0.35, float $softness = 1.5, ?Color $emission = null): self
+    {
+        return new self(
+            albedo: $albedo,
+            roughness: 1.0,
+            emission: $emission ?? new Color(0.0, 0.0, 0.0),
+            alpha: $alpha,
+            useEnvironmentMap: false,
+            twoSided: true,
+            softParticle: max(0.01, $softness),
+        );
+    }
 
     /**
      * Grass blades: root colour `$base`, tip colour `$tip`, two-sided, matte,
@@ -507,6 +532,7 @@ class Material
             mipBias: $mipBias ?? $this->mipBias,
             anisotropy: $anisotropy ?? $this->anisotropy,
             bodyWave: $clearBodyWave ? null : ($bodyWave ?? $this->bodyWave),
+            softParticle: $this->softParticle,
         );
     }
 
