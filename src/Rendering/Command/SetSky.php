@@ -83,6 +83,14 @@ final class SetSky
          * fold and drift across the night sky; visible where the sky is dark.
          */
         public readonly float $aurora = 0.0,
+        /**
+         * Physical sky 0..1 (shader plan 4.3): weight of a single-scattering atmosphere
+         * (Rayleigh + Mie over a planet) against the authored zenith/horizon gradient. It
+         * derives the blue day sky, the pale horizon and the reddening at sunset from the
+         * sun alone; once the sun sinks below about -7 degrees the authored gradient takes
+         * over again, so the night keeps its designed colours.
+         */
+        public readonly float $physicalSky = 0.0,
     ) {}
 
     /** Cloud drift distance the renderer applies (see $cloudOffset). */

@@ -184,6 +184,7 @@ final class VioEnvironmentCubemap
                 $sky->starBrightness, $sky->moonIntensity,
                 $sky->moonColor->r, $sky->moonColor->g, $sky->moonColor->b,
                 $sky->cloudCover, $sky->cloudAltitude, $sky->cloudDensity, $sky->cloudWindSpeed, $sky->fogDensity,
+                $sky->highFog, $sky->aurora, $sky->physicalSky,
             ]),
         ));
     }

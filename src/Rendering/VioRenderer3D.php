@@ -6957,6 +6957,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         vio_set_uniform($this->ctx, 'u_sun_direction', [$sunDir->x / $sunDirLen, $sunDir->y / $sunDirLen, $sunDir->z / $sunDirLen]);
         vio_set_uniform($this->ctx, 'u_sun_color', [$sky->sunColor->r, $sky->sunColor->g, $sky->sunColor->b]);
         vio_set_uniform($this->ctx, 'u_high_fog', $sky->highFog);
+        vio_set_uniform($this->ctx, 'u_physical_sky', $sky->physicalSky);
         vio_draw($this->ctx, $quad);
         }
 
