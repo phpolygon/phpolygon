@@ -47,8 +47,8 @@ final class VioEngineFrameOrderTest extends TestCase
      * unchanged (2D on top, the box through the offscreen target, checked by eye).
      */
     private const V092 = [
-        'd3d12|Microsoft Basic Render Driver' => '5ddf10cfaa0b78c47d0a074ecd48be69',
-        'd3d12|NVIDIA GeForce RTX 2080' => 'd89602a5db831c8ffbb0d57a29aeae5f',
+        'd3d12|Microsoft Basic Render Driver' => '391ff42377944bc705de666b3239d2b6',
+        'd3d12|NVIDIA GeForce RTX 2080' => '63c9a9c698f20b1f9eaf6d07fd1892e9',
     ];
 
     /** @return array{0: string, 1: string, 2: string} rgba, backend, adapter */

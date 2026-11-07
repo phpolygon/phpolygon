@@ -9477,14 +9477,17 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
     {
         $inv = $model->inverse();
         $m = $inv->toArray();
-        // Column-major storage: columns of transpose(inverse(model))
-        // = rows of inverse(model)
-        // OpenGL reads as column-major, HLSL row_major reads as rows.
-        // Both need the same data order: column 0 of inv, column 1 of inv, column 2 of inv
+        // u_normal_matrix is a GLSL mat3, uploaded column-major on every backend (php-vio
+        // packs it as std140 columns for HLSL / MSL too). Its columns are those of
+        // transpose(inverse(model)), i.e. the ROWS of inverse(model): Mat4::toArray() is
+        // column-major, so row r of the inverse is m[r], m[4 + r], m[8 + r]. Sending the
+        // columns of the inverse instead turned normals of a rotated single draw the
+        // other way round (a box turned 90 degrees showed its lit face black; instanced
+        // draws, which compute transpose(inverse(model)) in the shader, were right).
         return [
-            $m[0], $m[1], $m[2],
-            $m[4], $m[5], $m[6],
-            $m[8], $m[9], $m[10],
+            $m[0], $m[4], $m[8],
+            $m[1], $m[5], $m[9],
+            $m[2], $m[6], $m[10],
         ];
     }
 
