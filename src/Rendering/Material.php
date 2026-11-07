@@ -300,6 +300,14 @@ class Material
          * fresh paint the game wants clean).
          */
         public readonly float $weathering = 1.0,
+        /**
+         * 0..1: a transparent material reads as glass (shader plan 5.3) - towards
+         * grazing angles it turns opaque and mirror-like (Fresnel), so the pane's
+         * edges and curvature show.
+         */
+        public readonly float $glass = 0.0,
+        /** 0..1: dust smudges and dried rain runs on that glass. */
+        public readonly float $glassDirt = 0.0,
     ) {}
 
     /**
@@ -555,6 +563,8 @@ class Material
             softParticle: $this->softParticle,
             triplanar: $this->triplanar,
             weathering: $this->weathering,
+            glass: $this->glass,
+            glassDirt: $this->glassDirt,
         );
     }
 

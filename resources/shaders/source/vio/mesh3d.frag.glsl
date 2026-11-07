@@ -198,6 +198,8 @@ uniform int  u_age_zone_count;
 uniform vec4 u_age_zones[16];
 uniform vec4 u_age_params;
 uniform float u_weathering;
+// Glass look (shader plan 5.3): x = Fresnel edges, y = dirt.
+uniform vec2 u_glass;
 uniform vec4 u_decals[24];
 
 // HDR pipeline
@@ -1915,6 +1917,25 @@ void main() {
         vec3 gt = normalize(cross(N, vec3(0.0, 1.0, 0.0)) + vec3(1e-4));
         N = normalize(N + (gt * gr.y + vec3(0.0, 1.0, 0.0) * gr.z) * glassDrops);
         alpha = mix(alpha, min(1.0, alpha + 0.35), glassDrops);
+    }
+
+    // Glass (shader plan 5.3, Material::$glass): towards grazing angles the pane
+    // turns opaque and mirror-like, so edges and curvature read; dirt (smudges and
+    // dried rain runs) thickens and dulls it.
+    if (u_glass.x > 0.0 && alpha < 0.98) {
+        float gNdotV = clamp(dot(N, V), 0.0, 1.0);
+        float gF = 0.04 + 0.96 * pow(1.0 - gNdotV, 5.0);
+        alpha = mix(alpha, 1.0, gF * u_glass.x * 0.85);
+        if (u_glass.y > 0.0) {
+            vec3 gan = abs(N);
+            vec2 gwp = gan.y > max(gan.x, gan.z) ? v_worldPos.xz : (gan.x > gan.z ? v_worldPos.zy : v_worldPos.xy);
+            float smudge = smoothstep(0.45, 0.8, noise(gwp * 1.6)) * 0.7;
+            float runs = smoothstep(0.6, 0.85, noise(vec2(gwp.x * 9.0, v_worldPos.y * 0.7))) * 0.5;
+            float gd = clamp((smudge + runs) * u_glass.y, 0.0, 1.0);
+            alpha = mix(alpha, max(alpha, 0.7), gd * 0.6);
+            albedo = mix(albedo, vec3(0.42, 0.39, 0.33), gd * 0.5);
+            roughness = mix(roughness, 0.7, gd);
+        }
     }
 
     // Season colour map: grass blades and two-sided translucent foliage.

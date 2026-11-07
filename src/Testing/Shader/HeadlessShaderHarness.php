@@ -524,6 +524,7 @@ final class HeadlessShaderHarness
         $this->setUniform('u_season_grade', [1.0, 1.0, 1.0, 0.0]);
         $this->setUniform('u_sandstorm', [0.0, 0.0, 0.0, 0.0]);
         $this->setUniform('u_decal_count', 0);
+        $this->setUniform('u_age_zone_count', 0);
 
         $this->bindDummyMaterialSamplers();
     }
