@@ -63,6 +63,10 @@ final class GraphicsSettings
          * costs a second CPU submission of the opaque draws.
          */
         public readonly bool $depthPrepass = false,
+        /** Foveated shading (shader plan 9.1): coarser at the screen edges (VRS Tier 2). */
+        public readonly bool $foveatedShading = false,
+        /** Sky cloud cache (shader plan 9.1): raymarched clouds into a cube twice a second. */
+        public readonly bool $skyCloudCache = false,
         public readonly bool $hdr = true,
         /**
          * Low input latency: cap the CPU at ONE frame ahead of presentation
@@ -171,6 +175,8 @@ final class GraphicsSettings
         ?bool $cloudShadows = null,
         ?bool $bloom = null,
         ?bool $depthPrepass = null,
+        ?bool $foveatedShading = null,
+        ?bool $skyCloudCache = null,
         ?bool $hdr = null,
         ?bool $lowLatency = null,
         ?ShadingRate $shadingRate = null,
@@ -213,6 +219,8 @@ final class GraphicsSettings
             cloudShadows: $cloudShadows ?? $this->cloudShadows,
             bloom: $bloom ?? $this->bloom,
             depthPrepass: $depthPrepass ?? $this->depthPrepass,
+            foveatedShading: $foveatedShading ?? $this->foveatedShading,
+            skyCloudCache: $skyCloudCache ?? $this->skyCloudCache,
             hdr: $hdr ?? $this->hdr,
             lowLatency: $lowLatency ?? $this->lowLatency,
             shadingRate: $shadingRate ?? $this->shadingRate,
@@ -257,6 +265,8 @@ final class GraphicsSettings
             'cloudShadows' => $this->cloudShadows,
             'bloom' => $this->bloom,
             'depthPrepass' => $this->depthPrepass,
+            'foveatedShading' => $this->foveatedShading,
+            'skyCloudCache' => $this->skyCloudCache,
             'hdr' => $this->hdr,
             'lowLatency' => $this->lowLatency,
             'shadingRate' => $this->shadingRate->value,
@@ -308,6 +318,8 @@ final class GraphicsSettings
             cloudShadows: self::asBool($data['cloudShadows'] ?? null) ?? $defaults->cloudShadows,
             bloom: self::asBool($data['bloom'] ?? null) ?? $defaults->bloom,
             depthPrepass: self::asBool($data['depthPrepass'] ?? null) ?? $defaults->depthPrepass,
+            foveatedShading: self::asBool($data['foveatedShading'] ?? null) ?? $defaults->foveatedShading,
+            skyCloudCache: self::asBool($data['skyCloudCache'] ?? null) ?? $defaults->skyCloudCache,
             hdr: self::asBool($data['hdr'] ?? null) ?? $defaults->hdr,
             lowLatency: self::asBool($data['lowLatency'] ?? null) ?? $defaults->lowLatency,
             shadingRate: self::enumFrom(ShadingRate::class, $data['shadingRate'] ?? null) ?? $defaults->shadingRate,

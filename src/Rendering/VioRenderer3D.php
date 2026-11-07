@@ -3125,6 +3125,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         $this->beginOffscreenIfRequired();
         $this->syncNativeUpscaler();
         $this->applyShadingRate($this->settings->shadingRate);
+        $this->applyFoveatedShading($this->settings->foveatedShading);
     }
 
     public function endFrame(): void
@@ -3132,6 +3133,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         $this->frameOpened();
         // UI and post-processing shade every pixel; only the scene pass ran coarse.
         $this->applyShadingRate(Quality\ShadingRate::Full);
+        $this->applyFoveatedShading(false);
         if ($this->offscreenActive) {
             $this->presentOffscreenIfActive();
             $this->gpuMark('post');
@@ -3584,6 +3586,9 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         $hasShadowMap = $this->renderShadowPass($commandList, $dirLights);
         $this->renderSpotShadowPass($commandList, $spotLights);
         $this->renderMinimapIfDue($commandList);
+        if ($this->settings->skyCloudCache && $this->pendingSky !== null) {
+            $this->updateSkyCloudCache($this->pendingSky);
+        }
         $this->renderPointShadowPass($commandList, $pointLights);
         PerfProfiler::end();
         if ($hasShadowMap) {
@@ -4012,6 +4017,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         $this->compileShaderFromFiles('sky_stars',    'atmosphere.vert.glsl', 'sky_stars.frag.glsl');
         $this->compileShaderFromFiles('sky_clouds',   'atmosphere.vert.glsl', 'sky_clouds.frag.glsl');
         $this->compileShaderFromFiles('sky_haze',     'atmosphere.vert.glsl', 'sky_haze.frag.glsl');
+        $this->compileShaderFromFiles('sky_cloud_cache', 'atmosphere.vert.glsl', 'sky_cloud_cache.frag.glsl');
 
         // Outline pass (DrawOutline): only where the backend has a stencil
         // buffer. A compile failure just leaves outlines off.
@@ -4039,7 +4045,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
                 $this->compileShaderFromFiles('default_mrt', 'mesh3d.vert.glsl', 'mesh3d.frag.glsl', true);
                 $this->compileShaderFromFiles('composite',   'postprocess.vert.glsl', 'composite.frag.glsl');
                 $this->compileShaderFromFiles('skybox_mrt',  'skybox.vert.glsl', 'skybox.frag.glsl', true);
-                foreach (['sky_gradient', 'sky_sun', 'sky_moon', 'sky_stars', 'sky_clouds', 'sky_haze'] as $sky) {
+                foreach (['sky_gradient', 'sky_sun', 'sky_moon', 'sky_stars', 'sky_clouds', 'sky_haze', 'sky_cloud_cache'] as $sky) {
                     $this->compileShaderFromFiles($sky . '_mrt', 'atmosphere.vert.glsl', $sky . '.frag.glsl', true);
                 }
             } catch (\RuntimeException $e) {
@@ -6354,8 +6360,52 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         // the clip→world mapping we need is inverse(projection * rotView).
         $invVP = $projMatrix->multiply($rotView)->inverse()->toArray();
 
-        $this->drawSkyLayers($sky, $invVP, $this->sceneTargetIsHdr(), $this->mrtThisFrame);
+        $cached = $this->settings->skyCloudCache && $this->skyCloudCube !== null;
+        $this->drawSkyLayers($sky, $invVP, $this->sceneTargetIsHdr(), $this->mrtThisFrame, $cached ? 2 : 0);
     }
+
+    private ?\VioRenderTarget $skyCloudTarget = null;
+    private ?\VioCubemap $skyCloudCube = null;
+    private float $skyCloudRenderedAt = -1.0e9;
+    private const SKY_CLOUD_FACE = 512;
+    private const SKY_CLOUD_INTERVAL = 0.5;
+
+    /**
+     * Sky cloud cache (shader plan 9.1): every SKY_CLOUD_INTERVAL seconds the
+     * raymarched clouds go into a 512-pixel HDR cube (straight alpha), the screen
+     * then only looks them up. False where cube targets are missing.
+     */
+    private function updateSkyCloudCache(SetSky $sky): bool
+    {
+        if ($this->skyCloudTarget === null) {
+            if (!VioEnvironmentCubemap::isSupported($this->ctx)) {
+                return false;
+            }
+            $rt = vio_render_target($this->ctx, ['cube' => true, 'size' => self::SKY_CLOUD_FACE, 'hdr' => true]);
+            if ($rt === false) {
+                return false;
+            }
+            $this->skyCloudTarget = $rt;
+        }
+        if ($this->globalTime - $this->skyCloudRenderedAt >= self::SKY_CLOUD_INTERVAL || $this->skyCloudCube === null) {
+            $flipClipY = $this->conventions()->flipRenderTargetClipY();
+            foreach (VioEnvironmentCubemap::faceInverseViewProjections($flipClipY) as $face => $faceVP) {
+                vio_bind_render_target($this->ctx, $this->skyCloudTarget, $face);
+                vio_clear($this->ctx, 0.0, 0.0, 0.0, 0.0);
+                vio_viewport($this->ctx, 0, 0, self::SKY_CLOUD_FACE, self::SKY_CLOUD_FACE);
+                $this->drawSkyLayers($sky, $faceVP, true, false, 1);
+            }
+            vio_unbind_render_target($this->ctx);
+            $this->skyCloudRenderedAt = $this->globalTime;
+            if ($this->skyCloudCube === null) {
+                $cm = vio_render_target_cubemap($this->skyCloudTarget);
+                $this->skyCloudCube = $cm === false ? null : $cm;
+            }
+            $this->gpuMark('sky_cloud_cache');
+        }
+        return $this->skyCloudCube !== null;
+    }
+
 
     /**
      * The GPU-rendered sky environment cubemap, once a SetSky has been rendered
@@ -6406,7 +6456,8 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
      *
      * @param float[] $invVP column-major float[16]
      */
-    private function drawSkyLayers(SetSky $sky, array $invVP, bool $hdr, bool $mrt = false): void
+    /** @param int $mode 0 every layer, 1 only the clouds (into the cache), 2 every layer with the clouds from the cache */
+    private function drawSkyLayers(SetSky $sky, array $invVP, bool $hdr, bool $mrt = false, int $mode = 0): void
     {
         $quad = $this->screenQuad;
         if ($quad === null) {
@@ -6421,7 +6472,8 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         // value is zero, so an "off" element costs nothing — and each lives in
         // its own shader (sky_*.frag.glsl), editable/toggleable on its own.
 
-        // 1. Base gradient (opaque) — always.
+        // 1. Base gradient (opaque) — always (not into the cloud cache).
+        if ($mode !== 1) {
         $this->bindSkyPipeline('sky_gradient', VIO_BLEND_NONE, $hdr, $mrt);
         vio_set_uniform($this->ctx, 'u_sky_inv_vp', $invVP);
         vio_set_uniform($this->ctx, 'u_zenith_color', [$sky->zenithColor->r, $sky->zenithColor->g, $sky->zenithColor->b]);
@@ -6432,9 +6484,10 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         vio_set_uniform($this->ctx, 'u_sun_color', [$sky->sunColor->r, $sky->sunColor->g, $sky->sunColor->b]);
         vio_set_uniform($this->ctx, 'u_high_fog', $sky->highFog);
         vio_draw($this->ctx, $quad);
+        }
 
         // 2. Sun (additive).
-        if ($sky->sunIntensity > 0.0) {
+        if ($mode !== 1 && $sky->sunIntensity > 0.0) {
             $this->bindSkyPipeline('sky_sun', VIO_BLEND_ADDITIVE, $hdr, $mrt);
             vio_set_uniform($this->ctx, 'u_sky_inv_vp', $invVP);
             vio_set_uniform($this->ctx, 'u_sun_direction', [$sunDir->x, $sunDir->y, $sunDir->z]);
@@ -6447,7 +6500,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         }
 
         // 3. Moon (additive).
-        if ($sky->moonIntensity > 0.0) {
+        if ($mode !== 1 && $sky->moonIntensity > 0.0) {
             $moonDir = $sky->moonDirection ?? new Vec3(0.0, -1.0, 0.0);
             $this->bindSkyPipeline('sky_moon', VIO_BLEND_ADDITIVE, $hdr, $mrt);
             vio_set_uniform($this->ctx, 'u_sky_inv_vp', $invVP);
@@ -6461,7 +6514,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         }
 
         // 4. Stars (additive).
-        if ($sky->starBrightness > 0.0) {
+        if ($mode !== 1 && $sky->starBrightness > 0.0) {
             $this->bindSkyPipeline('sky_stars', VIO_BLEND_ADDITIVE, $hdr, $mrt);
             vio_set_uniform($this->ctx, 'u_sky_inv_vp', $invVP);
             vio_set_uniform($this->ctx, 'u_star_brightness', $sky->starBrightness);
@@ -6487,7 +6540,14 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             $wx = $wl > 1e-6 ? $wd->x / $wl : 1.0;
             $wz = $wl > 1e-6 ? $wd->z / $wl : 0.0;
 
-            $this->bindSkyPipeline('sky_clouds', VIO_BLEND_ALPHA, $hdr, $mrt);
+            if ($mode === 2 && $this->skyCloudCube !== null) {
+                $this->bindSkyPipeline('sky_cloud_cache', VIO_BLEND_ALPHA, $hdr, $mrt);
+                vio_set_uniform($this->ctx, 'u_sky_inv_vp', $invVP);
+                vio_set_uniform($this->ctx, 'u_cloud_cache', 0);
+                vio_bind_cubemap($this->ctx, $this->skyCloudCube, 0);
+                vio_draw($this->ctx, $quad);
+            } else {
+            $this->bindSkyPipeline('sky_clouds', $mode === 1 ? VIO_BLEND_NONE : VIO_BLEND_ALPHA, $hdr, $mrt);
             vio_set_uniform($this->ctx, 'u_sky_inv_vp', $invVP);
             vio_set_uniform($this->ctx, 'u_camera_pos', [$camPos->x, $camPos->y, $camPos->z]);
             vio_set_uniform($this->ctx, 'u_sun_direction', [$sunDir->x, $sunDir->y, $sunDir->z]);
@@ -6509,10 +6569,11 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             }
             vio_set_uniform($this->ctx, 'u_lightning_dir', [sin($sky->lightningAzimuth), cos($sky->lightningAzimuth)]);
             vio_draw($this->ctx, $quad);
+            }
         }
 
         // 6. Horizon haze (alpha).
-        if ($sky->fogDensity > 0.0) {
+        if ($mode !== 1 && $sky->fogDensity > 0.0) {
             $this->bindSkyPipeline('sky_haze', VIO_BLEND_ALPHA, $hdr, $mrt);
             vio_set_uniform($this->ctx, 'u_sky_inv_vp', $invVP);
             vio_set_uniform($this->ctx, 'u_horizon_color', [$sky->horizonColor->r, $sky->horizonColor->g, $sky->horizonColor->b]);
@@ -6742,6 +6803,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
     /** @param list<float>|null $params DrawMesh::$params */
     private function drawMeshCommand(string $meshId, Material $material, Mat4 $modelMatrix, string $materialId = '', bool $excludeFromGbuffer = false, ?Mat4 $prevModelMatrix = null, ?array $params = null): void
     {
+        $this->applyMaterialShadingRate($material);
         $mesh = $this->uploadMesh($meshId);
         if ($mesh === null) {
             return;
@@ -7241,6 +7303,59 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
     /** Rate currently armed on the context, to skip redundant native calls. */
     private Quality\ShadingRate $armedShadingRate = Quality\ShadingRate::Full;
 
+    /** The coarser of the frame's rate and the material's (shader plan 9.1). */
+    private function applyMaterialShadingRate(Material $material): void
+    {
+        $frame = $this->settings->shadingRate;
+        $own = $material->shadingRate;
+        $this->applyShadingRate($own !== null && $own->pixelWorkFraction() < $frame->pixelWorkFraction() ? $own : $frame);
+    }
+
+    /** Rates of the foveated image armed now (cache key: tiles), null = none. */
+    private ?string $foveatedKey = null;
+
+    /**
+     * Foveated shading (shader plan 9.1, VIO_FEATURE_SHADING_RATE_IMAGE): full
+     * rate in the centre, 2x2 in a ring and 4x4 at the edges and corners of the
+     * screen, where the eye rests least. Off clears the image.
+     */
+    private function applyFoveatedShading(bool $on): void
+    {
+        if (!function_exists('vio_set_shading_rate_image') || !defined('VIO_FEATURE_SHADING_RATE_IMAGE')
+            || !vio_supports_feature($this->ctx, VIO_FEATURE_SHADING_RATE_IMAGE)) {
+            return;
+        }
+        if (!$on) {
+            if ($this->foveatedKey !== null) {
+                vio_set_shading_rate_image($this->ctx, null);
+                $this->foveatedKey = null;
+            }
+            return;
+        }
+        $tile = vio_shading_rate_tile_size($this->ctx);
+        if ($tile <= 0) {
+            return;
+        }
+        $tx = (int) ceil($this->width / $tile);
+        $ty = (int) ceil($this->height / $tile);
+        $key = "{$tx}x{$ty}";
+        if ($this->foveatedKey === $key) {
+            return;
+        }
+        $bytes = '';
+        for ($y = 0; $y < $ty; $y++) {
+            for ($x = 0; $x < $tx; $x++) {
+                $dx = (($x + 0.5) / $tx - 0.5) * 2.0;
+                $dy = (($y + 0.5) / $ty - 0.5) * 2.0;
+                $r = sqrt($dx * $dx * 0.8 + $dy * $dy);
+                $bytes .= chr($r < 0.6 ? 0 : ($r < 0.95 ? 3 : 4));
+            }
+        }
+        if (vio_set_shading_rate_image($this->ctx, $bytes, $tx, $ty)) {
+            $this->foveatedKey = $key;
+        }
+    }
+
     private function applyShadingRate(Quality\ShadingRate $rate): void
     {
         if ($rate === $this->armedShadingRate || !$this->shadingRateAvailable()) {
@@ -7256,6 +7371,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
 
     private function drawMeshInstancedCommand(DrawMeshInstanced $cmd, Material $material): void
     {
+        $this->applyMaterialShadingRate($material);
         // Hot-path: read public properties directly instead of via the
         // accessors. The extra method-call dispatch broke the
         // boxes-1000-instanced perf budget on first CI run.

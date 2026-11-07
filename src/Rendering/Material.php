@@ -365,6 +365,14 @@ class Material
         public readonly float $flipbookFps = 12.0,
         /** Streaks (Stretched particles) fade towards their tail (shader plan 7.1). */
         public readonly bool $streakFade = false,
+        /**
+         * Coarsest shading rate this material may run at (shader plan 9.1,
+         * VIO_FEATURE_SHADING_RATE): Half / Quarter for surfaces whose detail
+         * hides it - sky domes, distant terrain, fog cards, water far out. Null =
+         * the frame's rate (GraphicsSettings::$shadingRate). The coarser of the two
+         * wins.
+         */
+        public readonly ?Quality\ShadingRate $shadingRate = null,
     ) {}
 
     /**
@@ -659,6 +667,7 @@ class Material
             flipbook: $this->flipbook,
             flipbookFps: $this->flipbookFps,
             streakFade: $this->streakFade,
+            shadingRate: $this->shadingRate,
         );
     }
 
