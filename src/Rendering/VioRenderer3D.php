@@ -6759,50 +6759,125 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         // the clip→world mapping we need is inverse(projection * rotView).
         $invVP = $projMatrix->multiply($rotView)->inverse()->toArray();
 
-        $cached = $this->settings->skyCloudCache && $this->skyCloudCube !== null;
+        // A lightning flash lasts a frame or two: the cache would miss it, so those frames draw the clouds live.
+        $cached = $this->settings->skyCloudCache && $this->skyCloudCube !== null && $this->skyCloudCubeNext !== null && $sky->lightning <= 0.0;
         $this->drawSkyLayers($sky, $invVP, $this->sceneTargetIsHdr(), $this->mrtThisFrame, $cached ? 2 : 0);
     }
 
-    private ?\VioRenderTarget $skyCloudTarget = null;
+    /** @var array<int, \VioRenderTarget> three cube targets, rotating */
+    private array $skyCloudTargets = [];
+    /** @var array<int, \VioCubemap> */
+    private array $skyCloudCubes = [];
+    /** Shown snapshots: the older and the newer one (slots into the arrays above). */
+    private int $skyCloudOld = -1;
+    private int $skyCloudNew = -1;
+    /** The snapshot being built, one face per frame, with the sky of its start. */
+    private ?SetSky $skyCloudBuildSky = null;
+    private int $skyCloudBuildFace = 0;
+    private float $skyCloudBuildStartedAt = -1.0e9;
+    private float $skyCloudBlendStart = 0.0;
+    private int $skyCloudFacesLastFrame = 0;
+    /** What drawSkyLayers() blends: older cube, newer cube, weight of the newer. */
     private ?\VioCubemap $skyCloudCube = null;
-    private float $skyCloudRenderedAt = -1.0e9;
+    private ?\VioCubemap $skyCloudCubeNext = null;
+    private float $skyCloudBlend = 0.0;
     private const SKY_CLOUD_FACE = 512;
     private const SKY_CLOUD_INTERVAL = 0.5;
 
     /**
-     * Sky cloud cache (shader plan 9.1): every SKY_CLOUD_INTERVAL seconds the
-     * raymarched clouds go into a 512-pixel HDR cube (straight alpha), the screen
-     * then only looks them up. False where cube targets are missing.
+     * Sky cloud cache (shader plan 9.1, temporal in 4.3): the raymarched clouds go
+     * into 512-pixel HDR cubes (straight alpha), the screen then only looks them up.
+     * The first snapshot is filled at once; after that a new one starts every
+     * SKY_CLOUD_INTERVAL seconds and is built one face per frame - with the sky as
+     * of its start, so the faces meet without seams - into the third cube, never
+     * more than one face per frame. The screen blends the two newest snapshots
+     * over the interval, so the clouds drift smoothly instead of jumping.
+     * False where cube targets are missing.
      */
     private function updateSkyCloudCache(SetSky $sky): bool
     {
-        if ($this->skyCloudTarget === null) {
-            if (!VioEnvironmentCubemap::isSupported($this->ctx)) {
+        $this->skyCloudFacesLastFrame = 0;
+        if ($this->skyCloudNew < 0) {
+            if ($this->skyCloudTarget(0) === null) {
                 return false;
+            }
+            for ($face = 0; $face < 6; $face++) {
+                $this->renderSkyCloudFace(0, $face, $sky);
+            }
+            $this->skyCloudOld = $this->skyCloudNew = 0;
+            $this->skyCloudBuildStartedAt = $this->skyCloudBlendStart = $this->globalTime;
+        } else {
+            if ($this->skyCloudBuildSky === null && $this->globalTime - $this->skyCloudBuildStartedAt >= self::SKY_CLOUD_INTERVAL) {
+                $this->skyCloudBuildSky = $sky;
+                $this->skyCloudBuildFace = 0;
+                $this->skyCloudBuildStartedAt = $this->globalTime;
+            }
+            if ($this->skyCloudBuildSky !== null) {
+                $slot = 0;
+                while ($slot === $this->skyCloudOld || $slot === $this->skyCloudNew) {
+                    $slot++;
+                }
+                if ($this->skyCloudTarget($slot) === null) {
+                    $this->skyCloudBuildSky = null;
+                } else {
+                    $this->renderSkyCloudFace($slot, $this->skyCloudBuildFace, $this->skyCloudBuildSky);
+                    if (++$this->skyCloudBuildFace === 6) {
+                        $this->skyCloudOld = $this->skyCloudNew;
+                        $this->skyCloudNew = $slot;
+                        $this->skyCloudBuildSky = null;
+                        $this->skyCloudBlendStart = $this->globalTime;
+                    }
+                }
+            }
+        }
+        if ($this->skyCloudFacesLastFrame > 0) {
+            vio_unbind_render_target($this->ctx);
+            $this->gpuMark('sky_cloud_cache');
+        }
+        $this->skyCloudCube = $this->skyCloudCubes[$this->skyCloudOld] ?? null;
+        $this->skyCloudCubeNext = $this->skyCloudCubes[$this->skyCloudNew] ?? null;
+        $this->skyCloudBlend = $this->skyCloudOld === $this->skyCloudNew ? 1.0
+            : max(0.0, min(1.0, ($this->globalTime - $this->skyCloudBlendStart) / self::SKY_CLOUD_INTERVAL));
+        return $this->skyCloudCube !== null && $this->skyCloudCubeNext !== null;
+    }
+
+    /** The cube target of a cache slot, allocated on first use; null where cube targets are missing. */
+    private function skyCloudTarget(int $slot): ?\VioRenderTarget
+    {
+        if (!isset($this->skyCloudTargets[$slot])) {
+            if (!VioEnvironmentCubemap::isSupported($this->ctx)) {
+                return null;
             }
             $rt = vio_render_target($this->ctx, ['cube' => true, 'size' => self::SKY_CLOUD_FACE, 'hdr' => true]);
             if ($rt === false) {
-                return false;
+                return null;
             }
-            $this->skyCloudTarget = $rt;
+            $this->skyCloudTargets[$slot] = $rt;
         }
-        if ($this->globalTime - $this->skyCloudRenderedAt >= self::SKY_CLOUD_INTERVAL || $this->skyCloudCube === null) {
-            $flipClipY = $this->conventions()->flipRenderTargetClipY();
-            foreach (VioEnvironmentCubemap::faceInverseViewProjections($flipClipY) as $face => $faceVP) {
-                vio_bind_render_target($this->ctx, $this->skyCloudTarget, $face);
-                vio_clear($this->ctx, 0.0, 0.0, 0.0, 0.0);
-                vio_viewport($this->ctx, 0, 0, self::SKY_CLOUD_FACE, self::SKY_CLOUD_FACE);
-                $this->drawSkyLayers($sky, $faceVP, true, false, 1);
+        return $this->skyCloudTargets[$slot];
+    }
+
+    private function renderSkyCloudFace(int $slot, int $face, SetSky $sky): void
+    {
+        $rt = $this->skyCloudTargets[$slot];
+        $faceVP = VioEnvironmentCubemap::faceInverseViewProjections($this->conventions()->flipRenderTargetClipY())[$face];
+        vio_bind_render_target($this->ctx, $rt, $face);
+        vio_clear($this->ctx, 0.0, 0.0, 0.0, 0.0);
+        vio_viewport($this->ctx, 0, 0, self::SKY_CLOUD_FACE, self::SKY_CLOUD_FACE);
+        $this->drawSkyLayers($sky, $faceVP, true, false, 1);
+        $this->skyCloudFacesLastFrame++;
+        if (!isset($this->skyCloudCubes[$slot])) {
+            $cm = vio_render_target_cubemap($rt);
+            if ($cm !== false) {
+                $this->skyCloudCubes[$slot] = $cm;
             }
-            vio_unbind_render_target($this->ctx);
-            $this->skyCloudRenderedAt = $this->globalTime;
-            if ($this->skyCloudCube === null) {
-                $cm = vio_render_target_cubemap($this->skyCloudTarget);
-                $this->skyCloudCube = $cm === false ? null : $cm;
-            }
-            $this->gpuMark('sky_cloud_cache');
         }
-        return $this->skyCloudCube !== null;
+    }
+
+    /** Cube faces the sky cloud cache rendered in the last frame (test/diagnostic hook). */
+    public function skyCloudFacesRenderedLastFrame(): int
+    {
+        return $this->skyCloudFacesLastFrame;
     }
 
 
@@ -6940,11 +7015,14 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             $wx = $wl > 1e-6 ? $wd->x / $wl : 1.0;
             $wz = $wl > 1e-6 ? $wd->z / $wl : 0.0;
 
-            if ($mode === 2 && $this->skyCloudCube !== null) {
+            if ($mode === 2 && $this->skyCloudCube !== null && $this->skyCloudCubeNext !== null) {
                 $this->bindSkyPipeline('sky_cloud_cache', VIO_BLEND_ALPHA, $hdr, $mrt);
                 vio_set_uniform($this->ctx, 'u_sky_inv_vp', $invVP);
                 vio_set_uniform($this->ctx, 'u_cloud_cache', 0);
+                vio_set_uniform($this->ctx, 'u_cloud_cache_next', 1);
+                vio_set_uniform($this->ctx, 'u_cloud_blend', $this->skyCloudBlend);
                 vio_bind_cubemap($this->ctx, $this->skyCloudCube, 0);
+                vio_bind_cubemap($this->ctx, $this->skyCloudCubeNext, 1);
                 vio_draw($this->ctx, $quad);
             } else {
             $this->bindSkyPipeline('sky_clouds', $mode === 1 ? VIO_BLEND_NONE : VIO_BLEND_ALPHA, $hdr, $mrt);
