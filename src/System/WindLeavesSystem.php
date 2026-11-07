@@ -31,8 +31,8 @@ class WindLeavesSystem extends AbstractSystem
     public const string MATERIAL = 'wind_leaf';
 
     /** Wind intensity where the first leaves fly and where the rate is full. */
-    public const float START = 0.45;
-    public const float FULL = 0.9;
+    public const float START = 0.65;
+    public const float FULL = 1.1;
     /** Leaves per second at full rate. */
     public const float MAX_RATE = 90.0;
     /** Height above the eye and the disc the leaves start on (m). */

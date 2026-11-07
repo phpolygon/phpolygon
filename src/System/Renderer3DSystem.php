@@ -445,6 +445,20 @@ class Renderer3DSystem extends AbstractSystem
         }
         $this->commandList->add(new SetSnowCover($this->snowCover));
         $this->commandList->add(new SetGroundWetness($rainWetness, $raining, $dryBelowY));
+        foreach ($world->query(Weather::class) as $entity) {
+            $weather = $entity->get(Weather::class);
+            $windDir = new Vec3(1.0, 0.0, 0.0);
+            foreach ($world->query(Wind::class) as $windEntity) {
+                $windDir = $windEntity->get(Wind::class)->direction;
+                break;
+            }
+            $this->commandList->add(new \PHPolygon\Rendering\Command\SetSandstorm(
+                $weather->sandstormIntensity,
+                $weather->sandstormColor ?? new \PHPolygon\Rendering\Color(0.62, 0.48, 0.30),
+                $windDir,
+            ));
+            break;
+        }
         $this->commandList->add(new SetWaveAnimation(
             enabled: true,
             amplitude: $waveAmp,

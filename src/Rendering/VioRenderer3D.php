@@ -478,6 +478,10 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
     private float $rainWetness = 0.0;
     private float $raining = 0.0;
     private float $rainDryBelow = -1.0e6;
+    /** @var list<float> sandstorm colour rgb + intensity (SetSandstorm) */
+    private array $sandstorm = [0.0, 0.0, 0.0, 0.0];
+    /** @var list<float> wind direction xz of the sandstorm */
+    private array $sandstormWind = [1.0, 0.0];
     /** @var array{0: float, 1: float, 2: float, 3: float} Season tint rgb + desaturation (SetSeasonGrade). */
     private array $seasonGrade = [1.0, 1.0, 1.0, 0.0];
 
@@ -3264,6 +3268,10 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
                 $this->rainWetness = $cmd->rainWetness;
                 $this->raining = $cmd->raining;
                 $this->rainDryBelow = $cmd->dryBelowY ?? -1.0e6;
+            } elseif ($cmd instanceof Command\SetSandstorm) {
+                $this->sandstorm = [$cmd->color->r, $cmd->color->g, $cmd->color->b, max(0.0, min(1.0, $cmd->intensity))];
+                $wl = sqrt($cmd->windDirection->x ** 2 + $cmd->windDirection->z ** 2);
+                $this->sandstormWind = $wl > 1e-6 ? [$cmd->windDirection->x / $wl, $cmd->windDirection->z / $wl] : [1.0, 0.0];
             } elseif ($cmd instanceof Command\SetSeasonGrade) {
                 $this->seasonGrade = [$cmd->tint->r, $cmd->tint->g, $cmd->tint->b, $cmd->desaturation];
             } elseif ($cmd instanceof SetWaveAnimation) {
@@ -7840,6 +7848,8 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         $rectCount = min(count($rects), 4);
         vio_set_uniform($this->ctx, 'u_rect_light_count', $rectCount);
         vio_set_uniform($this->ctx, 'u_season_grade', $this->seasonGrade);
+        vio_set_uniform($this->ctx, 'u_sandstorm', $this->sandstorm);
+        vio_set_uniform($this->ctx, 'u_sandstorm_wind', $this->sandstormWind);
         for ($i = 0; $i < $rectCount; $i++) {
             $rl = $rects[$i];
             vio_set_uniform($this->ctx, "u_rect_lights[{$i}].center", [$rl->center->x, $rl->center->y, $rl->center->z]);

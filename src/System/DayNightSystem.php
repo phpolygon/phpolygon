@@ -229,8 +229,12 @@ class DayNightSystem extends AbstractSystem
         $overcast = $cycle->cloudDarkening;
         $fogDensity = 0.0;
         $cloudDarkness = 0.0;
+        $sandstorm = 0.0;
+        $sandColor = new Color(0.62, 0.48, 0.30);
         foreach ($world->query(Weather::class) as $weatherEntity) {
             $weather = $weatherEntity->get(Weather::class);
+            $sandstorm = $weather->sandstormIntensity;
+            $sandColor = $weather->sandstormColor ?? $sandColor;
             $overcast = max($overcast, $weather->cloudCoverage);
             $fogDensity = max($fogDensity, $weather->fogDensity);
             $cloudDarkness = max($weather->rainIntensity, $weather->snowIntensity, $weather->stormIntensity);
@@ -241,6 +245,8 @@ class DayNightSystem extends AbstractSystem
         // Direct light loses more than ambient — an overcast sky is diffuse
         // gray, not dark, so the ambient floor keeps the scene readable.
         $directCloudDim = (1.0 - $overcast * 0.45) * (1.0 - $cloudDarkness * 0.6);
+        // Blown sand scatters the direct sun (shader plan 4.1); the clouds stay as they are.
+        $directCloudDim *= 1.0 - min(1.0, $sandstorm) * 0.7;
         $ambientCloudDim = 1.0 - min(0.65, $overcast * 0.25 + $cloudDarkness * 0.35);
 
         $t = $cycle->timeOfDay;
@@ -494,6 +500,22 @@ class DayNightSystem extends AbstractSystem
             $horizon['g'] * $cloudMute + $overcast * 0.08,
             $horizon['b'] * $cloudMute + $overcast * 0.10,
         );
+        // A sandstorm fills the sky with its sand (shader plan 4.1).
+        if ($sandstorm > 0.0) {
+            $sz = min(1.0, $sandstorm * 0.85);
+            $sh = min(1.0, $sandstorm);
+            $sunLit = 0.35 + 0.65 * $cycle->getSunHeight();
+            $zenithColor = new Color(
+                $zenithColor->r + ($sandColor->r * $sunLit - $zenithColor->r) * $sz,
+                $zenithColor->g + ($sandColor->g * $sunLit - $zenithColor->g) * $sz,
+                $zenithColor->b + ($sandColor->b * $sunLit - $zenithColor->b) * $sz,
+            );
+            $horizonMuted = new Color(
+                $horizonMuted->r + ($sandColor->r * $sunLit * 1.2 - $horizonMuted->r) * $sh,
+                $horizonMuted->g + ($sandColor->g * $sunLit * 1.2 - $horizonMuted->g) * $sh,
+                $horizonMuted->b + ($sandColor->b * $sunLit * 1.2 - $horizonMuted->b) * $sh,
+            );
+        }
         $groundColor = new Color(
             $horizon['r'] * 0.35,
             $horizon['g'] * 0.30,

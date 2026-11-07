@@ -31,12 +31,12 @@ final class WindLeavesSystemTest extends TestCase
 
         self::assertSame(0, iterator_count($world->query(ParticleEmitter::class)));
         self::assertSame(0.0, WindLeavesSystem::rateFor(WindLeavesSystem::START));
-        self::assertSame(WindLeavesSystem::MAX_RATE, WindLeavesSystem::rateFor(1.0));
+        self::assertSame(WindLeavesSystem::MAX_RATE, WindLeavesSystem::rateFor(1.2));
     }
 
     public function testStrongWindCarriesLeavesAlongIt(): void
     {
-        $world = $this->world(0.9);
+        $world = $this->world(1.2);
         (new WindLeavesSystem())->update($world, 0.016);
 
         $emitters = array_values(iterator_to_array($world->query(ParticleEmitter::class)));
@@ -48,7 +48,7 @@ final class WindLeavesSystemTest extends TestCase
 
     public function testNoLeavesInAHall(): void
     {
-        $world = $this->world(1.0);
+        $world = $this->world(1.2);
         $world->createEntity()
             ->attach(new Transform3D(position: new Vec3(0.0, 1.0, 0.0)))
             ->attach(new InteriorVolume(new Vec3(5.0, 5.0, 5.0), 0.02));

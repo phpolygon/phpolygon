@@ -69,6 +69,10 @@ class Weather extends AbstractComponent
     #[Property]
     public ?float $dryBelowY = null;
 
+    /** Colour of the sand or dust a sandstorm carries (linear). */
+    #[Property(editorHint: 'color')]
+    public ?\PHPolygon\Rendering\Color $sandstormColor = null;
+
     /** Direction of the last strike about the world Y axis (radians, 0 = +Z), for the sky. */
     #[Hidden]
     public float $lightningAzimuth = 0.0;

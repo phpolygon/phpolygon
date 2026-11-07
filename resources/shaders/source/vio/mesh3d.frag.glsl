@@ -178,6 +178,9 @@ uniform float u_moon_phase;
 uniform vec3 u_season_tint;
 // Season colour map for vegetation (shader plan 4.1): rgb tint, a desaturation.
 uniform vec4 u_season_grade;
+// Sandstorm (shader plan 4.1): rgb sand colour, a intensity; wind direction xz.
+uniform vec4 u_sandstorm;
+uniform vec2 u_sandstorm_wind;
 
 // HDR pipeline
 uniform int u_linear_output;
@@ -689,6 +692,22 @@ vec2 rainSoak(vec3 p, vec3 n) {
     return vec2(soak, puddle);
 }
 
+// Sandstorm veil over a fog value: from 5 m on the scene drowns in sand of the
+// storm's colour, lit by the ambient light, streaked by bands that race along the
+// wind (shader plan 4.1). Not from inside an interior volume.
+vec4 sandVeil(vec3 p, float d, vec4 fog) {
+    if (u_sandstorm.a <= 0.0 || interiorMask(u_camera_pos) > 0.0) return fog;
+    vec2 w = u_sandstorm_wind;
+    vec2 across = vec2(-w.y, w.x);
+    float band = noise(vec2(dot(p.xz, across) * 0.08, p.y * 0.25 + dot(p.xz, w) * 0.01 - u_frag_time * 1.6));
+    float s = u_sandstorm.a * smoothstep(3.0, 60.0, d) * (0.8 + 0.4 * band) * 1.15;
+    s = clamp(s, 0.0, 0.97);
+    vec3 sandLit = u_sandstorm.rgb * (u_ambient_color * u_ambient_intensity + 0.15);
+    float total = 1.0 - (1.0 - fog.a) * (1.0 - s);
+    vec3 c = (fog.rgb * fog.a + sandLit * s * (1.0 - fog.a)) / max(total, 1e-4);
+    return vec4(c, total);
+}
+
 // Fog at a world point, rgb = its colour, a = how much of it: the distance fog and,
 // in rain, the rain veil (shader plan 4.1) – beyond 25 m surfaces fade into the
 // falling rain, lit like a white surface under that sky (the ambient light; the
@@ -707,9 +726,9 @@ vec4 sceneFog(vec3 p) {
         float total = 1.0 - (1.0 - t) * (1.0 - veil);
         vec3 veilColor = u_ambient_color * u_ambient_intensity;
         vec3 c = (u_fog_color * t + veilColor * veil * (1.0 - t)) / max(total, 1e-4);
-        return vec4(c, total);
+        return sandVeil(p, d, vec4(c, total));
     }
-    return vec4(u_fog_color, t);
+    return sandVeil(p, d, vec4(u_fog_color, t));
 }
 
 // Rain drops on glass (shader plan 4.1): resting drops in 2 cm cells and, on steep
