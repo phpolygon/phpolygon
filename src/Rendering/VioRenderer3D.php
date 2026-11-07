@@ -364,6 +364,25 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
     private const SCENE_DEPTH_SLOT = 11;
     /** Unit of the scene-colour copy for refracting glass: only with more than 16 units. */
     private const SCENE_COLOR_SLOT = 16;
+    /** Unit of a material's vertex animation texture (vertex stage): more than 17 units only. */
+    private const VAT_SLOT = 17;
+
+    /** @var array<string, VioTexture> GPU images registered under a texture id (registerGpuTexture). */
+    private array $gpuTextures = [];
+
+    /**
+     * Use a GPU image the game or the engine made (a baked vertex animation, an
+     * impostor atlas, a render target's texture) as a material texture: materials
+     * name it by $id like any loaded texture. Null removes it.
+     */
+    public function registerGpuTexture(string $id, ?VioTexture $texture): void
+    {
+        if ($texture === null) {
+            unset($this->gpuTextures[$id]);
+            return;
+        }
+        $this->gpuTextures[$id] = $texture;
+    }
 
     // The baked coloured irradiance probe field (3× vio_texture_3d), from
     // SetFieldtracingProbes — one 3D texture per colour channel.
@@ -2068,6 +2087,61 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
     private static function prepassEligible(Material $m): bool
     {
         return $m->albedoTexture === null && $m->fadeDistance[1] == 0.0 && !$m->grass && $m->alpha >= 1.0;
+    }
+
+    private int $ssaoFrame = 0;
+    /** @var array{0: \VioRenderTarget, 1: \VioRenderTarget}|null */
+    private ?array $ssaoHistory = null;
+    private string $ssaoHistoryKey = '';
+    private ?string $ssaoHistoryView = null;
+
+    /**
+     * Temporal SSAO (shader plan 9.1): blend this frame's blurred AO into a history
+     * while the camera holds still, then copy the result back into the blur target
+     * the scene samples. A moved camera starts the history over.
+     */
+    private function accumulateSsao(\VioRenderTarget $blur, int $w, int $h, VioMesh $quad): void
+    {
+        $key = "{$w}x{$h}";
+        if ($this->ssaoHistory === null || $this->ssaoHistoryKey !== $key) {
+            $a = vio_render_target($this->ctx, ['width' => $w, 'height' => $h, 'hdr' => true]);
+            $b = vio_render_target($this->ctx, ['width' => $w, 'height' => $h, 'hdr' => true]);
+            if ($a === false || $b === false) {
+                return;
+            }
+            $this->ssaoHistory = [$a, $b];
+            $this->ssaoHistoryKey = $key;
+            $this->ssaoHistoryView = null;
+        }
+        $view = $this->currentViewMatrix !== null ? implode(',', array_map(static fn (float $v): string => sprintf('%.4f', $v), $this->currentViewMatrix->toArray())) : '';
+        $still = $this->ssaoHistoryView === $view;
+        $this->ssaoHistoryView = $view;
+        [$prev, $next] = $this->ssaoHistory;
+        if (!isset($this->shaderCache['ssao_temporal'])) {
+            return;
+        }
+        vio_bind_render_target($this->ctx, $next);
+        vio_viewport($this->ctx, 0, 0, $w, $h);
+        $this->bindPostProcessPipeline('ssao_temporal', true);
+        vio_bind_texture($this->ctx, vio_render_target_texture($blur), 0);
+        vio_set_uniform($this->ctx, 'u_current', 0);
+        vio_bind_texture($this->ctx, vio_render_target_texture($prev), 1);
+        vio_set_uniform($this->ctx, 'u_history', 1);
+        vio_set_uniform($this->ctx, 'u_blend', $still ? 0.2 : 1.0);
+        vio_draw($this->ctx, $quad);
+        vio_unbind_render_target($this->ctx);
+        // The scene samples the blur target: put the accumulated AO there.
+        vio_bind_render_target($this->ctx, $blur);
+        vio_viewport($this->ctx, 0, 0, $w, $h);
+        $this->bindPostProcessPipeline('ssao_temporal');
+        vio_bind_texture($this->ctx, vio_render_target_texture($next), 0);
+        vio_set_uniform($this->ctx, 'u_current', 0);
+        vio_bind_texture($this->ctx, vio_render_target_texture($next), 1);
+        vio_set_uniform($this->ctx, 'u_history', 1);
+        vio_set_uniform($this->ctx, 'u_blend', 1.0);
+        vio_draw($this->ctx, $quad);
+        vio_unbind_render_target($this->ctx);
+        $this->ssaoHistory = [$next, $prev];
     }
 
     private static function sceneColorAvailable(): bool
@@ -4005,6 +4079,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         $this->compileShaderFromFiles('sdf_ao',     'postprocess.vert.glsl', 'sdf_ao.frag.glsl');
         $this->compileShaderFromFiles('sdf_ao_blur','postprocess.vert.glsl', 'sdf_ao_blur.frag.glsl');
         $this->compileShaderFromFiles('ssao_blur',  'postprocess.vert.glsl', 'ssao_blur.frag.glsl');
+        $this->compileShaderFromFiles('ssao_temporal', 'postprocess.vert.glsl', 'ssao_temporal.frag.glsl');
         // SSR: ray-march the G-buffer (depth+normal+reflectivity) against the HDR
         // scene colour, then composite the reflection back over the scene.
         $this->compileShaderFromFiles('ssr',           'postprocess.vert.glsl', 'ssr.frag.glsl');
@@ -4137,6 +4212,10 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             && in_array($id, ['default', 'default_mrt', 'default_mrt_mv', 'shadow', 'gbuffer', 'depth'], true)) {
             $vertSrc = self::withDefine($vertSrc, 'PHPOLYGON_INSTANCE_PARAMS');
         }
+        if (in_array($id, ['default', 'default_mrt', 'default_mrt_mv'], true)
+            && (ProcModeShaderRegistry::textureUnits() ?? 0) > self::VAT_SLOT) {
+            $vertSrc = self::withDefine($vertSrc, 'PHPOLYGON_VAT');
+        }
         if ($motion) {
             // Motion vectors ride on the MRT outputs: both stages need the define.
             $vertSrc = self::withDefine($vertSrc, 'PHPOLYGON_MOTION');
@@ -4194,6 +4273,9 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         $source = $this->loadShader('mesh3d.vert.glsl');
         if ($storage) {
             $source = self::storageInstancingVertexSource($source);
+        }
+        if ((ProcModeShaderRegistry::textureUnits() ?? 0) > self::VAT_SLOT) {
+            $source = self::withDefine($source, 'PHPOLYGON_VAT');
         }
         return ProcModeShaderRegistry::instanceParamsEnabled()
             ? self::withDefine($source, 'PHPOLYGON_INSTANCE_PARAMS')
@@ -4910,7 +4992,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
                     continue;
                 }
                 $mat = MaterialRegistry::get($cmd->materialId);
-                if ($mat === null || $mat->alpha < 0.9 || !$this->castsShadow($cmd->materialId) || ($local && self::emitsLight($mat))) {
+                if ($mat === null || $mat->alpha < 0.9 || $mat->vatTexture !== null || !$this->castsShadow($cmd->materialId) || ($local && self::emitsLight($mat))) {
                     continue;
                 }
                 $casters[] = $cmd;
@@ -5313,6 +5395,8 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         vio_set_uniform($this->ctx, 'u_intensity', $tier->ssaoIntensity());
         vio_set_uniform($this->ctx, 'u_power', $tier->ssaoPower());
         vio_set_uniform($this->ctx, 'u_filter_in_shader', self::ssaoFiltersInShader($this->conventions()->name()) ? 1 : 0);
+        // Temporal SSAO: the golden angle per frame walks the noise through every rotation.
+        vio_set_uniform($this->ctx, 'u_noise_angle', $this->settings->temporalSsao ? fmod($this->ssaoFrame++ * 2.39996, 6.2831853) : 0.0);
         vio_draw($this->ctx, $screenQuad);
         vio_unbind_render_target($this->ctx);
 
@@ -5326,6 +5410,9 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         vio_set_uniform($this->ctx, 'u_texel', [1.0 / $halfW, 1.0 / $halfH]);
         vio_draw($this->ctx, $screenQuad);
         vio_unbind_render_target($this->ctx);
+        if ($this->settings->temporalSsao) {
+            $this->accumulateSsao($blur, $halfW, $halfH, $screenQuad);
+        }
 
         $this->ssaoActiveThisFrame = true;
         $this->gpuMark('ssao');
@@ -7743,6 +7830,9 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             'u_refract'             => [$material->refraction, $material->frost],
             'u_particle_tint'       => $material->particleTint ? 1.0 : 0.0,
             'u_flipbook'            => [(float) $material->flipbook[0], (float) $material->flipbook[1], $material->flipbookFps, $material->streakFade ? 1.0 : 0.0],
+            'u_vat'                 => $material->vatTexture !== null && count($material->vatInfo) >= 8 ? [$material->vatInfo[0], $material->vatInfo[1], 1.0, 0.0] : [0.0, 0.0, 0.0, 0.0],
+            'u_vat_min'             => count($material->vatInfo) >= 8 ? [$material->vatInfo[2], $material->vatInfo[3], $material->vatInfo[4]] : [0.0, 0.0, 0.0],
+            'u_vat_extent'          => count($material->vatInfo) >= 8 ? [$material->vatInfo[5], $material->vatInfo[6], $material->vatInfo[7]] : [1.0, 1.0, 1.0],
             // Subsurface scattering (skin path). Gated by strength > 0 in the
             // shader so non-skin materials remain visually identical.
             'u_subsurface_color'    => [$material->subsurfaceColor->r, $material->subsurfaceColor->g, $material->subsurfaceColor->b],
@@ -7823,7 +7913,14 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
     private function bindMaterialTextures(Material $material): void
     {
         $hasTexture = false;
-        if ($material->albedoTexture !== null && $this->textureManager !== null) {
+        if ($material->vatTexture !== null && (ProcModeShaderRegistry::textureUnits() ?? 0) > self::VAT_SLOT) {
+            $vat = $this->resolveTexture($material->vatTexture);
+            if ($vat !== null) {
+                vio_set_uniform($this->ctx, 'u_vat_tex', self::VAT_SLOT);
+                vio_bind_texture($this->ctx, $vat, self::VAT_SLOT);
+            }
+        }
+        if ($material->albedoTexture !== null && ($this->textureManager !== null || isset($this->gpuTextures[$material->albedoTexture]))) {
             $vioTex = $this->resolveTexture($material->albedoTexture);
             if ($vioTex !== null) {
                 vio_bind_texture($this->ctx, $vioTex, 0);
@@ -7844,6 +7941,9 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
 
     private function resolveTexture(string $textureId): ?VioTexture
     {
+        if (isset($this->gpuTextures[$textureId])) {
+            return $this->gpuTextures[$textureId];
+        }
         // An unloaded texture must leave this cache too, or it stays on the GPU.
         // Only those: dropping one this frame already bound would free it mid frame.
         $removals = $this->textureManager?->removals() ?? 0;

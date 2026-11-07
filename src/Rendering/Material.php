@@ -373,6 +373,17 @@ class Material
          * wins.
          */
         public readonly ?Quality\ShadingRate $shadingRate = null,
+        /**
+         * Vertex animation texture (shader plan 6.3, Geometry\VatBaker): the id of
+         * the baked image (VioRenderer3D::registerGpuTexture), and [frames, fps,
+         * min x, min y, min z, extent x, extent y, extent z] from the bake. Needs
+         * more than 17 texture units; the mesh then plays the animation in place
+         * (no shadow of its own: the shadow pass keeps the rest pose out).
+         *
+         * @var list<float>
+         */
+        public readonly ?string $vatTexture = null,
+        public readonly array $vatInfo = [],
     ) {}
 
     /**
@@ -668,6 +679,8 @@ class Material
             flipbookFps: $this->flipbookFps,
             streakFade: $this->streakFade,
             shadingRate: $this->shadingRate,
+            vatTexture: $this->vatTexture,
+            vatInfo: $this->vatInfo,
         );
     }
 

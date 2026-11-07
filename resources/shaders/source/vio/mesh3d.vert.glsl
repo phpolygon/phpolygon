@@ -260,6 +260,33 @@ vec3 animatePosition(vec3 pos, mat4 model, float time, float grassHash) {
     return pos;
 }
 
+// Vertex animation texture (shader plan 6.3, Material::$vatTexture): positions baked
+// per frame (VatBaker: two RGBA8 texels per vertex, 16 bits per axis), played at
+// fps and blended between neighbouring frames.
+uniform vec4 u_vat;          // frames, fps, on, unused
+uniform vec3 u_vat_min;
+uniform vec3 u_vat_extent;
+#ifdef PHPOLYGON_VAT
+uniform sampler2D u_vat_tex;
+vec3 vatFrame(int f) {
+    vec4 a = texelFetch(u_vat_tex, ivec2(gl_VertexID * 2, f), 0) * 255.0;
+    vec4 b = texelFetch(u_vat_tex, ivec2(gl_VertexID * 2 + 1, f), 0) * 255.0;
+    vec3 q = vec3(a.r * 256.0 + a.g, a.b * 256.0 + a.a, b.r * 256.0 + b.g) / 65535.0;
+    return u_vat_min + q * u_vat_extent;
+}
+#endif
+vec3 vatPosition(vec3 p) {
+#ifdef PHPOLYGON_VAT
+    if (u_vat.z > 0.5 && u_vat.x >= 1.0) {
+        float fr = mod(u_time * u_vat.y, u_vat.x);
+        int f0 = int(floor(fr));
+        int f1 = int(mod(float(f0 + 1), u_vat.x));
+        return mix(vatFrame(f0), vatFrame(f1), fract(fr));
+    }
+#endif
+    return p;
+}
+
 void main() {
     mat4 model = u_model;
     if (u_use_instancing == 1) {
@@ -280,7 +307,7 @@ void main() {
         model[2].w = 0.0;
     }
 #endif // PHPOLYGON_INSTANCE_PARAMS
-    vec3 pos = animatePosition(a_position, model, u_time, grassHash);
+    vec3 pos = animatePosition(vatPosition(a_position), model, u_time, grassHash);
 
     vec4 worldPos = model * vec4(pos, 1.0);
     v_worldPos = worldPos.xyz;

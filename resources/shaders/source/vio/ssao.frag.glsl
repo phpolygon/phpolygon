@@ -35,6 +35,7 @@ uniform float u_bias;         // depth bias to suppress self-occlusion acne
 uniform float u_intensity;    // occlusion scale (tier-driven)
 uniform float u_power;        // contrast curve applied to the final AO
 uniform int   u_filter_in_shader; // 1: filter the G-buffer here (gbufferFiltered)
+uniform float u_noise_angle;      // temporal SSAO: per-frame rotation of the noise (0 = off)
 
 out vec4 frag_color;
 
@@ -55,7 +56,7 @@ const vec3 KERNEL_SAMPLES[16] = vec3[](
 // from UV so it needs no noise texture (and adds no sampler to the SRV table).
 vec3 rotationNoise(vec2 uv) {
     vec2 p = uv * u_noise_scale;
-    float a = fract(sin(dot(floor(p), vec2(12.9898, 78.233))) * 43758.5453) * 6.2831853;
+    float a = fract(sin(dot(floor(p), vec2(12.9898, 78.233))) * 43758.5453) * 6.2831853 + u_noise_angle;
     return vec3(cos(a), sin(a), 0.0);
 }
 
