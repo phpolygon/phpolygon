@@ -4428,6 +4428,9 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         }
         if ($this->lightGridSupported()) {
             $source = self::withDefine($source, 'PHPOLYGON_LIGHT_GRID');
+            if ($this->conventions()->name() === 'd3d11') {
+                $source = self::withDefine($source, 'PHPOLYGON_UAV_SHARE_TARGETS');
+            }
             // std430 storage blocks under #version 410 need the extension; right after
             // #version, before any other token.
             $source = (string) preg_replace('/^(\s*#version[^\n]*\n)/', "$1#extension GL_ARB_shader_storage_buffer_object : require\n#extension GL_ARB_shading_language_420pack : require\n", $source, 1);

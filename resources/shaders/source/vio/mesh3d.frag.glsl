@@ -43,6 +43,12 @@ struct PointLight {
 uniform PointLight u_point_lights[8];
 uniform int u_point_light_count;
 
+// D3D11 puts fragment UAVs behind the render targets (u0..u7 shared): with the six
+// targets of the motion path the grid's buffers (u5..u7) do not fit, so that program
+// lights with the eight nearest point lights like a backend without the grid.
+#if defined(PHPOLYGON_LIGHT_GRID) && defined(PHPOLYGON_MOTION) && defined(PHPOLYGON_UAV_SHARE_TARGETS)
+#undef PHPOLYGON_LIGHT_GRID
+#endif
 #ifdef PHPOLYGON_LIGHT_GRID
 // World light grid (PHPolygon\Rendering\Lighting\LightGrid): all point lights of
 // the frame, and per x/z cell the ones that reach it. Declared writable like every
