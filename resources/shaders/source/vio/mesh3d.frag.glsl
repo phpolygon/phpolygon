@@ -235,6 +235,8 @@ layout(binding = 0) uniform accelerationStructureEXT u_tlas;
 // 16-byte-stride buffer reads wrong on D3D12.
 layout(std430, binding = 0) readonly buffer RtAlbedo { float rtAlbedo[]; };
 uniform float u_rt_reflections;
+// Ray-traced GI (shader plan 10.2, GraphicsSettings::$rayTracedGi): strength of the one-bounce diffuse light.
+uniform float u_rt_gi;
 #endif
 #ifdef PHPOLYGON_SCENE_COLOR
 // Copy of the opaque scene colour (more than 16 texture units only).
@@ -2317,6 +2319,49 @@ void main() {
     // they leave as separate attachments so the composite can apply SSAO / SDF-AO to
     // the ambient part and the SDF sun shadow to the sun part only.
     vec3 ambientAcc = u_ambient_color * u_ambient_intensity * albedo * kD_ambient * ambientShadow * ao;
+#ifdef PHPOLYGON_RAY_QUERY
+    // Ray-traced GI (shader plan 10.2): two cosine-distributed rays per pixel. A hit
+    // brings the hit instance's albedo lit by the ambient and the sun (one more ray
+    // for its visibility); a miss sees the sky. The flat ambient keeps only the share
+    // of rays that reached the sky. The pattern turns per pixel and over time, so
+    // temporal AA resolves the grain.
+    if (u_rt_gi > 0.0) {
+        vec3 up = abs(N.y) < 0.95 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
+        vec3 tx = normalize(cross(up, N));
+        vec3 ty = cross(N, tx);
+        vec3 bounce = vec3(0.0);
+        float sky = 0.0;
+        for (int gi = 0; gi < 2; gi++) {
+            vec2 seed = gl_FragCoord.xy + vec2(float(gi) * 37.0, fract(u_time * 7.31) * 113.0);
+            float h1 = hash21(seed);
+            float h2 = hash21(seed + 19.19);
+            float rr = sqrt(h1);
+            vec3 dir = normalize(tx * (rr * cos(6.2831853 * h2)) + ty * (rr * sin(6.2831853 * h2)) + N * sqrt(max(1.0 - h1, 0.0)));
+            rayQueryEXT rg;
+            rayQueryInitializeEXT(rg, u_tlas, gl_RayFlagsOpaqueEXT, 0xFF, v_worldPos + N * 0.04, 0.02, dir, 60.0);
+            while (rayQueryProceedEXT(rg)) {}
+            if (rayQueryGetIntersectionTypeEXT(rg, true) != gl_RayQueryCommittedIntersectionNoneEXT) {
+                int id = rayQueryGetIntersectionInstanceIdEXT(rg, true);
+                vec3 hp = v_worldPos + dir * rayQueryGetIntersectionTEXT(rg, true);
+                vec3 alb = vec3(rtAlbedo[id * 4], rtAlbedo[id * 4 + 1], rtAlbedo[id * 4 + 2]);
+                vec3 lit = u_ambient_color * u_ambient_intensity;
+                if (u_dir_light_count > 0) {
+                    vec3 sL = normalize(-u_dir_lights[0].direction);
+                    rayQueryEXT gs;
+                    rayQueryInitializeEXT(gs, u_tlas, gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsOpaqueEXT, 0xFF, hp - dir * 0.05, 0.02, sL, 2000.0);
+                    while (rayQueryProceedEXT(gs)) {}
+                    float vis = rayQueryGetIntersectionTypeEXT(gs, true) == gl_RayQueryCommittedIntersectionNoneEXT ? 1.0 : 0.0;
+                    lit += u_dir_lights[0].color * u_dir_lights[0].intensity * vis * 0.5;
+                }
+                bounce += alb * lit + rtAlbedo[id * 4 + 3] * alb;
+            } else {
+                sky += 1.0;
+            }
+        }
+        ambientAcc *= mix(1.0, 0.25 + 0.75 * sky * 0.5, u_rt_gi);
+        ambientAcc += albedo * kD_ambient * ao * bounce * 0.5 * u_rt_gi;
+    }
+#endif
     vec3 sunAcc = vec3(0.0);
     vec3 localAcc = vec3(0.0);
 

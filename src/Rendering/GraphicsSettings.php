@@ -75,6 +75,8 @@ final class GraphicsSettings
         public readonly bool $rayTracedReflections = false,
         /** Ray-traced update of the irradiance probe field (shader plan 10.1, VIO_FEATURE_RAY_QUERY). */
         public readonly bool $rayTracedProbes = false,
+        /** Ray-traced one-bounce diffuse light per pixel (shader plan 10.2, VIO_FEATURE_RAY_QUERY). */
+        public readonly bool $rayTracedGi = false,
         /** Mesh-shader path (shader plan 10.1, VIO_FEATURE_MESH_SHADER): instanced opaque batches as frustum-culled meshlets. */
         public readonly bool $meshShaders = false,
         /** Bindless materials (shader plan 10.1, VIO_FEATURE_BINDLESS): albedo from the texture table, per-instance textures in one draw. */
@@ -195,6 +197,7 @@ final class GraphicsSettings
         ?bool $rayTracedShadows = null,
         ?bool $rayTracedReflections = null,
         ?bool $rayTracedProbes = null,
+        ?bool $rayTracedGi = null,
         ?bool $meshShaders = null,
         ?bool $bindlessMaterials = null,
         ?bool $occlusionCulling = null,
@@ -246,6 +249,7 @@ final class GraphicsSettings
             rayTracedShadows: $rayTracedShadows ?? $this->rayTracedShadows,
             rayTracedReflections: $rayTracedReflections ?? $this->rayTracedReflections,
             rayTracedProbes: $rayTracedProbes ?? $this->rayTracedProbes,
+            rayTracedGi: $rayTracedGi ?? $this->rayTracedGi,
             meshShaders: $meshShaders ?? $this->meshShaders,
             bindlessMaterials: $bindlessMaterials ?? $this->bindlessMaterials,
             occlusionCulling: $occlusionCulling ?? $this->occlusionCulling,
@@ -299,6 +303,7 @@ final class GraphicsSettings
             'rayTracedShadows' => $this->rayTracedShadows,
             'rayTracedReflections' => $this->rayTracedReflections,
             'rayTracedProbes' => $this->rayTracedProbes,
+            'rayTracedGi' => $this->rayTracedGi,
             'meshShaders' => $this->meshShaders,
             'bindlessMaterials' => $this->bindlessMaterials,
             'occlusionCulling' => $this->occlusionCulling,
@@ -359,6 +364,7 @@ final class GraphicsSettings
             rayTracedShadows: self::asBool($data['rayTracedShadows'] ?? null) ?? $defaults->rayTracedShadows,
             rayTracedReflections: self::asBool($data['rayTracedReflections'] ?? null) ?? $defaults->rayTracedReflections,
             rayTracedProbes: self::asBool($data['rayTracedProbes'] ?? null) ?? $defaults->rayTracedProbes,
+            rayTracedGi: self::asBool($data['rayTracedGi'] ?? null) ?? $defaults->rayTracedGi,
             meshShaders: self::asBool($data['meshShaders'] ?? null) ?? $defaults->meshShaders,
             bindlessMaterials: self::asBool($data['bindlessMaterials'] ?? null) ?? $defaults->bindlessMaterials,
             occlusionCulling: self::asBool($data['occlusionCulling'] ?? null) ?? $defaults->occlusionCulling,

@@ -700,7 +700,8 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         if ($this->shadersWarmed && ($previous->bindlessMaterials !== $settings->bindlessMaterials
                 || $previous->occlusionCulling !== $settings->occlusionCulling
                 || $previous->rayTracedShadows !== $settings->rayTracedShadows
-                || $previous->rayTracedReflections !== $settings->rayTracedReflections)) {
+                || $previous->rayTracedReflections !== $settings->rayTracedReflections
+                || $previous->rayTracedGi !== $settings->rayTracedGi)) {
             $this->shaderRebuild = true;
         }
 
@@ -3213,7 +3214,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
     private function updateRayTracedScene(): void
     {
         $this->rtSceneReady = false;
-        if (!($this->settings->rayTracedShadows || $this->settings->rayTracedReflections || $this->settings->rayTracedProbes) || !$this->rayQueryAvailable() || $this->rtPending === []) {
+        if (!($this->settings->rayTracedShadows || $this->settings->rayTracedReflections || $this->settings->rayTracedProbes || $this->settings->rayTracedGi) || !$this->rayQueryAvailable() || $this->rtPending === []) {
             return;
         }
         if ($this->rtScene !== null && $this->rtBuiltKey === $this->rtPendingKey) {
@@ -3255,7 +3256,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
     /** Collect this frame's static opaque draws for next frame's acceleration structure. */
     private function collectRayTracedScene(array $commands): void
     {
-        if (!($this->settings->rayTracedShadows || $this->settings->rayTracedReflections || $this->settings->rayTracedProbes) || !$this->rayQueryAvailable()) {
+        if (!($this->settings->rayTracedShadows || $this->settings->rayTracedReflections || $this->settings->rayTracedProbes || $this->settings->rayTracedGi) || !$this->rayQueryAvailable()) {
             return;
         }
         $inst = [];
@@ -4471,7 +4472,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         if (self::sceneColorAvailable()) {
             $source = self::withDefine($source, 'PHPOLYGON_SCENE_COLOR');
         }
-        if (($this->settings->rayTracedShadows || $this->settings->rayTracedReflections) && $this->rayQueryAvailable()) {
+        if (($this->settings->rayTracedShadows || $this->settings->rayTracedReflections || $this->settings->rayTracedGi) && $this->rayQueryAvailable()) {
             $source = self::withDefine($source, 'PHPOLYGON_RAY_QUERY');
             // GL_EXT_ray_query needs GLSL 460.
             $source = (string) preg_replace('/^\s*#version[^\n]*\n/', "#version 460 core\n#extension GL_EXT_ray_query : require\n", $source, 1);
@@ -8144,6 +8145,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             'u_refract'             => [$material->refraction, $material->frost],
             'u_particle_tint'       => $material->particleTint ? 1.0 : 0.0,
             'u_rt_shadows'          => $this->rtSceneReady && $this->settings->rayTracedShadows ? 1.0 : 0.0,
+            'u_rt_gi'               => $this->rtSceneReady && $this->settings->rayTracedGi && $this->rtAlbedoBuffer !== null ? 1.0 : 0.0,
             'u_rt_reflections'      => $this->rtSceneReady && $this->settings->rayTracedReflections && $this->rtAlbedoBuffer !== null ? 1.0 : 0.0,
             'u_flipbook'            => [(float) $material->flipbook[0], (float) $material->flipbook[1], $material->flipbookFps, $material->streakFade ? 1.0 : 0.0],
             'u_alpha_cutoff'        => $material->alphaCutoff,
