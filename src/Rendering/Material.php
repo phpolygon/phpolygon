@@ -308,6 +308,14 @@ class Material
         public readonly float $glass = 0.0,
         /** 0..1: dust smudges and dried rain runs on that glass. */
         public readonly float $glassDirt = 0.0,
+        /**
+         * > 0: an emissive window surface lights per window (shader plan 5.4) - a
+         * world-space grid of windows, this fraction of them lit in a warm or cool
+         * tone, each showing a room behind the glass (interior mapping).
+         */
+        public readonly float $windowLights = 0.0,
+        /** Emissive neon tube: a hot white core facing the viewer, softer towards the rim. */
+        public readonly bool $neonTube = false,
     ) {}
 
     /**
@@ -565,6 +573,8 @@ class Material
             weathering: $this->weathering,
             glass: $this->glass,
             glassDirt: $this->glassDirt,
+            windowLights: $this->windowLights,
+            neonTube: $this->neonTube,
         );
     }
 

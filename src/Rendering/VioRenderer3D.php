@@ -7308,6 +7308,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             'u_triplanar'           => $material->triplanar,
             'u_weathering'          => $material->weathering,
             'u_glass'               => [$material->glass, $material->glassDirt],
+            'u_emissive_look'       => [$material->windowLights, $material->neonTube ? 1.0 : 0.0],
             // Subsurface scattering (skin path). Gated by strength > 0 in the
             // shader so non-skin materials remain visually identical.
             'u_subsurface_color'    => [$material->subsurfaceColor->r, $material->subsurfaceColor->g, $material->subsurfaceColor->b],
