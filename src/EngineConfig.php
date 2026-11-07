@@ -59,8 +59,10 @@ class EngineConfig
          * executable or in $vioDxcDir), the prerequisite for wave intrinsics,
          * 16-bit types and mesh shaders; 0 keeps the backend default (FXC 5.1).
          * php-vio falls back to FXC when DXC is unavailable, so 6 is safe to ask for.
+         * Default 6: FXC numbers sampler registers 0..15 only, DXC lets a shader use
+         * the device's texture units (php-vio SAMPLER-LIMITS-PLAN).
          */
-        public readonly int $vioShaderModel = 0,
+        public readonly int $vioShaderModel = 6,
         public readonly string $vioDxcDir = '',
         public readonly bool $skipSplash = false,
         public readonly float $splashDuration = 2.5,

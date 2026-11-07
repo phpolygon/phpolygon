@@ -3725,6 +3725,9 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
     private function initShaders(): void
     {
         ProcModeShaderRegistry::assertUniqueUniforms($this->loadShader('mesh3d.vert.glsl'), $this->loadShader('mesh3d.frag.glsl'));
+        // The backend's own texture units (php-vio vio_texture_units, its
+        // SAMPLER-LIMITS-PLAN): the snippet sampler budget follows them.
+        ProcModeShaderRegistry::setTextureUnits(function_exists('vio_texture_units') ? (int) vio_texture_units($this->ctx)['units'] : null);
         ProcModeShaderRegistry::assertSamplerBudget();
         $this->compileShaderFromFiles('default',    'mesh3d.vert.glsl',     'mesh3d.frag.glsl');
         $this->compileShaderFromFiles('unlit',      'unlit.vert.glsl',      'unlit.frag.glsl');

@@ -119,9 +119,44 @@ final class ProcModeShaderRegistry
      */
     public const SAMPLER_REGISTERS_2_40 = 12;
 
+    /**
+     * Comparison samplers of mesh3d.frag (cascades and the spot shadow): since php-vio
+     * reports its texture units (vio_texture_units) they come out of the same units.
+     */
+    public const COMPARISON_SAMPLERS = 4;
+
+    /** Texture units of the running context, null = not known yet (older php-vio). */
+    private static ?int $textureUnits = null;
+
+    /**
+     * The context's texture units per stage (php-vio `vio_texture_units()['units']`):
+     * the backend's own limit, any unit may compare. Null forgets it.
+     */
+    public static function setTextureUnits(?int $units): void
+    {
+        self::$textureUnits = $units !== null && $units > 0 ? $units : null;
+    }
+
+    public static function textureUnits(): ?int
+    {
+        return self::$textureUnits;
+    }
+
+    /**
+     * Samplers snippets may declare: the units above FIRST_SAMPLER_SLOT when the
+     * context's units are known, else MAX_SAMPLERS.
+     */
+    public static function maxSamplers(): int
+    {
+        return self::$textureUnits !== null ? max(self::MAX_SAMPLERS, self::$textureUnits - self::FIRST_SAMPLER_SLOT) : self::MAX_SAMPLERS;
+    }
+
     /** Ordinary sampler registers of the php-vio this process runs on. */
     public static function samplerRegisters(): int
     {
+        if (self::$textureUnits !== null) {
+            return self::$textureUnits - self::COMPARISON_SAMPLERS;
+        }
         $vio = phpversion('vio');
 
         return is_string($vio) && version_compare($vio, '2.40.0', '>=') ? self::SAMPLER_REGISTERS_2_40 : self::SAMPLER_REGISTERS;
@@ -431,8 +466,8 @@ final class ProcModeShaderRegistry
         if (isset(self::$samplers[$name])) {
             return self::$samplers[$name];
         }
-        if (count(self::$samplers) >= self::MAX_SAMPLERS) {
-            throw new \InvalidArgumentException('Snippets can declare at most ' . self::MAX_SAMPLERS . ' samplers');
+        if (count(self::$samplers) >= self::maxSamplers()) {
+            throw new \InvalidArgumentException('Snippets can declare at most ' . self::maxSamplers() . ' samplers');
         }
         self::$samplerPrograms[$name] = $programs;
         if ($cube) {
@@ -791,6 +826,7 @@ final class ProcModeShaderRegistry
 
     public static function clear(): void
     {
+        self::$textureUnits = null;
         self::$glslHelpers = [];
         self::$glslBranch = [];
         self::$postColorHelpers = null;
