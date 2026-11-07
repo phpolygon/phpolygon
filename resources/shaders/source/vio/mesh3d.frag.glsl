@@ -20,6 +20,7 @@ struct DirLight {
     vec3 color;
     float intensity;
 };
+uniform float u_light_halo;       // light scattered by the air per metre (halos, cones)
 uniform DirLight u_dir_lights[4];
 uniform int u_dir_light_count;
 
@@ -186,8 +187,12 @@ uniform vec4 u_height_fog;        // density, falloff, base height, on
 uniform vec4 u_height_fog_color;  // rgb, 1 = own colour (else the distance-fog colour)
 uniform int  u_fog_volume_count;
 uniform vec4 u_fog_volumes[12];   // per volume: (centre, yaw), (half extents, density), (colour, edge)
-uniform float u_light_halo;       // light scattered by the air per metre (halos, cones)
 uniform float u_soft_particle;    // Material::$softParticle: soft puff, depth fade distance
+uniform float u_triplanar;        // Material::$triplanar: tiles per metre, 0 = mesh UVs
+// Decal volumes (shader plan 5.1, DecalSystem): per decal (centre, yaw),
+// (half extents, strength), (colour, kind 0 stain 1 soot 2 moss 3 cracks).
+uniform int  u_decal_count;
+uniform vec4 u_decals[24];
 
 // HDR pipeline
 uniform int u_linear_output;
@@ -257,6 +262,17 @@ vec3 sampleAlbedoTexture(vec2 uv, vec2 dx, vec2 dy) {
         }
     }
     return textureGrad(u_albedo_texture, uv, dx, dy).rgb;
+}
+
+// Triplanar albedo (Material::$triplanar): the texture projected from the three
+// world axes, blended by the (sharpened) normal; automatic derivatives.
+vec3 sampleAlbedoTriplanar(vec3 p, vec3 n, float scale) {
+    vec3 w = pow(abs(n), vec3(4.0));
+    w /= max(w.x + w.y + w.z, 1e-4);
+    vec3 q = p * scale;
+    return texture(u_albedo_texture, q.zy).rgb * w.x
+         + texture(u_albedo_texture, q.xz).rgb * w.y
+         + texture(u_albedo_texture, q.xy).rgb * w.z;
 }
 
 // Screen-space ambient occlusion (real depth+normal SSAO; see ssao.frag.glsl).
@@ -1318,6 +1334,15 @@ vec3 np_skin(vec2 uv) {
     return normalize(vec3(-grad * 0.06, 1.0));
 }
 
+float nh_cobblestone(vec2 uv);
+// Normal from the cobblestone height field (central differences).
+vec3 np_cobblestone(vec2 uv) {
+    float e = 0.004;
+    float hx = nh_cobblestone(uv + vec2(e, 0.0)) - nh_cobblestone(uv - vec2(e, 0.0));
+    float hy = nh_cobblestone(uv + vec2(0.0, e)) - nh_cobblestone(uv - vec2(0.0, e));
+    return normalize(vec3(-hx * 3.0, -hy * 3.0, 1.0));
+}
+
 vec3 dispatchProceduralNormal(int code, vec2 uv) {
     if (code == 1)  return np_bricks(uv);
     if (code == 2)  return np_bumps(uv);
@@ -1329,6 +1354,7 @@ vec3 dispatchProceduralNormal(int code, vec2 uv) {
     if (code == 8)  return np_cracked(uv);
     if (code == 9)  return np_noise_pattern(uv);
     if (code == 10) return np_skin(uv);
+    if (code == 11) return np_cobblestone(uv);
     return vec3(0.0, 0.0, 1.0);
 }
 #endif // PHPOLYGON_OMIT_NORMAL_PATTERNS
@@ -1472,6 +1498,23 @@ float nh_skin(vec2 uv) {
     return noise(uv * 14.0) * 0.55 + fbm3(uv * 4.0) * 0.45;
 }
 
+// Cobblestones (shader plan 5.1): rounded setts in staggered rows, each a little
+// wider or narrower, higher or lower than its neighbours, in a mortar bed. No
+// cell search (it runs inside the parallax march): one cell, its own jitter.
+float nh_cobblestone(vec2 uv) {
+    vec2 p = uv * vec2(5.0, 7.0);
+    float row = floor(p.y);
+    p.x += hash21(vec2(row, 3.0)) * 0.8 + mod(row, 2.0) * 0.5;
+    vec2 id = floor(p);
+    vec2 f = fract(p) - 0.5;
+    vec2 size = 0.40 + 0.06 * vec2(hash21(id + 1.7), hash21(id + 5.3));
+    vec2 q = abs(f) - size + 0.12;
+    float d = length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - 0.12;
+    float dome = smoothstep(0.04, -0.10, d);
+    float stone = 0.82 + 0.18 * hash21(id + 9.0);
+    return stone * sqrt(dome);
+}
+
 float dispatchProceduralHeight(int code, vec2 uv) {
     if (code == 1)  return nh_bricks(uv);
     if (code == 2)  return nh_bumps(uv);
@@ -1483,6 +1526,7 @@ float dispatchProceduralHeight(int code, vec2 uv) {
     if (code == 8)  return nh_cracked(uv);
     if (code == 9)  return nh_noise(uv);
     if (code == 10) return nh_skin(uv);
+    if (code == 11) return nh_cobblestone(uv);
     return 1.0;
 }
 
@@ -1623,14 +1667,24 @@ void main() {
 #else
         float mipScale = exp2(u_material_mip_bias);
 #endif
-        texAlbedo *= sampleAlbedoTexture(patternUv, uvDx * mipScale, uvDy * mipScale);
+        texAlbedo *= u_triplanar > 0.0
+            ? sampleAlbedoTriplanar(v_worldPos, N, u_triplanar)
+            : sampleAlbedoTexture(patternUv, uvDx * mipScale, uvDy * mipScale);
     }
 
     // ---- Material selection ----
 /* PHPOLYGON:PROCMODE_BRANCHES */ {
-        float nse = noise(v_worldPos.xz * 0.4);
+        // World-space detail variation (shader plan 5.1): a large patchy
+        // brightness and hue drift and a fine grain, both from the 3D position
+        // projected along the dominant normal axis - walls vary like the ground,
+        // repeated surfaces stop looking stamped. Only rough materials.
+        vec3 an = abs(N);
+        vec2 wp = an.y > max(an.x, an.z) ? v_worldPos.xz : (an.x > an.z ? v_worldPos.zy : v_worldPos.xy);
+        float macro = noise(wp * 0.07) * 0.65 + noise(wp * 0.21) * 0.35;
+        float grain = noise(wp * 2.3);
         float noiseMask = smoothstep(0.3, 0.9, roughness);
-        albedo = texAlbedo * (1.0 + (nse - 0.5) * 0.12 * noiseMask);
+        vec3 drift = vec3(1.0 + (macro - 0.5) * 0.16, 1.0 + (macro - 0.5) * 0.12, 1.0 + (macro - 0.5) * 0.06);
+        albedo = texAlbedo * mix(vec3(1.0), drift * (1.0 + (grain - 0.5) * 0.08), noiseMask);
     }
 
 #ifndef PHPOLYGON_OMIT_GRASS
@@ -1722,6 +1776,50 @@ void main() {
         float ripFade = 1.0 - smoothstep(15.0, 35.0, length(u_camera_pos - v_worldPos));
         vec2 rip = ripFade > 0.0 ? rainRipples(v_worldPos.xz, u_frag_time) * (soak.y + 0.25 * soak.x) * u_rain_wetness * ripFade : vec2(0.0);
         N = normalize(N + vec3(rip.x, 0.0, rip.y));
+    }
+
+    // Decal volumes (shader plan 5.1): stains, soot, moss and cracks painted on
+    // whatever lies inside each box (the ground, a wall, a crate), fading towards
+    // its edges and broken up by noise. Not on water or unlit materials.
+    if (u_decal_count > 0 && u_proc_mode != 2) {
+        for (int k = 0; k < 8; k++) {
+            if (k >= u_decal_count) break;
+            vec4 cb = u_decals[k * 3];
+            vec4 hs = u_decals[k * 3 + 1];
+            vec4 ck = u_decals[k * 3 + 2];
+            vec3 d = v_worldPos - cb.xyz;
+            float cs = cos(cb.w);
+            float sn = sin(cb.w);
+            vec3 l = vec3(cs * d.x - sn * d.z, d.y, sn * d.x + cs * d.z) / max(hs.xyz, vec3(1e-3));
+            float edge = max(max(abs(l.x), abs(l.y)), abs(l.z));
+            if (edge >= 1.0) continue;
+            vec2 sp = vec2(l.x * hs.x, l.z * hs.z);
+            float blot = noise(sp * 1.3 + cb.xz) * 0.6 + noise(sp * 4.1 + cb.zx) * 0.4;
+            float rad = length(l.xz);
+            float mask = (1.0 - smoothstep(0.35, 1.0, rad + (blot - 0.5) * 0.7)) * (1.0 - smoothstep(0.7, 1.0, abs(l.y)));
+            mask *= hs.w;
+            if (mask <= 0.0) continue;
+            int kind = int(ck.w + 0.5);
+            if (kind == 3) {
+                // Cracks: thin dark lines where two ridged noises cross zero.
+                float r1 = abs(noise(sp * 1.8) - 0.5);
+                float r2 = abs(noise(sp * 4.3 + 11.0) - 0.5);
+                float line = (1.0 - smoothstep(0.0, 0.025, r1)) + 0.6 * (1.0 - smoothstep(0.0, 0.02, r2));
+                line = clamp(line, 0.0, 1.0);
+                albedo *= 1.0 - line * mask * 0.75;
+            } else if (kind == 2) {
+                // Moss / algae: a green, rough skin, thicker where the noise is high.
+                float g = mask * smoothstep(0.3, 0.7, blot);
+                albedo = mix(albedo, ck.rgb * (0.8 + 0.4 * blot), g);
+                roughness = mix(roughness, 0.95, g);
+            } else {
+                // Stain (0) tints towards its colour; soot (1) darkens and mattes.
+                float s = mask * (0.6 + 0.4 * blot);
+                albedo = mix(albedo, albedo * ck.rgb, s);
+                if (kind == 1) roughness = mix(roughness, 1.0, s);
+                else roughness = mix(roughness, max(roughness * 0.6, 0.2), s * 0.5);
+            }
+        }
     }
 
     // Rain on glass (shader plan 4.1): transparent, smooth, default-shaded panes

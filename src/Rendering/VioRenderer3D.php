@@ -7303,6 +7303,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             'u_parallax_depth'      => $this->settings->surfaceRelief->parallaxEnabled() ? $material->parallaxDepth : 0.0,
             'u_wetness'             => $material->wetness,
             'u_soft_particle'       => $material->softParticle,
+            'u_triplanar'           => $material->triplanar,
             // Subsurface scattering (skin path). Gated by strength > 0 in the
             // shader so non-skin materials remain visually identical.
             'u_subsurface_color'    => [$material->subsurfaceColor->r, $material->subsurfaceColor->g, $material->subsurfaceColor->b],

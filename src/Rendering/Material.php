@@ -288,6 +288,12 @@ class Material
          * and ground. 0 = an ordinary surface.
          */
         public readonly float $softParticle = 0.0,
+        /**
+         * > 0: the albedo texture is projected from the three world axes (tiles
+         * per metre) and blended by the normal instead of read through the mesh
+         * UVs - for imported meshes with stretched or missing UVs (shader plan 5.1).
+         */
+        public readonly float $triplanar = 0.0,
     ) {}
 
     /**
@@ -533,6 +539,7 @@ class Material
             anisotropy: $anisotropy ?? $this->anisotropy,
             bodyWave: $clearBodyWave ? null : ($bodyWave ?? $this->bodyWave),
             softParticle: $this->softParticle,
+            triplanar: $this->triplanar,
         );
     }
 

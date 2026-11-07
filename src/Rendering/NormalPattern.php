@@ -45,6 +45,8 @@ final class NormalPattern
      * realistic range, higher values exaggerate the orange-peel-like look.
      */
     public const SKIN        = 'skin';
+    /** Rounded stones in mortar beds (shader plan 5.1), with a height field for parallax. */
+    public const COBBLESTONE = 'cobblestone';
 
     /**
      * Map a string pattern id to the integer code consumed by the shader's
@@ -64,6 +66,7 @@ final class NormalPattern
             self::CRACKED     => 8,
             self::NOISE       => 9,
             self::SKIN        => 10,
+            self::COBBLESTONE => 11,
             default           => 0,
         };
     }
