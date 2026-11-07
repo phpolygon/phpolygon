@@ -331,6 +331,14 @@ class Material
          * @var array{0: float, 1: float}
          */
         public readonly array $fadeDistance = [0.0, 0.0],
+        /**
+         * 0..1: rim light for figures (shader plan 6.2) - a soft edge of sky light
+         * round the silhouette, brighter where the sun comes from behind, so a
+         * character separates from the background in light and shade.
+         */
+        public readonly float $rimLight = 0.0,
+        /** 0..1: hair shine - a highlight ring across the strands (Kajiya-Kay, strands run down the surface). */
+        public readonly float $hairShine = 0.0,
     ) {}
 
     /**
@@ -605,6 +613,8 @@ class Material
             brushed: $this->brushed,
             glitter: $this->glitter,
             fadeDistance: $this->fadeDistance,
+            rimLight: $this->rimLight,
+            hairShine: $this->hairShine,
         );
     }
 

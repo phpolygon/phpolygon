@@ -206,6 +206,8 @@ uniform vec2 u_emissive_look;
 uniform vec3 u_material_look;
 // Dithered distance fade (shader plan 6.1): (start, end) metres, end <= 0 = off.
 uniform vec2 u_fade_range;
+// Figure looks (shader plan 6.2): x = rim light, y = hair shine.
+uniform vec2 u_figure_look;
 // Wind for fragment looks (shader plan 6.1): xz direction, intensity.
 uniform vec3 u_frag_wind;
 uniform vec4 u_decals[24];
@@ -2267,6 +2269,20 @@ void main() {
                     flash *= step(0.82, hash31(gc + 9.1)) * (1.0 - smoothstep(6.0, 20.0, length(u_camera_pos - v_worldPos)));
                     lit += radiance * flash * u_material_look.z * 4.0 * dShadow;
                 }
+                // Hair shine (shader plan 6.2): strands run down the surface, the
+                // highlight is a ring across them (Kajiya-Kay) - a sharp white
+                // lobe and a broad one in the hair colour.
+                if (u_figure_look.y > 0.0) {
+                    vec3 hT = vec3(0.0, 1.0, 0.0) - N * N.y;
+                    hT = dot(hT, hT) > 1e-5 ? normalize(hT) : vec3(1.0, 0.0, 0.0);
+                    vec3 hH = normalize(dL + V);
+                    float th = dot(hT, hH);
+                    float sTH = sqrt(max(1.0 - th * th, 0.0));
+                    float th2 = dot(hT, normalize(hH + hT * 0.12));
+                    float sTH2 = sqrt(max(1.0 - th2 * th2, 0.0));
+                    vec3 hairSpec = vec3(pow(sTH, 90.0) * 0.35) + albedo * pow(sTH2, 18.0) * 0.6;
+                    lit += hairSpec * u_figure_look.y * radiance * dNdotL * dShadow;
+                }
             }
         }
         // Cloth sheen (shader plan 5.5): a soft rim of the albedo at grazing angles.
@@ -2276,6 +2292,19 @@ void main() {
         }
         // The primary light is the one the SDF soft sun shadow (composite) scales.
         if (dl == 0) sunAcc += lit; else localAcc += lit;
+    }
+    // Rim light for figures (shader plan 6.2): sky light round the silhouette,
+    // stronger where the sun stands behind the figure; works in shade too.
+    if (u_figure_look.x > 0.0) {
+        float rNV = clamp(dot(N, V), 0.0, 1.0);
+        float rim = pow(1.0 - rNV, 3.0) * smoothstep(-0.2, 0.4, N.y + 0.3);
+        vec3 rimCol = u_sky_color * 0.35 + u_ambient_color * 0.35;
+        if (u_dir_light_count > 0) {
+            vec3 rL = normalize(-u_dir_lights[0].direction);
+            float back = clamp(dot(-V, rL), 0.0, 1.0);
+            rimCol += u_dir_lights[0].color * u_dir_lights[0].intensity * back * back * 0.5;
+        }
+        localAcc += rimCol * rim * u_figure_look.x * mix(vec3(1.0), albedo * 2.0, 0.3);
     }
 
 #ifdef PHPOLYGON_LIGHT_GRID

@@ -7341,6 +7341,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             'u_emissive_look'       => [$material->windowLights, $material->neonTube ? 1.0 : 0.0],
             'u_material_look'       => [$material->sheen, $material->brushed, $material->glitter],
             'u_fade_range'          => [$material->fadeDistance[0], $material->fadeDistance[1]],
+            'u_figure_look'         => [$material->rimLight, $material->hairShine],
             // Subsurface scattering (skin path). Gated by strength > 0 in the
             // shader so non-skin materials remain visually identical.
             'u_subsurface_color'    => [$material->subsurfaceColor->r, $material->subsurfaceColor->g, $material->subsurfaceColor->b],
