@@ -218,6 +218,10 @@ void main() {
             // Powder: dim the thin low-density edges (which otherwise catch full
             // light and read as a too-bright fringe); dense cores stay bright.
             col *= mix(0.6, 1.0, 1.0 - exp(-dens * 3.0));
+            // Silver lining (shader plan 4.3): looking towards the sun, thin cloud
+            // edges scatter its light forward and glow bright.
+            float fwd = pow(max(dot(dir, L), 0.0), 10.0);
+            col += u_sun_color * max(u_sun_intensity, 0.0) * fwd * exp(-dens * 4.0) * 1.6 * (1.0 - u_cloud_darkness);
             // Lightning lights the cloud from inside, strongest near the strike.
             if (u_lightning > 0.01) {
                 vec2 strike = u_camera_pos.xz + u_lightning_dir * STRIKE_DIST;

@@ -67,6 +67,10 @@ final class SetSky
         public readonly float $lightning = 0.0,
         /** Direction of the strike about +Y (radians, 0 = +Z). */
         public readonly float $lightningAzimuth = 0.0,
+        /** Moon phase 0..1 (0 new, 0.5 full): the lit part of the disc. */
+        public readonly float $moonPhase = 0.5,
+        /** High fog layer 0..1: a grey stratus veil that flattens the sky. */
+        public readonly float $highFog = 0.0,
     ) {}
 
     /** Cloud drift distance the renderer applies (see $cloudOffset). */

@@ -5,6 +5,8 @@ uniform mat4 u_sky_inv_vp;
 uniform vec3 u_moon_direction;
 uniform vec3 u_moon_color;
 uniform float u_moon_intensity;
+// Phase 0..1 (0 new, 0.5 full): the lit part of the disc (shader plan 4.3).
+uniform float u_moon_phase;
 uniform float u_sun_size;       // moon disc sized relative to the sun disc
 uniform float u_sun_glow_size;
 // HDR scene path (FP16 target tonemapped on resolve). This is an ADDITIVE pass;
@@ -50,11 +52,30 @@ void main() {
 
     vec3 add = vec3(0.0);
     float disc = 1.0 - smoothstep01(u_sun_size * 0.7, u_sun_size * 1.4, angle);
-    add += u_moon_color * u_moon_intensity * disc;
+    // The disc as a lit sphere: its normal from the position on the disc, the light
+    // from the phase (behind the moon at new moon, from the viewer at full moon).
+    // Maria from a soft noise; the dark side keeps a faint earthshine.
+    vec3 md = normalize(u_moon_direction);
+    vec3 right = normalize(cross(md, abs(md.y) < 0.99 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0)));
+    vec3 upv = cross(right, md);
+    vec2 q = vec2(dot(dir, right), dot(dir, upv)) / max(u_sun_size * 1.05, 1e-4);
+    float r2 = dot(q, q);
+    float lit = 1.0;
+    float maria = 1.0;
+    if (r2 < 1.0) {
+        vec3 n = vec3(q, sqrt(1.0 - r2));
+        float th = 6.2831853 * u_moon_phase;
+        vec3 l = vec3(sin(th), 0.0, -cos(th));
+        lit = smoothstep01(-0.04, 0.08, dot(n, l));
+        vec2 m = q * 2.3;
+        float mn = sin(m.x * 3.1 + 1.3) * sin(m.y * 2.7 - 0.4) + sin(m.x * 5.3 - m.y * 4.1) * 0.5;
+        maria = 1.0 - 0.28 * smoothstep01(0.2, 0.9, mn);
+    }
+    add += u_moon_color * u_moon_intensity * disc * (lit * maria + 0.05);
 
     if (angle < u_sun_glow_size * 0.6) {
         float g = 1.0 - angle / (u_sun_glow_size * 0.6);
-        g = g * g * 0.35 * u_moon_intensity;
+        g = g * g * 0.35 * u_moon_intensity * (0.2 + 0.8 * (1.0 - abs(u_moon_phase - 0.5) * 2.0));
         add += u_moon_color * g;
     }
 

@@ -6,6 +6,11 @@ uniform mat4 u_sky_inv_vp;
 uniform vec3 u_zenith_color;
 uniform vec3 u_horizon_color;
 uniform vec3 u_ground_color;
+// Twilight scattering (shader plan 4.3): the sun's direction and colour.
+uniform vec3 u_sun_direction;
+uniform vec3 u_sun_color;
+// High fog layer 0..1 (SetSky::$highFog).
+uniform float u_high_fog;
 // HDR scene path (FP16 target tonemapped on resolve). The gradient colours are
 // authored display-referred, so under HDR emit the LINEAR value that the
 // resolve's ACES+gamma maps back to them — keeping the base sky pixel-identical.
@@ -50,6 +55,35 @@ void main() {
         color = mix(u_horizon_color, u_zenith_color, smoothstep01(0.0, 1.0, elevation));
     } else {
         color = mix(u_horizon_color, u_ground_color, smoothstep01(0.0, -0.3, elevation));
+    }
+
+    // Twilight (shader plan 4.3): with the sun low the sky on its side glows - a
+    // wide warm band along the horizon and a forward-scattering halo round the
+    // sun - and opposite it the earth's shadow rises as a cool band under a pink
+    // belt. All of it fades out once the sun stands higher than ~15 degrees.
+    float sunY = u_sun_direction.y;
+    float low = smoothstep01(0.26, 0.0, sunY) * smoothstep01(-0.2, -0.02, sunY);
+    if (low > 0.0 && elevation > -0.05) {
+        vec2 hs = normalize(u_sun_direction.xz + vec2(1e-5));
+        vec2 hd = normalize(dir.xz + vec2(1e-5));
+        float side = dot(hs, hd) * 0.5 + 0.5;
+        float band = exp(-max(elevation, 0.0) * 7.0);
+        float mu = max(dot(dir, u_sun_direction), 0.0);
+        vec3 warm = u_sun_color * vec3(1.0, 0.62, 0.32);
+        color += warm * band * pow(side, 3.0) * 0.35 * low;
+        color += u_sun_color * pow(mu, 24.0) * 0.45 * low;
+        float anti = pow(1.0 - side, 2.0);
+        float shadowBand = exp(-max(elevation, 0.0) * 14.0);
+        float belt = exp(-pow((elevation - 0.12) / 0.06, 2.0));
+        color = mix(color, color * vec3(0.78, 0.82, 0.95), shadowBand * anti * 0.5 * low);
+        color += vec3(0.30, 0.14, 0.18) * belt * anti * 0.5 * low;
+    }
+
+    // High fog: a grey stratus veil, the sky loses its depth and blue.
+    if (u_high_fog > 0.0 && elevation > -0.02) {
+        float grey = dot(color, vec3(0.299, 0.587, 0.114));
+        vec3 veil = vec3(grey * 1.05 + 0.04);
+        color = mix(color, veil, u_high_fog * (0.55 + 0.35 * smoothstep01(0.0, 0.6, elevation)));
     }
     if (u_linear_output == 1) {
         color = invToneMapInvGamma(color);

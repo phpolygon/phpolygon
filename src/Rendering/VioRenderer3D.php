@@ -6122,6 +6122,10 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         vio_set_uniform($this->ctx, 'u_zenith_color', [$sky->zenithColor->r, $sky->zenithColor->g, $sky->zenithColor->b]);
         vio_set_uniform($this->ctx, 'u_horizon_color', [$sky->horizonColor->r, $sky->horizonColor->g, $sky->horizonColor->b]);
         vio_set_uniform($this->ctx, 'u_ground_color', [$sky->groundColor->r, $sky->groundColor->g, $sky->groundColor->b]);
+        $sunDirLen = max(1e-6, $sunDir->length());
+        vio_set_uniform($this->ctx, 'u_sun_direction', [$sunDir->x / $sunDirLen, $sunDir->y / $sunDirLen, $sunDir->z / $sunDirLen]);
+        vio_set_uniform($this->ctx, 'u_sun_color', [$sky->sunColor->r, $sky->sunColor->g, $sky->sunColor->b]);
+        vio_set_uniform($this->ctx, 'u_high_fog', $sky->highFog);
         vio_draw($this->ctx, $quad);
 
         // 2. Sun (additive).
@@ -6145,6 +6149,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             vio_set_uniform($this->ctx, 'u_moon_direction', [$moonDir->x, $moonDir->y, $moonDir->z]);
             vio_set_uniform($this->ctx, 'u_moon_color', [$sky->moonColor->r, $sky->moonColor->g, $sky->moonColor->b]);
             vio_set_uniform($this->ctx, 'u_moon_intensity', $sky->moonIntensity);
+            vio_set_uniform($this->ctx, 'u_moon_phase', $sky->moonPhase);
             vio_set_uniform($this->ctx, 'u_sun_size', $sky->sunSize);
             vio_set_uniform($this->ctx, 'u_sun_glow_size', $sky->sunGlowSize);
             vio_draw($this->ctx, $quad);
@@ -6155,6 +6160,8 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             $this->bindSkyPipeline('sky_stars', VIO_BLEND_ADDITIVE, $hdr, $mrt);
             vio_set_uniform($this->ctx, 'u_sky_inv_vp', $invVP);
             vio_set_uniform($this->ctx, 'u_star_brightness', $sky->starBrightness);
+            vio_set_uniform($this->ctx, 'u_sky_time', $sky->time);
+            vio_set_uniform($this->ctx, 'u_high_fog', $sky->highFog);
             vio_draw($this->ctx, $quad);
         }
 

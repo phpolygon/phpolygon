@@ -230,10 +230,12 @@ class DayNightSystem extends AbstractSystem
         $fogDensity = 0.0;
         $cloudDarkness = 0.0;
         $sandstorm = 0.0;
+        $highFogHumidity = 0.0;
         $sandColor = new Color(0.62, 0.48, 0.30);
         foreach ($world->query(Weather::class) as $weatherEntity) {
             $weather = $weatherEntity->get(Weather::class);
             $sandstorm = $weather->sandstormIntensity;
+            $highFogHumidity = $weather->humidity;
             $sandColor = $weather->sandstormColor ?? $sandColor;
             $overcast = max($overcast, $weather->cloudCoverage);
             $fogDensity = max($fogDensity, $weather->fogDensity);
@@ -582,6 +584,9 @@ class DayNightSystem extends AbstractSystem
             cloudOffset: $this->cloudOffset,
             lightning: $cycle->lightningFlash,
             lightningAzimuth: $cycle->lightningAzimuth,
+            moonPhase: $moonPhase,
+            // Humid, calm, dry weather lays a high fog over the sky (shader plan 4.3).
+            highFog: max(0.0, min(1.0, ($highFogHumidity - 0.75) * 4.0)) * (1.0 - min(1.0, $cloudDarkness * 2.0)),
         ));
 
         // --- Sun sphere material ---
