@@ -75,6 +75,10 @@ class Renderer3DSystem extends AbstractSystem
     /** Rectangular area lights the mesh shader evaluates (the nearest ones). */
     public const MAX_RECT_LIGHTS = 4;
 
+    /** Seconds the ground takes to dry from soaked once the rain stops. */
+    public const float DRY_SECONDS = 150.0;
+
+
     /**
      * Screen-size LOD. Beyond {@see $lodNearDistance}, an entity whose projected
      * size (world bounding radius / distance to camera) falls below
@@ -197,6 +201,16 @@ class Renderer3DSystem extends AbstractSystem
     public function update(World $world, float $dt): void
     {
         $this->wavePhase += $dt;
+
+        // Ground wetness: soaks at once with the rain, dries over DRY_SECONDS after it.
+        foreach ($world->query(Weather::class) as $entity) {
+            $weather = $entity->get(Weather::class);
+            $target = min(1.0, $weather->rainIntensity * 1.2 + $weather->stormIntensity * 0.4);
+            $weather->groundWetness = $target >= $weather->groundWetness
+                ? $target
+                : max($target, $weather->groundWetness - $dt / self::DRY_SECONDS);
+            break;
+        }
 
         // Gradual snow accumulation / melting
         foreach ($world->query(Weather::class) as $entity) {
@@ -393,6 +407,7 @@ class Renderer3DSystem extends AbstractSystem
         $windIntensity = 0.5;
         $stormIntensity = 0.0;
         $rainWetness = 0.0;
+        $raining = 0.0;
         foreach ($world->query(Wind::class) as $entity) {
             $wind = $entity->get(Wind::class);
             $windIntensity = $wind->intensity;
@@ -413,7 +428,8 @@ class Renderer3DSystem extends AbstractSystem
             $stormIntensity = $weather->stormIntensity;
             // Rain soaks the ground faster than it evaporates. A bit of
             // surface moisture lingers after storms so sand doesn't snap dry.
-            $rainWetness = min(1.0, $weather->rainIntensity * 1.2 + $weather->stormIntensity * 0.4);
+            $rainWetness = max($weather->groundWetness, min(1.0, $weather->rainIntensity * 1.2 + $weather->stormIntensity * 0.4));
+            $raining = $weather->rainIntensity;
             break;
         }
         $waveAmp  = 0.1 + $windIntensity * 0.25 + $stormIntensity * 0.35;
@@ -426,7 +442,7 @@ class Renderer3DSystem extends AbstractSystem
             break;
         }
         $this->commandList->add(new SetSnowCover($this->snowCover));
-        $this->commandList->add(new SetGroundWetness($rainWetness));
+        $this->commandList->add(new SetGroundWetness($rainWetness, $raining));
         $this->commandList->add(new SetWaveAnimation(
             enabled: true,
             amplitude: $waveAmp,

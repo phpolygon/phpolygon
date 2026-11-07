@@ -55,6 +55,13 @@ class Weather extends AbstractComponent
     #[Hidden]
     public float $lightningTimer = 0.0;
 
+    /**
+     * How wet the ground is 0..1: soaks at once with the rain, dries over
+     * Renderer3DSystem::DRY_SECONDS after it (single writer: Renderer3DSystem).
+     */
+    #[Hidden]
+    public float $groundWetness = 0.0;
+
     /** Direction of the last strike about the world Y axis (radians, 0 = +Z), for the sky. */
     #[Hidden]
     public float $lightningAzimuth = 0.0;

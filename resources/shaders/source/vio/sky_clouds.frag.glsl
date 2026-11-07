@@ -20,6 +20,9 @@ uniform float u_cloud_darkness;  // 0 = white cumulus, 1 = dark rain/thunder/sno
 // Lightning (shader plan 4.1): flash 0..1 and the strike's direction in xz. The
 // clouds glow from within around the strike, a jagged bolt reaches the horizon.
 uniform float u_lightning;
+// Rainbow strength 0..1 (VioRenderer3D::rainbowStrength): the bow around the
+// antisolar point, primary at 42 degrees, a faint reversed secondary at 51.
+uniform float u_rainbow;
 uniform vec2  u_lightning_dir;
 // HDR scene path: clouds alpha-blend over the linear sky, so linearise the
 // cloud colour so it composites against the tonemapped resolve correctly.
@@ -110,15 +113,39 @@ float lightningBolt(vec3 dir) {
     return (core + glow) * smoothstep(-0.002, 0.01, e) * u_lightning;
 }
 
+// Spectrum across a bow: t 0 = inner (violet) .. 1 = outer (red).
+vec3 rainbowSpectrum(float t) {
+    float h = 0.75 * (1.0 - t);
+    return clamp(abs(fract(h + vec3(1.0, 2.0 / 3.0, 1.0 / 3.0)) * 6.0 - 3.0) - 1.0, 0.0, 1.0);
+}
+
+vec4 rainbow(vec3 dir) {
+    if (u_rainbow <= 0.0) return vec4(0.0);
+    float a = degrees(acos(clamp(dot(dir, -normalize(u_sun_direction)), -1.0, 1.0)));
+    float p = (a - 40.4) / 2.0;   // primary 40.4..42.4
+    float s = (54.0 - a) / 3.5;   // secondary 50.5..54, colours reversed
+    vec3 c = vec3(0.0);
+    float w = 0.0;
+    if (p > 0.0 && p < 1.0) { c = rainbowSpectrum(p); w = sin(p * 3.14159) * 0.42; }
+    else if (s > 0.0 && s < 1.0) { c = rainbowSpectrum(s); w = sin(s * 3.14159) * 0.08; }
+    float fadeLow = smoothstep(-0.02, 0.06, dir.y);
+    return vec4(c, w * u_rainbow * fadeLow);
+}
+
 void main() {
     vec4 world = u_sky_inv_vp * vec4(v_ndc, 1.0, 1.0);
     vec3 dir = normalize(world.xyz / world.w);
     float bolt = lightningBolt(dir);
     vec3 boltColor = vec3(0.85, 0.88, 1.0) * 4.0;
 
+    vec4 bow = rainbow(dir);
+
     // Only march upward into the slab.
-    if (dir.y <= 0.02) {
-        frag_color = vec4(u_linear_output == 1 ? boltColor : vec3(1.0), clamp(bolt, 0.0, 1.0));
+    if (dir.y <= 0.02 || u_cloud_cover <= 0.0) {
+        float ab0 = clamp(bolt, 0.0, 1.0);
+        float a0 = ab0 + bow.a * (1.0 - ab0);
+        vec3 c0 = ((u_linear_output == 1 ? boltColor : vec3(1.0)) * ab0 + bow.rgb * bow.a * (1.0 - ab0)) / max(a0, 1e-4);
+        frag_color = vec4(c0, a0);
         return;
     }
 
@@ -184,7 +211,10 @@ void main() {
     // The bolt hangs below the cloud base, in front of the slab.
     float ab = clamp(bolt, 0.0, 1.0);
     vec3 cb = u_linear_output == 1 ? boltColor : vec3(1.0);
-    float aOut = ab + alpha * (1.0 - ab);
-    vec3 cOut = (cb * ab + cloudColor * alpha * (1.0 - ab)) / max(aOut, 1e-4);
+    // The bow hangs in the rain below the clouds, in front of them.
+    float aCloud = bow.a + alpha * (1.0 - bow.a);
+    vec3 cCloud = (bow.rgb * bow.a + cloudColor * alpha * (1.0 - bow.a)) / max(aCloud, 1e-4);
+    float aOut = ab + aCloud * (1.0 - ab);
+    vec3 cOut = (cb * ab + cCloud * aCloud * (1.0 - ab)) / max(aOut, 1e-4);
     frag_color = vec4(cOut, aOut);
 }

@@ -476,6 +476,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
     private ?string $pendingSkyboxId = null;
     private ?SetSky $pendingSky = null;
     private float $rainWetness = 0.0;
+    private float $raining = 0.0;
     /** @var array{0: float, 1: float, 2: float, 3: float} Season tint rgb + desaturation (SetSeasonGrade). */
     private array $seasonGrade = [1.0, 1.0, 1.0, 0.0];
 
@@ -3260,6 +3261,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
                 $this->snowCover = $cmd->cover;
             } elseif ($cmd instanceof Command\SetGroundWetness) {
                 $this->rainWetness = $cmd->rainWetness;
+                $this->raining = $cmd->raining;
             } elseif ($cmd instanceof Command\SetSeasonGrade) {
                 $this->seasonGrade = [$cmd->tint->r, $cmd->tint->g, $cmd->tint->b, $cmd->desaturation];
             } elseif ($cmd instanceof SetWaveAnimation) {
@@ -5822,6 +5824,18 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         }
     }
 
+    /**
+     * Strength of the rainbow: wet ground where it no longer rains, a sun above the
+     * horizon but below the bow (sin 42 degrees ~ 0.67) and shining.
+     */
+    public static function rainbowStrength(float $wetness, float $raining, float $sunY, float $sunIntensity): float
+    {
+        $after = max(0.0, min(1.0, $wetness * 1.5 - $raining * 4.0));
+        $low = max(0.0, min(1.0, $sunY / 0.08)) * max(0.0, min(1.0, (0.62 - $sunY) / 0.1));
+
+        return $after * $low * max(0.0, min(1.0, $sunIntensity));
+    }
+
     /** The spot shadow map on its unit, or the 1x1 dummy depth target with index -1. */
     private function uploadSpotShadowUniforms(): void
     {
@@ -6130,8 +6144,14 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             vio_draw($this->ctx, $quad);
         }
 
+        // A rainbow (shader plan 4.1) on wet ground once the rain stops, with the
+        // sun up but lower than the bow's 42 degrees; drawn by the cloud pass.
+        $sunLen = max(1e-6, $sky->sunDirection->length());
+        $sunY = $sky->sunDirection->y / $sunLen;
+        $rainbow = $this->rainbowStrength($this->rainWetness, $this->raining, $sunY, $sky->sunIntensity);
+
         // 5. Clouds (alpha).
-        if ($sky->cloudCover > 0.0) {
+        if ($sky->cloudCover > 0.0 || $rainbow > 0.0) {
             // Normalise wind direction in the XZ plane so clouds drift in world space.
             $wd = $sky->cloudWindDirection;
             $wl = sqrt($wd->x * $wd->x + $wd->z * $wd->z);
@@ -6151,6 +6171,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             vio_set_uniform($this->ctx, 'u_cloud_wind_dir', [$wx, $wz]);
             vio_set_uniform($this->ctx, 'u_cloud_darkness', $sky->cloudDarkness);
             vio_set_uniform($this->ctx, 'u_lightning', $sky->lightning);
+            vio_set_uniform($this->ctx, 'u_rainbow', $rainbow);
             vio_set_uniform($this->ctx, 'u_lightning_dir', [sin($sky->lightningAzimuth), cos($sky->lightningAzimuth)]);
             vio_draw($this->ctx, $quad);
         }
