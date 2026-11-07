@@ -520,6 +520,8 @@ final class HeadlessShaderHarness
         vio_bind_texture($this->ctx, $tex, 4);
         $this->setUniform('u_spot_shadow_map', 4);
         $this->setUniform('u_spot_shadow_index', -1);
+        // Season colour map neutral (an unset vec4 would turn vegetation black).
+        $this->setUniform('u_season_grade', [1.0, 1.0, 1.0, 0.0]);
 
         $this->bindDummyMaterialSamplers();
     }

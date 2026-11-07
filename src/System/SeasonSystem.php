@@ -35,6 +35,19 @@ class SeasonSystem extends AbstractSystem
         ['time' => 1.0,  'r' => 0.24, 'g' => 0.61, 'b' => 0.24],  // wrap
     ];
 
+    /**
+     * Season colour map for vegetation (shader plan 4.1): tint and desaturation
+     * applied to grass and foliage, scaled by Season::$gradeStrength.
+     */
+    private const GRADE_KEYS = [
+        ['time' => 0.0,   'r' => 1.02, 'g' => 1.10, 'b' => 0.90, 'd' => 0.0],   // fresh spring
+        ['time' => 0.25,  'r' => 1.00, 'g' => 1.00, 'b' => 1.00, 'd' => 0.0],   // summer as authored
+        ['time' => 0.5,   'r' => 1.18, 'g' => 0.94, 'b' => 0.62, 'd' => 0.05],  // autumn gold
+        ['time' => 0.625, 'r' => 1.30, 'g' => 0.82, 'b' => 0.50, 'd' => 0.10],  // deep autumn
+        ['time' => 0.75,  'r' => 0.90, 'g' => 0.92, 'b' => 0.96, 'd' => 0.40],  // winter, faded
+        ['time' => 1.0,   'r' => 1.02, 'g' => 1.10, 'b' => 0.90, 'd' => 0.0],   // wrap
+    ];
+
     // Sand color per season
     private const SAND_KEYS = [
         ['time' => 0.0,  'r' => 0.77, 'g' => 0.66, 'b' => 0.44],  // spring fresh
@@ -61,6 +74,8 @@ class SeasonSystem extends AbstractSystem
             $season->axialTilt = cos(($t - 0.25) * 2.0 * M_PI) * 15.0;
 
             // Compute base temperature and humidity from seasonal curve
+            [$season->gradeTint, $season->gradeDesaturation] = self::gradeAt($t, $season->gradeStrength);
+
             $climate = self::interpolateClimate(self::TEMP_KEYS, $t);
             $season->baseTemperature = $climate['temp'];
             $season->baseHumidity = $climate['humidity'];
@@ -91,6 +106,34 @@ class SeasonSystem extends AbstractSystem
 
             break; // Only one Season entity
         }
+    }
+
+    /**
+     * Vegetation tint and desaturation for a year progress, mixed with the identity
+     * by $strength.
+     *
+     * @return array{0: Color, 1: float}
+     */
+    public static function gradeAt(float $t, float $strength): array
+    {
+        $t -= floor($t);
+        $s = max(0.0, min(1.0, $strength));
+        $keys = self::GRADE_KEYS;
+        for ($i = 0; $i < count($keys) - 1; $i++) {
+            if ($t >= $keys[$i]['time'] && $t <= $keys[$i + 1]['time']) {
+                $range = $keys[$i + 1]['time'] - $keys[$i]['time'];
+                $f = $range > 0 ? ($t - $keys[$i]['time']) / $range : 0.0;
+                $f = $f * $f * (3.0 - 2.0 * $f);
+                $lerp = static fn (string $k): float => $keys[$i][$k] + ($keys[$i + 1][$k] - $keys[$i][$k]) * $f;
+
+                return [
+                    new Color(1.0 + ($lerp('r') - 1.0) * $s, 1.0 + ($lerp('g') - 1.0) * $s, 1.0 + ($lerp('b') - 1.0) * $s),
+                    $lerp('d') * $s,
+                ];
+            }
+        }
+
+        return [new Color(1.0, 1.0, 1.0), 0.0];
     }
 
     /**

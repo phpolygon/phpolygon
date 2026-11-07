@@ -8,6 +8,7 @@ use PHPolygon\ECS\AbstractComponent;
 use PHPolygon\ECS\Attribute\Category;
 use PHPolygon\ECS\Attribute\Hidden;
 use PHPolygon\ECS\Attribute\Property;
+use PHPolygon\ECS\Attribute\Range;
 use PHPolygon\ECS\Attribute\Serializable;
 
 /**
@@ -46,14 +47,31 @@ class Season extends AbstractComponent
     #[Hidden]
     public float $baseHumidity = 0.5;
 
+    /**
+     * How strongly the season colours the vegetation (grass, foliage): 0 = not at
+     * all (plants as authored), 1 = the full map of {@see \PHPolygon\System\SeasonSystem}.
+     */
+    #[Property(editorHint: 'slider')]
+    #[Range(min: 0, max: 1)]
+    public float $gradeStrength = 0.0;
+
+    /** This frame's vegetation tint and desaturation (set by SeasonSystem). */
+    #[Hidden]
+    public ?\PHPolygon\Rendering\Color $gradeTint = null;
+
+    #[Hidden]
+    public float $gradeDesaturation = 0.0;
+
     public function __construct(
         float $yearProgress = 0.0,
         float $yearDuration = 480.0,
         float $speed = 1.0,
+        float $gradeStrength = 0.0,
     ) {
         $this->yearProgress = $yearProgress;
         $this->yearDuration = max(1.0, $yearDuration);
         $this->speed = $speed;
+        $this->gradeStrength = $gradeStrength;
     }
 
     /** Season name for the current progress */

@@ -418,6 +418,13 @@ class Renderer3DSystem extends AbstractSystem
         }
         $waveAmp  = 0.1 + $windIntensity * 0.25 + $stormIntensity * 0.35;
         $waveFreq = 0.4 + $windIntensity * 0.15 + $stormIntensity * 0.15;
+        foreach ($world->query(\PHPolygon\Component\Season::class) as $entity) {
+            $season = $entity->get(\PHPolygon\Component\Season::class);
+            if ($season->gradeTint !== null) {
+                $this->commandList->add(new \PHPolygon\Rendering\Command\SetSeasonGrade($season->gradeTint, $season->gradeDesaturation));
+            }
+            break;
+        }
         $this->commandList->add(new SetSnowCover($this->snowCover));
         $this->commandList->add(new SetGroundWetness($rainWetness));
         $this->commandList->add(new SetWaveAnimation(

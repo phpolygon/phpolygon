@@ -175,6 +175,8 @@ uniform vec3 u_horizon_color;
 
 uniform float u_moon_phase;
 uniform vec3 u_season_tint;
+// Season colour map for vegetation (shader plan 4.1): rgb tint, a desaturation.
+uniform vec4 u_season_grade;
 
 // HDR pipeline
 uniform int u_linear_output;
@@ -1519,6 +1521,12 @@ void main() {
         float ripFade = 1.0 - smoothstep(15.0, 35.0, length(u_camera_pos - v_worldPos));
         vec2 rip = ripFade > 0.0 ? rainRipples(v_worldPos.xz, u_frag_time) * (soak.y + 0.25 * soak.x) * u_rain_wetness * ripFade : vec2(0.0);
         N = normalize(N + vec3(rip.x, 0.0, rip.y));
+    }
+
+    // Season colour map: grass blades and two-sided translucent foliage.
+    if (u_grass_shade == 1 || (u_two_sided == 1 && u_subsurface_strength > 0.0)) {
+        float sl = dot(albedo, vec3(0.299, 0.587, 0.114));
+        albedo = mix(albedo, vec3(sl), u_season_grade.a) * u_season_grade.rgb;
     }
 
 #ifndef PHPOLYGON_OMIT_SNOW

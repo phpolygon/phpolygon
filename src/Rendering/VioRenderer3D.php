@@ -476,6 +476,8 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
     private ?string $pendingSkyboxId = null;
     private ?SetSky $pendingSky = null;
     private float $rainWetness = 0.0;
+    /** @var array{0: float, 1: float, 2: float, 3: float} Season tint rgb + desaturation (SetSeasonGrade). */
+    private array $seasonGrade = [1.0, 1.0, 1.0, 0.0];
 
     /** Current wind state, overwritten by SetWind dispatch. */
     /** @var array{0:float,1:float,2:float} */
@@ -3258,6 +3260,8 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
                 $this->snowCover = $cmd->cover;
             } elseif ($cmd instanceof Command\SetGroundWetness) {
                 $this->rainWetness = $cmd->rainWetness;
+            } elseif ($cmd instanceof Command\SetSeasonGrade) {
+                $this->seasonGrade = [$cmd->tint->r, $cmd->tint->g, $cmd->tint->b, $cmd->desaturation];
             } elseif ($cmd instanceof SetWaveAnimation) {
                 $waveEnabled = $cmd->enabled;
                 $waveAmplitude = $cmd->amplitude;
@@ -7810,6 +7814,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         $rects = $state['rectLights'] ?? [];
         $rectCount = min(count($rects), 4);
         vio_set_uniform($this->ctx, 'u_rect_light_count', $rectCount);
+        vio_set_uniform($this->ctx, 'u_season_grade', $this->seasonGrade);
         for ($i = 0; $i < $rectCount; $i++) {
             $rl = $rects[$i];
             vio_set_uniform($this->ctx, "u_rect_lights[{$i}].center", [$rl->center->x, $rl->center->y, $rl->center->z]);
