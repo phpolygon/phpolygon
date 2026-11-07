@@ -50,6 +50,8 @@ uniform vec4  u_grass_push[4];    // benders: xyz position, w radius (0 = unused
 uniform vec4  u_grass_trail[16]; // footprints: x, z, floor(radius cm) + strength (0..0.99)
 
 uniform mat4 u_light_space_matrix;
+// Fur shells (shader plan 10.2, Material::$furLength): shell height 0..1, strand length (m), unused, on.
+uniform vec4 u_fur;
 
 out vec3 v_normal;
 out vec3 v_worldPos;
@@ -322,6 +324,13 @@ void main() {
     model[3].w = 1.0;
 #endif
     vec3 pos = animatePosition(vatPosition(a_position), model, u_time, grassHash);
+    if (u_fur.w > 0.5 && u_fur.x > 0.0) {
+        // Pushed out along the normal by the shell's share of the strand length, in
+        // metres whatever the object's scale; the tips sag a little.
+        float scale = max((length(model[0].xyz) + length(model[1].xyz) + length(model[2].xyz)) / 3.0, 1e-4);
+        pos += normalize(a_normal) * (u_fur.x * u_fur.y / scale);
+        pos.y -= u_fur.x * u_fur.x * u_fur.y * 0.3 / scale;
+    }
 
     vec4 worldPos = model * vec4(pos, 1.0);
     v_worldPos = worldPos.xyz;

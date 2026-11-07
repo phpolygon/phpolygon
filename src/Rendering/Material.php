@@ -390,6 +390,15 @@ class Material
          * shadow pass ignores it.
          */
         public readonly float $alphaCutoff = 0.0,
+        /**
+         * Fur shells (shader plan 10.2): > 0 grows strands this long (metres) out of the
+         * surface - the mesh drawn again $furShells times, each shell pushed out along
+         * the normals and cut to thinning strand dots ($furDensity per UV unit). The
+         * base gets darker towards the skin. Opaque pass only; no shells in shadows.
+         */
+        public readonly float $furLength = 0.0,
+        public readonly int $furShells = 12,
+        public readonly float $furDensity = 120.0,
     ) {}
 
     /**
@@ -688,6 +697,9 @@ class Material
             vatTexture: $this->vatTexture,
             vatInfo: $this->vatInfo,
             alphaCutoff: $this->alphaCutoff,
+            furLength: $this->furLength,
+            furShells: $this->furShells,
+            furDensity: $this->furDensity,
         );
     }
 

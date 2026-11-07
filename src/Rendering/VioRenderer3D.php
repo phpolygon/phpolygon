@@ -2111,7 +2111,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
     /** Whether the depth prepass may draw a material: nothing that can discard. */
     private static function prepassEligible(Material $m): bool
     {
-        return $m->albedoTexture === null && $m->fadeDistance[1] == 0.0 && !$m->grass && $m->alpha >= 1.0;
+        return $m->albedoTexture === null && $m->fadeDistance[1] == 0.0 && !$m->grass && $m->alpha >= 1.0 && $m->furLength <= 0.0;
     }
 
     private int $ssaoFrame = 0;
@@ -7229,6 +7229,33 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         }
 
         vio_draw($this->ctx, $mesh);
+        if ($material->furLength > 0.0) {
+            $this->drawFurShells($material, fn () => vio_draw($this->ctx, $mesh));
+        }
+    }
+
+    /**
+     * Fur shells (shader plan 10.2, Material::$furLength): the draw again once per
+     * shell, pushed out along the normals and cut to strand dots, in the opaque pass.
+     */
+    private function drawFurShells(Material $material, callable $draw): void
+    {
+        if ($this->currentScenePass !== 'opaque') {
+            return;
+        }
+        $shells = max(1, min(64, $material->furShells));
+        for ($i = 1; $i <= $shells; $i++) {
+            $t = $i / $shells;
+            $this->setUniforms([
+                'u_fur' => [$t, $material->furLength, 0.0, 1.0],
+                'u_fur_shell' => [$t, $material->furDensity, 0.35, 1.0],
+            ]);
+            $draw();
+        }
+        $this->setUniforms([
+            'u_fur' => [0.0, $material->furLength, 0.0, 0.0],
+            'u_fur_shell' => [0.0, $material->furDensity, 0.35, 1.0],
+        ]);
     }
 
     /**
@@ -7782,6 +7809,9 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             return;
         }
         vio_draw_instanced($this->ctx, $mesh, $packed, $count);
+        if ($material->furLength > 0.0) {
+            $this->drawFurShells($material, fn () => vio_draw_instanced($this->ctx, $mesh, $packed, $count));
+        }
     }
 
     /**
@@ -8117,6 +8147,8 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             'u_rt_reflections'      => $this->rtSceneReady && $this->settings->rayTracedReflections && $this->rtAlbedoBuffer !== null ? 1.0 : 0.0,
             'u_flipbook'            => [(float) $material->flipbook[0], (float) $material->flipbook[1], $material->flipbookFps, $material->streakFade ? 1.0 : 0.0],
             'u_alpha_cutoff'        => $material->alphaCutoff,
+            'u_fur'                 => [0.0, $material->furLength, 0.0, 0.0],
+            'u_fur_shell'           => [0.0, $material->furDensity, 0.35, $material->furLength > 0.0 ? 1.0 : 0.0],
             'u_vat'                 => $material->vatTexture !== null && count($material->vatInfo) >= 8 ? [$material->vatInfo[0], $material->vatInfo[1], 1.0, 0.0] : [0.0, 0.0, 0.0, 0.0],
             'u_vat_min'             => count($material->vatInfo) >= 8 ? [$material->vatInfo[2], $material->vatInfo[3], $material->vatInfo[4]] : [0.0, 0.0, 0.0],
             'u_vat_extent'          => count($material->vatInfo) >= 8 ? [$material->vatInfo[5], $material->vatInfo[6], $material->vatInfo[7]] : [1.0, 1.0, 1.0],
@@ -8647,7 +8679,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
      */
     private function meshletEligible(DrawMeshInstanced $cmd, Material $material, string $materialId): bool
     {
-        if ($cmd->storageBuffer !== null || $material->vatTexture !== null || ($cmd->albedoTextures !== [] && !$this->bindlessBuilt)) {
+        if ($cmd->storageBuffer !== null || $material->vatTexture !== null || $material->furLength > 0.0 || ($cmd->albedoTextures !== [] && !$this->bindlessBuilt)) {
             return false;
         }
         if ($this->variantsThisFrame && !$material->grass) {

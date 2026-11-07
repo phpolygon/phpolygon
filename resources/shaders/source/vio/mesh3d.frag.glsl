@@ -196,6 +196,7 @@ uniform vec4 u_fog_volumes[12];   // per volume: (centre, yaw), (half extents, d
 uniform float u_soft_particle;    // Material::$softParticle: soft puff, depth fade distance
 uniform float u_triplanar;        // Material::$triplanar: tiles per metre, 0 = mesh UVs
 uniform float u_alpha_cutoff;     // Material::$alphaCutoff: cut out below this albedo alpha, 0 = off
+uniform vec4 u_fur_shell;         // Material::$furLength: shell height 0..1, strands per UV unit, darkening at the skin, on
 // Decal volumes (shader plan 5.1, DecalSystem): per decal (centre, yaw),
 // (half extents, strength), (colour, kind 0 stain 1 soot 2 moss 3 cracks).
 uniform int  u_decal_count;
@@ -1840,6 +1841,9 @@ void main() {
         texAlbedo *= u_triplanar > 0.0
             ? sampleAlbedoTriplanar(v_worldPos, N, u_triplanar)
             : sampleAlbedoTexture(fbUv, uvDx * mipScale * fbScale, uvDy * mipScale * fbScale);
+        if (u_fur_shell.w > 0.5) {
+            texAlbedo *= mix(u_fur_shell.z, 1.0, u_fur_shell.x);
+        }
         if (u_alpha_cutoff > 0.0 && albedoGrad(fbUv, uvDx * mipScale * fbScale, uvDy * mipScale * fbScale).a < u_alpha_cutoff) {
             discard;
         }
@@ -2118,6 +2122,17 @@ void main() {
     // Streaks fade towards their tail (Material::$streakFade, shader plan 7.1).
     if (u_flipbook.w > 0.5) {
         alpha *= smoothstep(0.0, 0.85, v_uv.y);
+    }
+    // Fur shells (shader plan 10.2): a shell keeps only the strand dots, thinner the
+    // higher it lies; the base (height 0) stays whole.
+    if (u_fur_shell.w > 0.5 && u_fur_shell.x > 0.0) {
+        vec2 g = v_uv * u_fur_shell.y;
+        vec2 cell = floor(g);
+        float h = fract(sin(dot(cell, vec2(12.9898, 78.233))) * 43758.5453);
+        float radius = 0.48 * (1.0 - u_fur_shell.x) * (0.55 + 0.45 * h);
+        if (h < 0.12 || length(fract(g) - 0.5) > radius) {
+            discard;
+        }
     }
     // Dithered distance fade (shader plan 6.1): dissolve instead of popping.
     // A negative range fades IN with the complementary dither (LOD cross-fade,
