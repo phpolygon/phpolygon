@@ -633,6 +633,12 @@ class Material
         return $this->copy(bodyWave: $wave, clearBodyWave: $wave === null);
     }
 
+    /** This material with a tangent-space normal map (see {@see $normalTexture}); null removes it. */
+    public function withNormalTexture(?string $textureId): self
+    {
+        return $this->copy(normalTexture: $textureId, clearNormalTexture: $textureId === null);
+    }
+
     /** This material drawn by another shader. */
     public function withShader(string $shader): self
     {
@@ -680,6 +686,8 @@ class Material
         ?int $anisotropy = null,
         ?BodyWave $bodyWave = null,
         bool $clearBodyWave = false,
+        ?string $normalTexture = null,
+        bool $clearNormalTexture = false,
     ): self {
         return new self(
             albedo: $albedo ?? $this->albedo,
@@ -760,6 +768,10 @@ class Material
             tessellation: $this->tessellation,
             tessNear: $this->tessNear,
             tessFar: $this->tessFar,
+            normalTexture: $clearNormalTexture ? null : ($normalTexture ?? $this->normalTexture),
+            splatLayers: $this->splatLayers,
+            splatArea: $this->splatArea,
+            splatSharpness: $this->splatSharpness,
         );
     }
 

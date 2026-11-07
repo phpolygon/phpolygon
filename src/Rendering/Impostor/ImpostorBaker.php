@@ -12,6 +12,7 @@ use PHPolygon\Rendering\Color;
 use PHPolygon\Rendering\Command\DrawMesh;
 use PHPolygon\Rendering\Command\SetAmbientLight;
 use PHPolygon\Rendering\Command\SetCamera;
+use PHPolygon\Rendering\Command\SetShader;
 use PHPolygon\Rendering\GraphicsSettings;
 use PHPolygon\Rendering\Material;
 use PHPolygon\Rendering\MaterialRegistry;
@@ -30,6 +31,12 @@ use PHPolygon\Rendering\VioRenderer3D;
  * display image (lit, tonemapped, gamma-encoded), so a grey ramp rendered under the
  * same flat light first gives the curve from displayed value back to albedo - the
  * texture holds albedo, lit again by the scene at run time.
+ *
+ * With $normals each view also gets a normal map (shader plan 9.1, impostor normals):
+ * the mesh drawn with the 'normals' shader, its world normals turned into the view's
+ * frame (right, up, towards the camera) - the frame the mesh shader builds for the
+ * billboard quad - so far instances turn with the sun instead of keeping the light
+ * they were baked in.
  */
 final class ImpostorBaker
 {
@@ -57,7 +64,7 @@ final class ImpostorBaker
      * renderer that draws the impostors) as "$prefix#0" .. "$prefix#(views-1)", the
      * quad mesh as "$prefix#quad".
      */
-    public function bake(VioRenderer3D $target, string $meshId, string $materialId, string $prefix, int $views = 8, int $size = 128): ImpostorSet
+    public function bake(VioRenderer3D $target, string $meshId, string $materialId, string $prefix, int $views = 8, int $size = 128, bool $normals = false): ImpostorSet
     {
         $mesh = MeshRegistry::get($meshId);
         if ($mesh === null || $views < 1 || $size < 8) {
@@ -78,6 +85,7 @@ final class ImpostorBaker
         $ramp = $this->ramp();
 
         $ids = [];
+        $normalIds = [];
         $cy = ($minY + $maxY) * 0.5;
         $distance = $radius + $height + 1.0;
         for ($k = 0; $k < $views; $k++) {
@@ -99,6 +107,17 @@ final class ImpostorBaker
             }
             $target->registerGpuTexture($prefix . '#' . $k, $tex);
             $ids[] = $prefix . '#' . $k;
+            if ($normals) {
+                $list->add(new SetShader('normals'));
+                $world = self::crop($this->renderer->renderToImage($list, $fw, $fh, new Color(0.0, 0.0, 0.0)), $fw, $fh, $w, $h);
+                $nrgba = self::viewNormals($world, $rgba, $w * $h, $a);
+                $ntex = vio_texture($this->ctx, ['data' => $nrgba, 'width' => $w, 'height' => $h, 'wrap' => VIO_WRAP_CLAMP, 'mipmaps' => true]);
+                if (!$ntex instanceof \VioTexture) {
+                    throw new \RuntimeException("ImpostorBaker: normal map for view {$k} not created");
+                }
+                $target->registerGpuTexture($prefix . '#n' . $k, $ntex);
+                $normalIds[] = $prefix . '#n' . $k;
+            }
         }
 
         // The quad spans the picture: centred on the mesh's vertical axis, bottom at minY.
@@ -109,7 +128,38 @@ final class ImpostorBaker
             [0.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0],
             [0, 1, 2, 0, 2, 3],
         ));
-        return new ImpostorSet($prefix . '#quad', $ids, $cx, $cz);
+        return new ImpostorSet($prefix . '#quad', $ids, $cx, $cz, $normalIds);
+    }
+
+    /**
+     * World normals (as the 'normals' shader writes them) in the frame of the view from
+     * azimuth $a: x along the view's right, y up, z towards the camera; RGB = n * 0.5 + 0.5,
+     * alpha the coverage of the albedo picture. Uncovered texels face the camera.
+     */
+    private static function viewNormals(string $world, string $albedo, int $pixels, float $a): string
+    {
+        $rx = cos($a);
+        $rz = -sin($a);
+        $tx = sin($a);
+        $tz = cos($a);
+        $out = '';
+        for ($p = 0; $p < $pixels; $p++) {
+            $o = $p * 4;
+            $alpha = ord($albedo[$o + 3]);
+            if ($alpha < 5) {
+                $out .= pack('C4', 128, 128, 255, $alpha);
+                continue;
+            }
+            $nx = ord($world[$o]) / 127.5 - 1.0;
+            $ny = ord($world[$o + 1]) / 127.5 - 1.0;
+            $nz = ord($world[$o + 2]) / 127.5 - 1.0;
+            $x = $nx * $rx + $nz * $rz;
+            $z = $nx * $tx + $nz * $tz;
+            $l = sqrt($x * $x + $ny * $ny + $z * $z);
+            $l = $l > 1e-6 ? $l : 1.0;
+            $out .= pack('C4', (int) round(($x / $l * 0.5 + 0.5) * 255.0), (int) round(($ny / $l * 0.5 + 0.5) * 255.0), (int) round(($z / $l * 0.5 + 0.5) * 255.0), $alpha);
+        }
+        return $out;
     }
 
     /** @return array{0: int, 1: int} */
