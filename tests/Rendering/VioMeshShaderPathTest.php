@@ -56,6 +56,7 @@ final class VioMeshShaderPathTest extends TestCase
         MaterialRegistry::clear();
         MeshRegistry::register('floor', BoxMesh::generate(40.0, 0.1, 40.0));
         MeshRegistry::register('ball', SphereMesh::generate(0.45, 24, 32));
+        MeshRegistry::register('wall', BoxMesh::generate(5.0, 2.0, 0.2));
         MaterialRegistry::register('floor', new Material(albedo: new Color(0.5, 0.5, 0.5), roughness: 1.0));
         MaterialRegistry::register('ball', new Material(albedo: new Color(0.8, 0.3, 0.1), roughness: 0.5));
     }
@@ -86,8 +87,27 @@ final class VioMeshShaderPathTest extends TestCase
         $this->assertSameImage($vertexImage, $meshImage);
     }
 
-    /** @return array{0: string, 1: int} */
-    private function render(bool $meshShaders, AntiAliasing $aa): array
+    public function testOcclusionCullingKeepsTheImage(): void
+    {
+        // A wall in front hides most of the grid: the Hi-Z pyramid of the depth prepass
+        // drops those meshlets, and the visible ones (beside and above it) all stay.
+        if (!defined('VIO_FEATURE_DEPTH_MIPMAPS') || !vio_supports_feature($this->ctx, VIO_FEATURE_DEPTH_MIPMAPS)) {
+            $this->markTestSkipped('no depth mipmaps');
+        }
+        // Bloom keeps the scene offscreen: the pyramid needs a sampleable scene depth.
+        // The culling renderer first: it must find the backend's units on its own.
+        \PHPolygon\Rendering\ProcModeShaderRegistry::clear();
+        [$culled, $draws, $ran] = $this->render(true, AntiAliasing::Off, prepass: true, wall: true, occlusion: true, bloom: true);
+        [$plain] = $this->render(true, AntiAliasing::Off, prepass: true, wall: true, bloom: true);
+        self::assertSame(2, $draws, 'prepass and shading pass on the mesh path');
+        self::assertTrue($ran, 'the meshlets were tested against the Hi-Z pyramid');
+        $this->assertSameImage($plain, $culled);
+        [$vertex] = $this->render(false, AntiAliasing::Off, prepass: true, wall: true, bloom: true);
+        $this->assertSameImage($vertex, $culled);
+    }
+
+    /** @return array{0: string, 1: int, 2: bool} */
+    private function render(bool $meshShaders, AntiAliasing $aa, bool $prepass = false, bool $wall = false, bool $occlusion = false, bool $bloom = false): array
     {
         self::assertNotNull($this->ctx);
         $renderer = new VioRenderer3D($this->ctx, self::W, self::H);
@@ -95,8 +115,10 @@ final class VioMeshShaderPathTest extends TestCase
             shadowQuality: ShadowQuality::Off,
             ambientOcclusion: ScreenSpaceAO::Off,
             antiAliasing: $aa,
-            bloom: false,
+            bloom: $bloom,
+            depthPrepass: $prepass,
             meshShaders: $meshShaders,
+            occlusionCulling: $occlusion,
         ));
         // A 21 x 21 grid of balls, most of it outside the view.
         $matrices = [];
@@ -113,13 +135,16 @@ final class VioMeshShaderPathTest extends TestCase
         $list->add(new SetAmbientLight(new Color(0.8, 0.85, 1.0), 0.5));
         $list->add(new SetDirectionalLight((new Vec3(-0.4, -1.0, -0.3))->normalize(), new Color(1.0, 0.95, 0.85), 1.6));
         $list->add(new DrawMesh('floor', 'floor', Mat4::translation(0.0, -0.05, 0.0)));
+        if ($wall) {
+            $list->add(new DrawMesh('wall', 'floor', Mat4::translation(-1.0, 1.0, 3.0)));
+        }
         $list->add(new DrawMeshInstanced('ball', 'ball', $matrices));
         $image = '';
         // Temporal AA converges over a few frames; the same frames on both paths.
         for ($frame = 0; $frame < ($aa === AntiAliasing::Off ? 1 : 4); $frame++) {
             $image = $renderer->renderToImage($list, self::W, self::H, new Color(0.5, 0.6, 0.75));
         }
-        return [$image, $renderer->meshletDrawCount()];
+        return [$image, $renderer->meshletDrawCount(), $renderer->occlusionCullingRan()];
     }
 
     private function assertSameImage(string $a, string $b): void

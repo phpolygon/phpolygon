@@ -698,6 +698,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
 
         // Settings compiled into the scene programs: rebuild them at the next frame.
         if ($this->shadersWarmed && ($previous->bindlessMaterials !== $settings->bindlessMaterials
+                || $previous->occlusionCulling !== $settings->occlusionCulling
                 || $previous->rayTracedShadows !== $settings->rayTracedShadows
                 || $previous->rayTracedReflections !== $settings->rayTracedReflections)) {
             $this->shaderRebuild = true;
@@ -3996,6 +3997,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
 
         $this->uploadMotionUniforms();
         $meshletsOn = $this->meshletsActive();
+        $this->hizReady = false;
 
         if ($this->prepassThisFrame) {
             // Depth prepass (shader plan 9.1): the same vertex path in a depth-only
@@ -4024,8 +4026,9 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
                 }
             }
             $this->drawMeshletRun($meshletDraws, 'prepass');
-            $this->bindPipeline('opaque');
             $this->gpuMark('prepass');
+            $this->hizReady = $meshletsOn && $this->hizUnitBuilt >= 0 && $this->buildHiZ($hdrTarget, $sceneViewportW, $sceneViewportH);
+            $this->bindPipeline('opaque');
         }
 
         $meshletDraws = [];
@@ -4270,6 +4273,8 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         // SAMPLER-LIMITS-PLAN): the snippet sampler budget follows them.
         ProcModeShaderRegistry::setTextureUnits(function_exists('vio_texture_units') ? (int) vio_texture_units($this->ctx)['units'] : null);
         ProcModeShaderRegistry::assertSamplerBudget();
+        // After the unit count is known: the pyramid takes the highest unit.
+        $this->hizUnitBuilt = $this->settings->occlusionCulling ? $this->hizUnit() : -1;
         $this->compileShaderFromFiles('default',    'mesh3d.vert.glsl',     'mesh3d.frag.glsl');
         $this->compileShaderFromFiles('unlit',      'unlit.vert.glsl',      'unlit.frag.glsl');
         $this->compileShaderFromFiles('shadow',     'shadow.vert.glsl',     'shadow.frag.glsl');
@@ -8343,6 +8348,116 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
     }
 
     // ----------------------------------------------------------------
+    // Hi-Z occlusion culling (shader plan 9.1, GraphicsSettings::$occlusionCulling)
+    // ----------------------------------------------------------------
+
+    /** Texture unit of the Hi-Z pyramid in the meshlet programs, -1 = culling off. */
+    private int $hizUnitBuilt = -1;
+    private ?VioRenderTarget $hizTarget = null;
+    /** @var array{0: int, 1: int, 2: int} level-0 width, height, mip count */
+    private array $hizSize = [0, 0, 0];
+    private bool $hizReady = false;
+
+    /**
+     * The last frame tested meshlets against a Hi-Z pyramid. Needs a sampleable scene
+     * depth: an offscreen scene target (temporal AA, bloom, render scale) or the MRT
+     * path, not a scene drawn straight into the window.
+     */
+    public function occlusionCullingRan(): bool
+    {
+        return $this->hizReady;
+    }
+
+    /**
+     * Unit for the pyramid in the task stage: the highest the backend offers, at most
+     * 31, above every fixed scene unit. -1 without depth mipmaps or enough units.
+     */
+    private function hizUnit(): int
+    {
+        if (!defined('VIO_FEATURE_DEPTH_MIPMAPS') || !defined('VIO_DEPTH_REDUCE_MAX')
+            || !vio_supports_feature($this->ctx, (int) constant('VIO_FEATURE_DEPTH_MIPMAPS'))) {
+            return -1;
+        }
+        $units = ProcModeShaderRegistry::textureUnits() ?? 0;
+        $unit = min($units - 1, 31);
+        return $unit > self::VAT_SLOT + 1 ? $unit : -1;
+    }
+
+    /**
+     * The Hi-Z pyramid of this frame's depth prepass: level 0 holds the farthest depth
+     * of each 4x4 block of the scene depth, the mips (VIO_DEPTH_REDUCE_MAX) the farthest
+     * below them. Built between the prepass and the shading pass, so the meshlets the
+     * prepass hid are skipped in the same frame - nothing pops in a frame late.
+     */
+    private function buildHiZ(?VioRenderTarget $hdrTarget, int $w, int $h): bool
+    {
+        $quad = $this->screenQuad;
+        $depth = $this->sceneDepthTexture();
+        if ($hdrTarget !== null || $quad === null || $depth === null || $w < 4 || $h < 4) {
+            return false;
+        }
+        $hw = intdiv($w + 3, 4);
+        $hh = intdiv($h + 3, 4);
+        if ($this->hizTarget === null || $this->hizSize[0] !== $hw || $this->hizSize[1] !== $hh) {
+            $this->hizTarget = vio_render_target($this->ctx, [
+                'width' => $hw, 'height' => $hh, 'depth_only' => true, 'mipmaps' => true,
+                'depth_reduction' => (int) constant('VIO_DEPTH_REDUCE_MAX'),
+            ]) ?: null;
+            $this->hizSize = [$hw, $hh, (int) floor(log(max($hw, $hh), 2)) + 1];
+        }
+        if ($this->hizTarget === null) {
+            return false;
+        }
+        if (!isset($this->shaderCache['hiz_downsample'])) {
+            try {
+                $this->compileShaderFromFiles('hiz_downsample', 'postprocess.vert.glsl', 'hiz_downsample.frag.glsl');
+            } catch (\RuntimeException) {
+                return false;
+            }
+        }
+        vio_unbind_render_target($this->ctx);
+        vio_bind_render_target($this->ctx, $this->hizTarget);
+        // Created with the depth-only target bound: D3D12 bakes its formats into the PSO.
+        if (!isset($this->pipelineCache['hiz_downsample'])) {
+            $pipeline = $this->createPipeline([
+                'shader' => $this->shaderCache['hiz_downsample'],
+                'depth_test' => true,
+                'depth_write' => true,
+                'depth_func' => VIO_DEPTH_LEQUAL,
+                'cull_mode' => VIO_CULL_NONE,
+                'blend' => VIO_BLEND_NONE,
+            ]);
+            if ($pipeline === false) {
+                $this->restoreSceneTarget($w, $h);
+                return false;
+            }
+            $this->pipelineCache['hiz_downsample'] = $pipeline;
+        }
+        vio_viewport($this->ctx, 0, 0, $hw, $hh);
+        vio_clear($this->ctx, 0.0, 0.0, 0.0, 1.0);
+        vio_bind_pipeline($this->ctx, $this->pipelineCache['hiz_downsample']);
+        vio_bind_texture($this->ctx, $depth, 0);
+        vio_set_uniform($this->ctx, 'u_depth', 0);
+        vio_draw($this->ctx, $quad);
+        vio_unbind_render_target($this->ctx);
+        $mips = vio_generate_mipmaps($this->ctx, $this->hizTarget);
+        $this->restoreSceneTarget($w, $h);
+        $this->gpuMark('hiz');
+        return $mips !== false;
+    }
+
+    /** Back to the scene target after a side pass in the middle of the scene. */
+    private function restoreSceneTarget(int $w, int $h): void
+    {
+        vio_unbind_render_target($this->ctx);
+        if ($this->mrtThisFrame && $this->mrtTarget !== null) {
+            vio_bind_render_target($this->ctx, $this->mrtTarget);
+        } else {
+            $this->bindSceneTarget(null);
+        }
+        vio_viewport($this->ctx, 0, 0, $w, $h);
+    }
+    // ----------------------------------------------------------------
     // Bindless materials (shader plan 10.1, GraphicsSettings::$bindlessMaterials)
     // ----------------------------------------------------------------
 
@@ -8597,7 +8712,8 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         $start = hrtime(true);
         try {
             $shader = vio_shader($this->ctx, [
-                'task' => MeshletShaderSource::task($src[0]),
+                // The prepass draws everything it frustum-culls: no pyramid code there.
+                'task' => MeshletShaderSource::task($src[0], $depthOnly ? -1 : $this->hizUnitBuilt),
                 'mesh' => MeshletShaderSource::mesh($src[0]),
                 'fragment' => $depthOnly ? self::withDefine($src[1], 'PHPOLYGON_DEPTH_ONLY') : $src[1],
                 'format' => $this->conventions()->shaderSourceFormat(),
@@ -8650,8 +8766,21 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         }
         $this->uploadSnippetInputs();
         $this->uploadMotionUniforms();
+        $hiz = $this->hizUnitBuilt >= 0 && $pass === 'opaque' && $this->hizReady && $this->hizTarget !== null;
+        if ($this->hizUnitBuilt >= 0 && $pass === 'opaque') {
+            // The task stage always declares the pyramid: something valid is bound.
+            $tex = $hiz && $this->hizTarget !== null ? vio_render_target_texture($this->hizTarget) : $this->whiteTexture;
+            if ($tex !== null) {
+                vio_bind_texture($this->ctx, $tex, $this->hizUnitBuilt);
+            }
+            vio_set_uniform($this->ctx, 'u_ms_hiz', $hiz ? [(float) $this->hizSize[0], (float) $this->hizSize[1], (float) ($this->hizSize[2] - 1), 1.0] : [1.0, 1.0, 0.0, 0.0]);
+        }
         foreach ($draws as [$cmd, $material]) {
             $this->drawMeshletInstances($cmd, $material);
+        }
+        if ($hiz && $this->whiteTexture !== null) {
+            // The pyramid is a depth target again next frame: not left bound for reading.
+            vio_bind_texture($this->ctx, $this->whiteTexture, $this->hizUnitBuilt);
         }
         $this->bindPipeline($pass);
     }

@@ -74,11 +74,18 @@ final class MeshletShaderSource
             GLSL;
     }
 
-    public static function task(string $vertexSource): string
+    /**
+     * $hizUnit >= 0: the task stage also tests each meshlet against the Hi-Z
+     * pyramid of this frame's depth prepass (shader plan 9.1, occlusion culling),
+     * bound at that texture unit; u_ms_hiz = (level-0 width, height, last mip, on).
+     */
+    public static function task(string $vertexSource, int $hizUnit = -1): string
     {
         [$src] = self::transform($vertexSource, false);
         $g = self::TASK_GROUP;
-        return $src . <<<GLSL
+        $hizDecl = $hizUnit >= 0 ? "layout(binding = {$hizUnit}) uniform sampler2D u_ms_hiz_tex;\n" : '';
+        $hizTest = $hizUnit >= 0 ? self::HIZ_TEST : '';
+        return $src . $hizDecl . <<<GLSL
 
             layout(local_size_x = {$g}) in;
             shared uint ms_visible;
@@ -113,6 +120,7 @@ final class MeshletShaderSource
                             visible = false;
                         }
                     }
+            {$hizTest}
                     if (visible) {
                         uint slot = atomicAdd(ms_visible, 1u);
                         ms_payload.meshlets[slot] = m;
@@ -124,6 +132,49 @@ final class MeshletShaderSource
 
             GLSL;
     }
+
+    /**
+     * Occlusion test against the Hi-Z pyramid (max depth): the screen rectangle of
+     * the sphere's box, the mip where it spans at most 2x2 texels, its four texels.
+     * Hidden when the box's nearest depth lies behind the farthest depth there. Mesh
+     * pipelines exist on D3D12 / Vulkan / Metal only: render-target row 0 is the top
+     * of the view and depth is stored as (ndc z + 1) / 2 on all three.
+     */
+    private const HIZ_TEST = <<<'GLSL'
+                    if (visible && u_ms_hiz.w > 0.5) {
+                        vec2 lo = vec2(1e9);
+                        vec2 hi = vec2(-1e9);
+                        float nearest = 1e9;
+                        bool crossesNear = false;
+                        for (int k = 0; k < 8; k++) {
+                            vec3 p = c.xyz + r * vec3((k & 1) != 0 ? 1.0 : -1.0, (k & 2) != 0 ? 1.0 : -1.0, (k & 4) != 0 ? 1.0 : -1.0);
+                            vec4 q = vp * vec4(p, 1.0);
+                            if (q.w <= 1e-4) {
+                                crossesNear = true;
+                            } else {
+                                vec3 n = q.xyz / q.w;
+                                lo = min(lo, n.xy);
+                                hi = max(hi, n.xy);
+                                nearest = min(nearest, n.z);
+                            }
+                        }
+                        if (!crossesNear && nearest > -1.0) {
+                            vec2 uv0 = clamp(vec2(lo.x * 0.5 + 0.5, 0.5 - hi.y * 0.5), 0.0, 1.0);
+                            vec2 uv1 = clamp(vec2(hi.x * 0.5 + 0.5, 0.5 - lo.y * 0.5), 0.0, 1.0);
+                            vec2 span = (uv1 - uv0) * u_ms_hiz.xy;
+                            int lod = int(clamp(ceil(log2(max(max(span.x, span.y), 1.0))), 0.0, u_ms_hiz.z));
+                            ivec2 dim = textureSize(u_ms_hiz_tex, lod);
+                            ivec2 a = clamp(ivec2(uv0 * vec2(dim)), ivec2(0), dim - 1);
+                            ivec2 b = clamp(ivec2(uv1 * vec2(dim)), ivec2(0), dim - 1);
+                            float far = max(max(texelFetch(u_ms_hiz_tex, a, lod).r, texelFetch(u_ms_hiz_tex, ivec2(b.x, a.y), lod).r),
+                                            max(texelFetch(u_ms_hiz_tex, ivec2(a.x, b.y), lod).r, texelFetch(u_ms_hiz_tex, b, lod).r));
+                            if (nearest * 0.5 + 0.5 > far) {
+                                visible = false;
+                            }
+                        }
+                    }
+
+        GLSL;
 
     /**
      * @return array{0: string, 1: string} transformed source, varying copies for the mesh main
@@ -185,6 +236,7 @@ final class MeshletShaderSource
         $head ="#version 450\n#extension GL_EXT_mesh_shader : require\n"
             . "// Meshlet path (shader plan 10.1): generated from the scene vertex shader by MeshletShaderSource.\n"
             . "uniform vec4 u_ms_params; // meshlet count, instance base, instance count, radius margin\n"
+            . "uniform vec4 u_ms_hiz;    // Hi-Z level-0 width, height, last mip, on (task stage)\n"
             . "layout(std430, binding = 0) readonly buffer MsVertices { float ms_vertices[]; };\n"
             . "layout(std430, binding = 1) readonly buffer MsMeshlets { uint ms_meshlets[]; };\n"
             . "layout(std430, binding = 2) readonly buffer MsIndices { uint ms_indices[]; };\n"
