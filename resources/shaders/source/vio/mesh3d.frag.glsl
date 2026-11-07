@@ -224,7 +224,9 @@ layout(binding = 0) uniform accelerationStructureEXT u_tlas;
 // Ray-traced reflections (shader plan 10.1): the albedo of every instance of the
 // acceleration structure, in its order - what a reflection ray hits gets this
 // colour, lit by the ambient and (a second ray) the sun.
-layout(std430, binding = 0) readonly buffer RtAlbedo { vec4 rtAlbedo[]; };
+// 4 floats per instance (rgb, emission) as a float array: a vec4 array in a
+// 16-byte-stride buffer reads wrong on D3D12.
+layout(std430, binding = 0) readonly buffer RtAlbedo { float rtAlbedo[]; };
 uniform float u_rt_reflections;
 #endif
 #ifdef PHPOLYGON_SCENE_COLOR
@@ -1004,7 +1006,7 @@ vec3 sampleEnvironment(vec3 R, float roughness) {
             int id = rayQueryGetIntersectionInstanceIdEXT(rr, true);
             float t = rayQueryGetIntersectionTEXT(rr, true);
             vec3 hp = v_worldPos + R * t;
-            vec3 alb = rtAlbedo[id].rgb;
+            vec3 alb = vec3(rtAlbedo[id * 4], rtAlbedo[id * 4 + 1], rtAlbedo[id * 4 + 2]);
             vec3 lit = u_ambient_color * 0.55;
             if (u_dir_light_count > 0) {
                 vec3 sL = normalize(-u_dir_lights[0].direction);
@@ -1014,7 +1016,7 @@ vec3 sampleEnvironment(vec3 R, float roughness) {
                 float vis = rayQueryGetIntersectionTypeEXT(rs, true) == gl_RayQueryCommittedIntersectionNoneEXT ? 1.0 : 0.0;
                 lit += u_dir_lights[0].color * u_dir_lights[0].intensity * vis * 0.55;
             }
-            vec3 hit = alb * lit + rtAlbedo[id].a * alb;
+            vec3 hit = alb * lit + rtAlbedo[id * 4 + 3] * alb;
             // Rougher surfaces blur the hit into the sky probe.
             return mix(hit, sampleEnvironmentProbe(R, roughness), smoothstep(0.15, 0.45, roughness));
         }

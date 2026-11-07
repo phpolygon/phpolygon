@@ -1122,6 +1122,8 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         if ($tex !== false) {
             $this->probeTex = $tex;
             $this->probeFieldVersion = $cmd->version;
+            $this->probeDims = [$cmd->width, $cmd->height, $cmd->depth];
+            $this->rtProbeKey = '';
         }
     }
 
@@ -3178,6 +3180,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
     private string $rtBuiltKey = '';
     private string $rtPendingAlbedo = '';
     private ?\VioBuffer $rtAlbedoBuffer = null;
+    private string $rtAlbedoBytes = '';
 
     /**
      * Ray-traced shadows (shader plan 10.1): the acceleration structure over the
@@ -3187,7 +3190,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
     private function updateRayTracedScene(): void
     {
         $this->rtSceneReady = false;
-        if (!($this->settings->rayTracedShadows || $this->settings->rayTracedReflections) || !$this->rayQueryAvailable() || $this->rtPending === []) {
+        if (!($this->settings->rayTracedShadows || $this->settings->rayTracedReflections || $this->settings->rayTracedProbes) || !$this->rayQueryAvailable() || $this->rtPending === []) {
             return;
         }
         if ($this->rtScene !== null && $this->rtBuiltKey === $this->rtPendingKey) {
@@ -3203,15 +3206,33 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         $this->rtBuiltKey = $this->rtPendingKey;
         $this->rtSceneReady = $this->rtScene !== null;
         if ($this->rtPendingAlbedo !== '') {
-            $buf = vio_storage_buffer($this->ctx, ['data' => $this->rtPendingAlbedo, 'stride' => 16]);
+            $buf = vio_storage_buffer($this->ctx, ['data' => $this->rtPendingAlbedo, 'stride' => 4]);
             $this->rtAlbedoBuffer = $buf === false ? null : $buf;
+            $this->rtAlbedoBytes = $this->rtPendingAlbedo;
         }
+    }
+
+    /**
+     * Bake the SH-L1 probe field by ray tracing the scene (shader plan 10.1,
+     * Fieldtracing\RtProbeBaker): the acceleration structure and instance colours of
+     * ray-traced shadows / reflections. Outside a frame. Null without them.
+     *
+     * @param array{0: float, 1: float, 2: float} $origin
+     * @param array{0: float, 1: float, 2: float} $sunDir
+     * @return list<float>|null
+     */
+    public function bakeRayTracedProbes(array $origin, int $pnx, int $pny, int $pnz, float $pcell, int $nDir, array $sunDir): ?array
+    {
+        if ($this->rtScene === null || $this->rtAlbedoBytes === '') {
+            return null;
+        }
+        return \PHPolygon\Fieldtracing\RtProbeBaker::tryFill($this->ctx, $this->rtScene, $this->rtAlbedoBytes, $origin, $pnx, $pny, $pnz, $pcell, $nDir, $sunDir);
     }
 
     /** Collect this frame's static opaque draws for next frame's acceleration structure. */
     private function collectRayTracedScene(array $commands): void
     {
-        if (!($this->settings->rayTracedShadows || $this->settings->rayTracedReflections) || !$this->rayQueryAvailable()) {
+        if (!($this->settings->rayTracedShadows || $this->settings->rayTracedReflections || $this->settings->rayTracedProbes) || !$this->rayQueryAvailable()) {
             return;
         }
         $inst = [];
@@ -3253,9 +3274,51 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         $this->rtPendingAlbedo = $albedo !== [] ? pack('f*', ...$albedo) : '';
     }
 
+    /** @var array{0: int, 1: int, 2: int}|null grid of the ingested probe field */
+    private ?array $probeDims = null;
+    private string $rtProbeKey = '';
+
+    /**
+     * Ray-traced probe update (shader plan 10.1, GraphicsSettings::$rayTracedProbes):
+     * re-bake the ingested probe field through the acceleration structure whenever
+     * the traced scene or the sun moved, and swap its three channel volumes in place.
+     * The grid, origin, size and range stay those of the baked field.
+     */
+    private function updateRayTracedProbes(): void
+    {
+        if (!$this->settings->rayTracedProbes || !$this->rtSceneReady || $this->probeDims === null
+            || $this->probeOrigin === null || $this->probeSize === null || $this->probeTex === null) {
+            return;
+        }
+        $sun = $this->frameSunDirection ?? new Vec3(0.0, 1.0, 0.0);
+        $key = $this->rtBuiltKey . sprintf(':%.2f:%.2f:%.2f', $sun->x, $sun->y, $sun->z);
+        if ($key === $this->rtProbeKey) {
+            return;
+        }
+        $this->rtProbeKey = $key;
+        [$w, $h, $d] = $this->probeDims;
+        $pcell = max($this->probeSize->x / max(1, $w - 1), $this->probeSize->y / max(1, $h - 1), $this->probeSize->z / max(1, $d - 1));
+        $c = $this->bakeRayTracedProbes([$this->probeOrigin->x, $this->probeOrigin->y, $this->probeOrigin->z], $w, $h, $d, $pcell, 64, [$sun->x, $sun->y, $sun->z]);
+        if ($c === null) {
+            return;
+        }
+        $data = '';
+        foreach ([0, 4, 8] as $off) {
+            $data .= \PHPolygon\Fieldtracing\RtProbeBaker::packChannel($c, $off, $this->probeRange);
+        }
+        $tex = vio_texture_3d($this->ctx, [
+            'data' => $data, 'width' => $w, 'height' => $h, 'depth' => $d * 3,
+            'filter' => VIO_FILTER_LINEAR, 'wrap' => VIO_WRAP_CLAMP,
+        ]);
+        if ($tex !== false) {
+            $this->probeTex = $tex;
+        }
+    }
+
     public function beginFrame(): void
     {
         $this->updateRayTracedScene();
+        $this->updateRayTracedProbes();
         $size = vio_framebuffer_size($this->ctx);
         if ($size[0] > 0 && $size[1] > 0) {
             $this->width = $size[0];
