@@ -3973,6 +3973,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         $this->sceneUniformInputs = [$frameState, $hasShadowMap, $dirLights];
 
         $this->uploadMotionUniforms();
+        $meshletsOn = $this->meshletsActive();
 
         if ($this->prepassThisFrame) {
             // Depth prepass (shader plan 9.1): the same vertex path in a depth-only
@@ -3985,8 +3986,13 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             $this->uploadShadowUniforms($hasShadowMap, $dirLights);
             $this->uploadSnippetInputs();
             $this->uploadMotionUniforms();
-            foreach ($opaque as [, , $cmd, $material]) {
+            $meshletDraws = [];
+            foreach ($opaque as [$materialId, , $cmd, $material]) {
                 if (!self::prepassEligible($material)) {
+                    continue;
+                }
+                if ($meshletsOn && $cmd instanceof DrawMeshInstanced && $this->meshletEligible($cmd, $material, $materialId)) {
+                    $meshletDraws[] = [$cmd, $material];
                     continue;
                 }
                 if ($cmd instanceof DrawMesh) {
@@ -3995,11 +4001,19 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
                     $this->drawMeshInstancedCommand($cmd, $material);
                 }
             }
+            $this->drawMeshletRun($meshletDraws, 'prepass');
             $this->bindPipeline('opaque');
             $this->gpuMark('prepass');
         }
 
+        $meshletDraws = [];
         foreach ($opaque as [$materialId, , $cmd, $material]) {
+            if ($meshletsOn && $cmd instanceof DrawMeshInstanced && $this->meshletEligible($cmd, $material, $materialId)) {
+                // Mesh-shader path (shader plan 10.1): drawn together after the
+                // vertex-path draws, with one pipeline switch.
+                $meshletDraws[] = [$cmd, $material];
+                continue;
+            }
             if ($this->variantsThisFrame) {
                 $this->selectVariant($material, $materialId);
             }
@@ -4009,6 +4023,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
                 $this->drawMeshInstancedCommand($cmd, $material);
             }
         }
+        $this->drawMeshletRun($meshletDraws, 'opaque');
         PerfProfiler::end();
         $this->gpuMark('opaque');
 
@@ -4670,7 +4685,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
      * $cull selects a culled variant (VIO_CULL_FRONT / VIO_CULL_BACK) – the
      * transparent pass draws a closed mesh's far faces before its near faces.
      */
-    private function bindPipeline(string $pass, bool $storageInstances = false, int $cull = VIO_CULL_NONE, bool $keepDrawState = false): void
+    private function bindPipeline(string $pass, bool $storageInstances = false, int $cull = VIO_CULL_NONE, bool $keepDrawState = false): bool
     {
         $shaderId = $storageInstances ? 'default_storage' : $this->activeShaderId();
         $variantSuffix = $this->sceneVariant === ProcModeShaderRegistry::BASE_VARIANT ? '' : '@' . $this->sceneVariant;
@@ -4694,6 +4709,10 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         if ($pass === 'opaque' && $this->prepassThisFrame) {
             $key .= ':pz';
         }
+        $meshlets = $this->meshletMode && !$storageInstances;
+        if ($meshlets) {
+            $key .= ':ms';
+        }
 
         if (!isset($this->pipelineCache[$key])) {
             if ($mrt) {
@@ -4706,7 +4725,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
                 // geometry, additively, and by opaque geometry in ':rx' frames.
                 $program = ($storageInstances ? 'default_storage_mrt' : 'default_mrt') . ($mv ? '_mv' : '') . $variantSuffix;
                 $cfg = [
-                    'shader' => ($pass === 'prepass' ? $this->depthOnlyShader($program) : null) ?? $this->shaderCache[$program],
+                    'shader' => $this->sceneShader($program, $pass, $meshlets),
                     'depth_test' => true,
                     'depth_write' => $pass === 'opaque' || $pass === 'prepass',
                     'cull_mode' => $cull,
@@ -4742,7 +4761,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
                 $pipeline = $this->createPipeline($cfg);
             } else {
                 $programId = isset($this->shaderCache[$shaderId . $variantSuffix]) ? $shaderId . $variantSuffix : 'default';
-                $shader = ($pass === 'prepass' ? $this->depthOnlyShader($programId) : null) ?? $this->shaderCache[$programId];
+                $shader = $this->sceneShader($programId, $pass, $meshlets);
 
                 $pipeline = $this->createPipeline([
                     'shader' => $shader,
@@ -4759,7 +4778,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             }
 
             if ($pipeline === false) {
-                return;
+                return false;
             }
 
             $this->pipelineCache[$key] = $pipeline;
@@ -4780,6 +4799,20 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         if (!$keepDrawState) {
             $this->resetDrawStateCache();
         }
+        return true;
+    }
+
+    /**
+     * The shader of a scene program for $pass: its depth-only twin in the prepass,
+     * its meshlet twin (task + mesh stage) on the mesh-shader path. Null when a
+     * twin does not compile (the meshlet path then stays off).
+     */
+    private function sceneShader(string $program, string $pass, bool $meshlets): ?\VioShader
+    {
+        if ($meshlets) {
+            return $this->meshletShader($program, $pass === 'prepass');
+        }
+        return ($pass === 'prepass' ? $this->depthOnlyShader($program) : null) ?? $this->shaderCache[$program];
     }
 
     /**
@@ -8256,6 +8289,242 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         $this->bindPipeline($pass, cull: $cull);
     }
 
+    // ----------------------------------------------------------------
+    // Mesh-shader path (shader plan 10.1, GraphicsSettings::$meshShaders)
+    // ----------------------------------------------------------------
+
+    /** True while bindPipeline() should pick the meshlet twin of the pass program. */
+    private bool $meshletMode = false;
+    private ?bool $meshShaderSupport = null;
+    /** @var array<string, true> programs whose meshlet twin did not compile */
+    private array $meshletFailed = [];
+    /** @var array<string, array{version: int, count: int, radius: float, vertices: \VioBuffer, meshlets: \VioBuffer, indices: \VioBuffer}|false> */
+    private array $meshletMeshes = [];
+    /** @var array<string, array{0: \VioBuffer, 1: int}> instance matrices by content, with the frame they were last used in */
+    private array $meshletInstances = [];
+    private int $meshletFrame = 0;
+    /** Meshlet draws of the last frame, and how many task groups they launched (tests, profiling). */
+    private int $meshletDrawCount = 0;
+
+    /** Backend has mesh pipelines (VIO_FEATURE_MESH_SHADER); probed once. */
+    public function meshShadersAvailable(): bool
+    {
+        return $this->meshShaderSupport ??= function_exists('vio_draw_mesh_tasks') && defined('VIO_FEATURE_MESH_SHADER')
+            && vio_supports_feature($this->ctx, VIO_FEATURE_MESH_SHADER);
+    }
+
+    /** Instanced draws of the last frame that went through the mesh-shader path. */
+    public function meshletDrawCount(): int
+    {
+        return $this->meshletDrawCount;
+    }
+
+    /** The mesh-shader path is wanted, supported and the scene uses the built-in programs. */
+    private function meshletsActive(): bool
+    {
+        $this->meshletDrawCount = 0;
+        if (!$this->settings->meshShaders || !$this->meshShadersAvailable() || $this->activeShaderId() !== 'default') {
+            return false;
+        }
+        // Instance buffers no draw used for two seconds are released.
+        if ((++$this->meshletFrame & 127) === 0) {
+            foreach ($this->meshletInstances as $key => [, $used]) {
+                if ($this->meshletFrame - $used > 120) {
+                    unset($this->meshletInstances[$key]);
+                }
+            }
+        }
+        return true;
+    }
+
+    /**
+     * Instanced opaque batches with CPU-side instance matrices and the frame's base
+     * program qualify; vertex-animation textures move vertices arbitrarily, so the
+     * meshlet bounds would not hold.
+     */
+    private function meshletEligible(DrawMeshInstanced $cmd, Material $material, string $materialId): bool
+    {
+        if ($cmd->storageBuffer !== null || $material->vatTexture !== null) {
+            return false;
+        }
+        if ($this->variantsThisFrame && !$material->grass) {
+            $variant = ProcModeShaderRegistry::variantOf(ProcModeRegistry::resolve($materialId));
+            if ($variant !== ProcModeShaderRegistry::BASE_VARIANT && $variant !== $this->frameBaseVariant) {
+                return false;
+            }
+        }
+        return $this->meshletMesh($cmd->meshId) !== null;
+    }
+
+    /**
+     * The meshlet buffers of a registered mesh, built once per mesh version.
+     *
+     * @return array{version: int, count: int, radius: float, vertices: \VioBuffer, meshlets: \VioBuffer, indices: \VioBuffer}|null
+     */
+    private function meshletMesh(string $meshId): ?array
+    {
+        $version = MeshRegistry::version($meshId);
+        $cached = $this->meshletMeshes[$meshId] ?? null;
+        if ($cached !== null && ($cached === false || $cached['version'] === $version)) {
+            return $cached === false ? null : $cached;
+        }
+        $data = MeshRegistry::get($meshId);
+        if ($data === null || $data->indices === [] || $data->vertices === []) {
+            $this->meshletMeshes[$meshId] = false;
+            return null;
+        }
+        $meshlets = \PHPolygon\Geometry\MeshletBuilder::build($data);
+        $radius = 0.0;
+        for ($i = 0; $i < $meshlets->count; $i++) {
+            $m = $meshlets->meshlet($i);
+            $radius = max($radius, sqrt($m['center'][0] ** 2 + $m['center'][1] ** 2 + $m['center'][2] ** 2) + $m['radius']);
+        }
+        $vertices = vio_storage_buffer($this->ctx, ['data' => $meshlets->vertices]);
+        $words = vio_storage_buffer($this->ctx, ['data' => $meshlets->meshlets]);
+        $indices = vio_storage_buffer($this->ctx, ['data' => $meshlets->indices]);
+        if (!$vertices instanceof \VioBuffer || !$words instanceof \VioBuffer || !$indices instanceof \VioBuffer) {
+            $this->meshletMeshes[$meshId] = false;
+            return null;
+        }
+        return $this->meshletMeshes[$meshId] = [
+            'version' => $version, 'count' => $meshlets->count, 'radius' => $radius,
+            'vertices' => $vertices, 'meshlets' => $words, 'indices' => $indices,
+        ];
+    }
+
+    /**
+     * The task + mesh twin of a scene program (MeshletShaderSource), with the
+     * program's fragment stage - depth-only for the prepass. Null when it does not
+     * compile; the program is then never tried again.
+     */
+    private function meshletShader(string $program, bool $depthOnly): ?\VioShader
+    {
+        $id = $program . '#ms' . ($depthOnly ? '#pz' : '');
+        if (isset($this->shaderCache[$id])) {
+            return $this->shaderCache[$id];
+        }
+        $src = $this->programSources[$program] ?? null;
+        if ($src === null || isset($this->meshletFailed[$id])) {
+            return null;
+        }
+        $start = hrtime(true);
+        try {
+            $shader = vio_shader($this->ctx, [
+                'task' => MeshletShaderSource::task($src[0]),
+                'mesh' => MeshletShaderSource::mesh($src[0]),
+                'fragment' => $depthOnly ? self::withDefine($src[1], 'PHPOLYGON_DEPTH_ONLY') : $src[1],
+                'format' => $this->conventions()->shaderSourceFormat(),
+            ]);
+        } catch (\RuntimeException $e) {
+            fwrite(STDERR, "[VioRenderer3D] meshlet path unavailable for '{$program}': {$e->getMessage()}\n");
+            $shader = false;
+        }
+        FrameSpikeRecorder::note(FrameSpikeRecorder::NOTE_SHADER, 1, hrtime(true) - $start);
+        if (!$shader instanceof \VioShader) {
+            $this->meshletFailed[$id] = true;
+            return null;
+        }
+        return $this->shaderCache[$id] = $shader;
+    }
+
+    /**
+     * Draw the collected meshlet batches of $pass ('prepass' or 'opaque') with the
+     * meshlet twin of the pass program, then go back to the regular one. Its
+     * constants start empty, so the frame uniforms go in first. When the twin is
+     * unavailable the batches take the vertex path.
+     *
+     * @param list<array{0: DrawMeshInstanced, 1: Material}> $draws
+     */
+    private function drawMeshletRun(array $draws, string $pass): void
+    {
+        if ($draws === []) {
+            return;
+        }
+        $inputs = $this->sceneUniformInputs;
+        if ($pass === 'opaque' && $this->variantsThisFrame) {
+            $this->sceneVariant = $this->frameBaseVariant;
+        }
+        $this->meshletMode = true;
+        $bound = $this->bindPipeline($pass);
+        $this->meshletMode = false;
+        if ($inputs === null || !$bound) {
+            $this->bindPipeline($pass);
+            foreach ($draws as [$cmd, $material]) {
+                $this->drawMeshInstancedCommand($cmd, $material);
+            }
+            return;
+        }
+        [$frameState, $hasShadowMap, $dirLights] = $inputs;
+        $this->uploadFrameUniforms($frameState);
+        $this->uploadShadowUniforms($hasShadowMap, $dirLights);
+        if ($pass !== 'prepass') {
+            $this->uploadSsaoUniforms();
+            $this->uploadSdfAoUniforms();
+        }
+        $this->uploadSnippetInputs();
+        $this->uploadMotionUniforms();
+        foreach ($draws as [$cmd, $material]) {
+            $this->drawMeshletInstances($cmd, $material);
+        }
+        $this->bindPipeline($pass);
+    }
+
+    /** One instanced batch as meshlets: a task group per 32 meshlets per instance. */
+    private function drawMeshletInstances(DrawMeshInstanced $cmd, Material $material): void
+    {
+        $mesh = $this->meshletMesh($cmd->meshId);
+        if ($mesh === null) {
+            return;
+        }
+        $this->applyMaterialShadingRate($material);
+        if ($cmd->materialId !== $this->lastMaterialId) {
+            $this->applyMaterialUniforms($material, $cmd->materialId);
+            $this->lastMaterialId = $cmd->materialId;
+        }
+        $this->bindMaterialTextures($material);
+        if (($material->cloth || $material->foliageWind) && $cmd->meshId !== $this->lastMeshId) {
+            $this->bindMeshAabb($cmd->meshId);
+            $this->lastMeshId = $cmd->meshId;
+        }
+        if ($this->lastUseInstancing !== 1) {
+            vio_set_uniform($this->ctx, 'u_use_instancing', 1);
+            $this->lastUseInstancing = 1;
+        }
+        $this->applyGbufferWrite(1);
+
+        [$packed, $count] = $this->resolveInstanceData($cmd->meshId, $material, $cmd);
+        if ($count <= 0) {
+            return;
+        }
+        $key = strlen($packed) . ':' . hash('xxh128', $packed);
+        $entry = $this->meshletInstances[$key] ?? null;
+        if ($entry === null) {
+            $buffer = vio_storage_buffer($this->ctx, ['data' => $packed]);
+            if (!$buffer instanceof \VioBuffer) {
+                return;
+            }
+            $entry = [$buffer, 0];
+        }
+        $entry[1] = $this->meshletFrame;
+        $this->meshletInstances[$key] = $entry;
+
+        vio_bind_storage_buffer($this->ctx, $mesh['vertices'], 0, VIO_COMPUTE_READ);
+        vio_bind_storage_buffer($this->ctx, $mesh['meshlets'], 1, VIO_COMPUTE_READ);
+        vio_bind_storage_buffer($this->ctx, $mesh['indices'], 2, VIO_COMPUTE_READ);
+        vio_bind_storage_buffer($this->ctx, $entry[0], 3, VIO_COMPUTE_READ);
+        // Vertex animation moves vertices out of the rest-pose spheres: cull with a margin.
+        $animated = $material->grass || $material->foliageWind || $material->cloth || $material->bodyWave !== null
+            || ProcModeRegistry::resolve($cmd->materialId) === 2;
+        $margin = $animated ? 0.5 * $mesh['radius'] : 0.0;
+        $chunks = intdiv($mesh['count'] + MeshletShaderSource::TASK_GROUP - 1, MeshletShaderSource::TASK_GROUP);
+        // At most 65535 groups per axis and 2^22 task groups per dispatch.
+        $perDispatch = max(1, min(65535, intdiv(4194304, max(1, $chunks))));
+        for ($base = 0; $base < $count; $base += $perDispatch) {
+            vio_set_uniform($this->ctx, 'u_ms_params', [(float) $mesh['count'], (float) $base, (float) $count, $margin]);
+            vio_draw_mesh_tasks($this->ctx, $chunks, min($perDispatch, $count - $base), 1);
+        }
+        $this->meshletDrawCount++;
+    }
     /**
      * Pre-compile the storage-instance programs, e.g. behind a splash, so the
      * first GPU-simulated draw does not stall on a shader compile. False when

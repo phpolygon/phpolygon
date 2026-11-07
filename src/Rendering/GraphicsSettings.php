@@ -75,6 +75,8 @@ final class GraphicsSettings
         public readonly bool $rayTracedReflections = false,
         /** Ray-traced update of the irradiance probe field (shader plan 10.1, VIO_FEATURE_RAY_QUERY). */
         public readonly bool $rayTracedProbes = false,
+        /** Mesh-shader path (shader plan 10.1, VIO_FEATURE_MESH_SHADER): instanced opaque batches as frustum-culled meshlets. */
+        public readonly bool $meshShaders = false,
         public readonly bool $hdr = true,
         /**
          * Low input latency: cap the CPU at ONE frame ahead of presentation
@@ -189,6 +191,7 @@ final class GraphicsSettings
         ?bool $rayTracedShadows = null,
         ?bool $rayTracedReflections = null,
         ?bool $rayTracedProbes = null,
+        ?bool $meshShaders = null,
         ?bool $hdr = null,
         ?bool $lowLatency = null,
         ?ShadingRate $shadingRate = null,
@@ -237,6 +240,7 @@ final class GraphicsSettings
             rayTracedShadows: $rayTracedShadows ?? $this->rayTracedShadows,
             rayTracedReflections: $rayTracedReflections ?? $this->rayTracedReflections,
             rayTracedProbes: $rayTracedProbes ?? $this->rayTracedProbes,
+            meshShaders: $meshShaders ?? $this->meshShaders,
             hdr: $hdr ?? $this->hdr,
             lowLatency: $lowLatency ?? $this->lowLatency,
             shadingRate: $shadingRate ?? $this->shadingRate,
@@ -287,6 +291,7 @@ final class GraphicsSettings
             'rayTracedShadows' => $this->rayTracedShadows,
             'rayTracedReflections' => $this->rayTracedReflections,
             'rayTracedProbes' => $this->rayTracedProbes,
+            'meshShaders' => $this->meshShaders,
             'hdr' => $this->hdr,
             'lowLatency' => $this->lowLatency,
             'shadingRate' => $this->shadingRate->value,
@@ -344,6 +349,7 @@ final class GraphicsSettings
             rayTracedShadows: self::asBool($data['rayTracedShadows'] ?? null) ?? $defaults->rayTracedShadows,
             rayTracedReflections: self::asBool($data['rayTracedReflections'] ?? null) ?? $defaults->rayTracedReflections,
             rayTracedProbes: self::asBool($data['rayTracedProbes'] ?? null) ?? $defaults->rayTracedProbes,
+            meshShaders: self::asBool($data['meshShaders'] ?? null) ?? $defaults->meshShaders,
             hdr: self::asBool($data['hdr'] ?? null) ?? $defaults->hdr,
             lowLatency: self::asBool($data['lowLatency'] ?? null) ?? $defaults->lowLatency,
             shadingRate: self::enumFrom(ShadingRate::class, $data['shadingRate'] ?? null) ?? $defaults->shadingRate,
