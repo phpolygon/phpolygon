@@ -221,6 +221,11 @@ uniform float u_depth_only;
 uniform float u_rt_shadows;
 #ifdef PHPOLYGON_RAY_QUERY
 layout(binding = 0) uniform accelerationStructureEXT u_tlas;
+// Ray-traced reflections (shader plan 10.1): the albedo of every instance of the
+// acceleration structure, in its order - what a reflection ray hits gets this
+// colour, lit by the ambient and (a second ray) the sun.
+layout(std430, binding = 0) readonly buffer RtAlbedo { vec4 rtAlbedo[]; };
+uniform float u_rt_reflections;
 #endif
 #ifdef PHPOLYGON_SCENE_COLOR
 // Copy of the opaque scene colour (more than 16 texture units only).
@@ -988,7 +993,37 @@ vec2 rainRipples(vec2 xz, float time) {
 // Environment (IBL) reflection: the bound cubemap — GPU sky probe (mipmapped,
 // u_env_mip_max > 0) or a baked reflection_probe — sampled at a roughness-
 // mapped LOD; falls back to the horizon/sky tint when no map is bound.
+vec3 sampleEnvironmentProbe(vec3 R, float roughness);
 vec3 sampleEnvironment(vec3 R, float roughness) {
+#ifdef PHPOLYGON_RAY_QUERY
+    if (u_rt_reflections > 0.5 && roughness < 0.45) {
+        rayQueryEXT rr;
+        rayQueryInitializeEXT(rr, u_tlas, gl_RayFlagsOpaqueEXT, 0xFF, v_worldPos + R * 0.05, 0.02, R, 400.0);
+        while (rayQueryProceedEXT(rr)) {}
+        if (rayQueryGetIntersectionTypeEXT(rr, true) != gl_RayQueryCommittedIntersectionNoneEXT) {
+            int id = rayQueryGetIntersectionInstanceIdEXT(rr, true);
+            float t = rayQueryGetIntersectionTEXT(rr, true);
+            vec3 hp = v_worldPos + R * t;
+            vec3 alb = rtAlbedo[id].rgb;
+            vec3 lit = u_ambient_color * 0.55;
+            if (u_dir_light_count > 0) {
+                vec3 sL = normalize(-u_dir_lights[0].direction);
+                rayQueryEXT rs;
+                rayQueryInitializeEXT(rs, u_tlas, gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsOpaqueEXT, 0xFF, hp - R * 0.05, 0.02, sL, 2000.0);
+                while (rayQueryProceedEXT(rs)) {}
+                float vis = rayQueryGetIntersectionTypeEXT(rs, true) == gl_RayQueryCommittedIntersectionNoneEXT ? 1.0 : 0.0;
+                lit += u_dir_lights[0].color * u_dir_lights[0].intensity * vis * 0.55;
+            }
+            vec3 hit = alb * lit + rtAlbedo[id].a * alb;
+            // Rougher surfaces blur the hit into the sky probe.
+            return mix(hit, sampleEnvironmentProbe(R, roughness), smoothstep(0.15, 0.45, roughness));
+        }
+    }
+#endif
+    return sampleEnvironmentProbe(R, roughness);
+}
+
+vec3 sampleEnvironmentProbe(vec3 R, float roughness) {
     float skyBlend = clamp(R.y * 2.0, 0.0, 1.0);
     vec3 fallback = mix(u_horizon_color, u_sky_color, skyBlend);
     if (u_has_environment_map == 0) {
