@@ -38,6 +38,9 @@ uniform vec4  u_contact_ray;       // x: ray length in m, y: thickness in m
 uniform float u_proj00;
 uniform float u_proj11;
 uniform float u_uv_flip_y;
+// Screen-space radiosity (shader plan 10.2, GraphicsSettings::$screenSpaceGi).
+uniform vec4  u_ssgi;           // x strength, y gather radius (m), w on
+uniform vec3  u_ssgi_ambient;   // the ambient light the ambient attachment was lit with
 
 vec3 contactViewPos(vec2 uv, float d) {
     vec2 ndc = uv * 2.0 - 1.0;
@@ -82,6 +85,58 @@ float contactShadow(vec2 uv) {
     return 1.0;
 }
 
+// View normal from the G-buffer's octahedral pair (inverse of gbuffer.frag's octEncode).
+vec3 decodeViewNormal(vec2 e) {
+    vec3 n = vec3(e, 1.0 - abs(e.x) - abs(e.y));
+    float t = max(-n.z, 0.0);
+    n.x += n.x >= 0.0 ? -t : t;
+    n.y += n.y >= 0.0 ? -t : t;
+    return normalize(n);
+}
+
+// One bounce of the direct light between pixels: neighbours within the gather radius
+// that face this point send their sun + local light, weighted by both cosines and
+// the distance. Twelve samples on a turning spiral; the receiving albedo comes back
+// out of the ambient attachment (ambient light * albedo).
+vec3 screenSpaceGi(vec2 uv) {
+    vec4 g = textureLod(u_gbuffer, uv, 0.0);
+    float depth = g.a;
+    if (depth <= 0.0 || depth > 80.0) {
+        return vec3(0.0);
+    }
+    vec3 P = contactViewPos(uv, depth);
+    vec3 N = decodeViewNormal(g.rg);
+    float spin = 6.2831853 * fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))));
+    vec3 acc = vec3(0.0);
+    const int SAMPLES = 12;
+    for (int i = 0; i < SAMPLES; i++) {
+        float f = (float(i) + 0.5) / float(SAMPLES);
+        float a = float(i) * 2.39996 + spin;
+        vec3 offset = vec3(cos(a), sin(a), 0.0) * (u_ssgi.y * sqrt(f));
+        vec2 suv = contactUV(P + offset);
+        if (suv.x < 0.0 || suv.x > 1.0 || suv.y < 0.0 || suv.y > 1.0) {
+            continue;
+        }
+        vec4 sg = textureLod(u_gbuffer, suv, 0.0);
+        if (sg.a <= 0.0) {
+            continue;
+        }
+        vec3 S = contactViewPos(suv, sg.a);
+        vec3 d = S - P;
+        float dist = length(d);
+        if (dist < 0.02 || dist > u_ssgi.y * 2.0) {
+            continue;
+        }
+        vec3 dir = d / dist;
+        // Form factor of the patch a sample stands for: cos * cos / (pi d^2) times its
+        // area (the disc pi R^2 shared by all samples), so the sum below is E / pi * pi.
+        float w = max(dot(N, dir), 0.0) * max(dot(decodeViewNormal(sg.rg), -dir), 0.0) / max(dist * dist, 0.09);
+        acc += (textureLod(u_sun, suv, 0.0).rgb + textureLod(u_local, suv, 0.0).rgb) * w;
+    }
+    // Uniform over the disc (sqrt spacing): each sample covers pi R^2 / SAMPLES.
+    return acc * (u_ssgi.y * u_ssgi.y / float(SAMPLES));
+}
+
 out vec4 frag_color;
 
 vec3 toneMapACES(vec3 x) {
@@ -111,6 +166,10 @@ void main() {
 
     sunShadow *= contactShadow(v_uv);
     vec3 color = max(sun.rgb * sunShadow + local.rgb + ambient * ao, vec3(0.0));
+    if (u_ssgi.w > 0.5) {
+        vec3 albedo = clamp(ambient / max(u_ssgi_ambient, vec3(1e-4)), 0.0, 1.0);
+        color += albedo * screenSpaceGi(v_uv) * u_ssgi.x * ao;
+    }
 
     // The composite is alpha-blended over the scene target so pixels nothing was
     // drawn into (alpha 0) keep the caller's clear colour, exactly like the

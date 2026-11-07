@@ -5104,6 +5104,9 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
     /** Strength of the screen-space contact shadows on the sun term. */
     public const float CONTACT_SHADOW_STRENGTH = 0.85;
 
+    /** @var list<float> ambient light (colour * intensity * pi) the scene's ambient term was lit with this frame */
+    private array $frameAmbientLight = [1.0, 1.0, 1.0];
+
     /** Sun direction of this frame's primary light (toward the light, world space), null without one. */
     private ?Vec3 $frameSunDirection = null;
 
@@ -5124,6 +5127,16 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         if ($tex !== null) {
             vio_bind_texture($this->ctx, $tex, 5);
             vio_set_uniform($this->ctx, 'u_gbuffer', 5);
+        }
+        // Screen-space radiosity (shader plan 10.2) reads the same G-buffer.
+        $gi = $gbuffer !== null && $projection !== null && $this->settings->screenSpaceGi;
+        vio_set_uniform($this->ctx, 'u_ssgi', $gi ? [6.0, 3.0, 0.0, 1.0] : [0.0, 0.0, 0.0, 0.0]);
+        vio_set_uniform($this->ctx, 'u_ssgi_ambient', $this->frameAmbientLight);
+        if ($gi && $projection !== null) {
+            $p = $projection->toArray();
+            vio_set_uniform($this->ctx, 'u_proj00', $p[0]);
+            vio_set_uniform($this->ctx, 'u_proj11', $p[5]);
+            vio_set_uniform($this->ctx, 'u_uv_flip_y', $this->conventions()->flipRenderTargetClipY() ? -1.0 : 1.0);
         }
         if (!$on || $view === null || $projection === null || $sun === null) {
             vio_set_uniform($this->ctx, 'u_contact', [0.0, 0.0, 0.0, 0.0]);
@@ -5513,7 +5526,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
     private function gbufferNeededThisFrame(): bool
     {
         return $this->ssaoEnabledThisFrame() || $this->ssrEnabledThisFrame()
-            || $this->sdfAoEnabledThisFrame();
+            || $this->sdfAoEnabledThisFrame() || $this->settings->screenSpaceGi;
     }
 
     /**
@@ -9157,6 +9170,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         // would respond as intensity² instead of linearly.
         vio_set_uniform($this->ctx, 'u_ambient_color', [$ac->r, $ac->g, $ac->b]);
         vio_set_uniform($this->ctx, 'u_ambient_intensity', $ai * $piScale);
+        $this->frameAmbientLight = [$ac->r * $ai * $piScale, $ac->g * $ai * $piScale, $ac->b * $ai * $piScale];
 
         $dirCount = min(count($state['dirLights']), 4);
 
