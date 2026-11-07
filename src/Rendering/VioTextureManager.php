@@ -118,7 +118,11 @@ class VioTextureManager extends TextureManager
                 'mipmaps' => true,
                 'anisotropy' => $this->anisotropy,
             ]);
-            return $vioTex === false ? null : $this->register($id, $vioTex, "rgba://{$id}");
+            if ($vioTex === false) {
+                return null;
+            }
+            $this->clampedIds[$id] = true;
+            return $this->register($id, $vioTex, "rgba://{$id}");
         } finally {
             PerfProfiler::end();
         }
@@ -214,6 +218,19 @@ class VioTextureManager extends TextureManager
         return isset($this->vioManagedTextures[$id]);
     }
 
+    /** @var array<string, true> textures created clamped to the edge (loadRgba) */
+    private array $clampedIds = [];
+
+    /**
+     * Whether texture $id was created clamped to the edge (plates, signs: loadRgba)
+     * rather than repeating - a reader that brings its own sampler, such as the
+     * bindless table, picks the matching wrap mode.
+     */
+    public function isClamped(string $id): bool
+    {
+        return isset($this->clampedIds[$id]);
+    }
+
     public function unload(string $id): void
     {
         $texture = $this->vioManagedTextures[$id] ?? null;
@@ -221,7 +238,7 @@ class VioTextureManager extends TextureManager
             $this->renderer?->unregisterVioTexture($texture->glId);
         }
         unset($this->vioTextureObjects[$id]);
-        unset($this->vioManagedTextures[$id]);
+        unset($this->vioManagedTextures[$id], $this->clampedIds[$id]);
         $this->removals++;
     }
 

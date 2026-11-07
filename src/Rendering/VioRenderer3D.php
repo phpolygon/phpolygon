@@ -8351,7 +8351,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
     private bool $bindlessBuilt = false;
     /** A setting compiled into the programs changed: rebuild them at the next frame. */
     private bool $shaderRebuild = false;
-    /** @var array<string, array{0: VioTexture, 1: int}> albedo texture id -> texture and its table slot */
+    /** @var array<string, array{0: VioTexture, 1: int}> albedo texture id -> texture and its slot code (slot * 2 + clamped) */
     private array $albedoSlots = [];
     /** Resident "has texture:slot" of the bound program, null = unknown. */
     private ?string $lastAlbedoSlot = null;
@@ -8369,7 +8369,11 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         return $this->bindlessBuilt;
     }
 
-    /** Table slot of an albedo texture, added on first use; null when it does not load. */
+    /**
+     * Slot code of an albedo texture: its table slot * 2, + 1 when it is clamped to the
+     * edge (loadRgba plates, engine-made images) so the shader takes the clamped table
+     * sampler. Added on first use; null when it does not load.
+     */
     private function albedoSlot(string $textureId): ?int
     {
         if (isset($this->albedoSlots[$textureId])) {
@@ -8386,8 +8390,10 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         if ($slot === false) {
             return null;
         }
-        $this->albedoSlots[$textureId] = [$tex, $slot];
-        return $slot;
+        $clamped = isset($this->gpuTextures[$textureId]) || $this->textureManager?->isClamped($textureId) === true;
+        $code = $slot * 2 + ($clamped ? 1 : 0);
+        $this->albedoSlots[$textureId] = [$tex, $code];
+        return $code;
     }
 
     /** The white texture's slot: the albedo of an instance without a texture of its own. */
@@ -8398,7 +8404,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         }
         if (!isset($this->albedoSlots["\0white"])) {
             $slot = vio_texture_index($this->ctx, $this->whiteTexture);
-            $this->albedoSlots["\0white"] = [$this->whiteTexture, $slot === false ? 0 : $slot];
+            $this->albedoSlots["\0white"] = [$this->whiteTexture, ($slot === false ? 0 : $slot) * 2 + 1];
         }
         return $this->albedoSlots["\0white"][1];
     }

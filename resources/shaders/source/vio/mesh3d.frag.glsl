@@ -283,13 +283,35 @@ uniform sampler2D u_albedo_texture;
 #ifdef PHPOLYGON_BINDLESS_MATERIALS
 // Bindless materials (shader plan 10.1): the albedo from the context's texture table,
 // through the 16x anisotropic table sampler; the slot per draw or per instance.
+// v_albedo_slot = slot * 2 + 1 for a clamped texture (signs, plates, atlases), + 0 for
+// a repeating one - the table's samplers carry the wrap mode, not the texture.
 flat in int v_albedo_slot;
 layout(set = 1, binding = 0) uniform texture2D vio_textures[];
 layout(set = 1, binding = 7) uniform sampler vio_sampler_aniso;
-#define PHPOLYGON_ALBEDO sampler2D(vio_textures[nonuniformEXT(v_albedo_slot)], vio_sampler_aniso)
+layout(set = 1, binding = 8) uniform sampler vio_sampler_aniso_clamp;
+vec4 albedoGrad(vec2 uv, vec2 dx, vec2 dy) {
+    int slot = v_albedo_slot >> 1;
+    if ((v_albedo_slot & 1) != 0) {
+        return textureGrad(sampler2D(vio_textures[nonuniformEXT(slot)], vio_sampler_aniso_clamp), uv, dx, dy);
+    }
+    return textureGrad(sampler2D(vio_textures[nonuniformEXT(slot)], vio_sampler_aniso), uv, dx, dy);
+}
+ivec2 albedoSize() {
+    return textureSize(sampler2D(vio_textures[nonuniformEXT(v_albedo_slot >> 1)], vio_sampler_aniso), 0);
+}
 #else
-#define PHPOLYGON_ALBEDO u_albedo_texture
+vec4 albedoGrad(vec2 uv, vec2 dx, vec2 dy) {
+    return textureGrad(u_albedo_texture, uv, dx, dy);
+}
+ivec2 albedoSize() {
+    return textureSize(u_albedo_texture, 0);
+}
 #endif
+// Implicit footprint, taken before any branch (neighbouring pixels of another
+// triangle may take the other sampler).
+vec4 albedoAuto(vec2 uv) {
+    return albedoGrad(uv, dFdx(uv), dFdy(uv));
+}
 uniform float u_material_mip_bias; // Material::$mipBias, in mip levels (negative = sharper)
 uniform vec2 u_material_aniso;     // x: most taps along the stretched axis (1 = one tap), y: the texture's own anisotropy
 
@@ -300,7 +322,7 @@ uniform vec2 u_material_aniso;     // x: most taps along the stretched axis (1 =
 vec3 sampleAlbedoTexture(vec2 uv, vec2 dx, vec2 dy) {
     if (u_material_aniso.x > 1.0) {
         // Lengths in texels: a texture that is not square stretches uv space.
-        vec2 texels = vec2(textureSize(PHPOLYGON_ALBEDO, 0));
+        vec2 texels = vec2(albedoSize());
         float lx = dot(dx * texels, dx * texels);
         float ly = dot(dy * texels, dy * texels);
         vec2 major = lx >= ly ? dx : dy;
@@ -314,12 +336,12 @@ vec3 sampleAlbedoTexture(vec2 uv, vec2 dx, vec2 dy) {
                 if (float(i) >= n) {
                     break;
                 }
-                sum += textureGrad(PHPOLYGON_ALBEDO, uv + major * ((float(i) + 0.5) / n - 0.5), tapGrad, minor).rgb;
+                sum += albedoGrad(uv + major * ((float(i) + 0.5) / n - 0.5), tapGrad, minor).rgb;
             }
             return sum / n;
         }
     }
-    return textureGrad(PHPOLYGON_ALBEDO, uv, dx, dy).rgb;
+    return albedoGrad(uv, dx, dy).rgb;
 }
 
 // Triplanar albedo (Material::$triplanar): the texture projected from the three
@@ -328,9 +350,9 @@ vec3 sampleAlbedoTriplanar(vec3 p, vec3 n, float scale) {
     vec3 w = pow(abs(n), vec3(4.0));
     w /= max(w.x + w.y + w.z, 1e-4);
     vec3 q = p * scale;
-    return texture(PHPOLYGON_ALBEDO, q.zy).rgb * w.x
-         + texture(PHPOLYGON_ALBEDO, q.xz).rgb * w.y
-         + texture(PHPOLYGON_ALBEDO, q.xy).rgb * w.z;
+    return albedoAuto(q.zy).rgb * w.x
+         + albedoAuto(q.xz).rgb * w.y
+         + albedoAuto(q.xy).rgb * w.z;
 }
 
 // Screen-space ambient occlusion (real depth+normal SSAO; see ssao.frag.glsl).

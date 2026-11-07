@@ -79,6 +79,24 @@ final class VioBindlessMaterialsTest extends TestCase
         self::assertLessThan(self::W * self::H * 3 / 100, $off, "{$off} channels differ by more than 3");
     }
 
+    public function testAClampedTextureStaysClampedThroughTheTable(): void
+    {
+        // Triplanar projection reads the plate far outside [0, 1]: the bound texture
+        // (loadRgba: clamped) smears its edge, the table must take the clamped sampler.
+        $this->requireBindless();
+        MaterialRegistry::register('projected', new Material(albedo: new Color(1.0, 1.0, 1.0), albedoTexture: 'checker', useEnvironmentMap: false, triplanar: 0.5));
+        $list = $this->scene([new DrawMesh('panel', 'projected', Mat4::translation(0.0, 0.0, -2.0)->multiply(Mat4::scaling(3.0, 1.6, 1.0)))]);
+        [$bound] = $this->render($list, false);
+        [$table] = $this->render($list, true);
+        $off = 0;
+        for ($i = 0, $n = strlen($bound); $i < $n; $i++) {
+            if (($i & 3) !== 3 && abs(ord($bound[$i]) - ord($table[$i])) > 3) {
+                $off++;
+            }
+        }
+        self::assertLessThan(self::W * self::H * 3 / 100, $off, "{$off} channels differ by more than 3");
+    }
+
     public function testInstancesShowTheirOwnTexturesThroughTheTable(): void
     {
         $this->requireBindless();
