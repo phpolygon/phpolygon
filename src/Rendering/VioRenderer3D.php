@@ -362,6 +362,8 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
 
     /** The depth copy of ProcModeShaderRegistry::requireSceneDepth(). */
     private const SCENE_DEPTH_SLOT = 11;
+    /** Unit of the scene-colour copy for refracting glass: only with more than 16 units. */
+    private const SCENE_COLOR_SLOT = 16;
 
     // The baked coloured irradiance probe field (3× vio_texture_3d), from
     // SetFieldtracingProbes — one 3D texture per colour channel.
@@ -499,6 +501,13 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
     private array $grassRange = [25.0, 60.0, 0.55, 0.8];
     /** @var list<array{0: float, 1: float, 2: float, 3: float}> Grass benders (SetGrass::benderSlots()). */
     private array $grassPush = [[0.0, -10000.0, 0.0, 0.0], [0.0, -10000.0, 0.0, 0.0], [0.0, -10000.0, 0.0, 0.0], [0.0, -10000.0, 0.0, 0.0]];
+
+    /** Footprint memory (shader plan 6.1): newest last, [x, z, radius, born at]. */
+    /** @var list<array{0: float, 1: float, 2: float, 3: float}> */
+    private array $grassTrail = [];
+    /** Seconds a footprint takes to rise again. */
+    private const GRASS_TRAIL_SECONDS = 6.0;
+    private const GRASS_TRAIL_POINTS = 16;
 
     /**
      * @var array<string, array{min: array{0:float,1:float,2:float}, max: array{0:float,1:float,2:float}}>
@@ -2051,6 +2060,109 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
      * this copy. The scene target is left and bound again, keeping colour and depth.
      * Nothing happens without ProcModeShaderRegistry::requireSceneDepth().
      */
+    /**
+     * Whether refracting glass is possible: the scene-colour copy reads unit 16, so
+     * the context needs more than 16 texture units (php-vio vio_texture_units).
+     */
+    private static function sceneColorAvailable(): bool
+    {
+        return (ProcModeShaderRegistry::textureUnits() ?? 0) > self::SCENE_COLOR_SLOT;
+    }
+
+    /** @param list<object> $commands */
+    private static function refractionIn(array $commands): bool
+    {
+        foreach ($commands as $cmd) {
+            if (!($cmd instanceof DrawMesh) && !($cmd instanceof DrawMeshInstanced)) {
+                continue;
+            }
+            $material = MaterialRegistry::get($cmd->materialId);
+            if ($material !== null && $material->alpha < 1.0 && $material->refraction > 0.0) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Copy the opaque scene colour for the transparent pass (refracting glass): the
+     * MRT light parts summed, or the single scene colour. Like the depth copy the
+     * scene target is left and bound again.
+     */
+    private function captureSceneColor(?VioRenderTarget $hdrTarget, int $w, int $h): void
+    {
+        $this->sceneColorCopied = false;
+        $quad = $this->screenQuad;
+        if ($hdrTarget !== null || $quad === null) {
+            return;
+        }
+        $parts = [];
+        if ($this->mrtThisFrame && $this->mrtTarget !== null) {
+            for ($i = 0; $i < 3; $i++) {
+                $t = self::textureOrNull(vio_render_target_texture($this->mrtTarget, $i));
+                if ($t === null) {
+                    return;
+                }
+                $parts[] = $t;
+            }
+        } else {
+            $source = $this->externalSceneTarget
+                ?? ($this->offscreenActive && $this->offscreenTarget !== null && $this->offscreenTarget->samples() === 1 ? $this->offscreenTarget->renderTarget() : null);
+            $t = $source !== null ? self::textureOrNull(vio_render_target_texture($source)) : null;
+            if ($t === null) {
+                return;
+            }
+            $parts = [$t, $t, $t];
+        }
+        if (!isset($this->shaderCache['scene_color_copy'])) {
+            $this->compileShaderFromFiles('scene_color_copy', 'postprocess.vert.glsl', 'scene_color_copy.frag.glsl');
+        }
+        $key = "{$w}x{$h}";
+        if ($this->sceneColorCopyKey !== $key || $this->sceneColorCopy === null) {
+            $this->sceneColorCopy = vio_render_target($this->ctx, ['width' => $w, 'height' => $h, 'hdr' => true]) ?: null;
+            $this->sceneColorCopyKey = $key;
+        }
+        if ($this->sceneColorCopy === null) {
+            return;
+        }
+        vio_unbind_render_target($this->ctx);
+        vio_bind_render_target($this->ctx, $this->sceneColorCopy);
+        vio_viewport($this->ctx, 0, 0, $w, $h);
+        $this->bindPostProcessPipeline('scene_color_copy', true);
+        foreach ($parts as $i => $t) {
+            vio_set_uniform($this->ctx, "u_part{$i}", $i);
+            vio_bind_texture($this->ctx, $t, $i);
+        }
+        vio_set_uniform($this->ctx, 'u_parts', $this->mrtThisFrame ? 3.0 : 1.0);
+        vio_draw($this->ctx, $quad);
+        vio_unbind_render_target($this->ctx);
+        if ($this->mrtThisFrame && $this->mrtTarget !== null) {
+            vio_bind_render_target($this->ctx, $this->mrtTarget);
+        } else {
+            $this->bindSceneTarget(null);
+        }
+        vio_viewport($this->ctx, 0, 0, $w, $h);
+        $this->sceneColorCopied = true;
+        $this->gpuMark('scene_color');
+    }
+
+    /** The scene-colour copy on the bound mesh program (white before it exists). */
+    private function uploadSceneColorInputs(): void
+    {
+        $texture = $this->sceneColorCopied && $this->sceneColorCopy !== null
+            ? vio_render_target_texture($this->sceneColorCopy)
+            : null;
+        if ($texture === null) {
+            $this->ensureWhiteTexture();
+            $texture = $this->whiteTexture;
+        }
+        if ($texture !== null) {
+            vio_set_uniform($this->ctx, 'u_scene_color', self::SCENE_COLOR_SLOT);
+            vio_bind_texture($this->ctx, $texture, self::SCENE_COLOR_SLOT);
+        }
+        vio_set_uniform($this->ctx, 'u_scene_color_ready', $this->sceneColorCopied ? 1.0 : 0.0);
+    }
+
     private function captureSceneDepth(?VioRenderTarget $hdrTarget, int $w, int $h): void
     {
         $this->sceneDepthCopied = false;
@@ -2109,8 +2221,115 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
      *
      * @param array{lift: list<float>, gamma: list<float>, gain: list<float>, saturation: float, vignette: float, viewport: list<float>, hdr: int, exposure: float, pq: int, paperWhite: float} $post
      */
+    /**
+     * The last 3D image for 2D effects that read what lies behind them (shader plan
+     * 8.1, BuiltinEffects2D::BACKDROP_SAMPLER): the scene before its tonemap (hdr)
+     * or after, and its exposure. Valid until the next 3D frame.
+     *
+     * @var array{texture: VioTexture, hdr: bool, exposure: float}|null
+     */
+    private static ?array $backdrop = null;
+
+    /** @var array{cx: float, cz: float, extent: float, size: int, interval: float, low: float, high: float}|null */
+    private ?array $minimapRequest = null;
+    private ?\VioRenderTarget $minimapTarget = null;
+    private int $minimapSize = 0;
+    private float $minimapRenderedAt = -1.0e9;
+
+    /**
+     * Ask for a minimap (shader plan 8.1): the world from above around (cx, cz),
+     * `extent` metres across, `size` pixels square, redrawn every `interval`
+     * seconds in its own light pass (flat material colour shaded by slope and by
+     * height between low and high). Null stops it. The image: minimapTexture().
+     */
+    public function requestMinimap(?float $cx, float $cz = 0.0, float $extent = 200.0, int $size = 256, float $interval = 0.5, float $low = 0.0, float $high = 40.0): void
+    {
+        $this->minimapRequest = $cx === null ? null : ['cx' => $cx, 'cz' => $cz, 'extent' => max(1.0, $extent), 'size' => max(16, min(2048, $size)), 'interval' => max(0.0, $interval), 'low' => $low, 'high' => $high];
+    }
+
+    /** The last minimap image (north = up, row 0 at the top), null before the first. */
+    public function minimapTexture(): ?VioTexture
+    {
+        return $this->minimapTarget !== null ? self::textureOrNull(vio_render_target_texture($this->minimapTarget)) : null;
+    }
+
+    private function renderMinimapIfDue(RenderCommandList $commandList): void
+    {
+        $req = $this->minimapRequest;
+        if ($req === null || $this->globalTime - $this->minimapRenderedAt < $req['interval']) {
+            return;
+        }
+        $this->minimapRenderedAt = $this->globalTime;
+        if ($this->minimapTarget === null || $this->minimapSize !== $req['size']) {
+            $this->minimapTarget = vio_render_target($this->ctx, ['width' => $req['size'], 'height' => $req['size']]) ?: null;
+            $this->minimapSize = $req['size'];
+        }
+        if ($this->minimapTarget === null) {
+            return;
+        }
+        if (!isset($this->shaderCache['minimap'])) {
+            $this->compileShaderFromFiles('minimap', 'minimap.vert.glsl', 'minimap.frag.glsl');
+        }
+        $key = 'minimap:pipeline';
+        if (!isset($this->pipelineCache[$key])) {
+            $p = $this->createPipeline(['shader' => $this->shaderCache['minimap'], 'depth_test' => true, 'cull_mode' => VIO_CULL_NONE, 'blend' => VIO_BLEND_NONE]);
+            if ($p === false) {
+                $this->minimapRequest = null;
+                return;
+            }
+            $this->pipelineCache[$key] = $p;
+        }
+        $half = $req['extent'] * 0.5;
+        $eye = new Vec3($req['cx'], $req['high'] + 500.0, $req['cz']);
+        $view = Mat4::lookAt($eye, new Vec3($req['cx'], $req['low'], $req['cz']), new Vec3(0.0, 0.0, -1.0));
+        $proj = Mat4::orthographic(-$half, $half, -$half, $half, 1.0, 1200.0);
+        $s = $req['size'];
+        vio_bind_render_target($this->ctx, $this->minimapTarget);
+        vio_viewport($this->ctx, 0, 0, $s, $s);
+        vio_clear($this->ctx, 0.05, 0.08, 0.12, 1.0);
+        vio_bind_pipeline($this->ctx, $this->pipelineCache[$key]);
+        vio_set_uniform($this->ctx, 'u_view', $view->toArray());
+        vio_set_uniform($this->ctx, 'u_projection', $proj->toArray());
+        vio_set_uniform($this->ctx, 'u_height_range', [$req['low'], $req['high']]);
+        foreach ($commandList->getCommands() as $cmd) {
+            if (!($cmd instanceof DrawMesh) && !($cmd instanceof DrawMeshInstanced)) {
+                continue;
+            }
+            $material = MaterialRegistry::get($cmd->materialId);
+            if ($material === null || $material->alpha < 0.9 || ($cmd instanceof DrawMeshInstanced && $cmd->storageBuffer !== null)) {
+                continue;
+            }
+            $mesh = $this->uploadMesh($cmd->meshId);
+            if ($mesh === null) {
+                continue;
+            }
+            $a = $material->albedo;
+            vio_set_uniform($this->ctx, 'u_albedo', [$a->r, $a->g, $a->b]);
+            if ($cmd instanceof DrawMesh) {
+                vio_set_uniform($this->ctx, 'u_use_instancing', 0);
+                vio_set_uniform($this->ctx, 'u_model', $cmd->modelMatrix->toArray());
+                vio_draw($this->ctx, $mesh);
+            } else {
+                [$packed, $count] = $this->resolveInstanceData($cmd->meshId, $material, $cmd);
+                if ($count > 0) {
+                    vio_set_uniform($this->ctx, 'u_use_instancing', 1);
+                    vio_draw_instanced($this->ctx, $mesh, $packed, $count);
+                }
+            }
+        }
+        vio_unbind_render_target($this->ctx);
+        $this->gpuMark('minimap');
+    }
+
+    /** @return array{texture: VioTexture, hdr: bool, exposure: float}|null */
+    public static function backdrop(): ?array
+    {
+        return self::$backdrop;
+    }
+
     private function drawPassthrough(VioTexture $sceneTex, VioMesh $quad, ?VioTexture $bloomTex, array $post): void
     {
+        self::$backdrop = ['texture' => $sceneTex, 'hdr' => ($post['hdr'] ?? 0) === 1, 'exposure' => (float) ($post['exposure'] ?? 1.0)];
         $this->bindPostProcessPipeline('passthrough_blit');
         vio_bind_texture($this->ctx, $sceneTex, 0);
         vio_set_uniform($this->ctx, 'u_source', 0);
@@ -3291,6 +3510,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             } elseif ($cmd instanceof Command\SetGrass) {
                 $this->grassRange = $cmd->rangeUniform();
                 $this->grassPush = $cmd->benderSlots();
+            $this->recordGrassTrail();
             } elseif ($cmd instanceof Command\SetFieldtracing) {
                 // Per-frame override of the settings-derived tier, capability-gated.
                 $ftMode = $this->gateFieldtracing($cmd->mode);
@@ -3336,6 +3556,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         ];
         $this->frameFtMode = $ftMode;
         $this->sceneDepthCopied = false;
+        $this->sceneColorCopied = false;
         $this->instanceParamsThisFrame = ProcModeShaderRegistry::instanceParamsEnabled();
         $this->variantUniformsUploaded = [];
         // While a surface cut runs the base program is the one that may discard.
@@ -3356,6 +3577,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         PerfProfiler::begin('render3d.submit.shadow');
         $hasShadowMap = $this->renderShadowPass($commandList, $dirLights);
         $this->renderSpotShadowPass($commandList, $spotLights);
+        $this->renderMinimapIfDue($commandList);
         $this->renderPointShadowPass($commandList, $pointLights);
         PerfProfiler::end();
         if ($hasShadowMap) {
@@ -3524,9 +3746,16 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             $this->captureSceneDepth($hdrTarget, $sceneViewportW, $sceneViewportH);
             $this->variantUniformsUploaded = [];
         }
+        if (self::sceneColorAvailable() && self::refractionIn($commands)) {
+            $this->captureSceneColor($hdrTarget, $sceneViewportW, $sceneViewportH);
+            $this->variantUniformsUploaded = [];
+        }
         $this->bindPipeline('transparent');
         if (ProcModeShaderRegistry::sceneDepthRequired()) {
             $this->uploadSceneDepthInputs();
+        }
+        if (self::sceneColorAvailable()) {
+            $this->uploadSceneColorInputs();
         }
         // The opaque pass already uploaded the frame uniforms (+ probe/ssao/sdfao
         // texture binds) into this same shader object's sticky cbuffer; re-upload
@@ -3912,6 +4141,9 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         }
         if (ProcModeShaderRegistry::cloudShadowMapAvailable()) {
             $source = self::withDefine($source, 'PHPOLYGON_CLOUD_SHADOW_MAP');
+        }
+        if (self::sceneColorAvailable()) {
+            $source = self::withDefine($source, 'PHPOLYGON_SCENE_COLOR');
         }
         if ($this->lightGridSupported()) {
             $source = self::withDefine($source, 'PHPOLYGON_LIGHT_GRID');
@@ -6572,6 +6804,11 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
     /** Whether this frame's opaque depth is in $sceneDepthCopy yet. */
     private bool $sceneDepthCopied = false;
 
+    /** Copy of the opaque scene colour for refracting glass (Material::$refraction). */
+    private ?VioRenderTarget $sceneColorCopy = null;
+    private string $sceneColorCopyKey = '';
+    private bool $sceneColorCopied = false;
+
     /** The Final stage's input while the present draws into it instead of the swapchain. */
     private ?VioRenderTarget $presentRedirect = null;
 
@@ -7345,6 +7582,9 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             'u_material_look'       => [$material->sheen, $material->brushed, $material->glitter],
             'u_fade_range'          => [$material->fadeDistance[0], $material->fadeDistance[1]],
             'u_figure_look'         => [$material->rimLight, $material->hairShine],
+            'u_refract'             => [$material->refraction, $material->frost],
+            'u_particle_tint'       => $material->particleTint ? 1.0 : 0.0,
+            'u_flipbook'            => [(float) $material->flipbook[0], (float) $material->flipbook[1], $material->flipbookFps, $material->streakFade ? 1.0 : 0.0],
             // Subsurface scattering (skin path). Gated by strength > 0 in the
             // shader so non-skin materials remain visually identical.
             'u_subsurface_color'    => [$material->subsurfaceColor->r, $material->subsurfaceColor->g, $material->subsurfaceColor->b],
@@ -8075,6 +8315,9 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         if (ProcModeShaderRegistry::sceneDepthRequired()) {
             $this->uploadSceneDepthInputs();
         }
+        if (self::sceneColorAvailable()) {
+            $this->uploadSceneColorInputs();
+        }
         if ($this->snippetParameters !== []) {
             $this->setUniforms($this->snippetParameters);
         }
@@ -8127,8 +8370,45 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         }
     }
 
+    /**
+     * Remember where the benders walked: a point whenever one moved a third of its
+     * radius from its last footprint; points older than GRASS_TRAIL_SECONDS go.
+     */
+    private function recordGrassTrail(): void
+    {
+        $now = $this->globalTime;
+        $this->grassTrail = array_values(array_filter($this->grassTrail, static fn (array $p): bool => $now - $p[3] < self::GRASS_TRAIL_SECONDS && $now >= $p[3]));
+        foreach ($this->grassPush as $b) {
+            if ($b[3] <= 0.0) {
+                continue;
+            }
+            $near = false;
+            foreach ($this->grassTrail as $p) {
+                if (($p[0] - $b[0]) ** 2 + ($p[1] - $b[2]) ** 2 < ($b[3] * 0.35) ** 2) {
+                    $near = true;
+                    break;
+                }
+            }
+            if (!$near) {
+                $this->grassTrail[] = [$b[0], $b[2], $b[3], $now];
+            }
+        }
+        if (count($this->grassTrail) > self::GRASS_TRAIL_POINTS) {
+            $this->grassTrail = array_slice($this->grassTrail, -self::GRASS_TRAIL_POINTS);
+        }
+    }
+
     private function uploadGrassFrameUniforms(): void
     {
+        for ($i = 0; $i < self::GRASS_TRAIL_POINTS; $i++) {
+            $p = $this->grassTrail[$i] ?? null;
+            $w = 0.0;
+            if ($p !== null) {
+                $strength = 1.0 - ($this->globalTime - $p[3]) / self::GRASS_TRAIL_SECONDS;
+                $w = $strength > 0.0 ? floor(min($p[2], 9.0) * 100.0) + min($strength, 1.0) * 0.99 : 0.0;
+            }
+            vio_set_uniform($this->ctx, "u_grass_trail[{$i}]", $p !== null ? [$p[0], $p[1], 0.0, $w] : [0.0, 0.0, 0.0, 0.0]);
+        }
         vio_set_uniform($this->ctx, 'u_grass_range', $this->grassRange);
         vio_set_uniform($this->ctx, 'u_grass_far_fade', [$this->grassRange[0], $this->grassRange[1]]);
         foreach ($this->grassPush as $i => $slot) {

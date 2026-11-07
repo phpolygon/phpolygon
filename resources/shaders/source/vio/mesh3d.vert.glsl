@@ -47,6 +47,7 @@ uniform int   u_grass;
 uniform float u_grass_bend;       // tip displacement per unit wind, fraction of the blade height
 uniform vec4  u_grass_range;      // full range, fade range, far height factor, push strength
 uniform vec4  u_grass_push[4];    // benders: xyz position, w radius (0 = unused)
+uniform vec4  u_grass_trail[16]; // footprints: x, z, floor(radius cm) + strength (0..0.99)
 
 uniform mat4 u_light_space_matrix;
 
@@ -96,10 +97,24 @@ vec3 grassBlade(vec3 pos, vec2 uv, mat4 model, float hash, float time) {
         return vec3(pos.x, -0.05, pos.z);
     }
     pos.y = pos.y * k - (1.0 - keep) * 0.03;
+    // Footprints (shader plan 6.1): where benders walked the blades stay pressed
+    // down for a few seconds and rise again as the strength fades.
+    float trodden = 0.0;
+    for (int i = 0; i < 16; i++) {
+        vec4 tr = u_grass_trail[i];
+        if (tr.w <= 0.0) {
+            continue;
+        }
+        float tRad = floor(tr.w) * 0.01;
+        float tf = 1.0 - smoothstep(tRad * 0.25, tRad, length(origin.xz - tr.xy));
+        trodden = max(trodden, tf * fract(tr.w));
+    }
+    pos.y *= 1.0 - 0.55 * trodden;
     float s2 = max(dot(model[0].xyz, model[0].xyz), 1e-8);
     float t = clamp(uv.y, 0.0, 1.0);
     float hw = max(pos.y, 0.0) * sqrt(s2);
     vec3 d = vec3(0.0);
+    d.xz += vec2(cos(uv.x * 6.2831), sin(uv.x * 6.2831)) * (trodden * hw * t * 0.7);
     float amp = u_wind_intensity * u_foliage_motion;
     if (amp > 0.0) {
         vec3 wind = vec3(u_wind_direction.x, 0.0, u_wind_direction.z);

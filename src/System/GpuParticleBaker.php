@@ -245,7 +245,33 @@ final class GpuParticleBaker
             int   mode;
             float stretch;
             float hstep; float pad1; float pad2;
+            // Colour over life (shader plan 7.1): up to four stops, packed RGBA6.
+            float colN; float colPad0; float colPad1; float colPad2;
+            vec4  colT;
+            vec4  colC;
         };
+
+        vec4 colUnpack(float v) {
+            v = floor(v + 0.5);
+            return vec4(mod(v, 64.0), mod(floor(v / 64.0), 64.0), mod(floor(v / 4096.0), 64.0), floor(v / 262144.0)) / 63.0;
+        }
+        float colPack(vec4 c) {
+            vec4 q = floor(clamp(c, 0.0, 1.0) * 63.0 + 0.5);
+            return q.x + q.y * 64.0 + q.z * 4096.0 + q.w * 262144.0;
+        }
+        float colAt(float t) {
+            int n = int(colN + 0.5);
+            if (n <= 0) return 0.0;
+            if (t <= colT.x || n == 1) return colC.x;
+            for (int i = 1; i < 4; i++) {
+                if (i >= n) break;
+                if (t <= colT[i]) {
+                    float k = (t - colT[i - 1]) / max(colT[i] - colT[i - 1], 1e-6);
+                    return colPack(mix(colUnpack(colC[i - 1]), colUnpack(colC[i]), k));
+                }
+            }
+            return colC[n - 1];
+        }
 
         GLSL;
 
@@ -274,6 +300,12 @@ final class GpuParticleBaker
             float vx = s[b + 3u] + gx * dt;
             float vy = s[b + 4u] + gy * dt;
             float vz = s[b + 5u] + gz * dt;
+            if (pad1 != 0.0) {
+                // Curl noise (shader plan 7.1): the field of ParticleSystem::integrate().
+                vx -= cos(pad2 * s[b + 2u] + 2.1) * pad1 * dt;
+                vy -= cos(pad2 * s[b + 0u] + 0.7) * pad1 * dt;
+                vz -= cos(pad2 * s[b + 1u] + 1.3) * pad1 * dt;
+            }
             float px = s[b + 0u] + vx * dt;
             float py = s[b + 1u] + vy * dt;
             float pz = s[b + 2u] + vz * dt;
@@ -293,6 +325,8 @@ final class GpuParticleBaker
             float t    = age / max(life, 1e-4);
             float size = mix(startSize, endSize, t);
             writeMatrix(o, px, py, pz, vx, vy, vz, size);
+            if (colN > 0.5) m[o + 3u] = colAt(t);
+            m[o + 7u] = t;   // life fraction: flipbook frames
         }
         GLSL;
 
@@ -401,7 +435,7 @@ final class GpuParticleBaker
      * reopens the frame's command list), which frees every block again. The
      * budget leaves headroom for blocks other compute work takes in between.
      */
-    private static function reserveDescriptorBlock(\VioContext $ctx): void
+    public static function reserveDescriptorBlock(\VioContext $ctx): void
     {
         self::useContext($ctx);
         self::$descriptorBudget ??= self::descriptorBudget($ctx);
@@ -575,6 +609,19 @@ final class GpuParticleBaker
      * tight std140 packing (all 4-byte scalars, none straddles a 16-byte
      * boundary; block padded to 64 = 16*4).
      */
+    /** The step kernel's colour-over-life block: count, pad, four t, four packed colours. */
+    private static function colorParams(ParticleEmitter $emitter): string
+    {
+        $stops = ParticleColor::stops($emitter);
+        $t = [0.0, 0.0, 0.0, 0.0];
+        $c = [0.0, 0.0, 0.0, 0.0];
+        foreach ($stops as $i => $s) {
+            $t[$i] = $s[0];
+            $c[$i] = ParticleColor::pack($s[1], $s[2], $s[3], $s[4]);
+        }
+        return pack('f4', (float) count($stops), 0.0, 0.0, 0.0) . pack('f4', ...$t) . pack('f4', ...$c);
+    }
+
     private static function stepParams(GpuParticleState $state, ParticleEmitter $emitter, float $dt, ?Vec3 $camPos, float $catchUpStep = 0.0): string
     {
         $hasCam = $camPos !== null ? 1 : 0;
@@ -589,7 +636,8 @@ final class GpuParticleBaker
             $emitter->startSize, $emitter->endSize,
             $cx, $cy, $cz,
         ) . pack('l3', $hasCam, $state->capacity, $emitter->renderMode->code())
-          . pack('f4', $emitter->stretch, $catchUpStep, 0.0, 0.0);
+          . pack('f4', $emitter->stretch, $catchUpStep, $emitter->curlNoise, $emitter->curlScale)
+          . self::colorParams($emitter);
     }
 
     /**
@@ -937,8 +985,10 @@ final class GpuParticleBaker
         void main() {
             uint gid = gl_GlobalInvocationID.x;
             if (gid >= uint(count)) return;
-            uint b = gid * 8u;
+            uint b = gid * 12u;
             writeMatrix(gid * 16u, s[b + 0u], s[b + 1u], s[b + 2u], s[b + 4u], s[b + 5u], s[b + 6u], s[b + 3u]);
+            m[gid * 16u + 3u] = s[b + 7u];   // packed colour over life (shader plan 7.1)
+            m[gid * 16u + 7u] = s[b + 8u];   // life fraction: flipbook frames
         }
         GLSL;
 
@@ -982,13 +1032,15 @@ final class GpuParticleBaker
             // start->end curve the CPU render path uses), vx,vy,vz, pad.
             $ss = $emitter->startSize;
             $es = $emitter->endSize;
+            $stops = ParticleColor::stops($emitter);
             $in = [];
             foreach ($emitter->particles as $p) {
                 $life = $p[7] > 1e-4 ? $p[7] : 1e-4;
                 $t = $p[6] / $life;
                 $in[] = $p[0]; $in[] = $p[1]; $in[] = $p[2];
                 $in[] = $ss + ($es - $ss) * $t;
-                $in[] = $p[3]; $in[] = $p[4]; $in[] = $p[5]; $in[] = 0.0;
+                $in[] = $p[3]; $in[] = $p[4]; $in[] = $p[5]; $in[] = $stops !== [] ? ParticleColor::packedAt($stops, $t) : 0.0;
+                $in[] = $t; $in[] = 0.0; $in[] = 0.0; $in[] = 0.0;
             }
             vio_update_buffer($inBuf, pack('f*', ...$in));
 
@@ -1039,7 +1091,7 @@ final class GpuParticleBaker
         }
         $inBufs = [];
         for ($i = 0; $i < GpuParticleState::UPLOAD_ROTATION; $i++) {
-            $inBuf = vio_storage_buffer($ctx, ['data' => str_repeat("\0", $cap * 8 * 4), 'stride' => 4]);
+            $inBuf = vio_storage_buffer($ctx, ['data' => str_repeat("\0", $cap * 12 * 4), 'stride' => 4]);
             if ($inBuf === false) {
                 return null;
             }

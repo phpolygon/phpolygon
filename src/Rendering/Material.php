@@ -339,6 +339,32 @@ class Material
         public readonly float $rimLight = 0.0,
         /** 0..1: hair shine - a highlight ring across the strands (Kajiya-Kay, strands run down the surface). */
         public readonly float $hairShine = 0.0,
+        /**
+         * 0..1: a transparent surface bends what lies behind it (glass, water in a
+         * tank, heat shields) - it shows the opaque scene shifted along its normal
+         * instead of blending over it. Needs more than 16 texture units (the copy of
+         * the scene colour reads unit 16); without them the surface blends as before.
+         */
+        public readonly float $refraction = 0.0,
+        /** 0..1: frosted glass - what lies behind is blurred (with $refraction > 0). */
+        public readonly float $frost = 0.0,
+        /**
+         * Particle material: albedo, emission and alpha are multiplied by the
+         * particle's colour over life (ParticleEmitter::$colorOverLife), which rides
+         * in the instance parameters (shader plan 7.1).
+         */
+        public readonly bool $particleTint = false,
+        /**
+         * Flipbook (shader plan 7.1): [columns, rows] of the albedo texture; a
+         * particle shows the frame of its age (first frame at birth, last at
+         * death), other meshes cycle at $flipbookFps. [0, 0] = off.
+         *
+         * @var array{0: int, 1: int}
+         */
+        public readonly array $flipbook = [0, 0],
+        public readonly float $flipbookFps = 12.0,
+        /** Streaks (Stretched particles) fade towards their tail (shader plan 7.1). */
+        public readonly bool $streakFade = false,
     ) {}
 
     /**
@@ -462,6 +488,18 @@ class Material
         $m = $this->copy();
 
         return new self(...[...get_object_vars($m), 'fadeDistance' => [max(0.0, $start), max(0.0, $end)]]);
+    }
+
+    /**
+     * This material appearing between two camera distances with the dither
+     * complementary to withFadeDistance() - the incoming level of a LOD
+     * cross-fade (shader plan 9.1). Stored as a negative range.
+     */
+    public function withFadeInDistance(float $start, float $end): self
+    {
+        $m = $this->copy();
+
+        return new self(...[...get_object_vars($m), 'fadeDistance' => [-max(0.0, $start), -max(1e-3, $end)]]);
     }
 
     /** This material with another emission colour (e.g. a glow that fades in at night). */
@@ -615,6 +653,12 @@ class Material
             fadeDistance: $this->fadeDistance,
             rimLight: $this->rimLight,
             hairShine: $this->hairShine,
+            refraction: $this->refraction,
+            frost: $this->frost,
+            particleTint: $this->particleTint,
+            flipbook: $this->flipbook,
+            flipbookFps: $this->flipbookFps,
+            streakFade: $this->streakFade,
         );
     }
 

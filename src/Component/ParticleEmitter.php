@@ -80,6 +80,63 @@ class ParticleEmitter extends AbstractComponent
     #[Property]
     public Color $endColor;
 
+    /**
+     * Colour and alpha over the lifetime (shader plan 7.1): the particle's
+     * material (Material::$particleTint) is multiplied by startColor -> endColor,
+     * or by $colorGradient when that is set. Off = the material colour alone.
+     */
+    #[Property]
+    public bool $colorOverLife = false;
+
+    /**
+     * Up to four stops [t 0..1, Color] (alpha included) instead of start/end:
+     * fire that glows white, turns orange and fades to grey smoke.
+     *
+     * @var list<array{0: float, 1: Color}>
+     */
+    public array $colorGradient = [];
+
+    /**
+     * Curl noise (shader plan 7.1): a divergence-free swirl field pushes the
+     * particles, m/s at full strength - smoke curls, sparks wander, snow drifts.
+     * Same field on the CPU and in the GPU kernel.
+     */
+    #[Property]
+    public float $curlNoise = 0.0;
+
+    /** Size of the swirls: the field's frequency per metre. */
+    #[Property]
+    public float $curlScale = 0.6;
+
+    /**
+     * Collision (shader plan 7.1): ground height under a point, fn(float $x,
+     * float $z): float. Particles that fall below it bounce ($bounce keeps that
+     * share of the normal speed) and slide. Runs the emitter on the CPU.
+     *
+     * @var (\Closure(float, float): float)|null
+     */
+    public ?\Closure $groundHeight = null;
+
+    #[Property]
+    public float $bounce = 0.3;
+
+    /**
+     * Particle lights (shader plan 7.1): the $lightCount particles nearest the
+     * camera light their surroundings - embers, sparks, fireflies. Intensity 0 =
+     * off; the colour follows the colour over life when that is on. Runs the
+     * emitter on the CPU.
+     */
+    #[Property]
+    public float $lightIntensity = 0.0;
+
+    #[Property]
+    public float $lightRadius = 3.0;
+
+    #[Property]
+    public int $lightCount = 4;
+
+    public ?Color $lightColor = null;
+
     /** Hard cap on simultaneously alive particles. */
     #[Property]
     public int $maxParticles;

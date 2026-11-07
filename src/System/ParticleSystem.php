@@ -11,6 +11,8 @@ use PHPolygon\ECS\AbstractSystem;
 use PHPolygon\ECS\World;
 use PHPolygon\Geometry\MeshRegistry;
 use PHPolygon\Math\Vec3;
+use PHPolygon\Rendering\Color;
+use PHPolygon\Rendering\Command\AddPointLight;
 use PHPolygon\Rendering\Command\DrawMeshInstanced;
 use PHPolygon\Rendering\Command\SetCamera;
 use PHPolygon\Rendering\Frustum;
@@ -232,6 +234,7 @@ class ParticleSystem extends AbstractSystem
             $startSize = $emitter->startSize;
             $endSize   = $emitter->endSize;
             $mode      = $emitter->renderMode->code();
+            $stops     = ParticleColor::stops($emitter);
             $stretch   = $emitter->stretch;
             $hasCam = $cameraPos !== null;
             $cx = $hasCam ? $cameraPos->x : 0.0;
@@ -255,6 +258,12 @@ class ParticleSystem extends AbstractSystem
                     $cx, $cy, $cz,
                     $hasCam,
                 );
+                if ($stops !== []) {
+                    // The colour rides in the instance parameters (m[0].w).
+                    $matrices[$i * 16 + 3] = ParticleColor::packedAt($stops, $t);
+                }
+                // Life fraction in m[1].w: flipbook frames (shader plan 7.1).
+                $matrices[$i * 16 + 7] = $t;
                 $i++;
             }
 
@@ -264,6 +273,35 @@ class ParticleSystem extends AbstractSystem
                 flatMatrices: $matrices,
                 instanceCount: $count,
             ));
+            $this->emitParticleLights($emitter, $cameraPos);
+        }
+    }
+
+    /**
+     * Particle lights (shader plan 7.1): point lights at the lightCount particles
+     * nearest the camera, fading in at birth and out at death.
+     */
+    private function emitParticleLights(ParticleEmitter $emitter, ?Vec3 $cameraPos): void
+    {
+        if ($emitter->lightIntensity <= 0.0 || $emitter->lightCount <= 0 || $emitter->particles === []) {
+            return;
+        }
+        $ps = $emitter->particles;
+        if ($cameraPos !== null) {
+            $cx = $cameraPos->x; $cy = $cameraPos->y; $cz = $cameraPos->z;
+            usort($ps, static fn (array $a, array $b): int => (($a[0] - $cx) ** 2 + ($a[1] - $cy) ** 2 + ($a[2] - $cz) ** 2) <=> (($b[0] - $cx) ** 2 + ($b[1] - $cy) ** 2 + ($b[2] - $cz) ** 2));
+        }
+        $stops = ParticleColor::stops($emitter);
+        $base = $emitter->lightColor ?? new Color(1.0, 0.7, 0.4);
+        foreach (array_slice($ps, 0, $emitter->lightCount) as $p) {
+            $t = $p[6] / max($p[7], 1e-4);
+            $fade = min(1.0, $t * 8.0) * min(1.0, (1.0 - $t) * 4.0);
+            $col = $base;
+            if ($stops !== []) {
+                [$r, $g, $b] = ParticleColor::unpack(ParticleColor::packedAt($stops, $t));
+                $col = new Color($base->r * $r, $base->g * $g, $base->b * $b);
+            }
+            $this->commandList->add(new AddPointLight(new Vec3($p[0], $p[1], $p[2]), $col, $emitter->lightIntensity * $fade, $emitter->lightRadius));
         }
     }
 
@@ -419,6 +457,8 @@ class ParticleSystem extends AbstractSystem
         if ($this->ctx === null
             || !$this->gpuSimulation
             || $emitter->simulation !== ParticleSimulation::Auto
+            || $emitter->groundHeight !== null
+            || $emitter->lightIntensity > 0.0
             || $emitter->maxParticles <= 0
             || isset($this->gpuFailed[$emitter])
         ) {
@@ -555,6 +595,10 @@ class ParticleSystem extends AbstractSystem
         $gx = $emitter->gravity->x;
         $gy = $emitter->gravity->y;
         $gz = $emitter->gravity->z;
+        $curl = $emitter->curlNoise;
+        $cs = $emitter->curlScale;
+        $ground = $emitter->groundHeight;
+        $bounce = $emitter->bounce;
         $alive = [];
         foreach ($emitter->particles as $p) {
             $newAge = $p[6] + $dt;
@@ -562,8 +606,29 @@ class ParticleSystem extends AbstractSystem
             $vx = $p[3] + $gx * $dt;
             $vy = $p[4] + $gy * $dt;
             $vz = $p[5] + $gz * $dt;
+            if ($curl != 0.0) {
+                // Curl of A = (sin(s y + 1.3), sin(s z + 2.1), sin(s x + 0.7)) / s:
+                // divergence-free, the same field as the GPU kernel.
+                $vx -= cos($cs * $p[2] + 2.1) * $curl * $dt;
+                $vy -= cos($cs * $p[0] + 0.7) * $curl * $dt;
+                $vz -= cos($cs * $p[1] + 1.3) * $curl * $dt;
+            }
+            $nx = $p[0] + $vx * $dt;
+            $ny = $p[1] + $vy * $dt;
+            $nz = $p[2] + $vz * $dt;
+            if ($ground !== null) {
+                $gh = (float) $ground($nx, $nz);
+                if ($ny < $gh) {
+                    $ny = $gh;
+                    if ($vy < 0.0) {
+                        $vy = -$vy * $bounce;
+                        $vx *= 0.8;
+                        $vz *= 0.8;
+                    }
+                }
+            }
             $alive[] = [
-                $p[0] + $vx * $dt, $p[1] + $vy * $dt, $p[2] + $vz * $dt,
+                $nx, $ny, $nz,
                 $vx, $vy, $vz,
                 $newAge, $p[7],
             ];

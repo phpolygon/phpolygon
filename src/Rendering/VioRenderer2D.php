@@ -8,6 +8,7 @@ use PHPolygon\Math\Mat3;
 use PHPolygon\Math\Rect;
 use PHPolygon\Math\Vec2;
 use PHPolygon\Rendering\Accessibility\ColorVisionFilter;
+use PHPolygon\Rendering\Effect2D\BuiltinEffects2D;
 use PHPolygon\Rendering\Effect2D\Effect2D;
 use PHPolygon\Rendering\Effect2D\Effect2DRegistry;
 use PHPolygon\Rendering\Effect2D\EffectRenderer2DInterface;
@@ -878,6 +879,20 @@ class VioRenderer2D implements Renderer2DInterface, EffectRenderer2DInterface, A
      * what was drawn before it). A state shown by colour belongs in a drawn shape or text,
      * or in the game's own art for each mode.
      */
+    /**
+     * Draw a GPU image the engine made (a minimap, a render target's texture) at
+     * x, y, w, h; srcW / srcH = its pixel size (shader plan 8.1).
+     */
+    public function drawGpuImage(VioTexture $texture, float $srcW, float $srcH, float $x, float $y, float $w, float $h, float $opacity = 1.0): void
+    {
+        vio_sprite($this->ctx, $texture, [
+            'x' => $x, 'y' => $y, 'width' => $w, 'height' => $h,
+            'src_x' => 0.0, 'src_y' => 0.0, 'src_w' => $srcW, 'src_h' => $srcH,
+            'color' => ((((int) (max(0.0, min(1.0, $opacity)) * $this->globalAlpha * 255)) & 0xFF) << 24) | 0xFFFFFF,
+            'z' => $this->nextZ(),
+        ]);
+    }
+
     public function drawSprite(Texture $texture, ?Rect $srcRegion, float $x, float $y, float $w, float $h, float $opacity = 1.0): void
     {
         $vioTex = $this->getVioTexture($texture);
@@ -1621,7 +1636,7 @@ class VioRenderer2D implements Renderer2DInterface, EffectRenderer2DInterface, A
         if ($target === null) {
             return false;
         }
-        $this->effectJobs[] = [$effect, $target[0], $pw, $ph, $parameters, $textures, [$pad / $qw, $pad / $qh, ($pad + $w) / $qw, ($pad + $h) / $qh]];
+        $this->effectJobs[] = [$effect, $target[0], $pw, $ph, $parameters, $textures, [$pad / $qw, $pad / $qh, ($pad + $w) / $qw, ($pad + $h) / $qh], [$x - $pad, $y - $pad, $qw, $qh]];
         // The region of the target the effect draws into: row 0 is the top row of
         // the image on every backend (the quad's v follows the target convention).
         vio_sprite($this->ctx, $target[1], [
@@ -1639,6 +1654,33 @@ class VioRenderer2D implements Renderer2DInterface, EffectRenderer2DInterface, A
         ]);
 
         return true;
+    }
+
+    /**
+     * Bind the last 3D image to a backdrop sampler and say where the effect lies in it:
+     * u_backdrop_rect (uv of the padded rectangle, row 0 at the top on every backend),
+     * u_backdrop_hdr / u_backdrop_exposure for the tonemap the effect applies.
+     *
+     * @param array{0: float, 1: float, 2: float, 3: float} $screen x, y, w, h in 2D units
+     */
+    private function bindBackdrop(int $slot, array $screen): void
+    {
+        $b = VioRenderer3D::backdrop();
+        $texture = $b['texture'] ?? ($this->effectWhite ??= (vio_texture($this->ctx, ['data' => "\xff\xff\xff\xff", 'width' => 1, 'height' => 1]) ?: null));
+        if ($texture === null) {
+            return;
+        }
+        vio_set_uniform($this->ctx, BuiltinEffects2D::BACKDROP_SAMPLER, $slot);
+        vio_bind_texture($this->ctx, $texture, $slot);
+        $sw = max(1.0, (float) $this->getWidth());
+        $sh = max(1.0, (float) $this->getHeight());
+        [$x, $y, $w, $h] = $screen;
+        $top = BackendConventions::forBackend(vio_backend_name($this->ctx))->isOpenGL()
+            ? [$x / $sw, 1.0 - $y / $sh, $w / $sw, -$h / $sh]
+            : [$x / $sw, $y / $sh, $w / $sw, $h / $sh];
+        vio_set_uniform($this->ctx, 'u_backdrop_rect', $top);
+        vio_set_uniform($this->ctx, 'u_backdrop_hdr', ($b['hdr'] ?? false) ? 1.0 : 0.0);
+        vio_set_uniform($this->ctx, 'u_backdrop_exposure', $b['exposure'] ?? 1.0);
     }
 
     /** Whether an effect draws now: settings, reduced motion, shader quality, then its gates. */
@@ -1771,7 +1813,7 @@ class VioRenderer2D implements Renderer2DInterface, EffectRenderer2DInterface, A
     {
         PerfProfiler::begin('render2d.effects');
         $quad = $this->effectQuad;
-        foreach ($this->effectJobs as [$effect, $target, $w, $h, $parameters, $textures, $rect]) {
+        foreach ($this->effectJobs as [$effect, $target, $w, $h, $parameters, $textures, $rect, $screen]) {
             $pipeline = $this->effectPipelines[$effect->name] ?? null;
             if ($pipeline === null || $quad === null) {
                 continue;
@@ -1781,6 +1823,11 @@ class VioRenderer2D implements Renderer2DInterface, EffectRenderer2DInterface, A
             vio_viewport($this->ctx, 0, 0, $w, $h);
             vio_bind_pipeline($this->ctx, $pipeline);
             foreach ($effect->samplers as $slot => $sampler) {
+                if ($sampler === BuiltinEffects2D::BACKDROP_SAMPLER && !isset($textures[$sampler])) {
+                    // The last 3D frame behind the effect (shader plan 8.1).
+                    $this->bindBackdrop($slot, $screen);
+                    continue;
+                }
                 $texture = isset($textures[$sampler]) ? $this->getVioTexture($textures[$sampler]) : null;
                 // A declared sampler is always bound: an unbound one reads an empty SRV on D3D12.
                 $texture ??= $this->effectWhite ??= (vio_texture($this->ctx, ['data' => "\xff\xff\xff\xff", 'width' => 1, 'height' => 1]) ?: null);

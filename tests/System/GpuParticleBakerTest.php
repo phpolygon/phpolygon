@@ -85,6 +85,7 @@ class GpuParticleBakerTest extends TestCase
         for ($i = 0; $i < $capacity; $i++) {
             $cpu = $this->cpuReference($i < $n ? $seed[$i] : null, $emitter, $cam, $dt);
             for ($k = 0; $k < 16; $k++) {
+                if ($k === 3 || $k === 7 || $k === 11) continue;   // instance parameters (colour, life), not the matrix
                 $e = abs($cpu[$k] - $gpu[$i * 16 + $k]);
                 if ($e > $maxErr) {
                     $maxErr = $e;
@@ -321,6 +322,7 @@ class GpuParticleBakerTest extends TestCase
                 ParticleOrientation::write($cpu, 0, $mode->code(), $px, $py, $pz, $vx, $vy, $vz, $size, $emitter->stretch, $cam->x, $cam->y, $cam->z, true);
             }
             for ($k = 0; $k < 16; $k++) {
+                if ($k === 3 || $k === 7 || $k === 11) continue;   // instance parameters (colour, life), not the matrix
                 $maxErr = max($maxErr, abs($cpu[$k] - $gpu[$i * 16 + $k]));
             }
         }
@@ -352,6 +354,7 @@ class GpuParticleBakerTest extends TestCase
             $cpu = array_fill(0, 16, 0.0);
             ParticleOrientation::write($cpu, 0, $mode->code(), $p[0], $p[1], $p[2], $p[3], $p[4], $p[5], 0.1, 0.05, $cam->x, $cam->y, $cam->z, true);
             for ($k = 0; $k < 16; $k++) {
+                if ($k === 3 || $k === 7 || $k === 11) continue;   // instance parameters (colour, life), not the matrix
                 $maxErr = max($maxErr, abs($cpu[$k] - $gpu[$i * 16 + $k]));
             }
         }

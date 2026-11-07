@@ -208,6 +208,17 @@ uniform vec3 u_material_look;
 uniform vec2 u_fade_range;
 // Figure looks (shader plan 6.2): x = rim light, y = hair shine.
 uniform vec2 u_figure_look;
+// Refraction (Material::$refraction, $frost): x = strength, y = frost.
+uniform vec2 u_refract;
+// Particle colour over life (shader plan 7.1): v_instance_params.x packs RGBA6.
+uniform float u_particle_tint;
+// Flipbook (shader plan 7.1): columns, rows, fps; w = streak fade.
+uniform vec4 u_flipbook;
+#ifdef PHPOLYGON_SCENE_COLOR
+// Copy of the opaque scene colour (more than 16 texture units only).
+uniform sampler2D u_scene_color;
+uniform float     u_scene_color_ready;
+#endif
 // Wind for fragment looks (shader plan 6.1): xz direction, intensity.
 uniform vec3 u_frag_wind;
 uniform vec4 u_decals[24];
@@ -1724,9 +1735,23 @@ void main() {
 #else
         float mipScale = exp2(u_material_mip_bias);
 #endif
+        vec2 fbUv = patternUv;
+        vec2 fbScale = vec2(1.0);
+        if (u_flipbook.x > 0.5 && u_flipbook.y > 0.5) {
+            // Flipbook (shader plan 7.1): the frame of the particle's age, or by time.
+            float frames = u_flipbook.x * u_flipbook.y;
+            float life = fract(u_frag_time * u_flipbook.z / frames);
+#ifdef PHPOLYGON_INSTANCE_PARAMS
+            if (v_instance_params.y > 0.0) life = clamp(v_instance_params.y, 0.0, 0.9999);
+#endif
+            float frame = floor(life * frames);
+            vec2 cell = vec2(mod(frame, u_flipbook.x), floor(frame / u_flipbook.x));
+            fbScale = 1.0 / u_flipbook.xy;
+            fbUv = (fract(patternUv) + cell) * fbScale;
+        }
         texAlbedo *= u_triplanar > 0.0
             ? sampleAlbedoTriplanar(v_worldPos, N, u_triplanar)
-            : sampleAlbedoTexture(patternUv, uvDx * mipScale, uvDy * mipScale);
+            : sampleAlbedoTexture(fbUv, uvDx * mipScale * fbScale, uvDy * mipScale * fbScale);
     }
 
     // ---- Material selection ----
@@ -1987,11 +2012,31 @@ void main() {
         }
     }
 
+    // Particle colour over life (shader plan 7.1): the packed RGBA6 of the
+    // instance tints albedo, emission (below) and alpha.
+    vec3 particleRgb = vec3(1.0);
+#ifdef PHPOLYGON_INSTANCE_PARAMS
+    if (u_particle_tint > 0.5 && v_instance_params.x > 0.0) {
+        float pv = floor(v_instance_params.x + 0.5);
+        vec4 pc = vec4(mod(pv, 64.0), mod(floor(pv / 64.0), 64.0), mod(floor(pv / 4096.0), 64.0), floor(pv / 262144.0)) / 63.0;
+        particleRgb = pc.rgb;
+        albedo *= pc.rgb;
+        alpha *= pc.a;
+    }
+#endif
+    // Streaks fade towards their tail (Material::$streakFade, shader plan 7.1).
+    if (u_flipbook.w > 0.5) {
+        alpha *= smoothstep(0.0, 0.85, v_uv.y);
+    }
     // Dithered distance fade (shader plan 6.1): dissolve instead of popping.
-    if (u_fade_range.y > 0.0) {
-        float fadeT = smoothstep(u_fade_range.x, u_fade_range.y, length(u_camera_pos - v_worldPos));
+    // A negative range fades IN with the complementary dither (LOD cross-fade,
+    // shader plan 9.1): the outgoing and the incoming level never cover the
+    // same pixel, and together they cover all of them.
+    if (u_fade_range.y != 0.0) {
+        float fadeT = smoothstep(abs(u_fade_range.x), abs(u_fade_range.y), length(u_camera_pos - v_worldPos));
         float dith = fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))));
-        if (fadeT > dith) {
+        bool keep = u_fade_range.y > 0.0 ? fadeT <= dith : fadeT > dith;
+        if (!keep) {
             discard;
         }
     }
@@ -2486,7 +2531,7 @@ void main() {
 #endif // PHPOLYGON_OMIT_CLEARCOAT
 
     // Emissive looks (shader plan 5.4).
-    vec3 emission = u_emission;
+    vec3 emission = u_emission * particleRgb;
     if (u_emissive_look.x > 0.0 && dot(emission, vec3(1.0)) > 0.0) {
         // Windows: a grid on the wall plane (2.2 m x 2.8 m), a share of them lit
         // in a warm or cool tone; behind each a room - back wall bright, side
@@ -2530,7 +2575,50 @@ void main() {
 #endif
         // Close to the eye a puff thins out instead of filling the view.
         alpha *= smoothstep(0.4, 2.0, length(u_camera_pos - v_worldPos));
+        // Smoke lighting (shader plan 7.1): a puff is darker on the side away from the
+        // sun and glows where the sun shines through it towards the eye (forward
+        // scattering, strongest at the thin rim).
+        if (u_dir_light_count > 0) {
+            vec3 sL = normalize(-u_dir_lights[0].direction);
+            float rimT = smoothstep(0.1, 0.5, length(v_uv - 0.5));
+            float facing = 0.5 + 0.5 * dot(sL, V);
+            float through = pow(max(dot(-V, sL), 0.0), 6.0) * (0.35 + 0.65 * rimT);
+            float smokeLit = mix(0.62, 1.08, facing) + through * 0.9;
+            sunAcc *= smokeLit;
+            ambientAcc *= mix(0.8, 1.05, facing);
+        }
     }
+
+    // Refraction (Material::$refraction): what lies behind, shifted along the
+    // screen-parallel part of the normal and blurred for frosted glass, tinted by
+    // the pane; the pane's own light covers it by its alpha, and the result is
+    // opaque - the surface does the blending itself.
+    vec3 refrBehind = vec3(0.0);
+    float refrOn = 0.0;
+#ifdef PHPOLYGON_SCENE_COLOR
+    {
+        vec3 rdx = dFdx(v_worldPos);
+        vec3 rdy = dFdy(v_worldPos);
+        vec2 rdir = vec2(dot(N, rdx / max(length(rdx), 1e-6)), dot(N, rdy / max(length(rdy), 1e-6)));
+        if (u_refract.x > 0.0 && u_scene_color_ready > 0.5) {
+            vec2 suv = gl_FragCoord.xy / u_viewport_size;
+            vec2 ruv = clamp(suv + rdir * (0.035 * u_refract.x), vec2(0.001), vec2(0.999));
+            float fr = u_refract.y * 0.012;
+            vec3 acc = textureLod(u_scene_color, ruv, 0.0).rgb;
+            if (fr > 0.0) {
+                vec2 asp = vec2(u_viewport_size.y / max(u_viewport_size.x, 1.0), 1.0);
+                for (int k = 0; k < 8; k++) {
+                    float a = float(k) * 0.785398 + 0.39;
+                    acc += textureLod(u_scene_color, clamp(ruv + vec2(cos(a), sin(a)) * asp * fr, vec2(0.001), vec2(0.999)), 0.0).rgb;
+                    acc += textureLod(u_scene_color, clamp(ruv + vec2(cos(a), sin(a)) * asp * fr * 0.5, vec2(0.001), vec2(0.999)), 0.0).rgb;
+                }
+                acc /= 17.0;
+            }
+            refrBehind = acc * mix(vec3(1.0), albedo, 0.35);
+            refrOn = 1.0;
+        }
+    }
+#endif
 
 #ifdef PHPOLYGON_MRT
     // mix(sum, fog, t) is affine: every part scales by (1 - t), the fog colour is
@@ -2541,6 +2629,12 @@ void main() {
     localAcc    = localAcc * (1.0 - fogT) + sceneFogV.rgb * fogT;
     localAcc   += volumetricScatter(v_worldPos);
     localAcc   += lightInscatter(v_worldPos) * (1.0 - 0.5 * fogT);
+    if (refrOn > 0.0) {
+        sunAcc *= alpha;
+        ambientAcc *= alpha;
+        localAcc = localAcc * alpha + refrBehind * (1.0 - alpha);
+        alpha = 1.0;
+    }
     vec3 pcA = applyPostColor(vec3(0.0));
     vec3 pcS = applyPostColor(vec3(1.0)) - pcA;
     float coverage = mrtCoverage(alpha);
@@ -2552,6 +2646,10 @@ void main() {
     color = mix(color, sceneFogV.rgb, fogT);
     color += volumetricScatter(v_worldPos);
     color += lightInscatter(v_worldPos) * (1.0 - 0.5 * fogT);
+    if (refrOn > 0.0) {
+        color = mix(refrBehind, color, alpha);
+        alpha = 1.0;
+    }
     color = applyPostColor(color);
     frag_color = outputColor(color, alpha);
 #endif

@@ -49,6 +49,9 @@ class FoliageInstanceSystem extends AbstractSystem
     /** Fraction of maxDistance where the dithered fade-out begins (shader plan 6.1). */
     public const float FADE_START = 0.82;
 
+    /** Fraction of a LOD boundary where the cross-fade to the next level begins (shader plan 9.1). */
+    public const float LOD_FADE_START = 0.9;
+
     /**
      * @var array<int, array{
      *     version: int,
@@ -170,6 +173,15 @@ class FoliageInstanceSystem extends AbstractSystem
                 $shadow = ($lod <= 1 && $d < $shadowDist) ? 1 : 0;
                 // The last stretch before maxDistance dissolves instead of popping.
                 $fading = $max > 0.0 && $d > $max * self::FADE_START ? 1 : 0;
+                // LOD cross-fade (shader plan 9.1): just before a level boundary the
+                // instance draws in both levels, the near one dissolving (kind 2),
+                // the far one appearing with the complementary dither (kind 3).
+                $boundary = $lod === 0 ? $lod1 : ($lod === 1 ? $lod2 : ($lod === 2 ? $imp : 0.0));
+                if ($fading === 0 && $boundary > 0.0 && $d > $boundary * self::LOD_FADE_START) {
+                    $groups[2 * 100000 + $st['stage'][$i] * 1000 + $lod * 100 + $st['tint'][$i] * 2 + $shadow][] = $i;
+                    $groups[3 * 100000 + $st['stage'][$i] * 1000 + ($lod + 1) * 100 + $st['tint'][$i] * 2 + 0][] = $i;
+                    continue;
+                }
                 $groups[$fading * 100000 + $st['stage'][$i] * 1000 + $lod * 100 + $st['tint'][$i] * 2 + $shadow][] = $i;
             }
         }
@@ -180,7 +192,8 @@ class FoliageInstanceSystem extends AbstractSystem
         /** @var array<int, list<int>> $sharedWood */
         $sharedWood = [];
         foreach ($groups as $gkey => $members) {
-            $fading = $gkey >= 100000;
+            $fadeKind = intdiv($gkey, 100000);
+            $fading = $fadeKind !== 0;
             $gkey %= 100000;
             $stage = GrowthStage::from(intdiv($gkey, 1000));
             $lod = PlantLod::from(intdiv($gkey % 1000, 100));
@@ -204,8 +217,11 @@ class FoliageInstanceSystem extends AbstractSystem
                 if ($part === PlantPart::Accent && $variant->accentGlow !== null) {
                     $material = self::glowMaterial($material, $variant->accentGlow, $glowLevel);
                 }
-                if ($fading) {
+                if ($fadeKind === 1) {
                     $material = self::fadeMaterial($material, $max);
+                } elseif ($fadeKind === 2 || $fadeKind === 3) {
+                    $b = match ($lod->value - ($fadeKind === 3 ? 1 : 0)) { 0 => $lod1, 1 => $lod2, default => $imp };
+                    $material = self::lodFadeMaterial($material, $b, $fadeKind === 3);
                 }
                 $source = $part === PlantPart::Wood ? $st['base'] : $st['leaf'];
                 $flat = [];
@@ -218,7 +234,7 @@ class FoliageInstanceSystem extends AbstractSystem
                     $flat,
                     count($members),
                     isStatic: true,
-                    staticKey: "foliage:{$oid}:" . ($fading ? 'f' : '') . "{$gkey}:{$part->value}",
+                    staticKey: "foliage:{$oid}:" . ($fading ? "f{$fadeKind}" : '') . "{$gkey}:{$part->value}",
                     castShadows: $shadow,
                 );
             }
@@ -359,6 +375,21 @@ class FoliageInstanceSystem extends AbstractSystem
      * The dithered-fade copy of a material for instances near maxDistance
      * (shader plan 6.1), registered once per material and distance.
      */
+    /** The cross-fade copy of a material at a LOD boundary: dissolving, or appearing ($in). */
+    public static function lodFadeMaterial(string $base, float $boundary, bool $in): string
+    {
+        $id = sprintf('%s#lod%s%d', $base, $in ? 'in' : 'out', (int) round($boundary * 10));
+        if (!MaterialRegistry::has($id)) {
+            $material = MaterialRegistry::get($base);
+            if ($material === null) {
+                return $base;
+            }
+            $start = $boundary * self::LOD_FADE_START;
+            MaterialRegistry::register($id, $in ? $material->withFadeInDistance($start, $boundary) : $material->withFadeDistance($start, $boundary));
+        }
+        return $id;
+    }
+
     public static function fadeMaterial(string $base, float $maxDistance): string
     {
         $id = sprintf('%s#fade%d', $base, (int) round($maxDistance));
