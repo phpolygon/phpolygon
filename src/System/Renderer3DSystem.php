@@ -216,11 +216,12 @@ class Renderer3DSystem extends AbstractSystem
         foreach ($world->query(Weather::class) as $entity) {
             $weather = $entity->get(Weather::class);
             if ($weather->snowIntensity > 0.1 && $weather->temperature < 2.0) {
-                $this->snowCover = min(1.0, $this->snowCover + $weather->snowIntensity * 0.008 * $dt);
+                $weather->snowCover = min(1.0, $weather->snowCover + $weather->snowIntensity * 0.008 * $dt);
             } else {
                 $meltRate = $weather->temperature > 5.0 ? 0.006 : 0.003;
-                $this->snowCover = max(0.0, $this->snowCover - $meltRate * $dt);
+                $weather->snowCover = max(0.0, $weather->snowCover - $meltRate * $dt);
             }
+            $this->snowCover = $weather->snowCover;
             break;
         }
     }

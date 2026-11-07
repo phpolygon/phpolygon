@@ -1594,6 +1594,7 @@ void main() {
     // Drops on wet leaves (shader plan 4.1): a wet plant darkens and turns glossy,
     // and small drops catch the sky light (outside interior volumes only).
     float leafDrops = 0.0;
+    float snowSparkle = 0.0;
     if (isPlant && u_rain_wetness > 0.0 && v_worldPos.y >= u_rain_dry_below && interiorMask(v_worldPos) <= 0.0) {
         float lw = clamp(u_rain_wetness, 0.0, 1.0);
         albedo *= 1.0 - 0.18 * lw;
@@ -1613,9 +1614,22 @@ void main() {
         float snowMask = smoothstep(0.3, 0.7, upFacing) * u_snow_cover;
         // Add noise for natural patchy edges
         snowMask *= 0.7 + noise(v_worldPos.xz * 2.0) * 0.3;
+        // Drifts (shader plan 4.1): the wind piles the snow in soft mounds where a
+        // slow noise is high; thin patches stay where it is low. The mounds tilt
+        // the normal (their slope from the noise gradient).
+        vec2 sp = v_worldPos.xz * 0.35;
+        float drift = noise(sp) * 0.7 + noise(sp * 2.7) * 0.3;
+        snowMask *= mix(0.55, 1.35, drift);
         snowMask = clamp(snowMask, 0.0, 1.0);
+        vec2 eps = vec2(0.15, 0.0);
+        float dx = (noise((v_worldPos.xz + eps.xy) * 0.35) - noise((v_worldPos.xz - eps.xy) * 0.35));
+        float dz = (noise((v_worldPos.xz + eps.yx) * 0.35) - noise((v_worldPos.xz - eps.yx) * 0.35));
+        N = normalize(mix(N, normalize(vec3(-dx * 3.0, 1.0, -dz * 3.0)), snowMask * u_snow_cover));
         albedo = mix(albedo, vec3(0.92, 0.93, 0.97), snowMask);
         roughness = mix(roughness, 0.8, snowMask); // snow is matte
+        // Crystals glint here and there in the cover.
+        float sh = hash31(floor(v_worldPos * 30.0));
+        snowSparkle = step(0.985, sh) * snowMask * (1.0 - smoothstep(6.0, 18.0, length(u_camera_pos - v_worldPos)));
     }
 #endif // PHPOLYGON_OMIT_SNOW
 
@@ -2000,6 +2014,7 @@ void main() {
     // Wet-leaf drops catch the sky (see above).
     localAcc += leafDrops * u_ambient_color * u_ambient_intensity * 0.9;
     localAcc += glassDrops * u_ambient_color * u_ambient_intensity * 0.6;
+    localAcc += snowSparkle * (u_ambient_color * u_ambient_intensity + u_dir_light_color * 0.5) * 1.2;
 
     vec4 sceneFogV = sceneFog(v_worldPos);
     float fogT = sceneFogV.a;

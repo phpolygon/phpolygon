@@ -62,6 +62,10 @@ class Weather extends AbstractComponent
     #[Hidden]
     public float $groundWetness = 0.0;
 
+    /** Snow lying on the ground 0..1, built up and melted by Renderer3DSystem (single writer). */
+    #[Hidden]
+    public float $snowCover = 0.0;
+
     /**
      * Below this world height no rain arrives (the sea level of a world with
      * underwater areas): no wet ground, no drops. Null = everywhere.
