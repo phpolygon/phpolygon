@@ -2271,6 +2271,166 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         vio_set_uniform($this->ctx, 'u_scene_color_ready', $this->sceneColorCopied ? 1.0 : 0.0);
     }
 
+    private bool $froxelThisFrame = false;
+    private ?VioRenderTarget $froxelInjectTarget = null;
+    private ?VioRenderTarget $froxelVolumeTarget = null;
+    /** @var list<float> the grid's inverse(projection * rotation-only view) */
+    private array $froxelInvVp = [];
+    /** @var list<float> */
+    private array $froxelForward = [0.0, 0.0, -1.0];
+    private float $froxelFar = 120.0;
+    private const FROXEL_ATLAS_W = 1280; // 8 tiles of 160 froxels
+    private const FROXEL_ATLAS_H = 720;  // 8 tiles of 90 froxels
+
+    /**
+     * Froxel fog (shader plan 4.2, GraphicsSettings::$froxelFog): inject the fog light
+     * of this frame into a 160 x 90 x 64 grid over the view frustum (an 8 x 8 atlas of
+     * depth slices) and integrate it along the view rays. False when it does not run -
+     * then mesh3d's per-pixel march stays on.
+     *
+     * @param list<SetDirectionalLight> $dirLights
+     * @param list<AddPointLight> $pointLights
+     */
+    private function renderFroxelVolume(array $dirLights, array $pointLights, float $fogFar): bool
+    {
+        $quad = $this->screenQuad;
+        $view = $this->currentViewMatrix;
+        $proj = $this->currentProjectionMatrix;
+        if (!$this->settings->volumetricFog || !$this->settings->froxelFog || $dirLights === [] || $quad === null
+            || $view === null || $proj === null || !isset($this->shaderCache['froxel_inject'], $this->shaderCache['froxel_integrate'])
+            || !isset($this->shaderCache['froxel_apply']) || !($this->mrtThisFrame || $this->sceneTargetIsHdr()) || $this->sceneDepthTexture() === null) {
+            return false;
+        }
+        $this->froxelInjectTarget ??= vio_render_target($this->ctx, ['width' => self::FROXEL_ATLAS_W, 'height' => self::FROXEL_ATLAS_H, 'hdr' => true]) ?: null;
+        $this->froxelVolumeTarget ??= vio_render_target($this->ctx, ['width' => self::FROXEL_ATLAS_W, 'height' => self::FROXEL_ATLAS_H, 'hdr' => true]) ?: null;
+        if ($this->froxelInjectTarget === null || $this->froxelVolumeTarget === null) {
+            return false;
+        }
+        $vm = $view->toArray();
+        $rotView = new Mat4([
+            $vm[0], $vm[1], $vm[2], 0.0,
+            $vm[4], $vm[5], $vm[6], 0.0,
+            $vm[8], $vm[9], $vm[10], 0.0,
+            0.0, 0.0, 0.0, 1.0,
+        ]);
+        $this->froxelInvVp = $proj->multiply($rotView)->inverse()->toArray();
+        $this->froxelForward = [-$vm[2], -$vm[6], -$vm[10]];
+        $this->froxelFar = max(30.0, min(300.0, $fogFar));
+        $cam = $this->cameraPosition ?? new Vec3(0.0, 0.0, 0.0);
+        $sun = $dirLights[0];
+        $len = max(1.0e-6, $sun->direction->length());
+        // A quarter of the light: the forward lobe is strong, and the sun is far brighter than a lamp.
+        $scale = max(0.0, min(1.0, $sun->volumetricScale)) * $sun->intensity * M_PI * 0.25;
+
+        // 1. Inject.
+        vio_bind_render_target($this->ctx, $this->froxelInjectTarget);
+        vio_viewport($this->ctx, 0, 0, self::FROXEL_ATLAS_W, self::FROXEL_ATLAS_H);
+        $this->bindPostProcessPipeline('froxel_inject', true);
+        vio_set_uniform($this->ctx, 'u_froxel_inv_vp', $this->froxelInvVp);
+        vio_set_uniform($this->ctx, 'u_camera_pos', [$cam->x, $cam->y, $cam->z]);
+        vio_set_uniform($this->ctx, 'u_froxel_far', $this->froxelFar);
+        // Light haze: 0.012 / m at sea level (some 250 m of visibility), falling 0.08 / m.
+        vio_set_uniform($this->ctx, 'u_fog_density', 0.012);
+        vio_set_uniform($this->ctx, 'u_fog_falloff', 0.08);
+        vio_set_uniform($this->ctx, 'u_sun_dir', [-$sun->direction->x / $len, -$sun->direction->y / $len, -$sun->direction->z / $len]);
+        vio_set_uniform($this->ctx, 'u_sun_radiance', [$sun->color->r * $scale, $sun->color->g * $scale, $sun->color->b * $scale]);
+        $this->bindFroxelShadows();
+        $cx = $cam->x;
+        $cy = $cam->y;
+        $cz = $cam->z;
+        usort($pointLights, static function (AddPointLight $a, AddPointLight $b) use ($cx, $cy, $cz): int {
+            $da = ($a->position->x - $cx) ** 2 + ($a->position->y - $cy) ** 2 + ($a->position->z - $cz) ** 2;
+            $db = ($b->position->x - $cx) ** 2 + ($b->position->y - $cy) ** 2 + ($b->position->z - $cz) ** 2;
+            return $da <=> $db;
+        });
+        $lamps = array_slice($pointLights, 0, 8);
+        vio_set_uniform($this->ctx, 'u_lamp_count', count($lamps));
+        foreach ($lamps as $i => $l) {
+            $k = $l->intensity * M_PI;
+            vio_set_uniform($this->ctx, 'u_lamps[' . (2 * $i) . ']', [$l->position->x, $l->position->y, $l->position->z, $l->radius]);
+            vio_set_uniform($this->ctx, 'u_lamps[' . (2 * $i + 1) . ']', [$l->color->r * $k, $l->color->g * $k, $l->color->b * $k, 0.0]);
+        }
+        vio_draw($this->ctx, $quad);
+        vio_unbind_render_target($this->ctx);
+
+        // 2. Integrate along the view rays.
+        vio_bind_render_target($this->ctx, $this->froxelVolumeTarget);
+        vio_viewport($this->ctx, 0, 0, self::FROXEL_ATLAS_W, self::FROXEL_ATLAS_H);
+        $this->bindPostProcessPipeline('froxel_integrate', true);
+        vio_bind_texture($this->ctx, vio_render_target_texture($this->froxelInjectTarget), 0);
+        vio_set_uniform($this->ctx, 'u_froxel_inject', 0);
+        vio_set_uniform($this->ctx, 'u_froxel_far', $this->froxelFar);
+        vio_draw($this->ctx, $quad);
+        vio_unbind_render_target($this->ctx);
+        $this->gpuMark('froxel');
+        return true;
+    }
+
+    /** Whether the last frame drew its fog through the froxel volume (test/diagnostic hook). */
+    public function froxelFogActive(): bool
+    {
+        return $this->froxelThisFrame;
+    }
+
+    /** The sun's shadow cascades on units 0-2 of the inject pass (a 1x1 depth target without shadows). */
+    private function bindFroxelShadows(): void
+    {
+        $has = $this->cascadeShadowTargets !== [] && $this->cascadeLightSpaceMatrices !== [];
+        vio_set_uniform($this->ctx, 'u_has_shadow_map', $has ? 1 : 0);
+        vio_set_uniform($this->ctx, 'u_csm_count', count(self::CASCADE_ORTHO_SIZES));
+        $flipY = $this->conventions()->flipRenderTargetClipY();
+        foreach (self::CASCADE_ORTHO_SIZES as $cIdx => $orthoSize) {
+            $target = $this->cascadeShadowTargets[$cIdx] ?? null;
+            $matrix = $this->cascadeLightSpaceMatrices[$cIdx] ?? null;
+            if ($target === null || $matrix === null) {
+                $this->ensureDummyShadowTarget();
+                if ($this->dummyShadowTarget !== null) {
+                    vio_bind_texture($this->ctx, vio_render_target_texture($this->dummyShadowTarget), $cIdx);
+                }
+                vio_set_uniform($this->ctx, "u_csm_map_{$cIdx}", $cIdx);
+                continue;
+            }
+            $lsm = $matrix->toArray();
+            if ($flipY) {
+                $lsm[1] = -$lsm[1];
+                $lsm[5] = -$lsm[5];
+                $lsm[9] = -$lsm[9];
+                $lsm[13] = -$lsm[13];
+            }
+            vio_bind_texture($this->ctx, vio_render_target_texture($target), $cIdx);
+            vio_set_uniform($this->ctx, "u_csm_map_{$cIdx}", $cIdx);
+            vio_set_uniform($this->ctx, "u_csm_matrix_{$cIdx}", $lsm);
+            vio_set_uniform($this->ctx, "u_csm_far_{$cIdx}", $orthoSize);
+        }
+    }
+
+    /** Add the froxel fog light over the opaque scene and the sky (additive, into the scene target). */
+    private function applyFroxelFog(?VioRenderTarget $hdrTarget, int $w, int $h): void
+    {
+        if ($this->froxelVolumeTarget === null || $this->screenQuad === null) {
+            return;
+        }
+        $this->captureSceneDepth($hdrTarget, $w, $h);
+        if (!$this->sceneDepthCopied || $this->sceneDepthCopy === null) {
+            return;
+        }
+        $mrt = $this->mrtThisFrame;
+        $this->bindSkyPipeline('froxel_apply', VIO_BLEND_ADDITIVE, true, $mrt);
+        vio_set_uniform($this->ctx, 'u_sky_inv_vp', $this->froxelInvVp);
+        vio_set_uniform($this->ctx, 'u_camera_forward', $this->froxelForward);
+        vio_set_uniform($this->ctx, 'u_froxel_far', $this->froxelFar);
+        vio_set_uniform($this->ctx, 'u_viewport_size', [(float) $w, (float) $h]);
+        vio_bind_texture($this->ctx, vio_render_target_texture($this->froxelVolumeTarget), 0);
+        vio_set_uniform($this->ctx, 'u_froxel_volume', 0);
+        vio_bind_texture($this->ctx, vio_render_target_texture($this->sceneDepthCopy), 1);
+        vio_set_uniform($this->ctx, 'u_scene_depth', 1);
+        vio_draw($this->ctx, $this->screenQuad);
+        // The mesh programs bound textures on these units: the transparent pass re-binds its own.
+        $this->variantUniformsUploaded = [];
+        $this->frameUniformsShaderId = null;
+        $this->gpuMark('froxel_apply');
+    }
+
     private function captureSceneDepth(?VioRenderTarget $hdrTarget, int $w, int $h): void
     {
         $this->sceneDepthCopied = false;
@@ -3871,6 +4031,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         // --- Cloud shadow map: the sun's transmittance through the clouds from above.
         $this->renderCloudShadowMap($dirLights);
 
+
         // --- Planar reflection: the opaque scene mirrored at the plane, into its
         // own target, before the scene target is bound (like the passes above).
         PerfProfiler::begin('render3d.submit.planar');
@@ -3912,6 +4073,10 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             // by the time the technique resumes.
             $this->temporalCamera->reset('paused');
         }
+
+        // --- Froxel fog volume (shader plan 4.2): after the MRT decision (it needs to
+        // know the scene target), before that target is bound.
+        $this->froxelThisFrame = $this->renderFroxelVolume($dirLights, $pointLights, $fogFar);
 
         if ($mrtTarget !== null) {
             // The AO passes run AFTER the geometry (renderAoFromMrt); until then
@@ -4054,6 +4219,9 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         $this->drawMeshletRun($meshletDraws, 'opaque');
         PerfProfiler::end();
         $this->gpuMark('opaque');
+        if ($this->froxelThisFrame) {
+            $this->applyFroxelFog($hdrTarget, $sceneViewportW, $sceneViewportH);
+        }
 
         // --- Pass 3: Transparent geometry ---
         PerfProfiler::begin('render3d.submit.transparent');
@@ -4305,6 +4473,15 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         $this->compileShaderFromFiles('sky_clouds',   'atmosphere.vert.glsl', 'sky_clouds.frag.glsl');
         $this->compileShaderFromFiles('sky_haze',     'atmosphere.vert.glsl', 'sky_haze.frag.glsl');
         $this->compileShaderFromFiles('sky_cloud_cache', 'atmosphere.vert.glsl', 'sky_cloud_cache.frag.glsl');
+        // Froxel fog (shader plan 4.2): a backend that cannot compile it keeps the per-pixel march.
+        try {
+            $this->compileShaderFromFiles('froxel_inject', 'postprocess.vert.glsl', 'froxel_inject.frag.glsl');
+            $this->compileShaderFromFiles('froxel_integrate', 'postprocess.vert.glsl', 'froxel_integrate.frag.glsl');
+            $this->compileShaderFromFiles('froxel_apply', 'atmosphere.vert.glsl', 'froxel_apply.frag.glsl');
+        } catch (\Throwable $e) {
+            unset($this->shaderCache['froxel_inject'], $this->shaderCache['froxel_integrate'], $this->shaderCache['froxel_apply']);
+            fwrite(STDERR, "[VioRenderer3D] froxel fog unavailable: {$e->getMessage()}\n");
+        }
 
         // Outline pass (DrawOutline): only where the backend has a stencil
         // buffer. A compile failure just leaves outlines off.
@@ -4338,6 +4515,14 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             } catch (\RuntimeException $e) {
                 $this->mrtSupported = false;
                 fwrite(STDERR, "[VioRenderer3D] MRT shaders unavailable, using the forward path: {$e->getMessage()}\n");
+            }
+        }
+        if ($this->mrtSupported && isset($this->shaderCache['froxel_apply'])) {
+            try {
+                $this->compileShaderFromFiles('froxel_apply_mrt', 'atmosphere.vert.glsl', 'froxel_apply.frag.glsl', true);
+            } catch (\Throwable $e) {
+                unset($this->shaderCache['froxel_apply']);
+                fwrite(STDERR, "[VioRenderer3D] froxel fog unavailable on the MRT path: {$e->getMessage()}\n");
             }
         }
 
@@ -9593,7 +9778,8 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         vio_set_uniform($this->ctx, 'u_grade_gain',        $grade['gain']);
         vio_set_uniform($this->ctx, 'u_grade_saturation', $grade['saturation']);
         vio_set_uniform($this->ctx, 'u_vignette_intensity', $this->settings->vignetteIntensity);
-        vio_set_uniform($this->ctx, 'u_volumetric_fog', $this->settings->volumetricFog ? 1 : 0);
+        // With the froxel volume this frame the per-pixel march steps aside (no double fog).
+        vio_set_uniform($this->ctx, 'u_volumetric_fog', $this->settings->volumetricFog && !$this->froxelThisFrame ? 1 : 0);
         vio_set_uniform($this->ctx, 'u_ssr_intensity', $this->settings->ssr->intensity());
         // Hand-off gate: when the real ray-marched SSR pass owns reflections this
         // frame, suppress the forward wetness surrogate so they don't double-apply
