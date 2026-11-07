@@ -320,6 +320,8 @@ class Engine
                 $config->vioDxcDir,
                 $config->offscreen,
                 $config->offscreenHardware,
+                // GPU choice of the graphics menu (GraphicsSettings::$gpu), like low latency at creation.
+                $this->graphics->settings()->gpu,
             );
         } else {
             $noApi = $config->is3D && in_array($config->renderBackend3D, ['vulkan', 'metal'], true);

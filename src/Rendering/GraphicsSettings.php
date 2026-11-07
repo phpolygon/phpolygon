@@ -162,6 +162,12 @@ final class GraphicsSettings
          * touch it. Saved only when it differs from the defaults.
          */
         public readonly AccessibilitySettings $accessibility = new AccessibilitySettings(),
+        /**
+         * The GPU to render on, by its name as {@see GpuAdapters::available()} lists it;
+         * '' = automatic (php-vio's choice, the discrete card first). Applied when the
+         * window opens, i.e. after a restart; a GPU that is gone falls back to automatic.
+         */
+        public readonly string $gpu = '',
     ) {
     }
 
@@ -224,6 +230,7 @@ final class GraphicsSettings
         ?GrassQuality $grassQuality = null,
         ?array $effects = null,
         ?AccessibilitySettings $accessibility = null,
+        ?string $gpu = null,
     ): self {
         $nextUpscaler = $upscaler ?? $this->upscaler;
         // Leaving a temporal upscaler re-clamps a sub-half render scale.
@@ -277,6 +284,7 @@ final class GraphicsSettings
             grassQuality: $grassQuality ?? $this->grassQuality,
             effects: $effects !== null ? [...$this->effects, ...$effects] : $this->effects,
             accessibility: $accessibility ?? $this->accessibility,
+            gpu: $gpu ?? $this->gpu,
         );
     }
 
@@ -337,6 +345,9 @@ final class GraphicsSettings
         if (!$this->accessibility->isDefault()) {
             $json['accessibility'] = $this->accessibility->toJson();
         }
+        if ($this->gpu !== '') {
+            $json['gpu'] = $this->gpu;
+        }
         return $json;
     }
 
@@ -394,6 +405,7 @@ final class GraphicsSettings
             grassQuality: self::enumFrom(GrassQuality::class, $data['grassQuality'] ?? null) ?? $defaults->grassQuality,
             effects: self::effectStates($data['effects'] ?? null),
             accessibility: AccessibilitySettings::fromJson($data['accessibility'] ?? null),
+            gpu: is_string($data['gpu'] ?? null) ? trim($data['gpu']) : '',
         );
     }
 

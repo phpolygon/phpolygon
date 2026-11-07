@@ -31,8 +31,10 @@ class VioMainWindow extends Window
         string $dxcDir = '',
         bool $offscreen = false,
         bool $offscreenHardware = true,
+        string $gpu = '',
     ) {
         parent::__construct($width, $height, $title, $vsync, $resizable);
+        $this->gpu = $gpu;
         $this->offscreen = $offscreen;
         $this->offscreenHardware = $offscreenHardware;
         $this->backend = $backend;
@@ -46,6 +48,9 @@ class VioMainWindow extends Window
     }
 
     /** vio_create 'shader_model' / 'dxc_dir' (EngineConfig::$vioShaderModel). */
+    /** GPU choice (GraphicsSettings::$gpu): part of an adapter name for vio_create 'adapter', '' = automatic. */
+    private string $gpu = '';
+
     private int $shaderModel = 0;
     private string $dxcDir = '';
 
@@ -131,6 +136,11 @@ class VioMainWindow extends Window
             $config['hdr_paper_white'] = $this->hdrPaperWhite;
             $config['hdr_composite'] = true;
         }
+        // GPU choice (php-vio 'adapter' option; older builds ignore it). openContext()
+        // falls back to the automatic choice when that GPU does not open.
+        if ($this->gpu !== '') {
+            $config['adapter'] = $this->gpu;
+        }
         // D3D12 shader model (php-vio >= 2.16): 6 = DXC / DXIL, honest fallback to FXC.
         if ($this->shaderModel > 0) {
             $config['shader_model'] = $this->shaderModel;
@@ -158,6 +168,14 @@ class VioMainWindow extends Window
         foreach ($candidates as $backend) {
             \PHPolygon\Engine::log('VioMainWindow: trying vio_create backend=' . $backend);
             $ctx = vio_create($backend, $config);
+            if ($ctx === false && isset($config['adapter'])) {
+                // The chosen GPU is gone (removed, disabled, other driver): render on
+                // the automatic choice rather than not at all.
+                \PHPolygon\Engine::log('VioMainWindow: GPU "' . $this->gpu . '" did not open on backend=' . $backend . ', using the automatic choice');
+                $auto = $config;
+                unset($auto['adapter']);
+                $ctx = vio_create($backend, $auto);
+            }
             if ($ctx === false && isset($config['headless_hardware'])) {
                 // No hardware adapter for an invisible surface (CI, a remote
                 // session): the software adapter still renders it.
@@ -184,7 +202,7 @@ class VioMainWindow extends Window
         $this->ctx = $ctx;
         $this->backend = $chosen;
         $this->initialized = true;
-        \PHPolygon\Engine::log('VioMainWindow: actual backend=' . vio_backend_name($ctx));
+        \PHPolygon\Engine::log('VioMainWindow: actual backend=' . vio_backend_name($ctx) . ', GPU=' . $this->gpuName());
 
         if ($input instanceof VioInput) {
             $input->setContext($ctx);
@@ -417,6 +435,15 @@ class VioMainWindow extends Window
         $this->destroy();
     }
 
+    /** Name of the GPU the context renders on ('' before the context opens or without php-vio's backend info). */
+    public function gpuName(): string
+    {
+        if (!$this->initialized || !function_exists('vio_backend_info')) {
+            return '';
+        }
+        $info = vio_backend_info($this->ctx);
+        return is_array($info) && is_string($info['device'] ?? null) ? $info['device'] : '';
+    }
 }
 
 // The former name, declared with the class: `instanceof VioWindow` in game code triggers no autoload,
