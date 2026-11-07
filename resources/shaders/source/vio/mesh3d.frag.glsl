@@ -127,6 +127,14 @@ uniform float u_ssr_intensity;
 // the only reflection cue and stays active. Mirrors u_ssao_enabled.
 uniform int   u_ssr_enabled;
 uniform int   u_volumetric_fog;
+// Splatted ground (Material::$splatLayers, shader plan 5.1): layer count (0 = off), the
+// world area the splat map (the albedo texture) covers, the blend's sharpness, and per
+// layer rgb + roughness and pattern code, pattern scale, height weight.
+uniform float u_splat_count;
+uniform vec4  u_splat_area;
+uniform float u_splat_sharpness;
+uniform vec4  u_splat_color[4];
+uniform vec4  u_splat_pattern[4];
 // Micro-shadows and bent normals (GraphicsSettings::$microShadows, shader plan 5.1): 0 or 1.
 uniform float u_micro_shadow;
 // 1 - DirectionalLight::$volumetricScale of the primary light: how much LESS that
@@ -1849,16 +1857,58 @@ void main() {
     vec3 posDy = dFdy(v_worldPos);
     vec2 uvDx = dFdx(v_uv);
     vec2 uvDy = dFdy(v_uv);
+    // Splatted ground: the albedo texture holds the layer weights over u_splat_area; each
+    // layer's pattern height lifts it in the blend (height blend), and the dominant layer
+    // lends its pattern to the relief below.
+    int nPattern = u_normal_pattern;
+    float nScale = u_normal_scale;
+    bool splatOn = u_splat_count > 0.5 && u_has_albedo_texture == 1;
+    vec3 splatAlbedo = u_albedo;
+    float splatRough = roughness;
+    if (splatOn) {
+        vec2 suv = (v_worldPos.xz - u_splat_area.xy) / u_splat_area.zw;
+        vec4 sw = albedoGrad(suv, dFdx(suv), dFdy(suv));
+        float weights[4] = float[4](sw.r, sw.g, sw.b, sw.a);
+        float lifted[4];
+        float top = -1.0e9;
+        for (int si = 0; si < 4; si++) {
+            float h = 0.5;
+#ifndef PHPOLYGON_OMIT_NORMAL_PATTERNS
+            int code = int(u_splat_pattern[si].x + 0.5);
+            if (code != 0) h = dispatchProceduralHeight(code, v_uv * u_splat_pattern[si].y);
+#endif
+            lifted[si] = float(si) < u_splat_count ? weights[si] + h * u_splat_pattern[si].z : -1.0e9;
+            top = max(top, lifted[si]);
+        }
+        float depth = 1.0 / max(u_splat_sharpness, 0.01);
+        float sum = 0.0;
+        vec3 col = vec3(0.0);
+        float rough = 0.0;
+        float best = -1.0;
+        int dominant = 0;
+        for (int si = 0; si < 4; si++) {
+            float b = max(lifted[si] - top + depth, 0.0);
+            sum += b;
+            col += u_splat_color[si].rgb * b;
+            rough += u_splat_color[si].a * b;
+            if (b > best) { best = b; dominant = si; }
+        }
+        splatAlbedo = col / max(sum, 1.0e-5);
+        splatRough = clamp(rough / max(sum, 1.0e-5), 0.04, 1.0);
+        nPattern = int(u_splat_pattern[dominant].x + 0.5);
+        nScale = u_splat_pattern[dominant].y;
+        roughness = splatRough;
+    }
     vec2 patternUv = v_uv;
 #ifndef PHPOLYGON_OMIT_NORMAL_PATTERNS
-    if (u_normal_pattern != 0 && u_parallax_depth > 0.0) {
+    if (nPattern != 0 && u_parallax_depth > 0.0) {
         patternUv = parallaxProceduralUv(Nv, V, v_uv, posDx, posDy, uvDx, uvDy,
-                                         u_normal_pattern, u_normal_scale, u_parallax_depth);
+                                         nPattern, nScale, u_parallax_depth);
     }
 #endif // PHPOLYGON_OMIT_NORMAL_PATTERNS
 
-    vec3 texAlbedo = u_albedo;
-    if (u_has_albedo_texture == 1) {
+    vec3 texAlbedo = splatOn ? splatAlbedo : u_albedo;
+    if (u_has_albedo_texture == 1 && !splatOn) {
 #ifdef PHPOLYGON_MOTION
         // Temporal upscaling reconstructs display-resolution detail: pick the
         // mip for the display, not the render resolution (2^bias scales the LOD).
@@ -1953,7 +2003,7 @@ void main() {
 #endif
 #ifndef PHPOLYGON_OMIT_NORMAL_PATTERNS
     N = perturbNormalProcedural(N, v_worldPos, v_uv, patternUv,
-                                u_normal_pattern, u_normal_scale,
+                                nPattern, nScale,
                                 u_normal_intensity);
 #endif // PHPOLYGON_OMIT_NORMAL_PATTERNS
 
@@ -1972,8 +2022,8 @@ void main() {
     // ambient terms take the full factor (through `ao` below), direct light half.
     float patternCavity = 1.0;
 #ifndef PHPOLYGON_OMIT_NORMAL_PATTERNS
-    if (u_normal_pattern != 0 && u_cavity > 0.0) {
-        float cavityHeight = dispatchProceduralHeight(u_normal_pattern, patternUv * u_normal_scale);
+    if (nPattern != 0 && u_cavity > 0.0) {
+        float cavityHeight = dispatchProceduralHeight(nPattern, patternUv * nScale);
         patternCavity = 1.0 - clamp(u_cavity, 0.0, 1.0) * (1.0 - cavityHeight);
         albedo *= mix(1.0, patternCavity, 0.5);
     }
@@ -2052,8 +2102,8 @@ void main() {
 
     // Brick variation (shader plan 5.2): each brick of the bricks pattern a little
     // lighter, darker or warmer than its neighbours; the mortar lines lighter.
-    if (u_normal_pattern == 1) {
-        vec2 bu = patternUv * u_normal_scale;
+    if (nPattern == 1) {
+        vec2 bu = patternUv * nScale;
         float brow = floor(bu.y);
         vec2 bcell = vec2(floor((bu.x + mod(brow, 2.0) * 0.25) / 0.5), brow);
         float bh = hash21(bcell + 4.1);
@@ -2108,7 +2158,7 @@ void main() {
                 albedo = mix(albedo, vec3(0.16, 0.24, 0.08), moss);
                 roughness = mix(roughness, 0.95, moss);
                 // Efflorescence: white bloom on bricks.
-                if (u_normal_pattern == 1) {
+                if (nPattern == 1) {
                     float bloom = a * smoothstep(0.6, 0.85, n2) * 0.5;
                     albedo = mix(albedo, vec3(0.86, 0.85, 0.82), bloom);
                 }

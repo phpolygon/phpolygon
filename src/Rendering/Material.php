@@ -436,6 +436,20 @@ class Material
          * registers; elsewhere the surface stays smooth.
          */
         public readonly ?string $normalTexture = null,
+        /**
+         * Splatted ground (shader plan 5.1): up to four {@see SplatLayer}s blended by a
+         * splat map - then $albedoTexture is that map, its RGBA the weights of layers
+         * 0-3 over $splatArea ([x, z, width, depth] in world metres). Each layer's
+         * pattern height lifts it in the blend; $splatSharpness sets how hard the
+         * layers meet (high = crisp, low = soft). The dominant layer's pattern shapes
+         * the relief. Empty = an ordinary material.
+         *
+         * @var list<SplatLayer>
+         */
+        public readonly array $splatLayers = [],
+        /** @var array{0: float, 1: float, 2: float, 3: float} */
+        public readonly array $splatArea = [0.0, 0.0, 100.0, 100.0],
+        public readonly float $splatSharpness = 6.0,
     ) {}
 
     /**

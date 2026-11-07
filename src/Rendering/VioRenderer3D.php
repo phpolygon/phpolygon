@@ -8446,6 +8446,9 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             'u_normal_intensity'    => $material->normalIntensity,
             'u_use_environment_map' => $material->useEnvironmentMap ? 1 : 0,
             'u_normal_pattern'      => NormalPattern::codeFor($material->normalPattern),
+            'u_splat_count'         => (float) min(4, count($material->splatLayers)),
+            'u_splat_area'          => [$material->splatArea[0], $material->splatArea[1], max(1.0e-3, $material->splatArea[2]), max(1.0e-3, $material->splatArea[3])],
+            'u_splat_sharpness'     => $material->splatSharpness,
             'u_normal_scale'        => $material->normalScale,
             'u_surface_pattern'     => SurfacePattern::codeFor($material->surfacePattern),
             'u_surface_scale'       => $material->surfaceScale,
@@ -8526,6 +8529,14 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         ];
 
         $this->setUniforms($u);
+        if ($material->splatLayers !== []) {
+            $layers = [];
+            foreach (array_slice($material->splatLayers, 0, 4) as $i => $layer) {
+                $layers["u_splat_color[{$i}]"] = [$layer->color->r, $layer->color->g, $layer->color->b, $layer->roughness];
+                $layers["u_splat_pattern[{$i}]"] = [(float) NormalPattern::codeFor($layer->pattern), $layer->patternScale, $layer->height, 0.0];
+            }
+            $this->setUniforms($layers);
+        }
     }
 
     /**
