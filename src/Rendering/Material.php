@@ -399,6 +399,12 @@ class Material
         public readonly float $furLength = 0.0,
         public readonly int $furShells = 12,
         public readonly float $furDensity = 120.0,
+        /**
+         * Strand hair (shader plan 10.2, {@see \PHPolygon\Geometry\HairMesh}): the mesh's
+         * normals are strand directions; shading uses the normal of a thin cylinder
+         * around the strand that faces the camera.
+         */
+        public readonly bool $hair = false,
     ) {}
 
     /**
@@ -700,6 +706,7 @@ class Material
             furLength: $this->furLength,
             furShells: $this->furShells,
             furDensity: $this->furDensity,
+            hair: $this->hair,
         );
     }
 

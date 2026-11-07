@@ -196,6 +196,7 @@ uniform vec4 u_fog_volumes[12];   // per volume: (centre, yaw), (half extents, d
 uniform float u_soft_particle;    // Material::$softParticle: soft puff, depth fade distance
 uniform float u_triplanar;        // Material::$triplanar: tiles per metre, 0 = mesh UVs
 uniform float u_alpha_cutoff;     // Material::$alphaCutoff: cut out below this albedo alpha, 0 = off
+uniform float u_hair;             // Material::$hair: v_normal is the strand direction
 uniform vec4 u_fur_shell;         // Material::$furLength: shell height 0..1, strands per UV unit, darkening at the skin, on
 // Decal volumes (shader plan 5.1, DecalSystem): per decal (centre, yaw),
 // (half extents, strength), (colour, kind 0 stain 1 soot 2 moss 3 cracks).
@@ -1772,6 +1773,15 @@ void main() {
             N = normalize(N - 2.0 * dot(N, tsNg) * tsNg);
         }
     }
+    // Strand hair (shader plan 10.2): the normal holds the strand direction. Shading
+    // takes the normal of a cylinder around the strand that faces the camera - a strand
+    // is lit by the sine to the light, the highlight runs in a band along the strands.
+    if (u_hair > 0.5) {
+        vec3 strand = normalize(v_normal);
+        vec3 toEye = normalize(u_camera_pos - v_worldPos);
+        vec3 across = toEye - strand * dot(strand, toEye);
+        N = length(across) > 1e-4 ? normalize(across) : toEye;
+    }
 #ifdef PHPOLYGON_MRT
     // Every attachment holds a defined value even when a procedural branch
     // returns early: no sun/ambient, unlit colour in o_local, geometry in the
@@ -1790,6 +1800,9 @@ void main() {
 #endif
     // View-facing normal for specular/fresnel (flipped for back faces)
     vec3 Nv = gl_FrontFacing ? N : -N;
+    if (u_hair > 0.5) {
+        Nv = N; // already towards the camera, on both sides of the ribbon
+    }
 
     vec3 V = normalize(u_camera_pos - v_worldPos);
     vec3 L = normalize(-u_dir_light_direction);
