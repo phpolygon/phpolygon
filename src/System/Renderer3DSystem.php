@@ -408,6 +408,7 @@ class Renderer3DSystem extends AbstractSystem
         $stormIntensity = 0.0;
         $rainWetness = 0.0;
         $raining = 0.0;
+        $dryBelowY = null;
         foreach ($world->query(Wind::class) as $entity) {
             $wind = $entity->get(Wind::class);
             $windIntensity = $wind->intensity;
@@ -430,6 +431,7 @@ class Renderer3DSystem extends AbstractSystem
             // surface moisture lingers after storms so sand doesn't snap dry.
             $rainWetness = max($weather->groundWetness, min(1.0, $weather->rainIntensity * 1.2 + $weather->stormIntensity * 0.4));
             $raining = $weather->rainIntensity;
+            $dryBelowY = $weather->dryBelowY;
             break;
         }
         $waveAmp  = 0.1 + $windIntensity * 0.25 + $stormIntensity * 0.35;
@@ -442,7 +444,7 @@ class Renderer3DSystem extends AbstractSystem
             break;
         }
         $this->commandList->add(new SetSnowCover($this->snowCover));
-        $this->commandList->add(new SetGroundWetness($rainWetness, $raining));
+        $this->commandList->add(new SetGroundWetness($rainWetness, $raining, $dryBelowY));
         $this->commandList->add(new SetWaveAnimation(
             enabled: true,
             amplitude: $waveAmp,

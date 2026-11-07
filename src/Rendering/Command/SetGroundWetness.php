@@ -17,5 +17,7 @@ final readonly class SetGroundWetness
     public function __construct(
         public float $rainWetness,
         public float $raining = 0.0,
+        /** Below this world height nothing is wet (Weather::$dryBelowY), null = everywhere. */
+        public ?float $dryBelowY = null,
     ) {}
 }

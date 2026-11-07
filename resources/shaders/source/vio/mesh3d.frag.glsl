@@ -158,6 +158,7 @@ uniform float u_vignette_intensity;
 uniform vec2  u_viewport_size;
 uniform float u_snow_cover; // 0.0 = no snow, 1.0 = full blanket
 uniform float u_rain_wetness; // 0.0 = dry, 1.0 = rain-soaked
+uniform float u_rain_dry_below; // no rain below this world height (Weather::$dryBelowY)
 uniform vec3 u_fog_color;
 uniform float u_fog_near;
 uniform float u_fog_far;
@@ -678,7 +679,7 @@ float interiorMask(vec3 p) {
 // keeps the rain out, whatever its light strength); puddles stand in
 // the hollows of a slow two-octave noise and spread as the rain grows.
 vec2 rainSoak(vec3 p, vec3 n) {
-    if (u_rain_wetness <= 0.0 || u_proc_mode == 2) return vec2(0.0);
+    if (u_rain_wetness <= 0.0 || u_proc_mode == 2 || p.y < u_rain_dry_below) return vec2(0.0);
     float up = clamp(dot(n, vec3(0.0, 1.0, 0.0)) * 1.6 - 0.6, 0.0, 1.0);
     if (up <= 0.0 || interiorMask(p) > 0.0) return vec2(0.0);
     float soak = clamp(u_rain_wetness, 0.0, 1.0) * up;
@@ -699,7 +700,7 @@ vec4 sceneFog(vec3 p) {
     float d = length(p - u_camera_pos);
     float f = clamp((d - u_fog_near) / (u_fog_far - u_fog_near), 0.0, 1.0);
     float t = 1.0 - exp(-f * f * 3.0);
-    if (u_rain_wetness > 0.0 && interiorMask(u_camera_pos) <= 0.0) {
+    if (u_rain_wetness > 0.0 && u_camera_pos.y >= u_rain_dry_below && interiorMask(u_camera_pos) <= 0.0) {
         vec3 vd = (p - u_camera_pos) / max(d, 1e-3);
         float shaft = 0.55 + 0.45 * noise(vd.xz * 7.0 + vec2(u_frag_time * 0.12, u_frag_time * 0.05));
         float veil = clamp(u_rain_wetness, 0.0, 1.0) * 0.45 * smoothstep(25.0, 160.0, d) * shaft;
@@ -709,6 +710,35 @@ vec4 sceneFog(vec3 p) {
         return vec4(c, total);
     }
     return vec4(u_fog_color, t);
+}
+
+// Rain drops on glass (shader plan 4.1): resting drops in 2 cm cells and, on steep
+// panes, drops running down in columns. Surface coordinates: along the pane's
+// horizontal tangent and world height. Returns x = coverage 0..1, yz = the tilt
+// of the normal in tangent/up.
+vec3 glassRain(vec3 p, vec3 n, float time) {
+    vec3 t = cross(n, vec3(0.0, 1.0, 0.0));
+    float tl = length(t);
+    t = tl > 1e-3 ? t / tl : vec3(1.0, 0.0, 0.0);
+    vec2 s = vec2(dot(p, t), p.y);
+    // Resting drops.
+    vec2 c = floor(s * 45.0);
+    vec2 f = fract(s * 45.0) - 0.5;
+    vec2 jit = vec2(hash21(c), hash21(c + 5.3)) - 0.5;
+    vec2 d = f - jit * 0.4;
+    float r = 0.15 + 0.2 * hash21(c + 9.1);
+    float rest = step(0.55, hash21(c + 2.7)) * smoothstep(r, r * 0.6, length(d));
+    vec2 tilt = rest > 0.0 ? d / max(length(d), 1e-3) * rest * 0.6 : vec2(0.0);
+    // Running drops on steep panes: a column every 6 cm, a drop sliding down.
+    float steep = 1.0 - abs(n.y);
+    float col = floor(s.x * 16.0);
+    float cx = fract(s.x * 16.0) - 0.5;
+    float speed = 0.25 + 0.35 * hash21(vec2(col, 1.7));
+    float y = fract(s.y * 1.5 + time * speed + hash21(vec2(col, 4.4)));
+    float head = smoothstep(0.12, 0.0, abs(cx)) * smoothstep(0.04, 0.0, abs(y - 0.5));
+    float trail = smoothstep(0.06, 0.0, abs(cx)) * smoothstep(0.5, 0.52, y) * (1.0 - smoothstep(0.52, 0.9, y)) * 0.5;
+    float run = (head + trail) * step(0.6, hash21(vec2(col, 8.2))) * steep;
+    return vec3(clamp(rest + run, 0.0, 1.0), tilt.x + cx * run, tilt.y);
 }
 
 // Rain rings on wet ground (shader plan 4.1): two offset grids of 0.35 m cells, each
@@ -1523,6 +1553,19 @@ void main() {
         N = normalize(N + vec3(rip.x, 0.0, rip.y));
     }
 
+    // Rain on glass (shader plan 4.1): transparent, smooth, default-shaded panes
+    // outside interior volumes. Drops thicken the pane a little and catch the sky.
+    float glassDrops = 0.0;
+    if (u_rain_wetness > 0.0 && alpha < 0.95 && u_roughness < 0.25 && u_proc_mode == 0
+        && v_worldPos.y >= u_rain_dry_below && interiorMask(v_worldPos) <= 0.0) {
+        vec3 gr = glassRain(v_worldPos, N, u_frag_time);
+        float gw = clamp(u_rain_wetness, 0.0, 1.0);
+        glassDrops = gr.x * gw * (1.0 - smoothstep(8.0, 20.0, length(u_camera_pos - v_worldPos)));
+        vec3 gt = normalize(cross(N, vec3(0.0, 1.0, 0.0)) + vec3(1e-4));
+        N = normalize(N + (gt * gr.y + vec3(0.0, 1.0, 0.0) * gr.z) * glassDrops);
+        alpha = mix(alpha, min(1.0, alpha + 0.35), glassDrops);
+    }
+
     // Season colour map: grass blades and two-sided translucent foliage.
     bool isPlant = u_grass_shade == 1 || (u_two_sided == 1 && u_subsurface_strength > 0.0);
     if (isPlant) {
@@ -1532,7 +1575,7 @@ void main() {
     // Drops on wet leaves (shader plan 4.1): a wet plant darkens and turns glossy,
     // and small drops catch the sky light (outside interior volumes only).
     float leafDrops = 0.0;
-    if (isPlant && u_rain_wetness > 0.0 && interiorMask(v_worldPos) <= 0.0) {
+    if (isPlant && u_rain_wetness > 0.0 && v_worldPos.y >= u_rain_dry_below && interiorMask(v_worldPos) <= 0.0) {
         float lw = clamp(u_rain_wetness, 0.0, 1.0);
         albedo *= 1.0 - 0.18 * lw;
         roughness = mix(roughness, 0.35, lw);
@@ -1937,6 +1980,7 @@ void main() {
     localAcc += u_emission + surfaceEmission;
     // Wet-leaf drops catch the sky (see above).
     localAcc += leafDrops * u_ambient_color * u_ambient_intensity * 0.9;
+    localAcc += glassDrops * u_ambient_color * u_ambient_intensity * 0.6;
 
     vec4 sceneFogV = sceneFog(v_worldPos);
     float fogT = sceneFogV.a;

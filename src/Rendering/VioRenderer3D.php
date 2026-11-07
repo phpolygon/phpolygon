@@ -477,6 +477,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
     private ?SetSky $pendingSky = null;
     private float $rainWetness = 0.0;
     private float $raining = 0.0;
+    private float $rainDryBelow = -1.0e6;
     /** @var array{0: float, 1: float, 2: float, 3: float} Season tint rgb + desaturation (SetSeasonGrade). */
     private array $seasonGrade = [1.0, 1.0, 1.0, 0.0];
 
@@ -3262,6 +3263,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             } elseif ($cmd instanceof Command\SetGroundWetness) {
                 $this->rainWetness = $cmd->rainWetness;
                 $this->raining = $cmd->raining;
+                $this->rainDryBelow = $cmd->dryBelowY ?? -1.0e6;
             } elseif ($cmd instanceof Command\SetSeasonGrade) {
                 $this->seasonGrade = [$cmd->tint->r, $cmd->tint->g, $cmd->tint->b, $cmd->desaturation];
             } elseif ($cmd instanceof SetWaveAnimation) {
@@ -4932,6 +4934,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         // ground after rain catches the SSR reflection. Per-material wetness /
         // metallic / roughness are pushed per draw in applyGbufferVertexAnim.
         vio_set_uniform($this->ctx, 'u_rain_wetness', $this->rainWetness);
+        vio_set_uniform($this->ctx, 'u_rain_dry_below', $this->rainDryBelow);
         // The G-buffer now stores raw LINEAR view depth in the FP16 alpha channel
         // (world units), so there is no normalisation range to share with the SSAO
         // pass any more — both sides read depth directly.
@@ -5101,6 +5104,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         vio_set_uniform($this->ctx, 'u_view', $viewMatrix->toArray());
         vio_set_uniform($this->ctx, 'u_projection', $projMatrix->toArray());
         vio_set_uniform($this->ctx, 'u_rain_wetness', $this->rainWetness);
+        vio_set_uniform($this->ctx, 'u_rain_dry_below', $this->rainDryBelow);
 
         foreach ($waterDraws as [$cmd, $material]) {
             if ($cmd instanceof DrawMesh) {
@@ -7944,6 +7948,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         vio_set_uniform($this->ctx, 'u_horizon_color', [0.85, 0.88, 0.92]);
         vio_set_uniform($this->ctx, 'u_snow_cover', $this->snowCover);
         vio_set_uniform($this->ctx, 'u_rain_wetness', $this->rainWetness);
+        vio_set_uniform($this->ctx, 'u_rain_dry_below', $this->rainDryBelow);
         vio_set_uniform($this->ctx, 'u_vertex_anim', 0); // enabled per-material in applyMaterial
         vio_set_uniform($this->ctx, 'u_wave_amplitude', $state['waveAmplitude']);
         vio_set_uniform($this->ctx, 'u_wave_frequency', $state['waveFrequency']);

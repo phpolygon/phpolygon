@@ -62,6 +62,13 @@ class Weather extends AbstractComponent
     #[Hidden]
     public float $groundWetness = 0.0;
 
+    /**
+     * Below this world height no rain arrives (the sea level of a world with
+     * underwater areas): no wet ground, no drops. Null = everywhere.
+     */
+    #[Property]
+    public ?float $dryBelowY = null;
+
     /** Direction of the last strike about the world Y axis (radians, 0 = +Z), for the sky. */
     #[Hidden]
     public float $lightningAzimuth = 0.0;
@@ -114,7 +121,9 @@ class Weather extends AbstractComponent
         float $temperature = 22.0,
         float $transitionDuration = 30.0,
         float $timeScale = 1.0,
+        ?float $dryBelowY = null,
     ) {
+        $this->dryBelowY = $dryBelowY;
         $this->cloudCoverage = $cloudCoverage;
         $this->humidity = $humidity;
         $this->temperature = $temperature;
