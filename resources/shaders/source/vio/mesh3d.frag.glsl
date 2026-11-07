@@ -214,6 +214,8 @@ uniform vec2 u_refract;
 uniform float u_particle_tint;
 // Flipbook (shader plan 7.1): columns, rows, fps; w = streak fade.
 uniform vec4 u_flipbook;
+// Depth prepass (shader plan 9.1): 1 = return at once (colour is masked).
+uniform float u_depth_only;
 #ifdef PHPOLYGON_SCENE_COLOR
 // Copy of the opaque scene colour (more than 16 texture units only).
 uniform sampler2D u_scene_color;
@@ -1667,6 +1669,9 @@ vec3 perturbNormalProcedural(vec3 N, vec3 worldPos, vec2 uv, vec2 sampleUv,
 // ================================================================
 
 void main() {
+    if (u_depth_only > 0.5) {
+        return;
+    }
     vec3 N = normalize(v_normal);
     // Two-sided opaque surfaces (foliage, fronds, flags): where the authored
     // normal faces away from the viewer it is mirrored through the triangle's

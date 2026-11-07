@@ -2064,6 +2064,12 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
      * Whether refracting glass is possible: the scene-colour copy reads unit 16, so
      * the context needs more than 16 texture units (php-vio vio_texture_units).
      */
+    /** Whether the depth prepass may draw a material: nothing that can discard. */
+    private static function prepassEligible(Material $m): bool
+    {
+        return $m->albedoTexture === null && $m->fadeDistance[1] == 0.0 && !$m->grass && $m->alpha >= 1.0;
+    }
+
     private static function sceneColorAvailable(): bool
     {
         return (ProcModeShaderRegistry::textureUnits() ?? 0) > self::SCENE_COLOR_SLOT;
@@ -3715,6 +3721,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         // equal depth, see OpaqueDrawOrder. Sorted before the first pipeline bind:
         // a reactive opaque material opens the reactive attachment for the pass.
         $opaque = OpaqueDrawOrder::sort($commands, $this->motionThisFrame, $this->reactiveOpaqueThisFrame);
+        $this->prepassThisFrame = $this->settings->depthPrepass && !$this->variantsThisFrame;
         $this->bindPipeline('opaque');
         $this->uploadFrameUniforms($frameState);
         $this->uploadShadowUniforms($hasShadowMap, $dirLights);
@@ -3725,6 +3732,28 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         $this->sceneUniformInputs = [$frameState, $hasShadowMap, $dirLights];
 
         $this->uploadMotionUniforms();
+
+        if ($this->prepassThisFrame) {
+            // Depth prepass (shader plan 9.1): the same program and vertex path,
+            // colour masked and the fragment stage returning at once, so the
+            // expensive shading below runs only for the visible surface (LEQUAL).
+            // Materials that may discard stay out (they would punch holes).
+            $this->bindPipeline('prepass');
+            vio_set_uniform($this->ctx, 'u_depth_only', 1.0);
+            foreach ($opaque as [, , $cmd, $material]) {
+                if (!self::prepassEligible($material)) {
+                    continue;
+                }
+                if ($cmd instanceof DrawMesh) {
+                    $this->drawMeshCommand($cmd->meshId, $material, $cmd->modelMatrix, $cmd->materialId, true, $cmd->prevModelMatrix, $cmd->params);
+                } else {
+                    $this->drawMeshInstancedCommand($cmd, $material);
+                }
+            }
+            vio_set_uniform($this->ctx, 'u_depth_only', 0.0);
+            $this->bindPipeline('opaque');
+            $this->gpuMark('prepass');
+        }
 
         foreach ($opaque as [$materialId, , $cmd, $material]) {
             if ($this->variantsThisFrame) {
@@ -4374,6 +4403,9 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         if ($cull !== VIO_CULL_NONE) {
             $key .= ':cull' . $cull;
         }
+        if ($pass === 'opaque' && $this->prepassThisFrame) {
+            $key .= ':pz';
+        }
 
         if (!isset($this->pipelineCache[$key])) {
             if ($mrt) {
@@ -4388,12 +4420,16 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
                 $cfg = [
                     'shader' => $this->shaderCache[$program],
                     'depth_test' => true,
-                    'depth_write' => $pass === 'opaque',
+                    'depth_write' => $pass === 'opaque' || $pass === 'prepass',
                     'cull_mode' => $cull,
-                    'blend' => $pass === 'opaque' ? VIO_BLEND_NONE : VIO_BLEND_ALPHA,
+                    'blend' => ($pass === 'opaque' || $pass === 'prepass') ? VIO_BLEND_NONE : VIO_BLEND_ALPHA,
                     'attachments' => self::mrtFormats($mv),
                 ];
-                if ($pass !== 'opaque') {
+                if ($pass === 'prepass') {
+                    // Depth prepass (shader plan 9.1): the same program, no colour.
+                    $cfg['attachment_blend'] = array_fill(0, $mv ? 6 : 4, VIO_BLEND_NONE);
+                    $cfg['attachment_color_mask'] = array_fill(0, $mv ? 6 : 4, 0);
+                } elseif ($pass !== 'opaque') {
                     $cfg['attachment_blend'] = [VIO_BLEND_ALPHA, VIO_BLEND_ALPHA, VIO_BLEND_ALPHA, VIO_BLEND_NONE];
                     $cfg['attachment_color_mask'] = [
                         VIO_COLOR_RGBA, VIO_COLOR_RGBA, VIO_COLOR_RGBA,
@@ -4412,6 +4448,9 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
                         $reactiveOpaque ? VIO_COLOR_RGBA : 0,
                     ];
                 }
+                if ($pass === 'opaque' && $this->prepassThisFrame) {
+                    $cfg['depth_func'] = VIO_DEPTH_LEQUAL;
+                }
                 $pipeline = $this->createPipeline($cfg);
             } else {
                 $shader = $this->shaderCache[$shaderId . $variantSuffix] ?? $this->shaderCache['default'];
@@ -4419,14 +4458,15 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
                 $pipeline = $this->createPipeline([
                     'shader' => $shader,
                     'depth_test' => true,
-                    'depth_write' => $pass === 'opaque',
+                    'depth_write' => $pass === 'opaque' || $pass === 'prepass',
                     'cull_mode' => $cull,
-                    'blend' => $pass === 'opaque' ? VIO_BLEND_NONE : VIO_BLEND_ALPHA,
+                    'blend' => ($pass === 'opaque' || $pass === 'prepass') ? VIO_BLEND_NONE : VIO_BLEND_ALPHA,
                     // FP16 scene target → PSO RTVFormats[0] = R16G16B16A16_FLOAT so
                     // the draw isn't dropped with "render target format does not
                     // match". No-op on backends that derive format from the target.
                     'hdr' => $hdr,
-                ]);
+                ] + ($pass === 'prepass' ? ['color_mask' => 0] : [])
+                  + ($pass === 'opaque' && $this->prepassThisFrame ? ['depth_func' => VIO_DEPTH_LEQUAL] : []));
             }
 
             if ($pipeline === false) {
@@ -6808,6 +6848,8 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
     private ?VioRenderTarget $sceneColorCopy = null;
     private string $sceneColorCopyKey = '';
     private bool $sceneColorCopied = false;
+    /** Depth prepass this frame (GraphicsSettings::$depthPrepass, shader plan 9.1). */
+    private bool $prepassThisFrame = false;
 
     /** The Final stage's input while the present draws into it instead of the swapchain. */
     private ?VioRenderTarget $presentRedirect = null;

@@ -57,6 +57,12 @@ final class GraphicsSettings
         public readonly ShaderQuality $shaderQuality = ShaderQuality::Full,
         public readonly bool $cloudShadows = true,
         public readonly bool $bloom = true,
+        /**
+         * Depth prepass (shader plan 9.1): opaque surfaces first write depth only, the
+         * full shading then runs once per pixel. Saves GPU time where much overlaps,
+         * costs a second CPU submission of the opaque draws.
+         */
+        public readonly bool $depthPrepass = false,
         public readonly bool $hdr = true,
         /**
          * Low input latency: cap the CPU at ONE frame ahead of presentation
@@ -164,6 +170,7 @@ final class GraphicsSettings
         ?ShaderQuality $shaderQuality = null,
         ?bool $cloudShadows = null,
         ?bool $bloom = null,
+        ?bool $depthPrepass = null,
         ?bool $hdr = null,
         ?bool $lowLatency = null,
         ?ShadingRate $shadingRate = null,
@@ -205,6 +212,7 @@ final class GraphicsSettings
             shaderQuality: $shaderQuality ?? $this->shaderQuality,
             cloudShadows: $cloudShadows ?? $this->cloudShadows,
             bloom: $bloom ?? $this->bloom,
+            depthPrepass: $depthPrepass ?? $this->depthPrepass,
             hdr: $hdr ?? $this->hdr,
             lowLatency: $lowLatency ?? $this->lowLatency,
             shadingRate: $shadingRate ?? $this->shadingRate,
@@ -248,6 +256,7 @@ final class GraphicsSettings
             'shaderQuality' => $this->shaderQuality->value,
             'cloudShadows' => $this->cloudShadows,
             'bloom' => $this->bloom,
+            'depthPrepass' => $this->depthPrepass,
             'hdr' => $this->hdr,
             'lowLatency' => $this->lowLatency,
             'shadingRate' => $this->shadingRate->value,
@@ -298,6 +307,7 @@ final class GraphicsSettings
             shaderQuality: self::enumFrom(ShaderQuality::class, $data['shaderQuality'] ?? null) ?? $defaults->shaderQuality,
             cloudShadows: self::asBool($data['cloudShadows'] ?? null) ?? $defaults->cloudShadows,
             bloom: self::asBool($data['bloom'] ?? null) ?? $defaults->bloom,
+            depthPrepass: self::asBool($data['depthPrepass'] ?? null) ?? $defaults->depthPrepass,
             hdr: self::asBool($data['hdr'] ?? null) ?? $defaults->hdr,
             lowLatency: self::asBool($data['lowLatency'] ?? null) ?? $defaults->lowLatency,
             shadingRate: self::enumFrom(ShadingRate::class, $data['shadingRate'] ?? null) ?? $defaults->shadingRate,
