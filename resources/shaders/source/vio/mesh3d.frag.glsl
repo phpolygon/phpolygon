@@ -181,6 +181,11 @@ uniform vec4 u_season_grade;
 // Sandstorm (shader plan 4.1): rgb sand colour, a intensity; wind direction xz.
 uniform vec4 u_sandstorm;
 uniform vec2 u_sandstorm_wind;
+// Height fog and local fog bodies (shader plan 4.2, AtmosphereFogSystem).
+uniform vec4 u_height_fog;        // density, falloff, base height, on
+uniform vec4 u_height_fog_color;  // rgb, 1 = own colour (else the distance-fog colour)
+uniform int  u_fog_volume_count;
+uniform vec4 u_fog_volumes[12];   // per volume: (centre, yaw), (half extents, density), (colour, edge)
 
 // HDR pipeline
 uniform int u_linear_output;
@@ -715,20 +720,85 @@ vec4 sandVeil(vec3 p, float d, vec4 fog) {
 // noise over the view direction and time); not from inside an interior volume.
 // Shared with the proc-mode branches that output on their own:
 // mix(colour, fog.rgb, fog.a).
+// Height fog and fog bodies over a fog value (shader plan 4.2), both integrated
+// analytically along camera -> p: the exponential height fog's optical depth in
+// closed form, and each box volume's density times the length of the ray inside
+// it (slab test in its yawed frame, softened by its edge at the segment middle).
+// Own colours are lit by the ambient and a little sun light.
+vec4 mediaFog(vec3 p, float d, vec4 fog) {
+    if (u_height_fog.w < 0.5 && u_fog_volume_count <= 0) return fog;
+    vec3 light = u_ambient_color * u_ambient_intensity + u_dir_light_color * u_dir_light_intensity * 0.25;
+    float tau = 0.0;
+    vec3 tc = vec3(0.0);
+    if (u_height_fog.w > 0.5) {
+        // No fog below the base (a sea level: the underwater view has its own
+        // tint): the ray is clipped to its part above it.
+        float b = u_height_fog.y;
+        float base = u_height_fog.z;
+        float y0 = u_camera_pos.y;
+        float y1 = p.y;
+        float th = 0.0;
+        if (max(y0, y1) > base) {
+            float frac = 1.0;
+            if (y0 < base) { frac = (y1 - base) / (y1 - y0); y0 = base; }
+            else if (y1 < base) { frac = (y0 - base) / (y0 - y1); y1 = base; }
+            float k = b * (y1 - y0);
+            float shape = abs(k) > 1e-4 ? (1.0 - exp(-k)) / k : 1.0;
+            th = u_height_fog.x * exp(-b * min(y0 - base, 400.0)) * d * frac * shape;
+        }
+        th = clamp(th, 0.0, 40.0);
+        tau += th;
+        tc += th * (u_height_fog_color.w > 0.5 ? u_height_fog_color.rgb * light : u_fog_color);
+    }
+    for (int k = 0; k < 4; k++) {
+        if (k >= u_fog_volume_count) break;
+        vec4 cb = u_fog_volumes[k * 3];
+        vec4 eh = u_fog_volumes[k * 3 + 1];
+        vec4 cc = u_fog_volumes[k * 3 + 2];
+        float cs = cos(cb.w);
+        float sn = sin(cb.w);
+        vec3 o = u_camera_pos - cb.xyz;
+        vec3 e = p - cb.xyz;
+        o = vec3(cs * o.x - sn * o.z, o.y, sn * o.x + cs * o.z);
+        e = vec3(cs * e.x - sn * e.z, e.y, sn * e.x + cs * e.z);
+        vec3 r = e - o;
+        vec3 inv = 1.0 / (sign(r) * max(abs(r), vec3(1e-5)) + vec3(1e-9));
+        vec3 t0 = (-eh.xyz - o) * inv;
+        vec3 t1 = ( eh.xyz - o) * inv;
+        vec3 tmin = min(t0, t1);
+        vec3 tmax = max(t0, t1);
+        float a = clamp(max(max(tmin.x, tmin.y), tmin.z), 0.0, 1.0);
+        float z = clamp(min(min(tmax.x, tmax.y), tmax.z), 0.0, 1.0);
+        if (z <= a) continue;
+        vec3 mid = abs(o + r * (0.5 * (a + z))) / max(eh.xyz, vec3(1e-3));
+        float soft = 1.0 - smoothstep(1.0 - cc.w, 1.0, max(max(mid.x, mid.y), mid.z));
+        float tv = clamp(eh.w * (z - a) * d * soft, 0.0, 40.0);
+        tau += tv;
+        tc += tv * cc.rgb * light;
+    }
+    if (tau <= 1e-5) return fog;
+    float am = 1.0 - exp(-tau);
+    vec3 mc = tc / tau;
+    float total = 1.0 - (1.0 - fog.a) * (1.0 - am);
+    vec3 c = (fog.rgb * fog.a + mc * am * (1.0 - fog.a)) / max(total, 1e-4);
+    return vec4(c, total);
+}
+
 vec4 sceneFog(vec3 p) {
     float d = length(p - u_camera_pos);
     float f = clamp((d - u_fog_near) / (u_fog_far - u_fog_near), 0.0, 1.0);
-    float t = 1.0 - exp(-f * f * 3.0);
+    vec4 base = mediaFog(p, d, vec4(u_fog_color, 1.0 - exp(-f * f * 3.0)));
+    float t = base.a;
     if (u_rain_wetness > 0.0 && u_camera_pos.y >= u_rain_dry_below && interiorMask(u_camera_pos) <= 0.0) {
         vec3 vd = (p - u_camera_pos) / max(d, 1e-3);
         float shaft = 0.55 + 0.45 * noise(vd.xz * 7.0 + vec2(u_frag_time * 0.12, u_frag_time * 0.05));
         float veil = clamp(u_rain_wetness, 0.0, 1.0) * 0.45 * smoothstep(25.0, 160.0, d) * shaft;
         float total = 1.0 - (1.0 - t) * (1.0 - veil);
         vec3 veilColor = u_ambient_color * u_ambient_intensity;
-        vec3 c = (u_fog_color * t + veilColor * veil * (1.0 - t)) / max(total, 1e-4);
+        vec3 c = (base.rgb * t + veilColor * veil * (1.0 - t)) / max(total, 1e-4);
         return sandVeil(p, d, vec4(c, total));
     }
-    return sandVeil(p, d, vec4(u_fog_color, t));
+    return sandVeil(p, d, base);
 }
 
 // Rain drops on glass (shader plan 4.1): resting drops in 2 cm cells and, on steep
