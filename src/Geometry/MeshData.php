@@ -102,6 +102,48 @@ readonly class MeshData
     }
 
     /**
+     * The mesh with $model applied: positions transformed, normals by the inverse
+     * transpose (renormalised), winding flipped when $model mirrors. For merging
+     * placed meshes into one (HLOD, shader plan 9.1). Tangents are dropped.
+     */
+    public function transformed(\PHPolygon\Math\Mat4 $model): self
+    {
+        $m = $model->toArray();
+        $inv = $model->inverse()->toArray();
+        $vertices = [];
+        $normals = [];
+        for ($i = 0, $n = count($this->vertices); $i + 2 < $n; $i += 3) {
+            $x = (float) $this->vertices[$i];
+            $y = (float) $this->vertices[$i + 1];
+            $z = (float) $this->vertices[$i + 2];
+            $vertices[] = $m[0] * $x + $m[4] * $y + $m[8] * $z + $m[12];
+            $vertices[] = $m[1] * $x + $m[5] * $y + $m[9] * $z + $m[13];
+            $vertices[] = $m[2] * $x + $m[6] * $y + $m[10] * $z + $m[14];
+        }
+        for ($i = 0, $n = count($this->normals); $i + 2 < $n; $i += 3) {
+            $x = (float) $this->normals[$i];
+            $y = (float) $this->normals[$i + 1];
+            $z = (float) $this->normals[$i + 2];
+            // transpose(inverse) * n: component i is column i of the inverse (column-major
+            // elements 4i .. 4i + 2) dotted with the normal.
+            $nx = $inv[0] * $x + $inv[1] * $y + $inv[2] * $z;
+            $ny = $inv[4] * $x + $inv[5] * $y + $inv[6] * $z;
+            $nz = $inv[8] * $x + $inv[9] * $y + $inv[10] * $z;
+            $len = sqrt($nx * $nx + $ny * $ny + $nz * $nz);
+            $len = $len > 1e-12 ? $len : 1.0;
+            array_push($normals, $nx / $len, $ny / $len, $nz / $len);
+        }
+        $indices = $this->indices;
+        $det = $m[0] * ($m[5] * $m[10] - $m[9] * $m[6]) - $m[4] * ($m[1] * $m[10] - $m[9] * $m[2]) + $m[8] * ($m[1] * $m[6] - $m[5] * $m[2]);
+        if ($det < 0.0) {
+            for ($i = 0, $n = count($indices); $i + 2 < $n; $i += 3) {
+                [$indices[$i + 1], $indices[$i + 2]] = [$indices[$i + 2], $indices[$i + 1]];
+            }
+        }
+        return new self($vertices, $normals, $this->uvs, $indices);
+    }
+
+    /**
      * Return self if tangents are already populated; otherwise return a new
      * MeshData with tangents computed from the existing vertex / normal /
      * uv / index buffers.
