@@ -6,6 +6,8 @@ uniform float u_star_brightness;
 // Sky time (s) for the shooting stars; high fog dims the stars (shader plan 4.3).
 uniform float u_sky_time;
 uniform float u_high_fog;
+// Aurora 0..1 (SetSky::$aurora).
+uniform float u_aurora;
 // HDR scene path (FP16 target tonemapped on resolve). This is an ADDITIVE pass;
 // linearise the additive contribution so the resolve's ACES+gamma maps it back
 // to its authored display-referred look — keeping the stars HDR≈LDR (mirrors the
@@ -83,6 +85,32 @@ float shootingStar(vec3 dir) {
     return exp(-dist / 0.0012) * h * (1.0 - t);
 }
 
+// Aurora: curtains hanging in a layer high above, sampled at a few heights along
+// the view ray. A curtain follows a folded line across the layer (slow noise), is
+// thin across and long along, split into vertical rays, green at the foot and
+// violet at the top; the folds drift with time.
+vec3 aurora(vec3 dir) {
+    if (u_aurora <= 0.0 || dir.y < 0.1) return vec3(0.0);
+    vec3 sum = vec3(0.0);
+    const int STEPS = 14;
+    for (int i = 0; i < STEPS; i++) {
+        float h = 1.0 + float(i) / float(STEPS) * 1.4;   // height within the curtain
+        vec2 p = dir.xz / dir.y * h * 0.35;
+        float t = u_sky_time * 0.03;
+        float fold = vnoise(vec3(p.x * 0.6, t, 1.3)) * 2.6 + vnoise(vec3(p.x * 1.7, t * 1.7, 4.1)) * 0.8;
+        // Bands repeat every 2.5 units across the layer: several curtains in view.
+        float across = abs(fract((p.y - fold) / 2.5) - 0.5) * 2.5;
+        float curtain = exp(-across * across * 10.0);
+        float rays = 0.45 + 0.55 * vnoise(vec3(p.x * 14.0 + fold * 3.0, t * 4.0, 7.7));
+        float k = float(i) / float(STEPS);
+        vec3 col = mix(vec3(0.15, 1.0, 0.45), vec3(0.65, 0.25, 0.9), smoothstep01(0.45, 1.0, k));
+        sum += col * curtain * rays * (1.0 - k * 0.6);
+    }
+    // Towards the horizon the bands crowd together: fade them out there.
+    float fade = smoothstep01(0.1, 0.45, dir.y) * (1.0 - u_high_fog);
+    return sum / float(STEPS) * 2.4 * u_aurora * fade;
+}
+
 void main() {
     vec4 world = u_sky_inv_vp * vec4(v_ndc, 1.0, 1.0);
     vec3 dir = normalize(world.xyz / world.w);
@@ -110,6 +138,7 @@ void main() {
             add += vec3(twinkle) * u_star_brightness * fadeEdge;
         }
     }
+    add += aurora(dir);
     // Under HDR, linearise the additive contribution so the resolve ACES maps an
     // isolated star back to its authored display look (no over-bright/over-spread).
     if (u_linear_output == 1) {

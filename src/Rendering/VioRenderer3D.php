@@ -6913,10 +6913,11 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         }
 
         // 4. Stars (additive).
-        if ($mode !== 1 && $sky->starBrightness > 0.0) {
+        if ($mode !== 1 && ($sky->starBrightness > 0.0 || $sky->aurora > 0.0)) {
             $this->bindSkyPipeline('sky_stars', VIO_BLEND_ADDITIVE, $hdr, $mrt);
             vio_set_uniform($this->ctx, 'u_sky_inv_vp', $invVP);
             vio_set_uniform($this->ctx, 'u_star_brightness', $sky->starBrightness);
+            vio_set_uniform($this->ctx, 'u_aurora', $sky->aurora);
             vio_set_uniform($this->ctx, 'u_sky_time', $sky->time);
             vio_set_uniform($this->ctx, 'u_high_fog', $sky->highFog);
             vio_draw($this->ctx, $quad);

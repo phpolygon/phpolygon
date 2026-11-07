@@ -78,6 +78,11 @@ final class SetSky
         public readonly bool $lightningInCloud = false,
         /** Distance of the flash from the camera in metres (the volume light inside the clouds). */
         public readonly float $lightningDistance = 350.0,
+        /**
+         * Aurora 0..1 (shader plan, deferred item): green curtains with violet tops that
+         * fold and drift across the night sky; visible where the sky is dark.
+         */
+        public readonly float $aurora = 0.0,
     ) {}
 
     /** Cloud drift distance the renderer applies (see $cloudOffset). */
