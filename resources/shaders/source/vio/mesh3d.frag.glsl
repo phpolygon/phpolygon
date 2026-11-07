@@ -1774,10 +1774,14 @@ vec3 perturbNormalMap(vec3 N, vec3 worldPos, vec2 uv, vec2 sampleUv, float inten
     float det = duvx.x * duvy.y - duvy.x * duvx.y;
     vec3 nMap = texture(u_normal_texture, sampleUv).xyz * 2.0 - 1.0;
     if (abs(det) < 1e-8 || intensity <= 0.0) return N;
-    // A mirrored UV layout flips the bitangent with the sign of the UV determinant.
+    // Cotangent frame: T = dP/du, and dP/dv the same way - both divide by the UV
+    // determinant, so the screen's y direction (opposite on GL and D3D) cancels out and
+    // mirrored UV layouts come out right. Green points to the image's top, i.e. against
+    // v (row 0 is the top): B = -dP/dv, the OpenGL convention.
     vec3 T = (dpx * duvy.y - dpy * duvx.y) / det;
     T = normalize(T - N * dot(N, T));
-    vec3 B = normalize(cross(N, T)) * sign(det);
+    vec3 B = (dpy * duvx.x - dpx * duvy.x) / det;
+    B = -normalize(B - N * dot(N, B) - T * dot(T, B));
     nMap.xy *= clamp(intensity, 0.0, 4.0);
     return normalize(mat3(T, B, N) * normalize(nMap));
 }

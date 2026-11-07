@@ -8,6 +8,7 @@ use PHPUnit\Framework\Attributes\Group;
 use PHPUnit\Framework\Attributes\RequiresPhpExtension;
 use PHPUnit\Framework\TestCase;
 use PHPolygon\Geometry\BoxMesh;
+use PHPolygon\Geometry\MeshData;
 use PHPolygon\Geometry\MeshRegistry;
 use PHPolygon\Math\Mat4;
 use PHPolygon\Math\Vec3;
@@ -124,6 +125,49 @@ final class VioNormalMapTest extends TestCase
             fprintf(STDERR, "[normal map] half-to-half contrast plain %.1f, mapped %.1f\n", $plainContrast, $mappedContrast);
             self::assertLessThan(3.0, $plainContrast, 'without the map the panel is even');
             self::assertGreaterThan(15.0, $mappedContrast, 'one half leans towards the light, the other away');
+        } finally {
+            vio_destroy($ctx);
+        }
+    }
+
+    /**
+     * Green points to the image's top (OpenGL convention, image row 0 = v 0 = top) on every
+     * backend: a wall whose map leans towards the image top catches more light from above
+     * than one leaning down. The frame came out mirrored on OpenGL before (screen y).
+     */
+    public function testGreenPointsToTheImageTopOnEveryBackend(): void
+    {
+        $ctx = VioTestContext::create(self::SIZE, self::SIZE, ['shader_cache' => sys_get_temp_dir() . '/phpolygon-test-shader-cache']);
+        if ($ctx === null) {
+            $this->markTestSkipped('vio_create(headless) unavailable');
+        }
+        if (!ProcModeShaderRegistry::normalMapAvailable()) {
+            vio_destroy($ctx);
+            $this->markTestSkipped('no normal maps with this php-vio');
+        }
+        try {
+            MeshRegistry::register('wall', new MeshData([-1.0, -1.0, 0.0, 1.0, -1.0, 0.0, 1.0, 1.0, 0.0, -1.0, 1.0, 0.0],
+                array_merge(...array_fill(0, 4, [0.0, 0.0, 1.0])), [0.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0], [0, 1, 2, 0, 2, 3]));
+            $textures = new VioTextureManager($ctx);
+            foreach (['lean_up' => 0.5, 'lean_down' => -0.5] as $id => $ny) {
+                $l = sqrt($ny * $ny + 1.0);
+                $textures->loadRgba($id, 4, 4, str_repeat(chr(128) . chr((int) round(($ny / $l * 0.5 + 0.5) * 255)) . chr((int) round((1.0 / $l * 0.5 + 0.5) * 255)) . "\xff", 16));
+            }
+            $renderer = new VioRenderer3D($ctx, self::SIZE, self::SIZE);
+            $renderer->setTextureManager($textures);
+            $renderer->applySettings(new GraphicsSettings(shadowQuality: ShadowQuality::Off, antiAliasing: AntiAliasing::Off, bloom: false));
+            $lit = [];
+            foreach (['lean_up', 'lean_down'] as $id) {
+                MaterialRegistry::register('panel', new Material(albedo: new Color(0.5, 0.5, 0.5), roughness: 0.9, useEnvironmentMap: false, normalTexture: $id));
+                $list = new RenderCommandList();
+                $list->add(new SetCamera(Mat4::lookAt(new Vec3(0.0, 0.0, 3.0), new Vec3(0.0, 0.0, 0.0), new Vec3(0.0, 1.0, 0.0)), Mat4::perspective(0.8, 1.0, 0.1, 10.0)));
+                $list->add(new SetAmbientLight(new Color(1.0, 1.0, 1.0), 0.05));
+                $list->add(new SetDirectionalLight(new Vec3(0.0, -1.0, -0.3), new Color(1.0, 1.0, 1.0), 1.0));
+                $list->add(new DrawMesh('wall', 'panel', Mat4::identity()));
+                $lit[$id] = $this->mean($renderer->renderToImage($list, self::SIZE, self::SIZE, new Color(0.0, 0.0, 0.0)), 24, 40, 24, 40);
+            }
+            fprintf(STDERR, "[normal map] lit from above: leaning up %.1f, leaning down %.1f\n", $lit['lean_up'], $lit['lean_down']);
+            self::assertGreaterThan($lit['lean_down'] + 40.0, $lit['lean_up']);
         } finally {
             vio_destroy($ctx);
         }
