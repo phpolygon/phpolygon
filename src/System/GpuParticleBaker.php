@@ -876,6 +876,139 @@ final class GpuParticleBaker
         }
     }
 
+    // ── Work-graph bursts (shader plan 10.2, VIO_FEATURE_WORK_GRAPHS) ─────────
+
+    /**
+     * Work graph that spawns particle bursts on the GPU. The entry node takes one
+     * record per burst and launches the spawn node with as many 64-thread groups as
+     * the burst needs (SV_DispatchGrid); each spawn thread rolls one particle - a
+     * direction inside the burst's cone, a speed and a lifetime from its ranges -
+     * and writes the row (px py pz vx vy vz age life) into the state ring at
+     * head + first + i. Records are 64 bytes:
+     *   float3 origin, uint count, float3 dir, float cosCone,
+     *   float2 speed (min, max), float2 life (min, max), uint first, head, capacity, seed.
+     */
+    public const BURST_GRAPH = <<<'HLSL'
+        RWByteAddressBuffer g_state : register(u0);
+        struct Burst {
+            float3 origin; uint count;
+            float3 dir;    float cosCone;
+            float2 speed;  float2 life;
+            uint first; uint head; uint capacity; uint seed;
+        };
+        struct SpawnRecord {
+            uint3 grid : SV_DispatchGrid;
+            Burst b;
+        };
+        uint pcg(uint v) {
+            uint s = v * 747796405u + 2891336453u;
+            uint w = ((s >> ((s >> 28u) + 4u)) ^ s) * 277803737u;
+            return (w >> 22u) ^ w;
+        }
+        float rand01(inout uint h) { h = pcg(h); return (h & 0x00FFFFFFu) / 16777216.0; }
+
+        [Shader("node")]
+        [NodeIsProgramEntry]
+        [NodeLaunch("thread")]
+        void burst(ThreadNodeInputRecord<Burst> input, [MaxRecords(1)] NodeOutput<SpawnRecord> spawn)
+        {
+            Burst b = input.Get();
+            ThreadNodeOutputRecords<SpawnRecord> o = spawn.GetThreadNodeOutputRecords(1);
+            o.Get().grid = uint3(max(1u, (b.count + 63u) / 64u), 1u, 1u);
+            o.Get().b = b;
+            o.OutputComplete();
+        }
+
+        [Shader("node")]
+        [NodeLaunch("broadcasting")]
+        [NodeMaxDispatchGrid(1024, 1, 1)]
+        [NumThreads(64, 1, 1)]
+        void spawn(DispatchNodeInputRecord<SpawnRecord> input, uint3 dtid : SV_DispatchThreadID)
+        {
+            Burst b = input.Get().b;
+            uint i = dtid.x;
+            if (i >= b.count) {
+                return;
+            }
+            uint h = pcg(b.seed ^ (i * 9781u + 0x9E3779B9u));
+            float cosT = lerp(1.0, b.cosCone, rand01(h));
+            float sinT = sqrt(max(0.0, 1.0 - cosT * cosT));
+            float phi = 6.2831853 * rand01(h);
+            float3 n = normalize(b.dir);
+            float3 t = normalize(abs(n.y) < 0.99 ? cross(n, float3(0.0, 1.0, 0.0)) : cross(n, float3(1.0, 0.0, 0.0)));
+            float3 bt = cross(n, t);
+            float3 dir = n * cosT + (t * cos(phi) + bt * sin(phi)) * sinT;
+            float speed = lerp(b.speed.x, b.speed.y, rand01(h));
+            float life = lerp(b.life.x, b.life.y, rand01(h));
+            uint slot = (b.head + b.first + i) % b.capacity;
+            uint o = slot * 32u;
+            g_state.Store3(o, asuint(b.origin));
+            g_state.Store3(o + 12u, asuint(dir * speed));
+            g_state.Store2(o + 24u, asuint(float2(0.0, life)));
+        }
+        HLSL;
+
+    /** @var \WeakMap<\VioContext, \VioWorkGraph|false>|null */
+    private static ?\WeakMap $burstGraphs = null;
+
+    /** The backend runs work graphs (D3D12 with Shader Model 6.8 node shaders). */
+    public static function workGraphsAvailable(\VioContext $ctx): bool
+    {
+        return function_exists('vio_work_graph') && defined('VIO_FEATURE_WORK_GRAPHS')
+            && vio_supports_feature($ctx, VIO_FEATURE_WORK_GRAPHS);
+    }
+
+    /**
+     * Spawn particle bursts straight on the GPU (work graph, see BURST_GRAPH): the CPU
+     * sends one 64-byte record per burst instead of every particle's row. Each burst:
+     * origin, dir (cone axis), cone (half angle in radians), speed [min, max], life
+     * [min, max], count, seed. The rows go into the state's ring at its head, which
+     * moves on by the total. False (nothing spawned) without work graphs or when the
+     * bursts exceed the ring - the caller spawns through inject() instead.
+     *
+     * @param list<array{origin: array{float, float, float}, dir: array{float, float, float}, cone: float, speed: array{float, float}, life: array{float, float}, count: int, seed: int}> $bursts
+     */
+    public static function spawnBursts(\VioContext $ctx, GpuParticleState $state, array $bursts): bool
+    {
+        if ($bursts === [] || !self::workGraphsAvailable($ctx)) {
+            return false;
+        }
+        $total = 0;
+        foreach ($bursts as $b) {
+            $total += max(0, $b['count']);
+        }
+        if ($total === 0 || $total > $state->capacity) {
+            return false;
+        }
+        self::$burstGraphs ??= new \WeakMap();
+        if (!isset(self::$burstGraphs[$ctx])) {
+            $graph = @vio_work_graph($ctx, ['hlsl' => self::BURST_GRAPH, 'entry' => 'burst', 'record_size' => 64]);
+            self::$burstGraphs[$ctx] = $graph instanceof \VioWorkGraph ? $graph : false;
+        }
+        $graph = self::$burstGraphs[$ctx];
+        if ($graph === false) {
+            return false;
+        }
+        $head = $state->ledger->head();
+        $records = '';
+        $first = 0;
+        foreach ($bursts as $b) {
+            $count = max(0, $b['count']);
+            $records .= pack('g3', ...$b['origin']) . pack('V', $count)
+                . pack('g3', ...$b['dir']) . pack('g', cos($b['cone']))
+                . pack('g4', $b['speed'][0], $b['speed'][1], $b['life'][0], $b['life'][1])
+                . pack('V4', $first, $head, $state->capacity, $b['seed'] & 0xFFFFFFFF);
+            $first += $count;
+        }
+        try {
+            vio_work_graph_bind_buffer($ctx, $graph, $state->stateBuf, 0);
+            vio_dispatch_graph($ctx, $graph, $records, count($bursts));
+        } catch (\Throwable) {
+            return false;
+        }
+        $state->ledger->advanceHead($total);
+        return true;
+    }
     // ── Readback-free path (Path B: VIO_FEATURE_VERTEX_STORAGE) ──────────────
 
     /**
