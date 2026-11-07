@@ -405,6 +405,19 @@ class Material
          * around the strand that faces the camera.
          */
         public readonly bool $hair = false,
+        /**
+         * Spectral ocean (shader plan 10.2): a texture id holding an
+         * {@see \PHPolygon\Rendering\Ocean\OceanSpectrum} volume. The vertex stage
+         * displaces the surface by it (tiled every $oceanPatch metres, $oceanAmplitude
+         * metres at the largest wave, looping every $oceanLoop seconds, $oceanChop
+         * scales the sideways motion that sharpens crests) and turns the normals with
+         * it. Needs more than 18 texture units; elsewhere the material draws flat.
+         */
+        public readonly ?string $oceanTexture = null,
+        public readonly float $oceanPatch = 64.0,
+        public readonly float $oceanAmplitude = 0.6,
+        public readonly float $oceanLoop = 12.0,
+        public readonly float $oceanChop = 1.0,
     ) {}
 
     /**
@@ -707,6 +720,11 @@ class Material
             furShells: $this->furShells,
             furDensity: $this->furDensity,
             hair: $this->hair,
+            oceanTexture: $this->oceanTexture,
+            oceanPatch: $this->oceanPatch,
+            oceanAmplitude: $this->oceanAmplitude,
+            oceanLoop: $this->oceanLoop,
+            oceanChop: $this->oceanChop,
         );
     }
 

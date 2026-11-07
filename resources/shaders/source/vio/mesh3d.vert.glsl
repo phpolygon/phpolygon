@@ -52,6 +52,26 @@ uniform vec4  u_grass_trail[16]; // footprints: x, z, floor(radius cm) + strengt
 uniform mat4 u_light_space_matrix;
 // Fur shells (shader plan 10.2, Material::$furLength): shell height 0..1, strand length (m), unused, on.
 uniform vec4 u_fur;
+// Spectral ocean (shader plan 10.2, Material::$oceanTexture): tile size (m), amplitude (m), loop (s), on.
+uniform vec4  u_ocean;
+uniform float u_ocean_chop;
+#ifdef PHPOLYGON_OCEAN
+uniform sampler3D u_ocean_tex;
+vec3 oceanSample(vec2 xz, float time) {
+    return textureLod(u_ocean_tex, vec3(xz / u_ocean.x, fract(time / u_ocean.z)), 0.0).rgb * 2.0 - 1.0;
+}
+// World-space displacement of a surface point and the normal of the displaced
+// surface (from the height one texel to either side).
+vec3 oceanDisplacement(vec3 wp, float time, out vec3 n) {
+    vec3 s = oceanSample(wp.xz, time);
+    float e = u_ocean.x / float(textureSize(u_ocean_tex, 0).x);
+    float hx = oceanSample(wp.xz + vec2(e, 0.0), time).r - oceanSample(wp.xz - vec2(e, 0.0), time).r;
+    float hz = oceanSample(wp.xz + vec2(0.0, e), time).r - oceanSample(wp.xz - vec2(0.0, e), time).r;
+    float a = u_ocean.y;
+    n = normalize(vec3(-hx * a / (2.0 * e), 1.0, -hz * a / (2.0 * e)));
+    return vec3(s.g * u_ocean_chop, s.r, s.b * u_ocean_chop) * a;
+}
+#endif
 
 out vec3 v_normal;
 out vec3 v_worldPos;
@@ -331,25 +351,34 @@ void main() {
         pos += normalize(a_normal) * (u_fur.x * u_fur.y / scale);
         pos.y -= u_fur.x * u_fur.x * u_fur.y * 0.3 / scale;
     }
+    vec3 localNormal = a_normal;
+#ifdef PHPOLYGON_OCEAN
+    if (u_ocean.w > 0.5) {
+        vec3 oceanN;
+        mat3 m3 = mat3(model);
+        pos += inverse(m3) * oceanDisplacement((model * vec4(pos, 1.0)).xyz, u_time, oceanN);
+        localNormal = normalize(transpose(m3) * oceanN);
+    }
+#endif
 
     vec4 worldPos = model * vec4(pos, 1.0);
     v_worldPos = worldPos.xyz;
     v_localPos = pos;
-    v_localNormal = a_normal;
+    v_localNormal = localNormal;
     v_objectScale = vec3(length(model[0].xyz), length(model[1].xyz), length(model[2].xyz));
 
     if (u_use_instancing == 1) {
         // Per-instance model: always compute normal matrix from instance transform
-        v_normal = mat3(transpose(inverse(model))) * a_normal;
+        v_normal = mat3(transpose(inverse(model))) * localNormal;
     } else {
         // Per-object: use precomputed normal matrix, fall back to model if zero
         bool isZero = (u_normal_matrix[0] == vec3(0.0) &&
                        u_normal_matrix[1] == vec3(0.0) &&
                        u_normal_matrix[2] == vec3(0.0));
         if (isZero) {
-            v_normal = mat3(transpose(inverse(model))) * a_normal;
+            v_normal = mat3(transpose(inverse(model))) * localNormal;
         } else {
-            v_normal = u_normal_matrix * a_normal;
+            v_normal = u_normal_matrix * localNormal;
         }
     }
 
@@ -363,6 +392,12 @@ void main() {
         prevModel[0].w = 0.0;
     }
     vec3 prevPos = animatePosition(a_position, prevModel, u_time_prev, grassHash);
+#ifdef PHPOLYGON_OCEAN
+    if (u_ocean.w > 0.5) {
+        vec3 prevN;
+        prevPos += inverse(mat3(prevModel)) * oceanDisplacement((prevModel * vec4(prevPos, 1.0)).xyz, u_time_prev, prevN);
+    }
+#endif
     v_currClip = u_curr_view_proj * (model * vec4(pos, 1.0));
     v_prevClip = u_prev_view_proj * (prevModel * vec4(prevPos, 1.0));
 #endif

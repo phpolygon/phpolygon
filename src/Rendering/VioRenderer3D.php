@@ -366,6 +366,8 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
     private const SCENE_COLOR_SLOT = 16;
     /** Unit of a material's vertex animation texture (vertex stage): more than 17 units only. */
     private const VAT_SLOT = 17;
+    /** Unit of a material's ocean spectrum volume (vertex stage): more than 18 units only. */
+    private const OCEAN_SLOT = 18;
 
     /** @var array<string, VioTexture> GPU images registered under a texture id (registerGpuTexture). */
     private array $gpuTextures = [];
@@ -4426,6 +4428,10 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             && (ProcModeShaderRegistry::textureUnits() ?? 0) > self::VAT_SLOT) {
             $vertSrc = self::withDefine($vertSrc, 'PHPOLYGON_VAT');
         }
+        if (in_array($id, ['default', 'default_mrt', 'default_mrt_mv'], true)
+            && (ProcModeShaderRegistry::textureUnits() ?? 0) > self::OCEAN_SLOT) {
+            $vertSrc = self::withDefine($vertSrc, 'PHPOLYGON_OCEAN');
+        }
         if (in_array($id, ['default', 'default_mrt', 'default_mrt_mv'], true)) {
             $vertSrc = $this->withBindless($vertSrc, false);
         }
@@ -4510,6 +4516,9 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         $source = $this->withBindless($source, false);
         if ((ProcModeShaderRegistry::textureUnits() ?? 0) > self::VAT_SLOT) {
             $source = self::withDefine($source, 'PHPOLYGON_VAT');
+        }
+        if ((ProcModeShaderRegistry::textureUnits() ?? 0) > self::OCEAN_SLOT) {
+            $source = self::withDefine($source, 'PHPOLYGON_OCEAN');
         }
         return ProcModeShaderRegistry::instanceParamsEnabled()
             ? self::withDefine($source, 'PHPOLYGON_INSTANCE_PARAMS')
@@ -8163,6 +8172,8 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             'u_rt_reflections'      => $this->rtSceneReady && $this->settings->rayTracedReflections && $this->rtAlbedoBuffer !== null ? 1.0 : 0.0,
             'u_flipbook'            => [(float) $material->flipbook[0], (float) $material->flipbook[1], $material->flipbookFps, $material->streakFade ? 1.0 : 0.0],
             'u_alpha_cutoff'        => $material->alphaCutoff,
+            'u_ocean'               => [$material->oceanPatch, $material->oceanAmplitude, max(0.1, $material->oceanLoop), $material->oceanTexture !== null && (ProcModeShaderRegistry::textureUnits() ?? 0) > self::OCEAN_SLOT ? 1.0 : 0.0],
+            'u_ocean_chop'          => $material->oceanChop,
             'u_hair'                => $material->hair ? 1.0 : 0.0,
             'u_fur'                 => [0.0, $material->furLength, 0.0, 0.0],
             'u_fur_shell'           => [0.0, $material->furDensity, 0.35, $material->furLength > 0.0 ? 1.0 : 0.0],
@@ -8250,6 +8261,13 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
     private function bindMaterialTextures(Material $material, bool $instanceTextures = false): void
     {
         $hasTexture = false;
+        if ($material->oceanTexture !== null && (ProcModeShaderRegistry::textureUnits() ?? 0) > self::OCEAN_SLOT) {
+            $ocean = $this->resolveTexture($material->oceanTexture);
+            if ($ocean !== null) {
+                vio_set_uniform($this->ctx, 'u_ocean_tex', self::OCEAN_SLOT);
+                vio_bind_texture($this->ctx, $ocean, self::OCEAN_SLOT);
+            }
+        }
         if ($material->vatTexture !== null && (ProcModeShaderRegistry::textureUnits() ?? 0) > self::VAT_SLOT) {
             $vat = $this->resolveTexture($material->vatTexture);
             if ($vat !== null) {
@@ -8430,7 +8448,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         }
         $units = ProcModeShaderRegistry::textureUnits() ?? 0;
         $unit = min($units - 1, 31);
-        return $unit > self::VAT_SLOT + 1 ? $unit : -1;
+        return $unit > self::OCEAN_SLOT ? $unit : -1;
     }
 
     /**
@@ -8696,7 +8714,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
      */
     private function meshletEligible(DrawMeshInstanced $cmd, Material $material, string $materialId): bool
     {
-        if ($cmd->storageBuffer !== null || $material->vatTexture !== null || $material->furLength > 0.0 || ($cmd->albedoTextures !== [] && !$this->bindlessBuilt)) {
+        if ($cmd->storageBuffer !== null || $material->vatTexture !== null || $material->oceanTexture !== null || $material->furLength > 0.0 || ($cmd->albedoTextures !== [] && !$this->bindlessBuilt)) {
             return false;
         }
         if ($this->variantsThisFrame && !$material->grass) {
