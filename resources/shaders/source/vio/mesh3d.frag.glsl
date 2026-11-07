@@ -127,6 +127,8 @@ uniform float u_ssr_intensity;
 // the only reflection cue and stays active. Mirrors u_ssao_enabled.
 uniform int   u_ssr_enabled;
 uniform int   u_volumetric_fog;
+// Micro-shadows and bent normals (GraphicsSettings::$microShadows, shader plan 5.1): 0 or 1.
+uniform float u_micro_shadow;
 // 1 - DirectionalLight::$volumetricScale of the primary light: how much LESS that
 // light scatters in the volumetric fog (0 = full, the default when unset; the
 // moon scatters far less than its lighting intensity suggests).
@@ -1937,6 +1939,10 @@ void main() {
         N = Nv;
     }
 
+    // The surface's own normal before maps and patterns add detail: the open direction
+    // of their small cavities (bent normal, below).
+    vec3 Nmacro = N;
+
     // Procedural normal-map pattern (mirrors mesh3d.frag.glsl). Self-shading
     // procedural materials (water, cloud, moon) have early-returned above so
     // this only affects standard, sand, rock, palm, wood, thatch, carpaint.
@@ -2394,6 +2400,13 @@ void main() {
 #endif
     vec3 sunAcc = vec3(0.0);
     vec3 localAcc = vec3(0.0);
+    // Bent normal: in an occluded cavity the sky light arrives from its opening -
+    // roughly the surface's own normal - not along the detail normal at its bottom.
+    vec3 Nbent = u_micro_shadow > 0.5 ? normalize(mix(Nmacro, N, ao)) : N;
+    // The cone aperture of the micro-shadow term: cavity and curvature AO reach 0 where
+    // baked AO (the formula's source) rarely goes below 0.5, so map it into 0.5..1;
+    // and at most 70 % of the light goes, as the cavity's ambient is already near 0.
+    float msAo = mix(0.5, 1.0, ao);
 
     // Fieldtracing contribution (added before outputColor, per the engine's
     // "contribution before finalize" rule). ProbesOnly tier: a hemisphere
@@ -2405,7 +2418,7 @@ void main() {
     if (u_ft_mode >= 0.5) {
         // The analytic hemisphere: the whole ambient where no probe field is bound,
         // and what a field fades into toward its border.
-        float ftHemi  = N.y * 0.5 + 0.5;
+        float ftHemi  = Nbent.y * 0.5 + 0.5;
         vec3  ftSky   = u_ambient_color * 1.2 + vec3(0.015, 0.03, 0.06);
         vec3  ftGround = u_ambient_color * 0.6;
         vec3  ftHemiProbe = mix(ftGround, ftSky, ftHemi) * u_ambient_intensity;
@@ -2418,7 +2431,7 @@ void main() {
             // by u_ambient_color. The SdfBounce tier (mode>=2.5) shows the full
             // bounce; lower SDF/Probe tiers dial it back so the tiers differ.
             vec3 puvw = clamp((v_worldPos - u_probe_origin) / u_probe_size, 0.0, 1.0);
-            vec4 nd = vec4(1.0, N.x, N.y, N.z);
+            vec4 nd = vec4(1.0, Nbent.x, Nbent.y, Nbent.z);
             // Each channel's block is a third of the stacked texture; z stays between
             // the block's first and last texel centre, so filtering never reaches the
             // neighbouring channel.
@@ -2541,6 +2554,12 @@ void main() {
             float sNV = clamp(dot(N, V), 0.0, 1.0);
             lit += albedo * pow(1.0 - sNV, 3.0) * u_material_look.x * radiance * clamp(dot(N, dL) * 0.5 + 0.5, 0.0, 1.0) * dShadow * 0.6;
         }
+        // Micro-shadows (Chan 2018): light at a grazing angle does not reach into the
+        // occluded cavity - the AO cone's aperture against the light's angle.
+        if (u_micro_shadow > 0.5) {
+            float msNdotL = abs(dot(N, normalize(-u_dir_lights[dl].direction)));
+            lit *= mix(1.0, clamp(msNdotL + 2.0 * msAo * msAo - 1.0, 0.0, 1.0), 0.7);
+        }
         // The primary light is the one the SDF soft sun shadow (composite) scales.
         if (dl == 0) sunAcc += lit; else localAcc += lit;
     }
@@ -2618,7 +2637,8 @@ void main() {
             vec3 kD = (1.0 - F) * (1.0 - metallic);
 
             vec3 radiance = u_point_lights[i].color * u_point_lights[i].intensity * atten;
-            localAcc += (kD * albedo / 3.14159265 + spec) * radiance * NdotPL;
+            float msPoint = u_micro_shadow > 0.5 ? mix(1.0, clamp(NdotPL + 2.0 * msAo * msAo - 1.0, 0.0, 1.0), 0.7) : 1.0;
+            localAcc += (kD * albedo / 3.14159265 + spec) * radiance * NdotPL * msPoint;
         }
     }
 

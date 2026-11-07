@@ -9801,6 +9801,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         vio_set_uniform($this->ctx, 'u_grade_gain',        $grade['gain']);
         vio_set_uniform($this->ctx, 'u_grade_saturation', $grade['saturation']);
         vio_set_uniform($this->ctx, 'u_vignette_intensity', $this->settings->vignetteIntensity);
+        vio_set_uniform($this->ctx, 'u_micro_shadow', $this->settings->microShadows ? 1.0 : 0.0);
         // With the froxel volume this frame the per-pixel march steps aside (no double fog).
         vio_set_uniform($this->ctx, 'u_volumetric_fog', $this->settings->volumetricFog && !$this->froxelThisFrame ? 1 : 0);
         vio_set_uniform($this->ctx, 'u_ssr_intensity', $this->settings->ssr->intensity());

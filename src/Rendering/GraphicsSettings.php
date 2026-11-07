@@ -176,6 +176,14 @@ final class GraphicsSettings
          * backend that samples scene depth; elsewhere the march stays.
          */
         public readonly bool $froxelFog = false,
+        /**
+         * Micro-shadows and bent normals (shader plan 5.1): direct light at a grazing
+         * angle does not reach into occluded cavities (AO against the light's angle), and
+         * sky light / probe GI in them comes from the cavity's opening (the surface's
+         * normal before maps and patterns). Uses the AO the shading sees: SSAO on the
+         * forward path, cavity and curvature terms always.
+         */
+        public readonly bool $microShadows = false,
     ) {
     }
 
@@ -240,6 +248,7 @@ final class GraphicsSettings
         ?AccessibilitySettings $accessibility = null,
         ?string $gpu = null,
         ?bool $froxelFog = null,
+        ?bool $microShadows = null,
     ): self {
         $nextUpscaler = $upscaler ?? $this->upscaler;
         // Leaving a temporal upscaler re-clamps a sub-half render scale.
@@ -295,6 +304,7 @@ final class GraphicsSettings
             accessibility: $accessibility ?? $this->accessibility,
             gpu: $gpu ?? $this->gpu,
             froxelFog: $froxelFog ?? $this->froxelFog,
+            microShadows: $microShadows ?? $this->microShadows,
         );
     }
 
@@ -342,6 +352,7 @@ final class GraphicsSettings
             'vignetteIntensity' => $this->vignetteIntensity,
             'volumetricFog' => $this->volumetricFog,
             'froxelFog' => $this->froxelFog,
+            'microShadows' => $this->microShadows,
             'ssr' => $this->ssr->value,
             'fieldtracing' => $this->fieldtracing->value,
             'surfaceRelief' => $this->surfaceRelief->value,
@@ -418,6 +429,7 @@ final class GraphicsSettings
             accessibility: AccessibilitySettings::fromJson($data['accessibility'] ?? null),
             gpu: is_string($data['gpu'] ?? null) ? trim($data['gpu']) : '',
             froxelFog: self::asBool($data['froxelFog'] ?? null) ?? $defaults->froxelFog,
+            microShadows: self::asBool($data['microShadows'] ?? null) ?? $defaults->microShadows,
         );
     }
 
