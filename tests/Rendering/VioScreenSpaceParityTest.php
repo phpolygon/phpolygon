@@ -60,8 +60,10 @@ final class VioScreenSpaceParityTest extends TestCase
         // D3D12 on the RTX 2080 measured 81.0/32.7, 727 px (SSAO) and the same SSR.
         'ssao-0' => [80.8, 32.0, 765],
         'ssao-1' => [80.8, 32.0, 767],
-        'ssr-0' => [79.5, 48.3, 236],
-        'ssr-1' => [79.5, 48.3, 236],
+        // SSR re-measured 2026-11-07 after the depth-scaled thickness and start jitter
+        // (WARP 321 px; Vulkan and the RTX 319 px, same centre).
+        'ssr-0' => [79.4, 46.5, 321],
+        'ssr-1' => [79.4, 46.5, 321],
         // The RTX 2080 measured the same on D3D12 and Vulkan (719 px both paths).
         'sdfao-0' => [79.5, 35.6, 719],
         'sdfao-1' => [79.5, 35.6, 720],

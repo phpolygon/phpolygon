@@ -175,8 +175,11 @@ final class VioSceneDepthTest extends TestCase
         ProcModeShaderRegistry::requireSceneDepth(['soft']);
         self::assertContains('PHPOLYGON_SCENE_DEPTH', ProcModeShaderRegistry::variantDefines('soft'));
         self::assertNotContains('PHPOLYGON_SCENE_DEPTH', ProcModeShaderRegistry::variantDefines());
-        self::assertSame(3, ProcModeShaderRegistry::samplerBudget('soft'));
-        self::assertSame(1, ProcModeShaderRegistry::samplerBudget());
+        // The base program keeps every engine sampler; 'soft' gives up the probe field
+        // (one stacked 3D texture) and spends a sampler on the scene depth.
+        $base = ProcModeShaderRegistry::samplerRegisters() - ProcModeShaderRegistry::engineSamplers();
+        self::assertSame($base, ProcModeShaderRegistry::samplerBudget());
+        self::assertSame($base + 1 - 1, ProcModeShaderRegistry::samplerBudget('soft'));
 
         $near = self::px($this->renderer()->renderToImage(self::scene(-5.0, -8.0), self::SIZE, self::SIZE), 8, 32);
         self::assertEqualsWithDelta(3.0, self::blueToDelta($near[2]), 0.35);

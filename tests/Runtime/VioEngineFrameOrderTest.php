@@ -42,11 +42,13 @@ final class VioEngineFrameOrderTest extends TestCase
     /**
      * md5 of this frame rendered by v0.92.0, the engine before the fix, by adapter.
      * The fix must not move a pixel where the frame was right. Vulkan has none: there
-     * v0.92.0 presented nothing.
+     * v0.92.0 presented nothing. Re-pinned 2026-11-07 after the surface shading of the
+     * shader plan (material detail, grading) changed the box itself; the frame order is
+     * unchanged (2D on top, the box through the offscreen target, checked by eye).
      */
     private const V092 = [
-        'd3d12|Microsoft Basic Render Driver' => 'd841aaab16b565e8947043534e809133',
-        'd3d12|NVIDIA GeForce RTX 2080' => '411561e2a8a77c28ae484e363443f6e3',
+        'd3d12|Microsoft Basic Render Driver' => '5ddf10cfaa0b78c47d0a074ecd48be69',
+        'd3d12|NVIDIA GeForce RTX 2080' => 'd89602a5db831c8ffbb0d57a29aeae5f',
     ];
 
     /** @return array{0: string, 1: string, 2: string} rgba, backend, adapter */
