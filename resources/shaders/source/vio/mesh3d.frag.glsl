@@ -846,13 +846,26 @@ vec3 lightInscatter(vec3 p) {
         float t0 = max(b - sq, 0.0);
         float t1 = min(b + sq, len);
         if (t1 <= t0) continue;
-        float st = (t1 - t0) / 6.0;
         vec3 sd = normalize(u_spot_lights[i].direction);
+        // Sample round where the view ray passes closest to the cone's axis, over
+        // the cone's width there: a narrow beam is hit, a wide cone filled.
+        vec3 w0 = o - lp;
+        float bb = dot(rd, sd);
+        float dd = dot(rd, w0);
+        float ee = dot(sd, w0);
+        float den = max(1.0 - bb * bb, 1e-4);
+        float tRay = clamp((bb * ee - dd) / den, t0, t1);
+        float sAxis = clamp(dot(o + rd * tRay - lp, sd), 0.0, R);
+        float hw = sAxis * tan(u_spot_lights[i].angle) * 1.5 / max(sqrt(den), 0.2) + 1.0;
+        float a0 = max(t0, tRay - hw);
+        float a1 = min(t1, tRay + hw);
+        if (a1 <= a0) continue;
+        float st = (a1 - a0) / 8.0;
         float cosOuter = cos(u_spot_lights[i].angle);
         float cosInner = cos(u_spot_lights[i].angle * (1.0 - u_spot_lights[i].penumbra));
         vec3 acc = vec3(0.0);
-        for (int j = 0; j < 6; j++) {
-            vec3 q = o + rd * (t0 + (float(j) + jit) * st);
+        for (int j = 0; j < 8; j++) {
+            vec3 q = o + rd * (a0 + (float(j) + jit) * st);
             vec3 lq = lp - q;
             float dq = length(lq);
             vec3 ln = lq / max(dq, 1e-3);
@@ -860,9 +873,10 @@ vec3 lightInscatter(vec3 p) {
             if (cone <= 0.0) continue;
             float at = clamp(1.0 - dq * dq / (R * R), 0.0, 1.0);
             float sh = i == u_spot_shadow_index ? spotShadow(q, ln, ln, dq) : 1.0;
-            acc += vec3(at * at * cone * sh / max(dq * dq, 0.5));
+            // The engine's light falloff (a window, no inverse square), as on surfaces.
+            acc += vec3(at * at * cone * sh);
         }
-        sum += u_spot_lights[i].color * u_spot_lights[i].intensity * acc * st;
+        sum += u_spot_lights[i].color * u_spot_lights[i].intensity * acc * st * 0.15;
     }
     return sum * sigma * 0.08;
 }
