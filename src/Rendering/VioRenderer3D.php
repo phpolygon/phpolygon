@@ -6552,8 +6552,22 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
 
     private ?VioTexture $sceneDepthView = null;
 
-    /** @var array<string, int|float|array<float>> SetShaderParameter values, sticky */
-    private array $snippetParameters = [];
+    /**
+     * SetShaderParameter values, sticky. Seeded with the neutral values of the
+     * engine uniforms only an optional system sets (fog, halos, decals, heat,
+     * shafts): without a writer they would keep whatever the constant buffer held.
+     *
+     * @var array<string, int|float|array<float>>
+     */
+    private array $snippetParameters = [
+        'u_light_halo' => 0.0,
+        'u_height_fog' => [0.0, 0.1, 0.0, 0.0],
+        'u_height_fog_color' => [0.0, 0.0, 0.0, 0.0],
+        'u_fog_volume_count' => 0,
+        'u_decal_count' => 0,
+        'u_heat_count' => 0,
+        'u_sun_shafts' => [0.0, 0.0, 0.0, 0.0],
+    ];
 
     private ?VioRenderTarget $planarTarget = null;
     private int $planarWidth = 0;

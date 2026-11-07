@@ -812,7 +812,8 @@ vec3 lightInscatter(vec3 p) {
     float sigma = u_light_halo + 0.03 * clamp(u_rain_wetness, 0.0, 1.0);
     // Indoor air is dry: a third of the scattering from inside an interior volume.
     if (interiorMask(u_camera_pos) > 0.0) sigma *= 0.3;
-    if (sigma <= 0.0) return vec3(0.0);
+    // NaN-safe: an unset uniform must not poison the colour.
+    if (!(sigma > 0.0)) return vec3(0.0);
     vec3 o = u_camera_pos;
     vec3 rd = p - o;
     float len = length(rd);
@@ -873,9 +874,9 @@ vec3 lightInscatter(vec3 p) {
             float cone = smoothstep(cosOuter, cosInner, dot(-ln, sd));
             if (cone <= 0.0) continue;
             float at = clamp(1.0 - dq * dq / (R * R), 0.0, 1.0);
-            float sh = i == u_spot_shadow_index ? spotShadow(q, ln, ln, dq) : 1.0;
             // The engine's light falloff (a window, no inverse square), as on surfaces.
-            acc += vec3(at * at * cone * sh);
+            // (No shadow lookup here: a comparison sample in this loop miscompiled.)
+            acc += vec3(at * at * cone);
         }
         sum += u_spot_lights[i].color * u_spot_lights[i].intensity * acc * st * 0.15;
     }
