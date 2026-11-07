@@ -1524,9 +1524,23 @@ void main() {
     }
 
     // Season colour map: grass blades and two-sided translucent foliage.
-    if (u_grass_shade == 1 || (u_two_sided == 1 && u_subsurface_strength > 0.0)) {
+    bool isPlant = u_grass_shade == 1 || (u_two_sided == 1 && u_subsurface_strength > 0.0);
+    if (isPlant) {
         float sl = dot(albedo, vec3(0.299, 0.587, 0.114));
         albedo = mix(albedo, vec3(sl), u_season_grade.a) * u_season_grade.rgb;
+    }
+    // Drops on wet leaves (shader plan 4.1): a wet plant darkens and turns glossy,
+    // and small drops catch the sky light (outside interior volumes only).
+    float leafDrops = 0.0;
+    if (isPlant && u_rain_wetness > 0.0 && interiorMask(v_worldPos) <= 0.0) {
+        float lw = clamp(u_rain_wetness, 0.0, 1.0);
+        albedo *= 1.0 - 0.18 * lw;
+        roughness = mix(roughness, 0.35, lw);
+        vec3 dc = floor(v_worldPos * 24.0);
+        vec3 df = fract(v_worldPos * 24.0) - 0.5;
+        float dh = hash31(dc);
+        leafDrops = step(1.0 - 0.12 * lw, dh) * smoothstep(0.42, 0.2, length(df.xz)) * lw;
+        roughness = mix(roughness, 0.06, leafDrops);
     }
 
 #ifndef PHPOLYGON_OMIT_SNOW
@@ -1921,6 +1935,8 @@ void main() {
 #endif // PHPOLYGON_OMIT_CLEARCOAT
 
     localAcc += u_emission + surfaceEmission;
+    // Wet-leaf drops catch the sky (see above).
+    localAcc += leafDrops * u_ambient_color * u_ambient_intensity * 0.9;
 
     vec4 sceneFogV = sceneFog(v_worldPos);
     float fogT = sceneFogV.a;
