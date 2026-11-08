@@ -1825,12 +1825,14 @@ void main() {
     // Strand hair (shader plan 10.2): the normal holds the strand direction. Shading
     // takes the normal of a cylinder around the strand that faces the camera - a strand
     // is lit by the sine to the light, the highlight runs in a band along the strands.
+#ifndef PHPOLYGON_OMIT_HAIR
     if (u_hair > 0.5) {
         vec3 strand = normalize(v_normal);
         vec3 toEye = normalize(u_camera_pos - v_worldPos);
         vec3 across = toEye - strand * dot(strand, toEye);
         N = length(across) > 1e-4 ? normalize(across) : toEye;
     }
+#endif // PHPOLYGON_OMIT_HAIR
 #ifdef PHPOLYGON_MRT
     // Every attachment holds a defined value even when a procedural branch
     // returns early: no sun/ambient, unlit colour in o_local, geometry in the
@@ -1849,9 +1851,11 @@ void main() {
 #endif
     // View-facing normal for specular/fresnel (flipped for back faces)
     vec3 Nv = gl_FrontFacing ? N : -N;
+#ifndef PHPOLYGON_OMIT_HAIR
     if (u_hair > 0.5) {
         Nv = N; // already towards the camera, on both sides of the ribbon
     }
+#endif // PHPOLYGON_OMIT_HAIR
 
     vec3 V = normalize(u_camera_pos - v_worldPos);
     vec3 L = normalize(-u_dir_light_direction);
@@ -1874,9 +1878,14 @@ void main() {
     // lends its pattern to the relief below.
     int nPattern = u_normal_pattern;
     float nScale = u_normal_scale;
+#ifndef PHPOLYGON_OMIT_SPLAT
     bool splatOn = u_splat_count > 0.5 && u_has_albedo_texture == 1;
+#else
+    const bool splatOn = false;
+#endif // PHPOLYGON_OMIT_SPLAT
     vec3 splatAlbedo = u_albedo;
     float splatRough = roughness;
+#ifndef PHPOLYGON_OMIT_SPLAT
     if (splatOn) {
         vec2 suv = (v_worldPos.xz - u_splat_area.xy) / u_splat_area.zw;
         vec4 sw = albedoGrad(suv, dFdx(suv), dFdy(suv));
@@ -1888,7 +1897,7 @@ void main() {
 #ifndef PHPOLYGON_OMIT_NORMAL_PATTERNS
             int code = int(u_splat_pattern[si].x + 0.5);
             if (code != 0) h = dispatchProceduralHeight(code, v_uv * u_splat_pattern[si].y);
-#endif
+#endif // PHPOLYGON_OMIT_NORMAL_PATTERNS
             lifted[si] = float(si) < u_splat_count ? weights[si] + h * u_splat_pattern[si].z : -1.0e9;
             top = max(top, lifted[si]);
         }
@@ -1911,6 +1920,7 @@ void main() {
         nScale = u_splat_pattern[dominant].y;
         roughness = splatRough;
     }
+#endif // PHPOLYGON_OMIT_SPLAT
     vec2 patternUv = v_uv;
 #ifndef PHPOLYGON_OMIT_NORMAL_PATTERNS
     if (nPattern != 0 && u_parallax_depth > 0.0) {
@@ -1930,6 +1940,7 @@ void main() {
 #endif
         vec2 fbUv = patternUv;
         vec2 fbScale = vec2(1.0);
+#ifndef PHPOLYGON_OMIT_FLIPBOOK
         if (u_flipbook.x > 0.5 && u_flipbook.y > 0.5) {
             // Flipbook (shader plan 7.1): the frame of the particle's age, or by time.
             float frames = u_flipbook.x * u_flipbook.y;
@@ -1942,15 +1953,24 @@ void main() {
             fbScale = 1.0 / u_flipbook.xy;
             fbUv = (fract(patternUv) + cell) * fbScale;
         }
+#endif // PHPOLYGON_OMIT_FLIPBOOK
+#ifndef PHPOLYGON_OMIT_TRIPLANAR
         texAlbedo *= u_triplanar > 0.0
             ? sampleAlbedoTriplanar(v_worldPos, N, u_triplanar)
             : sampleAlbedoTexture(fbUv, uvDx * mipScale * fbScale, uvDy * mipScale * fbScale);
+#else
+        texAlbedo *= sampleAlbedoTexture(fbUv, uvDx * mipScale * fbScale, uvDy * mipScale * fbScale);
+#endif // PHPOLYGON_OMIT_TRIPLANAR
+#ifndef PHPOLYGON_OMIT_FUR
         if (u_fur_shell.w > 0.5) {
             texAlbedo *= mix(u_fur_shell.z, 1.0, u_fur_shell.x);
         }
+#endif // PHPOLYGON_OMIT_FUR
+#ifdef PHPOLYGON_CUTOUT
         if (u_alpha_cutoff > 0.0 && albedoGrad(fbUv, uvDx * mipScale * fbScale, uvDy * mipScale * fbScale).a < u_alpha_cutoff) {
             discard;
         }
+#endif
     }
 
     // ---- Material selection ----
@@ -2047,12 +2067,14 @@ void main() {
     // tier Off, or a non-D3D / non-HDR path). When the real pass owns reflections
     // it composites the actual reflected scene into the HDR buffer afterwards, so
     // suppressing the surrogate here prevents double-darkening the same surface.
+#ifndef PHPOLYGON_OMIT_WETNESS
     if (u_wetness > 0.0 && u_ssr_enabled == 0) {
         float upMask = clamp(dot(N, vec3(0.0, 1.0, 0.0)) * 1.4 - 0.2, 0.0, 1.0);
         float w = u_wetness * upMask;
         roughness = mix(roughness, max(roughness * 0.25, 0.04), w);
         albedo    = mix(albedo,    albedo * 0.7,                 w);
     }
+#endif // PHPOLYGON_OMIT_WETNESS
 
     // Rain-soaked ground (shader plan 4.1): porous surfaces darken, the water film
     // smooths them, puddles are near mirrors lying flat. Mirrors in the G-buffer.
@@ -2126,6 +2148,7 @@ void main() {
     // rain streaks run down walls, metal rusts (copper turns green), moss grows
     // on the north side, bricks bloom white. Near a waterline vertical surfaces
     // carry a salt crust above it and algae below, whatever the zone.
+#ifndef PHPOLYGON_OMIT_WEATHERING
     if (u_weathering > 0.0 && u_proc_mode == 0 && alpha > 0.95 && dot(u_emission, vec3(1.0)) < 0.05) {
         float age = 0.0;
         for (int k = 0; k < 8; k++) {
@@ -2187,6 +2210,7 @@ void main() {
             roughness = mix(roughness, 0.95, max(salt, algae));
         }
     }
+#endif // PHPOLYGON_OMIT_WEATHERING
 
     // Rain on glass (shader plan 4.1): transparent, smooth, default-shaded panes
     // outside interior volumes. Drops thicken the pane a little and catch the sky.
@@ -2204,6 +2228,7 @@ void main() {
     // Glass (shader plan 5.3, Material::$glass): towards grazing angles the pane
     // turns opaque and mirror-like, so edges and curvature read; dirt (smudges and
     // dried rain runs) thickens and dulls it.
+#ifndef PHPOLYGON_OMIT_GLASS
     if (u_glass.x > 0.0 && alpha < 0.98) {
         float gNdotV = clamp(dot(N, V), 0.0, 1.0);
         float gF = 0.04 + 0.96 * pow(1.0 - gNdotV, 5.0);
@@ -2219,6 +2244,7 @@ void main() {
             roughness = mix(roughness, 0.7, gd);
         }
     }
+#endif // PHPOLYGON_OMIT_GLASS
 
     // Particle colour over life (shader plan 7.1): the packed RGBA6 of the
     // instance tints albedo, emission (below) and alpha.
@@ -2233,20 +2259,26 @@ void main() {
     }
 #endif
     // Streaks fade towards their tail (Material::$streakFade, shader plan 7.1).
+#ifndef PHPOLYGON_OMIT_FLIPBOOK
     if (u_flipbook.w > 0.5) {
         alpha *= smoothstep(0.0, 0.85, v_uv.y);
     }
+#endif // PHPOLYGON_OMIT_FLIPBOOK
     // Fur shells (shader plan 10.2): a shell keeps only the strand dots, thinner the
     // higher it lies; the base (height 0) stays whole.
+#ifndef PHPOLYGON_OMIT_FUR
     if (u_fur_shell.w > 0.5 && u_fur_shell.x > 0.0) {
         vec2 g = v_uv * u_fur_shell.y;
         vec2 cell = floor(g);
         float h = fract(sin(dot(cell, vec2(12.9898, 78.233))) * 43758.5453);
         float radius = 0.48 * (1.0 - u_fur_shell.x) * (0.55 + 0.45 * h);
+#ifdef PHPOLYGON_CUTOUT
         if (h < 0.12 || length(fract(g) - 0.5) > radius) {
             discard;
         }
+#endif
     }
+#endif // PHPOLYGON_OMIT_FUR
     // Dithered distance fade (shader plan 6.1): dissolve instead of popping.
     // A negative range fades IN with the complementary dither (LOD cross-fade,
     // shader plan 9.1): the outgoing and the incoming level never cover the
@@ -2255,9 +2287,11 @@ void main() {
         float fadeT = smoothstep(abs(u_fade_range.x), abs(u_fade_range.y), length(u_camera_pos - v_worldPos));
         float dith = fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))));
         bool keep = u_fade_range.y > 0.0 ? fadeT <= dith : fadeT > dith;
+#ifdef PHPOLYGON_CUTOUT
         if (!keep) {
             discard;
         }
+#endif
     }
     // Season colour map: grass blades and two-sided translucent foliage.
     bool isPlant = u_grass_shade == 1 || (u_two_sided == 1 && u_subsurface_strength > 0.0);
@@ -2578,6 +2612,7 @@ void main() {
                 lit += (kD * albedo / 3.14159265 + spec) * radiance * dNdotL * dShadow;
                 // Brushed metal (shader plan 5.5): an extra highlight stretched along
                 // the surface's horizontal (the brushing direction).
+#ifndef PHPOLYGON_OMIT_MATERIAL_LOOK
                 if (u_material_look.y > 0.0) {
                     vec3 bT = normalize(cross(vec3(0.0, 1.0, 0.0), N) + vec3(1e-5, 0.0, 0.0));
                     vec3 bB = normalize(cross(N, bT));
@@ -2595,9 +2630,11 @@ void main() {
                     flash *= step(0.82, hash31(gc + 9.1)) * (1.0 - smoothstep(6.0, 20.0, length(u_camera_pos - v_worldPos)));
                     lit += radiance * flash * u_material_look.z * 4.0 * dShadow;
                 }
+#endif // PHPOLYGON_OMIT_MATERIAL_LOOK
                 // Hair shine (shader plan 6.2): strands run down the surface, the
                 // highlight is a ring across them (Kajiya-Kay) - a sharp white
                 // lobe and a broad one in the hair colour.
+#ifndef PHPOLYGON_OMIT_FIGURE_LOOK
                 if (u_figure_look.y > 0.0) {
                     vec3 hT = vec3(0.0, 1.0, 0.0) - N * N.y;
                     hT = dot(hT, hT) > 1e-5 ? normalize(hT) : vec3(1.0, 0.0, 0.0);
@@ -2609,13 +2646,16 @@ void main() {
                     vec3 hairSpec = vec3(pow(sTH, 90.0) * 0.35) + albedo * pow(sTH2, 18.0) * 0.6;
                     lit += hairSpec * u_figure_look.y * radiance * dNdotL * dShadow;
                 }
+#endif // PHPOLYGON_OMIT_FIGURE_LOOK
             }
         }
         // Cloth sheen (shader plan 5.5): a soft rim of the albedo at grazing angles.
+#ifndef PHPOLYGON_OMIT_MATERIAL_LOOK
         if (u_material_look.x > 0.0) {
             float sNV = clamp(dot(N, V), 0.0, 1.0);
             lit += albedo * pow(1.0 - sNV, 3.0) * u_material_look.x * radiance * clamp(dot(N, dL) * 0.5 + 0.5, 0.0, 1.0) * dShadow * 0.6;
         }
+#endif // PHPOLYGON_OMIT_MATERIAL_LOOK
         // Micro-shadows (Chan 2018): light at a grazing angle does not reach into the
         // occluded cavity - the AO cone's aperture against the light's angle.
         if (u_micro_shadow > 0.5) {
@@ -2627,6 +2667,7 @@ void main() {
     }
     // Rim light for figures (shader plan 6.2): sky light round the silhouette,
     // stronger where the sun stands behind the figure; works in shade too.
+#ifndef PHPOLYGON_OMIT_FIGURE_LOOK
     if (u_figure_look.x > 0.0) {
         float rNV = clamp(dot(N, V), 0.0, 1.0);
         float rim = pow(1.0 - rNV, 3.0) * smoothstep(-0.2, 0.4, N.y + 0.3);
@@ -2638,6 +2679,7 @@ void main() {
         }
         localAcc += rimCol * rim * u_figure_look.x * mix(vec3(1.0), albedo * 2.0, 0.3);
     }
+#endif // PHPOLYGON_OMIT_FIGURE_LOOK
 
 #ifdef PHPOLYGON_LIGHT_GRID
     // More than eight point lights: the lights of this fragment's grid cell.
@@ -2820,6 +2862,7 @@ void main() {
 
     // Emissive looks (shader plan 5.4).
     vec3 emission = u_emission * particleRgb;
+#ifndef PHPOLYGON_OMIT_EMISSIVE_LOOK
     if (u_emissive_look.x > 0.0 && dot(emission, vec3(1.0)) > 0.0) {
         // Windows: a grid on the wall plane (2.2 m x 2.8 m), a share of them lit
         // in a warm or cool tone; behind each a room - back wall bright, side
@@ -2845,6 +2888,7 @@ void main() {
         float lum = max(max(emission.r, emission.g), emission.b);
         emission = mix(emission * (0.35 + 1.2 * pow(tn, 2.0)), vec3(lum * 1.6), pow(tn, 10.0) * 0.6);
     }
+#endif // PHPOLYGON_OMIT_EMISSIVE_LOOK
     localAcc += emission + surfaceEmission;
     // Wet-leaf drops catch the sky (see above).
     localAcc += leafDrops * u_ambient_color * u_ambient_intensity * 0.9;
@@ -2856,6 +2900,7 @@ void main() {
 
     // Soft puffs (Material::$softParticle, shader plan 4.2): round on their quad and
     // fading where they meet geometry, so smoke and steam have no hard edges.
+#ifndef PHPOLYGON_OMIT_SOFT_PARTICLE
     if (u_soft_particle > 0.0) {
         alpha *= 1.0 - smoothstep(0.18, 0.5, length(v_uv - 0.5));
 #ifdef PHPOLYGON_SCENE_DEPTH
@@ -2876,6 +2921,7 @@ void main() {
             ambientAcc *= mix(0.8, 1.05, facing);
         }
     }
+#endif // PHPOLYGON_OMIT_SOFT_PARTICLE
 
     // Refraction (Material::$refraction): what lies behind, shifted along the
     // screen-parallel part of the normal and blurred for frosted glass, tinted by
@@ -2884,6 +2930,7 @@ void main() {
     vec3 refrBehind = vec3(0.0);
     float refrOn = 0.0;
 #ifdef PHPOLYGON_SCENE_COLOR
+#ifndef PHPOLYGON_OMIT_REFRACTION
     {
         vec3 rdx = dFdx(v_worldPos);
         vec3 rdy = dFdy(v_worldPos);
@@ -2906,6 +2953,7 @@ void main() {
             refrOn = 1.0;
         }
     }
+#endif // PHPOLYGON_OMIT_REFRACTION
 #endif
 
 #ifdef PHPOLYGON_MRT

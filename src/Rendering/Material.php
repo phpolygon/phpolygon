@@ -473,6 +473,11 @@ class Material
          * pergolas; 0 = a solid shadow.
          */
         public readonly float $shadowDapple = 0.0,
+        /**
+         * Shader profile ({@see ShaderProfiles}): the lean program this material draws
+         * with. Null = by id prefix or the smallest covering profile.
+         */
+        public readonly ?string $shaderProfile = null,
     ) {}
 
     /**
@@ -820,6 +825,7 @@ class Material
             breathing: $this->breathing,
             instanceTint: $this->instanceTint,
             shadowDapple: $this->shadowDapple,
+            shaderProfile: $this->shaderProfile,
         );
     }
 

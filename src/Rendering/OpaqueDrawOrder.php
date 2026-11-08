@@ -21,7 +21,8 @@ use PHPolygon\Rendering\Command\DrawMeshInstanced;
  * bytes; a frame with a numeric material or mesh id therefore keeps the
  * comparator sort, so the order never differs.
  *
- * With shader variants registered, the program comes first in the key: every
+ * With shader variants or shader profiles registered (and for cut-out twins), the
+ * program comes first in the key: every
  * program change costs a pipeline bind. Opaque draws are order-independent up to
  * equal depth, where the earlier draw keeps the pixel; a variant defined with
  * `keepOrder` therefore sorts as the base program and keeps its material position.
@@ -49,7 +50,10 @@ final class OpaqueDrawOrder
         $materials = [];
         /** @var array<string, true> $checked ids already tested for being numeric */
         $checked = [];
-        $variants = ProcModeShaderRegistry::hasVariants();
+        $profiles = ShaderProfiles::names() !== [];
+        $variants = ProcModeShaderRegistry::hasVariants() || $profiles;
+        /** @var array<string, string> $programs program sort key per material id */
+        $programs = [];
         foreach ($commands as $cmd) {
             if (!$cmd instanceof DrawMesh && !$cmd instanceof DrawMeshInstanced) {
                 continue;
@@ -72,7 +76,19 @@ final class OpaqueDrawOrder
             $moved = $motion && $cmd instanceof DrawMesh && $cmd->prevModelMatrix !== null ? 1 : 0;
             $key = $materialId . "\0" . $meshId . "\0" . $moved;
             if ($variants) {
-                $key = ProcModeShaderRegistry::sortVariantOf(ProcModeRegistry::resolve($materialId)) . "\0" . $key;
+                $program = $programs[$materialId] ?? null;
+                if ($program === null) {
+                    $program = ProcModeShaderRegistry::sortVariantOf(ProcModeRegistry::resolve($materialId));
+                    // Shader profiles and cut-out twins are programs of their own too.
+                    if ($program === ProcModeShaderRegistry::BASE_VARIANT && $profiles) {
+                        $program = 'profile:' . (ShaderProfiles::profileOf($materialId, $material) ?? '');
+                    }
+                    if (VioRenderer3D::needsCutout($material)) {
+                        $program .= '+cutout';
+                    }
+                    $programs[$materialId] = $program;
+                }
+                $key = $program . "\0" . $key;
             }
             $keys[] = $key;
             $opaque[] = [$materialId, $meshId, $cmd, $material, $moved];

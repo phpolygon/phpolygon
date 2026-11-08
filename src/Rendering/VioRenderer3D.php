@@ -199,6 +199,28 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
 
     private int $materialUniformParams = -1;
 
+    /**
+     * OMIT defines of the {@see ShaderPath::automatic()} paths no registered material
+     * needs; compiled into every mesh program. Only ever shrinks while programs exist
+     * (a removed material never costs a rebuild).
+     *
+     * @var list<string>
+     */
+    private array $autoOmit = [];
+
+    private int $autoOmitMaterials = -1;
+
+    private int $autoOmitProfiles = -1;
+
+    /** @var array<string, true> automatic paths some registered material has needed */
+    private array $autoNeeded = [];
+
+    /**
+     * A program failed to compile without some path (a game snippet uses it), or
+     * PHPOLYGON_SHADER_OMIT=0 (diagnosis): no automatic omissions.
+     */
+    private bool $autoOmitOff = false;
+
     private ?Mat4 $currentViewMatrix = null;
     private ?Mat4 $currentProjectionMatrix = null;
     private ?Vec3 $cameraPosition = null;
@@ -4133,6 +4155,9 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         $this->sceneColorCopied = false;
         $this->instanceParamsThisFrame = ProcModeShaderRegistry::instanceParamsEnabled();
         $this->variantUniformsUploaded = [];
+        // New materials may need a left-out path: rebuild before anything is drawn.
+        $this->refreshAutoOmissions(true);
+        $this->profilesThisFrame = ShaderProfiles::names() !== [] && $this->activeShaderId() === 'default';
         // While a surface cut runs the base program is the one that may discard.
         $this->frameBaseVariant = ProcModeShaderRegistry::surfaceCutActive()
             && $this->activeShaderId() === 'default'
@@ -4358,7 +4383,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
                 $meshletDraws[] = [$cmd, $material];
                 continue;
             }
-            if ($this->variantsThisFrame) {
+            if ($this->wantsVariantSwitch($material)) {
                 $this->selectVariant($material, $materialId);
             }
             if ($cmd instanceof DrawMesh) {
@@ -4421,7 +4446,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             if ($material === null || $material->alpha >= 1.0) {
                 continue;
             }
-            if ($this->variantsThisFrame) {
+            if ($this->wantsVariantSwitch($material)) {
                 $this->selectVariant($material, $cmd->materialId);
             }
             if ($waterToGbuffer) {
@@ -4597,7 +4622,16 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         ProcModeShaderRegistry::assertSamplerBudget();
         // After the unit count is known: the pyramid takes the highest unit.
         $this->hizUnitBuilt = $this->settings->occlusionCulling ? $this->hizUnit() : -1;
-        $this->compileShaderFromFiles('default',    'mesh3d.vert.glsl',     'mesh3d.frag.glsl');
+        $this->refreshAutoOmissions(false);
+        try {
+            $this->compileShaderFromFiles('default',    'mesh3d.vert.glsl',     'mesh3d.frag.glsl');
+        } catch (\RuntimeException $e) {
+            if ($this->autoOmit === []) {
+                throw $e;
+            }
+            $this->disableAutoOmissions($e);
+            $this->compileShaderFromFiles('default',    'mesh3d.vert.glsl',     'mesh3d.frag.glsl');
+        }
         $this->compileShaderFromFiles('unlit',      'unlit.vert.glsl',      'unlit.frag.glsl');
         $this->compileShaderFromFiles('shadow',     'shadow.vert.glsl',     'shadow.frag.glsl');
         $this->compileShaderFromFiles('depth',      'depth.vert.glsl',      'depth.frag.glsl');
@@ -4689,6 +4723,8 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
                 $this->ensureVariantCompiled($variant);
             }
         }
+        // The cut-out and profile programs the registered materials use, up front.
+        $this->ensureUsedVariants();
     }
 
     private function initPostProcess(): void
@@ -4793,6 +4829,17 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
     /** mesh3d.frag of one program: its snippets, without the paths it leaves out. */
     private function meshFragmentSource(string $variant = ProcModeShaderRegistry::BASE_VARIANT): string
     {
+        // '+cutout': the same program with the cut-out discards compiled in.
+        $cutout = str_ends_with($variant, self::CUTOUT_SUFFIX);
+        if ($cutout) {
+            $variant = substr($variant, 0, -strlen(self::CUTOUT_SUFFIX));
+        }
+        // 'profile:<name>': the base program without the paths the profile leaves out.
+        $profileOmit = [];
+        if (str_starts_with($variant, self::PROFILE_PREFIX)) {
+            $profileOmit = ShaderProfiles::omissions(substr($variant, strlen(self::PROFILE_PREFIX)));
+            $variant = ProcModeShaderRegistry::BASE_VARIANT;
+        }
         // The surface-cut program is the base program with discards allowed.
         $cut = $variant === ProcModeShaderRegistry::SURFACE_CUT_VARIANT;
         if ($cut) {
@@ -4803,11 +4850,20 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             ProcModeShaderRegistry::FAMILY_VIO,
             $variant,
         );
-        foreach (ProcModeShaderRegistry::variantDefines($variant) as $define) {
+        $variantDefines = ProcModeShaderRegistry::variantDefines($variant);
+        foreach ($variantDefines as $define) {
             $source = self::withDefine($source, $define);
+        }
+        foreach (array_unique([...$this->autoOmit, ...$profileOmit]) as $define) {
+            if (!in_array($define, $variantDefines, true)) {
+                $source = self::withDefine($source, $define);
+            }
         }
         if ($cut) {
             $source = self::withDefine($source, 'PHPOLYGON_SURFACE_CUT');
+        }
+        if ($cutout) {
+            $source = self::withDefine($source, 'PHPOLYGON_CUTOUT');
         }
         if (self::preciseHashOn($this->conventions()->name())) {
             $source = self::withDefine($source, 'PHPOLYGON_PRECISE_HASH');
@@ -4920,6 +4976,179 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
      * other registers, and php-vio's Vulkan path binds by register.
      * Callers test $variantsThisFrame first: a frame without variants pays no call.
      */
+    /**
+     * Programs are compiled WITHOUT discard (`#ifdef PHPOLYGON_CUTOUT`): a discard
+     * anywhere in a fragment shader turns early depth testing off for every draw of
+     * that program, so the hidden surfaces of all opaque geometry got shaded too
+     * (measured: 1.3 ms of 4.7 ms GPU in a 300-material scene). Materials that cut
+     * pixels out draw with the '+cutout' twin of their program.
+     */
+    private const string CUTOUT_SUFFIX = '+cutout';
+
+    /** Variant name of a shader profile's program ({@see ShaderProfiles}). */
+    private const string PROFILE_PREFIX = 'profile:';
+
+    /** Shader profiles are registered: base-variant materials may switch to theirs. */
+    private bool $profilesThisFrame = false;
+
+    /**
+     * Re-read the material registry (only when it changed) and leave out every
+     * automatic path no material needs. With $rebuild, programs built without a path
+     * that is needed now are rebuilt.
+     */
+    private function refreshAutoOmissions(bool $rebuild): void
+    {
+        if ($this->autoOmitMaterials < 0 && getenv('PHPOLYGON_SHADER_OMIT') === '0') {
+            $this->autoOmitOff = true;
+        }
+        $materials = MaterialRegistry::version();
+        $profiles = ShaderProfiles::version();
+        if ($materials === $this->autoOmitMaterials && $profiles === $this->autoOmitProfiles) {
+            return;
+        }
+        // Only what changed since the last look: games re-register materials every frame.
+        $changed = $profiles !== $this->autoOmitProfiles || $materials < $this->autoOmitMaterials
+            ? MaterialRegistry::all()
+            : MaterialRegistry::changedSince($this->autoOmitMaterials);
+        $this->autoOmitMaterials = $materials;
+        $this->autoOmitProfiles = $profiles;
+        $before = $this->autoOmit;
+        if (!$this->autoOmitOff) {
+            $automatic = ShaderPath::automatic();
+            foreach ($changed as $material) {
+                foreach ($automatic as $path) {
+                    if (!isset($this->autoNeeded[$path->value]) && $path->neededBy($material)) {
+                        $this->autoNeeded[$path->value] = true;
+                    }
+                }
+            }
+            // The needed set only grows, so the omissions only shrink: a removed
+            // material never costs a rebuild.
+            $omit = [];
+            foreach ($automatic as $path) {
+                if (!isset($this->autoNeeded[$path->value])) {
+                    $omit[] = $path->define();
+                }
+            }
+            $this->autoOmit = $omit;
+        }
+        if (!$rebuild || !isset($this->shaderCache['default'])) {
+            return;
+        }
+        if ($this->autoOmit !== $before) {
+            $this->rebuildMeshPrograms();
+            return;
+        }
+        $this->ensureUsedVariants($changed);
+    }
+
+    /**
+     * Compile, at the start of a frame, the cut-out and profile programs the registered
+     * materials draw with: compiled lazily in the middle of a frame, the first draw
+     * with a new program lost its albedo texture (D3D12, cold cache).
+     */
+    /** @param array<string, Material>|null $materials defaults to every registered material */
+    private function ensureUsedVariants(?array $materials = null): void
+    {
+        $profiles = ShaderProfiles::names() !== [];
+        $wanted = [];
+        foreach ($materials ?? MaterialRegistry::all() as $id => $material) {
+            $variant = $material->grass
+                ? ProcModeShaderRegistry::BASE_VARIANT
+                : ProcModeShaderRegistry::variantOf(ProcModeRegistry::resolve((string) $id));
+            if ($variant === ProcModeShaderRegistry::BASE_VARIANT && $profiles) {
+                $profile = ShaderProfiles::profileOf((string) $id, $material);
+                if ($profile !== null) {
+                    $variant = self::PROFILE_PREFIX . $profile;
+                }
+            }
+            if (self::needsCutout($material)) {
+                $variant .= self::CUTOUT_SUFFIX;
+            }
+            $wanted[$variant] = true;
+        }
+        foreach (array_keys($wanted) as $variant) {
+            $this->ensureVariantCompiled((string) $variant);
+        }
+    }
+
+    /**
+     * The automatic omissions in force (OMIT defines) - tests and profiling.
+     *
+     * @return list<string>
+     */
+    public function automaticShaderOmissions(): array
+    {
+        return $this->autoOmit;
+    }
+
+    private function disableAutoOmissions(\Throwable $e): void
+    {
+        fwrite(STDERR, "[VioRenderer3D] mesh program needs every path (automatic omissions off): {$e->getMessage()}\n");
+        $this->autoOmit = [];
+        $this->autoOmitOff = true;
+    }
+
+    /**
+     * Drop every program built from mesh3d.frag (base, MRT and motion twins,
+     * variants, storage, depth-only, meshlet and tessellation twins) and their
+     * pipelines, and build the base programs again. Called at the start of a frame.
+     */
+    private function rebuildMeshPrograms(): void
+    {
+        $mrt = isset($this->shaderCache['default_mrt']);
+        $motion = isset($this->shaderCache['default_mrt_mv']);
+        foreach (array_keys($this->shaderCache) as $id) {
+            if (str_starts_with((string) $id, 'default')) {
+                unset($this->shaderCache[$id], $this->programSources[$id]);
+            }
+        }
+        foreach (array_keys($this->pipelineCache) as $key) {
+            if (str_contains((string) $key, ':default')) {
+                unset($this->pipelineCache[$key]);
+            }
+        }
+        $this->failedVariants = [];
+        $this->meshletFailed = [];
+        $this->tessFailed = [];
+        $this->variantUniformsUploaded = [];
+        $this->storageInstancingReady = null;
+        try {
+            $this->compileShaderFromFiles('default', 'mesh3d.vert.glsl', 'mesh3d.frag.glsl');
+            if ($mrt) {
+                $this->compileShaderFromFiles('default_mrt', 'mesh3d.vert.glsl', 'mesh3d.frag.glsl', true);
+            }
+            if ($motion) {
+                $this->compileShaderFromFiles('default_mrt_mv', 'mesh3d.vert.glsl', 'mesh3d.frag.glsl', true, true);
+            }
+        } catch (\RuntimeException $e) {
+            if ($this->autoOmit === []) {
+                throw $e;
+            }
+            $this->disableAutoOmissions($e);
+            $this->rebuildMeshPrograms();
+            return;
+        }
+        foreach (ProcModeShaderRegistry::variants() as $variant) {
+            if (!ProcModeShaderRegistry::isLazyVariant($variant)) {
+                $this->ensureVariantCompiled($variant);
+            }
+        }
+        $this->ensureUsedVariants();
+    }
+
+    /** Whether $material discards pixels: alpha cutoff, fur shells, dithered distance fade. */
+    public static function needsCutout(Material $material): bool
+    {
+        return $material->alphaCutoff > 0.0 || $material->furLength > 0.0 || $material->fadeDistance[1] != 0.0;
+    }
+
+    /** Whether a draw of $material may need another program than the one bound. */
+    private function wantsVariantSwitch(Material $material): bool
+    {
+        return $this->variantsThisFrame || $this->profilesThisFrame || $this->sceneVariant !== $this->frameBaseVariant || self::needsCutout($material);
+    }
+
     private function selectVariant(Material $material, string $materialId): void
     {
         $variant = $material->grass
@@ -4927,6 +5156,17 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             : ProcModeShaderRegistry::variantOf(ProcModeRegistry::resolve($materialId));
         if ($variant === ProcModeShaderRegistry::BASE_VARIANT) {
             $variant = $this->frameBaseVariant;
+            // Profiles in the opaque pass only: transparent draws go back to front and
+            // would switch programs at almost every draw, for few pixels.
+            if ($variant === ProcModeShaderRegistry::BASE_VARIANT && $this->profilesThisFrame && $this->currentScenePass === 'opaque') {
+                $profile = ShaderProfiles::profileOf($materialId, $material);
+                if ($profile !== null) {
+                    $variant = self::PROFILE_PREFIX . $profile;
+                }
+            }
+        }
+        if (self::needsCutout($material)) {
+            $variant .= self::CUTOUT_SUFFIX;
         }
         if ($variant === $this->sceneVariant) {
             return;
@@ -7901,7 +8141,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         $this->lastMaterialId = null;
         $reactive = false; // by reference: the mirrored pass writes no reactive mask
         foreach (OpaqueDrawOrder::sort($commands, false, $reactive) as [$materialId, , $cmd, $material]) {
-            if ($this->variantsThisFrame) {
+            if ($this->wantsVariantSwitch($material)) {
                 $this->selectVariant($material, $materialId);
             }
             if ($cmd instanceof DrawMesh) {
@@ -9347,7 +9587,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
      */
     private function meshletEligible(DrawMeshInstanced $cmd, Material $material, string $materialId): bool
     {
-        if ($cmd->storageBuffer !== null || $material->vatTexture !== null || $material->oceanTexture !== null || $material->tessellation > 0.0 || $material->furLength > 0.0 || ($cmd->albedoTextures !== [] && !$this->bindlessBuilt)) {
+        if ($cmd->storageBuffer !== null || $material->vatTexture !== null || $material->oceanTexture !== null || $material->tessellation > 0.0 || self::needsCutout($material) || ($cmd->albedoTextures !== [] && !$this->bindlessBuilt)) {
             return false;
         }
         if ($this->variantsThisFrame && !$material->grass) {
@@ -9445,7 +9685,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             return;
         }
         $inputs = $this->sceneUniformInputs;
-        if ($pass === 'opaque' && $this->variantsThisFrame) {
+        if ($pass === 'opaque') {
             $this->sceneVariant = $this->frameBaseVariant;
         }
         $this->meshletMode = true;
@@ -9775,7 +10015,10 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
      */
     private function programTime(float $time): float
     {
-        return $this->sceneVariant === ProcModeShaderRegistry::BASE_VARIANT ? $time : EffectRegistry::effectTime(EffectRegistry::get($this->sceneVariant), $time);
+        $name = explode(self::CUTOUT_SUFFIX, $this->sceneVariant)[0];
+        return $name === ProcModeShaderRegistry::BASE_VARIANT || str_starts_with($name, self::PROFILE_PREFIX)
+            ? $time
+            : EffectRegistry::effectTime(EffectRegistry::get($name), $time);
     }
 
     /**
