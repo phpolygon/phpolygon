@@ -5700,10 +5700,15 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         }
         if (!$reusePacked) {
             $shadowGroups = [];
+            $groupMeta = [];
             $this->shadowCasterMatrices[$k] = [];
             $this->shadowCasterMeshIds[$k] = [];
             foreach ($casters as $cmd) {
-                $shadowGroups[$cmd->meshId . ($this->swaysInShadow($cmd->materialId) ? '|sway' : '')][] = $cmd->modelMatrix;
+                $sway = $this->swaysInShadow($cmd->materialId);
+                $dapple = $this->shadowDappleOf($cmd->materialId);
+                $groupKey = $cmd->meshId . ($sway ? '|sway' : '') . ($dapple > 0.0 ? '|d' . $dapple : '');
+                $groupMeta[$groupKey] = [$cmd->meshId, $sway, $dapple];
+                $shadowGroups[$groupKey][] = $cmd->modelMatrix;
                 $this->shadowCasterMatrices[$k][] = $cmd->modelMatrix;
                 $this->shadowCasterMeshIds[$k][] = $cmd->meshId;
             }
@@ -5715,19 +5720,17 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
                         $floats[] = $f;
                     }
                 }
-                $this->shadowPackedCache[$k][$meshId] = [pack('f*', ...$floats), count($mats)];
+                $this->shadowPackedCache[$k][$meshId] = [pack('f*', ...$floats), count($mats), ...$groupMeta[$meshId]];
             }
         }
 
         // Resolve every shadow draw once per frame, not once per cascade.
-        /** @var list<array{0: \VioMesh, 1: string, 2: int, 3?: bool}> $shadowDraws */
+        /** @var list<array{0: \VioMesh, 1: string, 2: int, 3?: bool, 4?: float}> $shadowDraws */
         $shadowDraws = [];
-        foreach ($this->shadowPackedCache[$k] as $groupKey => [$buf, $cnt]) {
-            $groupKey = (string) $groupKey;
-            $sway = str_ends_with($groupKey, '|sway');
-            $mesh = $this->uploadMesh($sway ? substr($groupKey, 0, -5) : $groupKey);
+        foreach ($this->shadowPackedCache[$k] as [$buf, $cnt, $meshId, $sway, $dapple]) {
+            $mesh = $this->uploadMesh($meshId);
             if ($mesh !== null) {
-                $shadowDraws[] = [$mesh, $buf, $cnt, $sway];
+                $shadowDraws[] = [$mesh, $buf, $cnt, $sway, $dapple];
             }
         }
         foreach ($instancedCasters as [$cmd, $mat]) {
@@ -5736,7 +5739,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
                 continue;
             }
             [$flatMatrices, $instanceCount] = $this->resolveInstanceData($cmd->meshId, $mat, $cmd);
-            $shadowDraws[] = [$mesh, $flatMatrices, $instanceCount, $mat->foliageWind];
+            $shadowDraws[] = [$mesh, $flatMatrices, $instanceCount, $mat->foliageWind, max(0.0, min(1.0, $mat->shadowDapple))];
         }
 
         PerfProfiler::end();
@@ -6906,7 +6909,9 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
      * (Material::$foliageWind) bends in the depth pass too, so a tree's shadow
      * moves with the tree (shader plan 6.1).
      *
-     * @param list<array{0: \VioMesh, 1: string, 2: int, 3?: bool}> $draws
+     * Dappled casters (Material::$shadowDapple) punch drifting gaps into their shadow.
+     *
+     * @param list<array{0: \VioMesh, 1: string, 2: int, 3?: bool, 4?: float}> $draws
      */
     private function drawShadowList(array $draws): void
     {
@@ -6918,15 +6923,29 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         vio_set_uniform($this->ctx, 'u_foliage_fade', $this->foliageFade);
         vio_set_uniform($this->ctx, 'u_shadow_camera_pos', $camera !== null ? [$camera->x, $camera->y, $camera->z] : [0.0, 0.0, 0.0]);
         $sway = false;
+        $dapple = 0.0;
         vio_set_uniform($this->ctx, 'u_foliage_wind', 0);
+        vio_set_uniform($this->ctx, 'u_shadow_dapple', 0.0);
         foreach ($draws as $draw) {
             $wants = ($draw[3] ?? false) === true;
             if ($wants !== $sway) {
                 $sway = $wants;
                 vio_set_uniform($this->ctx, 'u_foliage_wind', $sway ? 1 : 0);
             }
+            $d = $draw[4] ?? 0.0;
+            if ($d !== $dapple) {
+                $dapple = $d;
+                vio_set_uniform($this->ctx, 'u_shadow_dapple', $dapple);
+            }
             vio_draw_instanced($this->ctx, $draw[0], $draw[1], $draw[2]);
         }
+    }
+
+    /** A material's dappled-shadow amount (0..1, rounded so groups stay few). */
+    private function shadowDappleOf(string $materialId): float
+    {
+        $d = MaterialRegistry::get($materialId)->shadowDapple ?? 0.0;
+        return round(max(0.0, min(1.0, $d)), 2);
     }
 
     /** Whether a material's foliage sway also bends its shadow. */
@@ -8128,7 +8147,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
     /** @var array<int, list<string>> */
     private array $shadowCasterMeshIds = [[], []];
 
-    /** @var array<int, array<string, array{0: string, 1: int}>> packed matrices per mesh for those casters */
+    /** @var array<int, array<string, array{0: string, 1: int, 2: string, 3: bool, 4: float}>> packed matrices per caster group (mesh, sway, dapple) */
     private array $shadowPackedCache = [[], []];
 
     /** A surface that glows is a light source itself: it casts no shadow for local lights. */

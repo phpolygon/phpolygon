@@ -13,6 +13,8 @@ uniform mat4 u_view;
 uniform mat4 u_projection;
 uniform int  u_use_instancing;
 
+out vec3 v_shadow_world;   // world position, for the dappled-shadow gaps (shadow.frag)
+
 // Foliage sway in the shadow (shader plan 6.1): the same trunk-and-crown bend as
 // mesh3d.vert's foliageSway (without leaf flutter), so a tree's shadow moves with
 // the tree. The fade uses the player camera, not the light view.
@@ -57,5 +59,7 @@ void main() {
     if (u_foliage_wind == 1) {
         pos = foliageSway(pos, model);
     }
-    gl_Position = u_projection * u_view * model * vec4(pos, 1.0);
+    vec4 world = model * vec4(pos, 1.0);
+    v_shadow_world = world.xyz;
+    gl_Position = u_projection * u_view * world;
 }

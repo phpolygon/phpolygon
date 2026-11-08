@@ -466,6 +466,13 @@ class Material
          * stands; no instance data needed.
          */
         public readonly float $instanceTint = 0.0,
+        /**
+         * Dappled shadow (shader plan 6.1): 0..1 - how much of this caster's sun shadow
+         * breaks up into gaps, leaf-cluster sized (about half a metre) and drifting with
+         * the wind, so the light under a tree crown falls in spots. For crowns, hedges,
+         * pergolas; 0 = a solid shadow.
+         */
+        public readonly float $shadowDapple = 0.0,
     ) {}
 
     /**
@@ -790,6 +797,7 @@ class Material
             splatSharpness: $this->splatSharpness,
             breathing: $this->breathing,
             instanceTint: $this->instanceTint,
+            shadowDapple: $this->shadowDapple,
         );
     }
 
