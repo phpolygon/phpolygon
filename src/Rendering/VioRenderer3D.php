@@ -288,6 +288,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
     private int $sdfAoWidth = 0;
     private int $sdfAoHeight = 0;
     private bool $sdfAoActiveThisFrame = false;
+    private bool $bakedLightActiveThisFrame = false;
     /** GL texture unit wired to u_sdf_ao_map. Distinct from albedo(0), ssao(1), shadows(6-9). */
     private const SDF_AO_SAMPLER_SLOT = 2;
 
@@ -341,6 +342,10 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
     private ?Vec3 $sdfVolOrigin = null;
     private ?Vec3 $sdfVolSize = null;
     private float $sdfVolRange = 4.0;
+    // The baked light volume (shader plan 3.3, SetBakedLight): R = sky, G = sun visibility.
+    private ?VioTexture $bakedLightTex = null;
+    private int $bakedLightVersion = -1;
+    private ?Command\SetBakedLight $bakedLight = null;
     /** Effective Fieldtracing tier for the current frame (set in render() pass 1). */
     private Quality\FieldtracingMode $frameFtMode = Quality\FieldtracingMode::Off;
 
@@ -1255,6 +1260,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         $this->sdfAoActiveThisFrame = false;
 
         if (!$this->sdfAoEnabledThisFrame()) {
+            $this->renderBakedLightPass($frameState, $gbufferTex);
             return;
         }
 
@@ -1345,6 +1351,128 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
 
         $this->sdfAoActiveThisFrame = true;
         $this->gpuMark('sdfao');
+    }
+
+    /**
+     * Upload the baked light volume (SetBakedLight) to a 3D texture, once per version.
+     */
+    private function ingestBakedLight(Command\SetBakedLight $cmd): void
+    {
+        $this->bakedLight = $cmd;
+        if ($this->bakedLightTex !== null && $this->bakedLightVersion === $cmd->version) {
+            return;
+        }
+        if (!function_exists('vio_texture_3d') || !$this->supportsTexture3D()) {
+            return;
+        }
+        $tex = vio_texture_3d($this->ctx, [
+            'data'   => $cmd->data,
+            'width'  => $cmd->width,
+            'height' => $cmd->height,
+            'depth'  => $cmd->depth,
+            'filter' => VIO_FILTER_LINEAR,
+            'wrap'   => VIO_WRAP_CLAMP,
+        ]);
+        if ($tex !== false) {
+            $this->bakedLightTex = $tex;
+            $this->bakedLightVersion = $cmd->version;
+        }
+    }
+
+    /** Baked light lookup: setting on, a volume uploaded, the live SDF trace not running, G-buffer effects available. */
+    private function bakedLightEnabledThisFrame(): bool
+    {
+        if (getenv('PHPOLYGON_BAKED_LIGHT') === '0') {
+            return false;
+        }
+        return $this->settings->bakedLight
+            && $this->bakedLightTex !== null
+            && $this->bakedLight !== null
+            && isset($this->shaderCache['baked_light'])
+            && !$this->sdfAoEnabledThisFrame()
+            && $this->screenSpaceEffectsSupported();
+    }
+
+    /** Whether the baked light lookup ran this frame (tests, debug overlays). */
+    public function bakedLightActive(): bool
+    {
+        return $this->bakedLightActiveThisFrame;
+    }
+
+    /**
+     * Baked light (shader plan 3.3): look the light volume up per pixel from the
+     * G-buffer and write AO / sun shadow straight into the target the mesh pass and
+     * the composite read for the SDF trace (already smooth - no blur pass).
+     *
+     * @param array{dirLights: list<SetDirectionalLight>, ...} $frameState
+     */
+    private function renderBakedLightPass(array $frameState, ?VioTexture $gbufferTex): void
+    {
+        $this->bakedLightActiveThisFrame = false;
+        if (!$this->bakedLightEnabledThisFrame()) {
+            return;
+        }
+        if ($gbufferTex === null && $this->gbufferTarget !== null) {
+            $gbufferTex = vio_render_target_texture($this->gbufferTarget);
+        }
+        $cmd = $this->bakedLight;
+        $volTex = $this->bakedLightTex;
+        if ($gbufferTex === null || $cmd === null || $volTex === null || $this->screenQuad === null
+            || $this->currentProjectionMatrix === null || $this->currentViewMatrix === null) {
+            return;
+        }
+        $quad = $this->screenQuad;
+        $proj = $this->currentProjectionMatrix->toArray();
+        $invView = $this->currentViewMatrix->inverse()->toArray();
+        $this->ensureSdfAoTarget();
+        $target = $this->sdfAoBlurTarget;
+        if ($target === null) {
+            return;
+        }
+
+        // The baked sun term fits the baked direction only: full within 5 degrees of
+        // the live sun, gone at 25.
+        $sunFit = 0.0;
+        if (isset($frameState['dirLights'][0])) {
+            $d = $frameState['dirLights'][0]->direction;
+            $b = $cmd->towardSun;
+            $ld = sqrt($d->x ** 2 + $d->y ** 2 + $d->z ** 2) ?: 1.0;
+            $lb = sqrt($b->x ** 2 + $b->y ** 2 + $b->z ** 2) ?: 1.0;
+            $cos = -($d->x * $b->x + $d->y * $b->y + $d->z * $b->z) / ($ld * $lb);
+            $lo = cos(deg2rad(25.0));
+            $hi = cos(deg2rad(5.0));
+            $t = max(0.0, min(1.0, ($cos - $lo) / ($hi - $lo)));
+            $sunFit = $t * $t * (3.0 - 2.0 * $t);
+        }
+
+        $w = max(1, $this->sdfAoWidth);
+        $h = max(1, $this->sdfAoHeight);
+        vio_bind_render_target($this->ctx, $target);
+        vio_viewport($this->ctx, 0, 0, $w, $h);
+        vio_clear($this->ctx, 1, 1, 0, 1);
+        $this->bindPostProcessPipeline('baked_light');
+        vio_bind_texture($this->ctx, $volTex, 0);
+        vio_set_uniform($this->ctx, 'u_light_volume', 0);
+        vio_bind_texture($this->ctx, $gbufferTex, 1);
+        vio_set_uniform($this->ctx, 'u_gbuffer', 1);
+        vio_set_uniform($this->ctx, 'u_proj00', $proj[0]);
+        vio_set_uniform($this->ctx, 'u_proj11', $proj[5]);
+        vio_set_uniform($this->ctx, 'u_uv_flip_y', $this->conventions()->flipRenderTargetClipY() ? -1.0 : 1.0);
+        vio_set_uniform($this->ctx, 'u_inv_view', $invView);
+        vio_set_uniform($this->ctx, 'u_vol_origin', [$cmd->origin->x, $cmd->origin->y, $cmd->origin->z]);
+        vio_set_uniform($this->ctx, 'u_vol_size', [$cmd->size->x, $cmd->size->y, $cmd->size->z]);
+        vio_set_uniform($this->ctx, 'u_bl_params', [
+            max(0.0, min(1.0, $cmd->skyStrength)),
+            max(0.0, min(1.0, $cmd->sunStrength)) * $sunFit,
+            $cmd->sunFadeStart,
+            $cmd->sunFadeEnd,
+        ]);
+        vio_draw($this->ctx, $quad);
+        vio_unbind_render_target($this->ctx);
+
+        $this->sdfAoActiveThisFrame = true;
+        $this->bakedLightActiveThisFrame = true;
+        $this->gpuMark('baked_light');
     }
 
     /** Bind the SDF-AO screen map (or white fallback) for the mesh pass. */
@@ -3505,6 +3633,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
 
     public function beginFrame(): void
     {
+        $this->bakedLightActiveThisFrame = false;
         $this->updateRayTracedScene();
         $this->updateRayTracedProbes();
         $size = vio_framebuffer_size($this->ctx);
@@ -3943,6 +4072,8 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
                 $ftAoRadius = $cmd->aoRadius;
             } elseif ($cmd instanceof Command\SetFieldtracingVolume) {
                 $this->ingestSdfVolume($cmd);
+            } elseif ($cmd instanceof Command\SetBakedLight) {
+                $this->ingestBakedLight($cmd);
             } elseif ($cmd instanceof Command\SetFieldtracingProbes) {
                 $this->ingestProbeField($cmd);
             }
@@ -4460,6 +4591,13 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         $this->compileShaderFromFiles('ssao',       'postprocess.vert.glsl', 'ssao.frag.glsl');
         $this->compileShaderFromFiles('sdf_ao',     'postprocess.vert.glsl', 'sdf_ao.frag.glsl');
         $this->compileShaderFromFiles('sdf_ao_blur','postprocess.vert.glsl', 'sdf_ao_blur.frag.glsl');
+        // Baked light lookup (shader plan 3.3): a backend that cannot compile it goes without.
+        try {
+            $this->compileShaderFromFiles('baked_light', 'postprocess.vert.glsl', 'baked_light.frag.glsl');
+        } catch (\Throwable $e) {
+            unset($this->shaderCache['baked_light']);
+            fwrite(STDERR, "[VioRenderer3D] baked light unavailable: {$e->getMessage()}\n");
+        }
         $this->compileShaderFromFiles('ssao_blur',  'postprocess.vert.glsl', 'ssao_blur.frag.glsl');
         $this->compileShaderFromFiles('ssao_temporal', 'postprocess.vert.glsl', 'ssao_temporal.frag.glsl');
         // SSR: ray-march the G-buffer (depth+normal+reflectivity) against the HDR
@@ -5741,7 +5879,8 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
     private function gbufferNeededThisFrame(): bool
     {
         return $this->ssaoEnabledThisFrame() || $this->ssrEnabledThisFrame()
-            || $this->sdfAoEnabledThisFrame() || $this->settings->screenSpaceGi || $this->settings->screenSpaceSss;
+            || $this->sdfAoEnabledThisFrame() || $this->settings->screenSpaceGi || $this->settings->screenSpaceSss
+            || $this->bakedLightEnabledThisFrame();
     }
 
     /**

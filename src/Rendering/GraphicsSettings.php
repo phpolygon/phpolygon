@@ -191,6 +191,13 @@ final class GraphicsSettings
          * Needs the G-buffer (builds it when nothing else does).
          */
         public readonly bool $screenSpaceSss = false,
+        /**
+         * Baked light (shader plan 3.3): with a light volume provided (SetBakedLight), sky
+         * and sun visibility baked once from the SDF are looked up per pixel - soft
+         * occlusion and far shadows for the cost of one texture fetch. The live SDF trace
+         * wins where its tier runs. Needs the G-buffer (builds it when nothing else does).
+         */
+        public readonly bool $bakedLight = false,
     ) {
     }
 
@@ -257,6 +264,7 @@ final class GraphicsSettings
         ?bool $froxelFog = null,
         ?bool $microShadows = null,
         ?bool $screenSpaceSss = null,
+        ?bool $bakedLight = null,
     ): self {
         $nextUpscaler = $upscaler ?? $this->upscaler;
         // Leaving a temporal upscaler re-clamps a sub-half render scale.
@@ -314,6 +322,7 @@ final class GraphicsSettings
             froxelFog: $froxelFog ?? $this->froxelFog,
             microShadows: $microShadows ?? $this->microShadows,
             screenSpaceSss: $screenSpaceSss ?? $this->screenSpaceSss,
+            bakedLight: $bakedLight ?? $this->bakedLight,
         );
     }
 
@@ -363,6 +372,7 @@ final class GraphicsSettings
             'froxelFog' => $this->froxelFog,
             'microShadows' => $this->microShadows,
             'screenSpaceSss' => $this->screenSpaceSss,
+            'bakedLight' => $this->bakedLight,
             'ssr' => $this->ssr->value,
             'fieldtracing' => $this->fieldtracing->value,
             'surfaceRelief' => $this->surfaceRelief->value,
@@ -441,6 +451,7 @@ final class GraphicsSettings
             froxelFog: self::asBool($data['froxelFog'] ?? null) ?? $defaults->froxelFog,
             microShadows: self::asBool($data['microShadows'] ?? null) ?? $defaults->microShadows,
             screenSpaceSss: self::asBool($data['screenSpaceSss'] ?? null) ?? $defaults->screenSpaceSss,
+            bakedLight: self::asBool($data['bakedLight'] ?? null) ?? $defaults->bakedLight,
         );
     }
 
