@@ -200,6 +200,29 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
     private int $materialUniformParams = -1;
 
     /**
+     * Static material uniforms resident in the bound program's constants (null right
+     * after a pipeline bind) and the per-frame ones sent with them: a material change
+     * sends only what differs from the previous material.
+     *
+     * @var array<string, mixed>|null
+     */
+    private ?array $residentStatic = null;
+
+    /** @var array<string, mixed>|null */
+    private ?array $residentDynamic = null;
+
+    private string $residentKey = '';
+
+    /**
+     * Uniforms that differ between two materials, by "previous>next" key. The draw
+     * order repeats from frame to frame, so the pairs repeat too. Each entry keeps the
+     * two arrays it was taken from; a reused object id with other values misses.
+     *
+     * @var array<string, array{0: array<string, mixed>, 1: array<string, mixed>, 2: array<string, mixed>}>
+     */
+    private array $materialDeltaCache = [];
+
+    /**
      * OMIT defines of the {@see ShaderPath::automatic()} paths no registered material
      * needs; compiled into every mesh program. Only ever shrinks while programs exist
      * (a removed material never costs a rebuild).
@@ -3673,6 +3696,8 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
 
     public function beginFrame(): void
     {
+        // Program (re)builds before the frame opens, not between two draws.
+        $this->refreshAutoOmissions(true);
         $this->bakedLightActiveThisFrame = false;
         $this->updateRayTracedScene();
         $this->updateRayTracedProbes();
@@ -3859,6 +3884,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         $this->renderingToImage = true;
         $this->externalSceneTarget = $rt;
         try {
+            $this->refreshAutoOmissions(true);
             vio_begin($this->ctx);
             vio_bind_render_target($this->ctx, $rt);
             // Clear the bound target itself: in-frame vio_clear is eager on every
@@ -5065,10 +5091,23 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             if (self::needsCutout($material)) {
                 $variant .= self::CUTOUT_SUFFIX;
             }
-            $wanted[$variant] = true;
+            $wanted[$variant] ??= false;
+            if ($material->tessellation > 0.0) {
+                $wanted[$variant] = true;
+            }
         }
-        foreach (array_keys($wanted) as $variant) {
-            $this->ensureVariantCompiled((string) $variant);
+        foreach ($wanted as $variant => $tessellated) {
+            $variant = (string) $variant;
+            if (!$this->ensureVariantCompiled($variant) || !$tessellated || !$this->tessellationAvailable()) {
+                continue;
+            }
+            // The tessellation twins too, so no draw waits for a compile.
+            $suffix = $variant === ProcModeShaderRegistry::BASE_VARIANT ? '' : '@' . $variant;
+            foreach (['default', 'default_mrt', 'default_mrt_mv'] as $program) {
+                if (isset($this->shaderCache[$program . $suffix])) {
+                    $this->tessShader($program . $suffix);
+                }
+            }
         }
     }
 
@@ -5472,6 +5511,8 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
      */
     private function resetDrawStateCache(): void
     {
+        $this->residentStatic = null;
+        $this->residentDynamic = null;
         $this->lastMaterialId = null;
         $this->lastMeshId = null;
         $this->lastUseInstancing = null;
@@ -8862,9 +8903,35 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             $byId[$materialId] = $this->staticMaterialUniforms($material, $materialId, $params);
             $this->materialUniformCache[$material] = $byId;
         }
-        /** @var array<string, int|float|array<float>> $static */
         $static = $byId[$materialId];
-        $this->setUniforms($static);
+        $key = spl_object_id($material) . ':' . $materialId;
+        $prev = $this->residentStatic;
+        if ($prev === null) {
+            /** @var array<string, int|float|array<float>> $static */
+            $this->setUniforms($static);
+        } elseif ($prev !== $static) {
+            $pair = $this->residentKey . '>' . $key;
+            $hit = $this->materialDeltaCache[$pair] ?? null;
+            if ($hit === null || $hit[0] !== $prev || $hit[1] !== $static) {
+                $delta = [];
+                foreach ($static as $name => $value) {
+                    if (!array_key_exists($name, $prev) || $prev[$name] !== $value) {
+                        $delta[$name] = $value;
+                    }
+                }
+                if (count($this->materialDeltaCache) > 20000) {
+                    $this->materialDeltaCache = [];
+                }
+                $hit = $this->materialDeltaCache[$pair] = [$prev, $static, $delta];
+            }
+            if ($hit[2] !== []) {
+                /** @var array<string, int|float|array<float>> $delta */
+                $delta = $hit[2];
+                $this->setUniforms($delta);
+            }
+        }
+        $this->residentStatic = $static;
+        $this->residentKey = $key;
 
         // Per-frame state: ray-traced scene, bindless sampler, ocean unit, motion.
         $u = [
@@ -8884,7 +8951,10 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             $material->anisotropy > $hwAniso ? (float) min(16, (int) ceil($material->anisotropy / $hwAniso)) : 1.0,
             (float) $hwAniso,
         ];
-        $this->setUniforms($u);
+        if ($u !== $this->residentDynamic) {
+            $this->setUniforms($u);
+            $this->residentDynamic = $u;
+        }
     }
 
     /**
