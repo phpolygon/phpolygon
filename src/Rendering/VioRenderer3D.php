@@ -4826,7 +4826,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             $fragSrc = $this->meshFragmentSource();
         }
         if (ProcModeShaderRegistry::instanceParamsEnabled()
-            && in_array($id, ['default', 'default_mrt', 'default_mrt_mv', 'shadow', 'gbuffer', 'depth'], true)) {
+            && in_array($id, ['default', 'default_mrt', 'default_mrt_mv', 'shadow', 'gbuffer', 'depth', 'minimap'], true)) {
             $vertSrc = self::withDefine($vertSrc, 'PHPOLYGON_INSTANCE_PARAMS');
         }
         if (in_array($id, ['default', 'default_mrt', 'default_mrt_mv'], true)

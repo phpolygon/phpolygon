@@ -21,9 +21,11 @@ void main() {
     if (u_use_instancing == 1) {
         model = mat4(a_instance_col0, a_instance_col1, a_instance_col2, a_instance_col3);
     }
+#ifdef PHPOLYGON_INSTANCE_PARAMS
     model[0].w = 0.0;
     model[1].w = 0.0;
     model[2].w = 0.0;
+#endif // PHPOLYGON_INSTANCE_PARAMS
     vec4 world = model * vec4(a_position, 1.0);
     v_normal = normalize(mat3(model) * a_normal);
     v_height = world.y;
