@@ -3244,6 +3244,11 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             upscalers: $upscalers,
             upscalerNotes: $notes,
             pendingUpscalers: $pending,
+            rayTracing: $this->rayQueryAvailable(),
+            meshShaders: $this->meshShadersAvailable(),
+            occlusionCulling: $this->meshShadersAvailable() && $this->hizUnit() >= 0,
+            bindless: $this->bindlessSupported(),
+            screenSpaceEffects: $this->screenSpaceEffectsSupported(),
         );
     }
 

@@ -24,6 +24,14 @@ final class GraphicsCapabilities
      * @param bool          $screenSpaceReflections SSR tiers change the image
      * @param bool          $fieldtracingSdf        SDF occlusion/bounce tiers (3D textures)
      * @param bool          $surfaceRelief          Cavity + parallax on procedural patterns
+     * @param bool          $rayTracing             Inline ray queries: ray-traced shadows,
+     *                                              reflections, probes and GI
+     * @param bool          $meshShaders            Mesh pipelines (GraphicsSettings::$meshShaders)
+     * @param bool          $occlusionCulling       Hi-Z culling in the task stage (mesh shaders,
+     *                                              depth mipmaps and a free texture unit)
+     * @param bool          $bindless               Bindless material textures
+     * @param bool          $screenSpaceEffects     The G-buffer passes: froxel fog, skin SSS,
+     *                                              screen-space GI, baked light, micro-shadows' AO
      * @param list<Upscaler> $upscalers             Upscalers this renderer implements
      * @param array<string, string> $upscalerNotes  Why an upscaler is missing, keyed by
      *                                              {@see Upscaler} value (settings tooltips)
@@ -42,6 +50,11 @@ final class GraphicsCapabilities
         public readonly array $upscalers = [Upscaler::Off],
         public readonly array $upscalerNotes = [],
         public readonly array $pendingUpscalers = [],
+        public readonly bool $rayTracing = false,
+        public readonly bool $meshShaders = false,
+        public readonly bool $occlusionCulling = false,
+        public readonly bool $bindless = false,
+        public readonly bool $screenSpaceEffects = false,
     ) {}
 
     /** No renderer to ask (headless, before the window exists): nothing is disabled. */
@@ -57,6 +70,11 @@ final class GraphicsCapabilities
             fieldtracingSdf: true,
             surfaceRelief: true,
             upscalers: Upscaler::cases(),
+            rayTracing: true,
+            meshShaders: true,
+            occlusionCulling: true,
+            bindless: true,
+            screenSpaceEffects: true,
         );
     }
 

@@ -27,6 +27,13 @@ final class GraphicsCapabilitiesTest extends TestCase
             $this->assertTrue($caps->supportsUpscaler($upscaler), $upscaler->value);
         }
         $this->assertTrue($caps->shadingRate && $caps->hdrOutput && $caps->lowLatency && $caps->surfaceRelief);
+        $this->assertTrue($caps->rayTracing && $caps->meshShaders && $caps->occlusionCulling && $caps->bindless && $caps->screenSpaceEffects);
+    }
+
+    public function testHardwarePathsAreOffUnlessARendererReportsThem(): void
+    {
+        $caps = new GraphicsCapabilities();
+        $this->assertFalse($caps->rayTracing || $caps->meshShaders || $caps->occlusionCulling || $caps->bindless || $caps->screenSpaceEffects);
     }
 
     public function testMissingFeaturesDisableTheirOptionsOnly(): void
