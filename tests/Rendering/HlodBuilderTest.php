@@ -50,6 +50,49 @@ final class HlodBuilderTest extends TestCase
         self::assertTrue($found);
     }
 
+    public function testTheCacheGivesBackTheSameCell(): void
+    {
+        MeshRegistry::register('cache_sphere', SphereMesh::generate(1.0, 24, 16));
+        $draws = [];
+        for ($i = 0; $i < 4; $i++) {
+            $draws[] = ['cache_sphere', $i % 2 === 0 ? 'stone' : 'roof', Mat4::translation($i * 3.0, 0.0, 0.0)];
+        }
+        $dir = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'phpolygon_hlod_test_' . getmypid();
+        $path = HlodBuilder::cachePath('district', $draws, 0.5, $dir);
+        @unlink($path);
+        try {
+            $built = HlodBuilder::buildCached('district', $draws, 0.5, 100.0, $dir);
+            self::assertFileExists($path);
+            $meshes = [];
+            foreach ($built->proxies as [$meshId]) {
+                $meshes[$meshId] = MeshRegistry::get($meshId);
+            }
+            MeshRegistry::clear();
+            // From the file alone: no source mesh registered any more.
+            $read = HlodBuilder::buildCached('district', $draws, 0.5, 100.0, $dir);
+            self::assertSame($built->proxies, $read->proxies);
+            self::assertSame([$built->sourceTriangles, $built->proxyTriangles], [$read->sourceTriangles, $read->proxyTriangles]);
+            self::assertEqualsWithDelta($built->radius, $read->radius, 1e-9);
+            self::assertEqualsWithDelta(0.0, $built->center->sub($read->center)->length(), 1e-9);
+            foreach ($meshes as $meshId => $mesh) {
+                $again = MeshRegistry::get($meshId);
+                self::assertNotNull($again);
+                self::assertSame($mesh?->indices, $again->indices);
+                // Stored as 32-bit floats, as the GPU reads them.
+                self::assertCount(count($mesh?->vertices ?? []), $again->vertices);
+                foreach ($again->vertices as $k => $v) {
+                    self::assertEqualsWithDelta($mesh?->vertices[$k], $v, 1e-5);
+                }
+            }
+            // A moved draw is another cell.
+            $draws[0][2] = Mat4::translation(-1.0, 0.0, 0.0);
+            self::assertNotSame($path, HlodBuilder::cachePath('district', $draws, 0.5, $dir));
+        } finally {
+            @unlink($path);
+            @rmdir($dir);
+        }
+    }
+
     public function testAMirroringPlacementKeepsTheWindingOutward(): void
     {
         $box = BoxMesh::generate(1.0, 1.0, 1.0);
