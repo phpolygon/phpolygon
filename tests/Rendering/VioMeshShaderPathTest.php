@@ -94,6 +94,11 @@ final class VioMeshShaderPathTest extends TestCase
         if (!defined('VIO_FEATURE_DEPTH_MIPMAPS') || !vio_supports_feature($this->ctx, VIO_FEATURE_DEPTH_MIPMAPS)) {
             $this->markTestSkipped('no depth mipmaps');
         }
+        // The pyramid takes a unit above every fixed scene unit (the ocean's 18): with 16
+        // units (Metal: 16 sampler states) culling stays off and the image unchanged.
+        if ((vio_texture_units($this->ctx)['units'] ?? 0) <= 19) {
+            $this->markTestSkipped('too few texture units for the Hi-Z pyramid');
+        }
         // Bloom keeps the scene offscreen: the pyramid needs a sampleable scene depth.
         // The culling renderer first: it must find the backend's units on its own.
         \PHPolygon\Rendering\ProcModeShaderRegistry::clear();
