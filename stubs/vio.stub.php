@@ -454,11 +454,18 @@ function vio_pop_scissor(VioContext $ctx): void {}
 
 /**
  * Atlas rasterized at $size * $scale physical px; metrics reported in logical
- * $size units (devicePixelRatio). $scale clamped to >= 1.0.
+ * $size units (devicePixelRatio). $scale clamped to >= 1.0. Options: 'sdf' => true|int
+ * (signed-distance-field atlas, php-vio with the options parameter).
  *
+ * @param array{sdf?: bool|int}|null $options
  * @return VioFont|false
  */
-function vio_font(VioContext $ctx, string $path, float $size = 24.0, float $scale = 1.0): VioFont|false {}
+function vio_font(VioContext $ctx, string $path, float $size = 24.0, float $scale = 1.0, ?array $options = null): VioFont|false {}
+
+/**
+ * @return array{glyphs: int, rasterized: int, atlas_size: int, lazy: bool, sdf?: int}|false
+ */
+function vio_font_info(VioFont $font): array|false {}
 function vio_font_face(string $path): VioFontFace|false {}
 function vio_font_face_has_glyph(VioFontFace $face, int $codepoint): bool {}
 

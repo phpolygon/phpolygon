@@ -22,7 +22,7 @@ use VioContext;
 use VioFont;
 use VioTexture;
 
-class VioRenderer2D implements Renderer2DInterface, EffectRenderer2DInterface, AnimationClockInterface
+class VioRenderer2D implements Renderer2DInterface, EffectRenderer2DInterface, AnimationClockInterface, SdfFontRenderer2DInterface
 {
     /** Frames an unregistered texture stays alive: more than php-vio ever has in flight. */
     private const int RETIRE_FRAMES = 8;
@@ -154,6 +154,19 @@ class VioRenderer2D implements Renderer2DInterface, EffectRenderer2DInterface, A
      * @var array<string, true> Font name -> registered flag
      */
     private array $asyncFontNames = [];
+
+    /**
+     * Fonts registered with loadFont(..., sdf: true): their atlases (24 px and up) are
+     * signed distance fields, so text stays sharp when a transform magnifies it.
+     *
+     * @var array<string, true>
+     */
+    private array $sdfFontNames = [];
+
+    /** Smallest atlas size (physical px) an SDF font is rasterized as SDF; below, thin strokes thin out. */
+    public const float SDF_MIN_ATLAS_PX = 24.0;
+
+    private static ?bool $vioSdf = null;
 
     /**
      * In-flight async font loads, keyed by the same "name:size" cache key used
@@ -949,7 +962,39 @@ class VioRenderer2D implements Renderer2DInterface, EffectRenderer2DInterface, A
     public function loadFont(string $name, string $path): void
     {
         $this->fontPaths[$name] = $path;
-        unset($this->fontFiles[$name]);
+        unset($this->fontFiles[$name], $this->sdfFontNames[$name]);
+    }
+
+    /**
+     * Register a font whose glyph atlases are signed distance fields (php-vio with
+     * vio_font 'sdf'). Sizes whose atlas would be under {@see SDF_MIN_ATLAS_PX} and older
+     * php-vio builds keep the coverage atlas. Cached atlases of the name are dropped.
+     */
+    public function loadSdfFont(string $name, string $path): void
+    {
+        $this->loadFont($name, $path);
+        $this->sdfFontNames[$name] = true;
+        foreach (array_keys($this->fontCache) as $key) {
+            if (str_starts_with((string) $key, $name . ':')) {
+                unset($this->fontCache[$key]);
+            }
+        }
+    }
+
+    /** Whether this php-vio build takes vio_font options (the 'sdf' atlas). */
+    public static function vioSupportsSdfFonts(): bool
+    {
+        return self::$vioSdf ??= \function_exists('vio_font')
+            && (new \ReflectionFunction('vio_font'))->getNumberOfParameters() >= 5;
+    }
+
+    /** Synchronous atlas for $name at $size: SDF where registered and large enough. */
+    private function openFont(string $name, string $file, float $size, float $scale): VioFont|false
+    {
+        if (isset($this->sdfFontNames[$name]) && $size * $scale >= self::SDF_MIN_ATLAS_PX && self::vioSupportsSdfFonts()) {
+            return vio_font($this->ctx, $file, $size, $scale, ['sdf' => true]);
+        }
+        return vio_font($this->ctx, $file, $size, $scale);
     }
 
     /**
@@ -1064,6 +1109,13 @@ class VioRenderer2D implements Renderer2DInterface, EffectRenderer2DInterface, A
                 $rounded = (float)(int)$size;
                 $key = $this->fontCacheKey($name, (int)$rounded);
                 if (isset($this->fontCache[$key]) || isset($work[$key])) {
+                    continue;
+                }
+                if (isset($this->sdfFontNames[$name])) {
+                    $font = $this->openFont($name, $path, $rounded, $this->fontRenderScale);
+                    if ($font instanceof VioFont) {
+                        $this->fontCache[$key] = $font;
+                    }
                     continue;
                 }
                 $work[$key] = [$path, $rounded];
@@ -1896,7 +1948,7 @@ class VioRenderer2D implements Renderer2DInterface, EffectRenderer2DInterface, A
             return null;
         }
 
-        $font = vio_font($this->ctx, $this->fontFile($name), (float)$roundedSize, $scale);
+        $font = $this->openFont($name, $this->fontFile($name), (float)$roundedSize, $scale);
         if ($font === false) {
             return null;
         }

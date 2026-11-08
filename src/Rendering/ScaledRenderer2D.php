@@ -27,7 +27,7 @@ use PHPolygon\UI\UIScale;
  * the pointer lands in the same logical space, and hand both to a UIContext
  * via {@see \PHPolygon\UI\UIContext::useBackends()} while it lays out.
  */
-final class ScaledRenderer2D implements Renderer2DInterface, EffectRenderer2DInterface
+final class ScaledRenderer2D implements Renderer2DInterface, EffectRenderer2DInterface, SdfFontRenderer2DInterface
 {
     public function __construct(
         private readonly Renderer2DInterface $inner,
@@ -173,6 +173,15 @@ final class ScaledRenderer2D implements Renderer2DInterface, EffectRenderer2DInt
     public function loadFont(string $name, string $path): void
     {
         $this->inner->loadFont($name, $path);
+    }
+
+    public function loadSdfFont(string $name, string $path): void
+    {
+        if ($this->inner instanceof SdfFontRenderer2DInterface) {
+            $this->inner->loadSdfFont($name, $path);
+        } else {
+            $this->inner->loadFont($name, $path);
+        }
     }
 
     public function preloadFontAsync(string $name, string $path): void
