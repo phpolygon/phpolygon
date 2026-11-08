@@ -1336,6 +1336,12 @@ vec4 gbufferValue(vec3 worldN) {
         float r = length(v_worldPos.xz);
         reflectivity *= smoothstep(92.0, 100.0, r);
     }
+    // Skin (subsurface on a closed surface, not two-sided foliage) marks itself for the
+    // screen-space subsurface blur of the composite: a negative value, its strength.
+    // Reflections treat it as matte.
+    if (u_subsurface_strength > 0.0 && u_two_sided == 0) {
+        reflectivity = -clamp(u_subsurface_strength, 0.01, 1.0);
+    }
     return vec4(octEncode(n), reflectivity, linearDepth);
 }
 #endif

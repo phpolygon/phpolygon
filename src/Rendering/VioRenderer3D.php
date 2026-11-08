@@ -5310,6 +5310,9 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         vio_draw($this->ctx, $quad);
     }
 
+    /** Scatter width of the screen-space subsurface blur, metres (skin: a few millimetres). */
+    public const float SSS_WIDTH = 0.012;
+
     /** Strength of the screen-space contact shadows on the sun term. */
     public const float CONTACT_SHADOW_STRENGTH = 0.85;
 
@@ -5341,7 +5344,10 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         $gi = $gbuffer !== null && $projection !== null && $this->settings->screenSpaceGi;
         vio_set_uniform($this->ctx, 'u_ssgi', $gi ? [6.0, 3.0, 0.0, 1.0] : [0.0, 0.0, 0.0, 0.0]);
         vio_set_uniform($this->ctx, 'u_ssgi_ambient', $this->frameAmbientLight);
-        if ($gi && $projection !== null) {
+        // Screen-space subsurface scattering (shader plan 6.2) as well.
+        $sss = $gbuffer !== null && $projection !== null && $this->settings->screenSpaceSss;
+        vio_set_uniform($this->ctx, 'u_sss', $sss ? [1.0, self::SSS_WIDTH, 0.0, 0.0] : [0.0, 0.0, 0.0, 0.0]);
+        if (($gi || $sss) && $projection !== null) {
             $p = $projection->toArray();
             vio_set_uniform($this->ctx, 'u_proj00', $p[0]);
             vio_set_uniform($this->ctx, 'u_proj11', $p[5]);
@@ -5735,7 +5741,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
     private function gbufferNeededThisFrame(): bool
     {
         return $this->ssaoEnabledThisFrame() || $this->ssrEnabledThisFrame()
-            || $this->sdfAoEnabledThisFrame() || $this->settings->screenSpaceGi;
+            || $this->sdfAoEnabledThisFrame() || $this->settings->screenSpaceGi || $this->settings->screenSpaceSss;
     }
 
     /**

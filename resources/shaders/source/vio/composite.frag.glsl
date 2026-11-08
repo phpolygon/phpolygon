@@ -41,6 +41,36 @@ uniform float u_uv_flip_y;
 // Screen-space radiosity (shader plan 10.2, GraphicsSettings::$screenSpaceGi).
 uniform vec4  u_ssgi;           // x strength, y gather radius (m), w on
 uniform vec3  u_ssgi_ambient;   // the ambient light the ambient attachment was lit with
+// Screen-space subsurface scattering (GraphicsSettings::$screenSpaceSss): x on (strength
+// scale), y scatter width in metres. Skin pixels carry -strength in the G-buffer's b.
+uniform vec4  u_sss;
+
+// Light diffuses under skin: the sun and ambient light of a skin pixel blurred over a
+// disc a few millimetres wide in the world (12 taps), only from skin at about the same
+// depth; red reaches furthest, blue least.
+void subsurfaceBlur(vec2 uv, float strength, float depth, inout vec3 sunRgb, inout vec3 ambientRgb) {
+    const vec2 disc[12] = vec2[12](
+        vec2(0.2770, 0.1650), vec2(-0.3320, 0.2020), vec2(0.0530, -0.4460), vec2(0.5580, -0.2980),
+        vec2(-0.6260, -0.3270), vec2(-0.1170, 0.6880), vec2(0.6950, 0.4720), vec2(-0.8580, 0.1730),
+        vec2(0.1720, 0.8960), vec2(0.3630, -0.8440), vec2(-0.4340, -0.8320), vec2(0.9380, -0.0290));
+    vec2 radius = vec2(u_sss.y * u_proj00, u_sss.y * u_proj11) * 0.5 / max(depth, 1.0e-3);
+    vec3 sunSum = sunRgb;
+    vec3 ambSum = ambientRgb;
+    float wSum = 1.0;
+    for (int i = 0; i < 12; i++) {
+        vec2 suv = uv + disc[i] * radius;
+        vec4 g = texture(u_gbuffer, suv);
+        if (g.b >= 0.0 || g.a <= 0.0) continue;          // only skin scatters into skin
+        float dz = abs(g.a - depth) / (0.02 + depth * 0.01);
+        float w = exp(-dot(disc[i], disc[i]) * 2.0) * exp(-dz * dz);
+        sunSum += texture(u_sun, suv).rgb * w;
+        ambSum += texture(u_ambient, suv).rgb * w;
+        wSum += w;
+    }
+    vec3 profile = vec3(1.0, 0.55, 0.3) * clamp(strength, 0.0, 1.0);
+    sunRgb = mix(sunRgb, sunSum / wSum, profile);
+    ambientRgb = mix(ambientRgb, ambSum / wSum, profile);
+}
 
 vec3 contactViewPos(vec2 uv, float d) {
     vec2 ndc = uv * 2.0 - 1.0;
@@ -152,6 +182,14 @@ void main() {
     vec4 sun     = texture(u_sun, v_uv);
     vec4 local   = texture(u_local, v_uv);
     vec3 ambient = texture(u_ambient, v_uv).rgb;
+    if (u_sss.x > 0.0) {
+        vec4 g0 = texture(u_gbuffer, v_uv);
+        if (g0.b < 0.0 && g0.a > 0.0) {
+            vec3 sunRgb = sun.rgb;
+            subsurfaceBlur(v_uv, -g0.b * u_sss.x, g0.a, sunRgb, ambient);
+            sun.rgb = sunRgb;
+        }
+    }
 
     float ao = 1.0;
     if (u_ssao_enabled == 1) {

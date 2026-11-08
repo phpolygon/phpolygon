@@ -184,6 +184,13 @@ final class GraphicsSettings
          * forward path, cavity and curvature terms always.
          */
         public readonly bool $microShadows = false,
+        /**
+         * Screen-space subsurface scattering (shader plan 6.2): on the MRT path the light
+         * on skin (materials with subsurface on a closed surface) is blurred over a few
+         * millimetres in the image, red furthest - soft shadow edges on faces and hands.
+         * Needs the G-buffer (builds it when nothing else does).
+         */
+        public readonly bool $screenSpaceSss = false,
     ) {
     }
 
@@ -249,6 +256,7 @@ final class GraphicsSettings
         ?string $gpu = null,
         ?bool $froxelFog = null,
         ?bool $microShadows = null,
+        ?bool $screenSpaceSss = null,
     ): self {
         $nextUpscaler = $upscaler ?? $this->upscaler;
         // Leaving a temporal upscaler re-clamps a sub-half render scale.
@@ -305,6 +313,7 @@ final class GraphicsSettings
             gpu: $gpu ?? $this->gpu,
             froxelFog: $froxelFog ?? $this->froxelFog,
             microShadows: $microShadows ?? $this->microShadows,
+            screenSpaceSss: $screenSpaceSss ?? $this->screenSpaceSss,
         );
     }
 
@@ -353,6 +362,7 @@ final class GraphicsSettings
             'volumetricFog' => $this->volumetricFog,
             'froxelFog' => $this->froxelFog,
             'microShadows' => $this->microShadows,
+            'screenSpaceSss' => $this->screenSpaceSss,
             'ssr' => $this->ssr->value,
             'fieldtracing' => $this->fieldtracing->value,
             'surfaceRelief' => $this->surfaceRelief->value,
@@ -430,6 +440,7 @@ final class GraphicsSettings
             gpu: is_string($data['gpu'] ?? null) ? trim($data['gpu']) : '',
             froxelFog: self::asBool($data['froxelFog'] ?? null) ?? $defaults->froxelFog,
             microShadows: self::asBool($data['microShadows'] ?? null) ?? $defaults->microShadows,
+            screenSpaceSss: self::asBool($data['screenSpaceSss'] ?? null) ?? $defaults->screenSpaceSss,
         );
     }
 
