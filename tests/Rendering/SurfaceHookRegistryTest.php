@@ -67,7 +67,9 @@ final class SurfaceHookRegistryTest extends TestCase
     public function testBothMeshFragmentCopiesHoldTheHookInOrder(): void
     {
         $root = dirname(__DIR__, 2) . self::SHADERS;
-        foreach (['vio/mesh3d.frag.glsl' => 'localAcc += u_emission + surfaceEmission;', 'mesh3d.frag.glsl' => 'color += u_emission + surfaceEmission;'] as $file => $emission) {
+        // The VIO copy adds the hook's emission to u_emission after the emissive looks
+        // (shader plan 5.4) have shaped it into `emission`.
+        foreach (['vio/mesh3d.frag.glsl' => 'localAcc += emission + surfaceEmission;', 'mesh3d.frag.glsl' => 'color += u_emission + surfaceEmission;'] as $file => $emission) {
             $src = str_replace("\r\n", "\n", (string) file_get_contents($root . $file));
             $helpers = strpos($src, ProcModeShaderRegistry::SURFACE_HELPERS_SENTINEL . "\n");
             $call = strpos($src, '    ' . ProcModeShaderRegistry::SURFACE_SENTINEL . "\n");

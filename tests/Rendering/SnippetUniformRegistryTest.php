@@ -27,6 +27,7 @@ final class SnippetUniformRegistryTest extends TestCase
     protected function tearDown(): void
     {
         ProcModeShaderRegistry::clear();
+        ProcModeShaderRegistry::setTextureUnits(null);
     }
 
     public function testNothingDeclaredLeavesNothingBehind(): void
@@ -63,16 +64,20 @@ final class SnippetUniformRegistryTest extends TestCase
      */
     public function testAProgramHoldsWhatPhpVioGivesIt(): void
     {
+        // A context with 10 texture units (6 ordinary samplers, the four comparison
+        // samplers apart): the budget then does not depend on the php-vio that runs
+        // the suite. The engine's five ordinary samplers leave the base program one,
+        // and a program without probe GI one more.
+        ProcModeShaderRegistry::setTextureUnits(10);
         ProcModeShaderRegistry::defineVariant('lean', [2], [ShaderPath::ProbeGi]);
         self::assertSame(1, ProcModeShaderRegistry::samplerBudget());
-        self::assertSame(4, ProcModeShaderRegistry::samplerBudget('lean'));
+        self::assertSame(2, ProcModeShaderRegistry::samplerBudget('lean'));
 
         ProcModeShaderRegistry::declareSampler('u_fx_a', ['lean']);
-        ProcModeShaderRegistry::declareSampler('u_fx_b', ['lean']);
-        ProcModeShaderRegistry::declareSampler('u_fx_c');
+        ProcModeShaderRegistry::declareSampler('u_fx_b');
         ProcModeShaderRegistry::assertSamplerBudget();
 
-        ProcModeShaderRegistry::declareSampler('u_fx_d');
+        ProcModeShaderRegistry::declareSampler('u_fx_c');
         $this->expectException(\InvalidArgumentException::class);
         ProcModeShaderRegistry::assertSamplerBudget();
     }

@@ -15,76 +15,18 @@ use PHPolygon\Rendering\ShaderPath;
 /**
  * Program variants of the mesh shader, no GPU involved: which snippets land in which
  * program, that a branch ladder survives any selection of modes, and that the base
- * shader is the v0.92.0 shader as long as nobody defines anything.
+ * shader is the one of the last release as long as nobody defines anything.
  */
 final class ShaderVariantRegistryTest extends TestCase
 {
     private const SENTINEL = "    /* PHPOLYGON:PROCMODE_BRANCHES */ { base(); }\n";
 
-    /** sha256 of mesh3d.frag at v0.92.0 with whitespace collapsed. */
-    private const VIO_FRAG_V092 = '3f45aaaee65df657b11d60ba86f0640d4d928ed32890e3bcced9ffae8a24625e';
-
     /**
-     * Intended changes since v0.96.1, as [new text, old text]: the reactive mask of opaque
-     * surfaces (Material::$reactive, VioReactiveMaterialTest) and the albedo filter of a material
-     * (Material::$mipBias / $anisotropy, VioMaterialTextureFilterTest; its sampling function is cut
-     * out between {@see ALBEDO_FILTER_START} and the next blank line).
-     *
-     * @var list<array{0: string, 1: string}>
+     * sha256 of mesh3d.frag as the preprocessor leaves it without any define, whitespace
+     * collapsed, at the release of the shader plan (v0.101.0). A change to the default
+     * program is a decision: update this hash in the commit that makes it and say why.
      */
-    private const ALBEDO_FILTER_START = 'uniform float u_material_mip_bias;';
-
-    private const SINCE_V0961 = [
-        [
-            "//                      (transparent pass, additive), or Material::\$reactive of an\n"
-            . "//                      opaque surface whose content moves (opaque pass, only in\n"
-            . "//                      frames that draw one; the others write 0 then)\n",
-            "//                      (transparent pass, additive)\n",
-        ],
-        ["uniform float u_material_reactive; // Material::\$reactive\n", ''],
-        [
-            "#ifdef PHPOLYGON_MOTION\n"
-            . "// The reactive mask: a transparent surface's coverage, an opaque one's own value\n"
-            . "// (Material::\$reactive), whichever is larger.\n"
-            . "float reactiveValue(float coverage) {\n"
-            . "    return clamp(max(u_material_reactive, u_alpha >= 1.0 ? 0.0 : coverage), 0.0, 1.0);\n"
-            . "}\n"
-            . "#endif\n",
-            '',
-        ],
-        ['float reactiveAlpha = reactiveValue(alpha);', 'float reactiveAlpha = clamp(alpha, 0.0, 1.0);'],
-        ['float reactive = reactiveValue(u_alpha);', 'float reactive = clamp(u_alpha, 0.0, 1.0);'],
-        [
-            "        float mipScale = exp2(u_mip_bias + u_material_mip_bias);\n"
-            . "#else\n"
-            . "        float mipScale = exp2(u_material_mip_bias);\n"
-            . "#endif\n"
-            . "        texAlbedo *= sampleAlbedoTexture(patternUv, uvDx * mipScale, uvDy * mipScale);\n",
-            "        float mipScale = exp2(u_mip_bias);\n"
-            . "        texAlbedo *= textureGrad(u_albedo_texture, patternUv, uvDx * mipScale, uvDy * mipScale).rgb;\n"
-            . "#else\n"
-            . "        texAlbedo *= textureGrad(u_albedo_texture, patternUv, uvDx, uvDy).rgb;\n"
-            . "#endif\n",
-        ],
-        // The surface hook (registerSurfaceGlsl): two sentinels and the emission it adds.
-        ["// PHPOLYGON:PROCMODE_HELPERS\n// PHPOLYGON:SURFACE_HELPERS\n", "// PHPOLYGON:PROCMODE_HELPERS\n"],
-        [
-            "#endif // PHPOLYGON_OMIT_SNOW\n\n"
-            . "    // Game surface hook (ProcModeShaderRegistry::registerSurfaceGlsl): the last word\n"
-            . "    // on albedo, roughness and metallic before lighting; may discard; self-lit colour\n"
-            . "    // goes into surfaceEmission (local light, fogged like u_emission).\n"
-            . "    vec3 surfaceEmission = vec3(0.0);\n"
-            . "    // PHPOLYGON:SURFACE\n",
-            "#endif // PHPOLYGON_OMIT_SNOW\n",
-        ],
-        ['localAcc += u_emission + surfaceEmission;', 'localAcc += u_emission;'],
-    ];    /** The stage-local animation time of mesh3d.frag (v0.96.1), replacing `uniform float u_time;`. */
-    private const FRAGMENT_TIME = "// Animation time of this stage. The vertex stage declares u_time too, and php-vio's\n"
-        . "// cbuffer backends (D3D11, D3D12, Vulkan, Metal) set a name declared in both stages\n"
-        . "// in the vertex stage only - the fragment copy read 0. The renderer uploads the same\n"
-        . "// value under this stage-local name; fragment code and snippets keep writing u_time.\n"
-        . "uniform float u_frag_time;\n"
-        . "#define u_time u_frag_time\n";
+    private const VIO_FRAG_RELEASE = 'd36b8d0b263229926d11d13bbca917c5fb034abb80f81d329e49e78c2278f841';
 
     protected function setUp(): void
     {
@@ -238,26 +180,13 @@ final class ShaderVariantRegistryTest extends TestCase
     }
 
     /**
-     * With no define set, the preprocessor leaves the v0.92.0 shader: the guards add
-     * lines, not code. Whitespace is collapsed (`} else {` became `} else` + `{`).
+     * With no define set, the preprocessor leaves the shader of the last release: the
+     * guards add lines, not code. Whitespace is collapsed (`} else {` became `} else` + `{`).
      */
     public function testWithoutDefinesTheShaderIsTheOneOfTheLastRelease(): void
     {
         $frag = str_replace("\r\n", "\n", (string) file_get_contents(dirname(__DIR__, 2) . '/resources/shaders/source/vio/mesh3d.frag.glsl'));
-        // The one intended change since: the fragment stage reads the time under its own
-        // name (VioFragmentTimeTest). Undo exactly that block.
-        self::assertStringContainsString(self::FRAGMENT_TIME, $frag);
-        $frag = str_replace(self::FRAGMENT_TIME, "uniform float u_time;\n", $frag);
-        $start = strpos($frag, self::ALBEDO_FILTER_START);
-        self::assertNotFalse($start);
-        $end = strpos($frag, "}\n\n", $start);
-        self::assertNotFalse($end);
-        $frag = substr($frag, 0, $start) . substr($frag, $end + 3);
-        foreach (self::SINCE_V0961 as [$now, $before]) {
-            self::assertStringContainsString($now, $frag);
-            $frag = str_replace($now, $before, $frag);
-        }
-        self::assertSame(self::VIO_FRAG_V092, hash('sha256', self::preprocess($frag)));
+        self::assertSame(self::VIO_FRAG_RELEASE, hash('sha256', self::preprocess($frag)));
     }
 
     /**
