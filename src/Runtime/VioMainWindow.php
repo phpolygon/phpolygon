@@ -138,8 +138,11 @@ class VioMainWindow extends Window
         }
         // GPU choice (php-vio 'adapter' option; older builds ignore it). openContext()
         // falls back to the automatic choice when that GPU does not open.
-        if ($this->gpu !== '') {
-            $config['adapter'] = $this->gpu;
+        // PHPOLYGON_VIO_ADAPTER picks one for tools and test harnesses that have no
+        // graphics menu (e.g. a second GPU, so the first stays free).
+        $adapter = $this->gpu !== '' ? $this->gpu : trim((string) getenv('PHPOLYGON_VIO_ADAPTER'));
+        if ($adapter !== '') {
+            $config['adapter'] = $adapter;
         }
         // D3D12 shader model (php-vio >= 2.16): 6 = DXC / DXIL, honest fallback to FXC.
         if ($this->shaderModel > 0) {
