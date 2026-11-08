@@ -186,6 +186,19 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
     /** Whether the php-vio build exposes the batch vio_set_uniforms helper. */
     private bool $batchUniforms = false;
 
+    /**
+     * The static part of each material's uniforms, built once per (Material, material
+     * id) instead of on every material change: Material is readonly, so the values only
+     * change with the settings or the proc-mode parameter registry, which reset it.
+     *
+     * @var \WeakMap<Material, array<string, array<string, mixed>>>|null
+     */
+    private ?\WeakMap $materialUniformCache = null;
+
+    private ?GraphicsSettings $materialUniformSettings = null;
+
+    private int $materialUniformParams = -1;
+
     private ?Mat4 $currentViewMatrix = null;
     private ?Mat4 $currentProjectionMatrix = null;
     private ?Vec3 $cameraPosition = null;
@@ -8597,6 +8610,52 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
      */
     private function applyMaterialUniforms(Material $material, string $materialId = ''): void
     {
+        $params = ProcModeShaderRegistry::materialParameters();
+        if ($this->materialUniformSettings !== $this->settings || count($params) !== $this->materialUniformParams) {
+            $this->materialUniformCache = null;
+            $this->materialUniformSettings = $this->settings;
+            $this->materialUniformParams = count($params);
+        }
+        $this->materialUniformCache ??= new \WeakMap();
+        $byId = $this->materialUniformCache[$material] ?? [];
+        if (!isset($byId[$materialId])) {
+            $byId[$materialId] = $this->staticMaterialUniforms($material, $materialId, $params);
+            $this->materialUniformCache[$material] = $byId;
+        }
+        /** @var array<string, int|float|array<float>> $static */
+        $static = $byId[$materialId];
+        $this->setUniforms($static);
+
+        // Per-frame state: ray-traced scene, bindless sampler, ocean unit, motion.
+        $u = [
+            'u_rt_shadows'          => $this->rtSceneReady && $this->settings->rayTracedShadows ? 1.0 : 0.0,
+            'u_rt_gi'               => $this->rtSceneReady && $this->settings->rayTracedGi && $this->rtAlbedoBuffer !== null ? 1.0 : 0.0,
+            'u_rt_reflections'      => $this->rtSceneReady && $this->settings->rayTracedReflections && $this->rtAlbedoBuffer !== null ? 1.0 : 0.0,
+            'u_ocean'               => [$material->oceanPatch, $material->oceanAmplitude, max(0.1, $material->oceanLoop), $material->oceanTexture !== null && (ProcModeShaderRegistry::textureUnits() ?? 0) > self::OCEAN_SLOT ? 1.0 : 0.0],
+        ];
+        if ($this->motionThisFrame) {
+            $u['u_material_reactive'] = $material->reactive;
+        }
+        // Albedo texture filter of the material: extra taps only above the
+        // anisotropy the texture was created with (the player's setting).
+        // Bindless materials read through the table's 16x sampler.
+        $hwAniso = $this->bindlessBuilt ? 16 : max(1, min(16, $this->settings->anisotropy));
+        $u['u_material_aniso'] = [
+            $material->anisotropy > $hwAniso ? (float) min(16, (int) ceil($material->anisotropy / $hwAniso)) : 1.0,
+            (float) $hwAniso,
+        ];
+        $this->setUniforms($u);
+    }
+
+    /**
+     * The uniforms of a material that only depend on it, its id, the settings and the
+     * proc-mode parameters ({@see applyMaterialUniforms()} caches them).
+     *
+     * @param array<string, float|array<float>> $procParams
+     * @return array<string, mixed>
+     */
+    private function staticMaterialUniforms(Material $material, string $materialId, array $procParams): array
+    {
         // Grass blades shade through their own branch, never a game's proc mode.
         $procMode = $material->grass ? 0 : ProcModeRegistry::resolve($materialId);
 
@@ -8637,12 +8696,8 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             'u_figure_look'         => [$material->rimLight, $material->hairShine],
             'u_refract'             => [$material->refraction, $material->frost],
             'u_particle_tint'       => $material->particleTint ? 1.0 : 0.0,
-            'u_rt_shadows'          => $this->rtSceneReady && $this->settings->rayTracedShadows ? 1.0 : 0.0,
-            'u_rt_gi'               => $this->rtSceneReady && $this->settings->rayTracedGi && $this->rtAlbedoBuffer !== null ? 1.0 : 0.0,
-            'u_rt_reflections'      => $this->rtSceneReady && $this->settings->rayTracedReflections && $this->rtAlbedoBuffer !== null ? 1.0 : 0.0,
             'u_flipbook'            => [(float) $material->flipbook[0], (float) $material->flipbook[1], $material->flipbookFps, $material->streakFade ? 1.0 : 0.0],
             'u_alpha_cutoff'        => $material->alphaCutoff,
-            'u_ocean'               => [$material->oceanPatch, $material->oceanAmplitude, max(0.1, $material->oceanLoop), $material->oceanTexture !== null && (ProcModeShaderRegistry::textureUnits() ?? 0) > self::OCEAN_SLOT ? 1.0 : 0.0],
             'u_ocean_chop'          => $material->oceanChop,
             'u_tess'                => [max(1.0, min(64.0, $material->tessellation)), $material->tessNear, $material->tessFar, $material->tessellation > 0.0 ? 1.0 : 0.0],
             'u_hair'                => $material->hair ? 1.0 : 0.0,
@@ -8683,31 +8738,15 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         if ($procMode === 9) {
             $u['u_moon_phase'] = $material->roughness;
         }
-        foreach (ProcModeShaderRegistry::materialParameters() as $name => $default) {
+        foreach ($procParams as $name => $default) {
             $u[$name] = $material->params[$name] ?? $default;
         }
-        if ($this->motionThisFrame) {
-            $u['u_material_reactive'] = $material->reactive;
-        }
-        // Albedo texture filter of the material: extra taps only above the
-        // anisotropy the texture was created with (the player's setting).
         $u['u_material_mip_bias'] = $material->mipBias;
-        // Bindless materials read through the table's 16x sampler.
-        $hwAniso = $this->bindlessBuilt ? 16 : max(1, min(16, $this->settings->anisotropy));
-        $u['u_material_aniso'] = [
-            $material->anisotropy > $hwAniso ? (float) min(16, (int) ceil($material->anisotropy / $hwAniso)) : 1.0,
-            (float) $hwAniso,
-        ];
-
-        $this->setUniforms($u);
-        if ($material->splatLayers !== []) {
-            $layers = [];
-            foreach (array_slice($material->splatLayers, 0, 4) as $i => $layer) {
-                $layers["u_splat_color[{$i}]"] = [$layer->color->r, $layer->color->g, $layer->color->b, $layer->roughness];
-                $layers["u_splat_pattern[{$i}]"] = [(float) NormalPattern::codeFor($layer->pattern), $layer->patternScale, $layer->height, 0.0];
-            }
-            $this->setUniforms($layers);
+        foreach (array_slice($material->splatLayers, 0, 4) as $i => $layer) {
+            $u["u_splat_color[{$i}]"] = [$layer->color->r, $layer->color->g, $layer->color->b, $layer->roughness];
+            $u["u_splat_pattern[{$i}]"] = [(float) NormalPattern::codeFor($layer->pattern), $layer->patternScale, $layer->height, 0.0];
         }
+        return $u;
     }
 
     /**
