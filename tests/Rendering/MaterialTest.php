@@ -164,4 +164,21 @@ class MaterialTest extends TestCase
         $this->assertSame('bricks', $m->normalPattern);
         $this->assertEqualsWithDelta(4.0, $m->normalScale, 1e-6);
     }
+
+    public function testWithWetnessKeepsEverythingElse(): void
+    {
+        $m = new Material(albedo: new Color(0.3, 0.4, 0.5), roughness: 0.8, sheen: 0.4, rimLight: 0.45, shadowDapple: 0.2);
+        $wet = $m->withWetness(0.7);
+        $this->assertEqualsWithDelta(0.7, $wet->wetness, 1e-9);
+        $this->assertSame(0.0, $m->wetness, 'the original stays dry');
+        $this->assertEqualsWithDelta(0.8 + (0.28 - 0.8) * 0.7, $wet->roughness, 1e-9, 'the film smooths it');
+        $this->assertEqualsWithDelta(0.3 * (1.0 - 0.5 * 0.7), $wet->albedo->r, 1e-9, 'porous surfaces darken');
+        $this->assertSame($m->albedo->r, $m->withWetness(0.0)->albedo->r, 'dry = unchanged');
+        $this->assertSame(0.6, (new Material(albedo: new Color(0.6, 0.6, 0.6), metallic: 1.0))->withWetness(1.0)->albedo->r, 'metal does not darken');
+        $this->assertEqualsWithDelta(0.4 * (1.0 - 0.8 * 0.7), $wet->sheen, 1e-9, 'the fuzz lies flat');
+        $this->assertEqualsWithDelta(0.45, $wet->rimLight, 1e-9);
+        $this->assertEqualsWithDelta(0.2, $wet->shadowDapple, 1e-9);
+        $this->assertSame(1.0, $m->withWetness(3.0)->wetness);
+        $this->assertSame(0.0, $m->withWetness(-1.0)->wetness);
+    }
 }

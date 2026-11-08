@@ -588,6 +588,28 @@ class Material
     }
 
     /**
+     * This material wetted, on every face (0 = dry, 1 = soaked): a porous (non-metal)
+     * surface darkens toward 50 %, the water film lowers the roughness and lays cloth
+     * fuzz (sheen) flat, and $wetness feeds the reflections. Call it on the DRY
+     * material each time - it compounds.
+     * For soaked clothes, splashed rocks, a player out of the water.
+     */
+    public function withWetness(float $wetness): self
+    {
+        $w = max(0.0, min(1.0, $wetness));
+        $m = $this->copy();
+        $dark = 1.0 - 0.5 * $w * (1.0 - max(0.0, min(1.0, $this->metallic)));
+
+        return new self(...[
+            ...get_object_vars($m),
+            'albedo' => new Color($this->albedo->r * $dark, $this->albedo->g * $dark, $this->albedo->b * $dark, $this->albedo->a),
+            'roughness' => $this->roughness + (max($this->roughness * 0.35, 0.08) - $this->roughness) * $w,
+            'sheen' => $this->sheen * (1.0 - 0.8 * $w),
+            'wetness' => $w,
+        ]);
+    }
+
+    /**
      * This material dissolving in a dither between two camera distances (shader
      * plan 6.1); end <= 0 switches the fade off.
      */
