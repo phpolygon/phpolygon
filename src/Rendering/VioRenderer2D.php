@@ -22,7 +22,7 @@ use VioContext;
 use VioFont;
 use VioTexture;
 
-class VioRenderer2D implements Renderer2DInterface, EffectRenderer2DInterface, AnimationClockInterface, SdfFontRenderer2DInterface
+class VioRenderer2D implements Renderer2DInterface, EffectRenderer2DInterface, AnimationClockInterface, SdfFontRenderer2DInterface, GpuImageRenderer2DInterface
 {
     /** Frames an unregistered texture stays alive: more than php-vio ever has in flight. */
     private const int RETIRE_FRAMES = 8;

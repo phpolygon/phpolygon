@@ -27,7 +27,7 @@ use PHPolygon\UI\UIScale;
  * the pointer lands in the same logical space, and hand both to a UIContext
  * via {@see \PHPolygon\UI\UIContext::useBackends()} while it lays out.
  */
-final class ScaledRenderer2D implements Renderer2DInterface, EffectRenderer2DInterface, SdfFontRenderer2DInterface
+final class ScaledRenderer2D implements Renderer2DInterface, EffectRenderer2DInterface, SdfFontRenderer2DInterface, GpuImageRenderer2DInterface
 {
     public function __construct(
         private readonly Renderer2DInterface $inner,
@@ -296,6 +296,15 @@ final class ScaledRenderer2D implements Renderer2DInterface, EffectRenderer2DInt
         [$x, $y, $w, $h] = $this->snap($x, $y, $w, $h);
 
         return $this->inner->drawEffect($name, $x, $y, $w, $h, $parameters, $textures, $padding * $this->scale->factor);
+    }
+
+    public function drawGpuImage(\VioTexture $texture, float $srcW, float $srcH, float $x, float $y, float $w, float $h, float $opacity = 1.0): void
+    {
+        if (!$this->inner instanceof GpuImageRenderer2DInterface) {
+            return;
+        }
+        [$x, $y, $w, $h] = $this->snap($x, $y, $w, $h);
+        $this->inner->drawGpuImage($texture, $srcW, $srcH, $x, $y, $w, $h, $opacity);
     }
 
     public function effectAvailable(string $name): bool

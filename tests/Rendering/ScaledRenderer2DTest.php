@@ -61,6 +61,32 @@ final class ScaledRenderer2DTest extends TestCase
         };
     }
 
+    public function testGpuImagesGoThroughInScreenPixels(): void
+    {
+        $ctx = VioTestContext::create(16, 16);
+        if ($ctx === null) {
+            self::markTestSkipped('vio_create(headless) unavailable');
+        }
+        try {
+            $texture = vio_texture($ctx, ['data' => "\xff\xff\xff\xff", 'width' => 1, 'height' => 1]);
+            self::assertInstanceOf(\VioTexture::class, $texture);
+            $inner = new class(3840, 2160) extends NullRenderer2D implements \PHPolygon\Rendering\GpuImageRenderer2DInterface {
+                /** @var list<list<float>> */
+                public array $images = [];
+
+                public function drawGpuImage(\VioTexture $texture, float $srcW, float $srcH, float $x, float $y, float $w, float $h, float $opacity = 1.0): void
+                {
+                    $this->images[] = [$srcW, $srcH, $x, $y, $w, $h, $opacity];
+                }
+            };
+            $r = new ScaledRenderer2D($inner, new UIScale(2.0));
+            $r->drawGpuImage($texture, 256.0, 256.0, 10.0, 20.0, 80.0, 80.0, 0.9);
+            self::assertSame([[256.0, 256.0, 20.0, 40.0, 160.0, 160.0, 0.9]], $inner->images, 'source size kept, rectangle scaled');
+        } finally {
+            vio_destroy($ctx);
+        }
+    }
+
     public function testFactorOnePassesEverythingThrough(): void
     {
         $inner = $this->recorder(1920, 1080);
