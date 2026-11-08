@@ -7204,6 +7204,20 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
     }
 
     /**
+     * Wind for fragment stages: normalised xz direction and intensity.
+     *
+     * @return array{0: float, 1: float, 2: float}
+     */
+    private function fragWind(): array
+    {
+        $fw = $this->windDirection;
+        $fwl = sqrt($fw[0] * $fw[0] + $fw[2] * $fw[2]);
+        return $fwl > 1e-4
+            ? [$fw[0] / $fwl, $fw[2] / $fwl, $this->windIntensity]
+            : [0.0, 1.0, $this->windIntensity];
+    }
+
+    /**
      * Draw a resolved shadow list into the bound depth target. Swaying foliage
      * (Material::$foliageWind) bends in the depth pass too, so a tree's shadow
      * moves with the tree (shader plan 6.1).
@@ -7218,6 +7232,9 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         vio_set_uniform($this->ctx, 'u_time', $this->globalTime);
         vio_set_uniform($this->ctx, 'u_wind_direction', $this->windDirection);
         vio_set_uniform($this->ctx, 'u_wind_intensity', $this->windIntensity);
+        // shadow.frag (dapple) reads time and wind under its own names.
+        vio_set_uniform($this->ctx, 'u_frag_time', $this->globalTime);
+        vio_set_uniform($this->ctx, 'u_frag_wind', $this->fragWind());
         vio_set_uniform($this->ctx, 'u_foliage_motion', $this->foliageMotion);
         vio_set_uniform($this->ctx, 'u_foliage_fade', $this->foliageFade);
         vio_set_uniform($this->ctx, 'u_shadow_camera_pos', $camera !== null ? [$camera->x, $camera->y, $camera->z] : [0.0, 0.0, 0.0]);
@@ -10258,9 +10275,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         vio_set_uniform($this->ctx, 'u_time', $time);
         vio_set_uniform($this->ctx, 'u_frag_time', $time);
         // Wind for fragment looks (lawn waves, shader plan 6.1): xz direction, intensity.
-        $fw = $this->windDirection;
-        $fwl = sqrt($fw[0] * $fw[0] + $fw[2] * $fw[2]);
-        vio_set_uniform($this->ctx, 'u_frag_wind', $fwl > 1e-4 ? [$fw[0] / $fwl, $fw[2] / $fwl, $this->windIntensity] : [0.0, 1.0, $this->windIntensity]);
+        vio_set_uniform($this->ctx, 'u_frag_wind', $this->fragWind());
         vio_set_uniform($this->ctx, 'u_ao_strength', $this->settings->ambientOcclusion->strength());
 
         // Fieldtracing (SDF GI) — float mode (int-in-UBO is unreliable across

@@ -6,9 +6,10 @@ in vec3 v_shadow_world;
 // drop out in leaf-cluster-sized gaps that drift with the wind, so its shadow lets
 // spots of sun through. 0 = solid (the common case: the branch is uniform per draw).
 uniform float u_shadow_dapple;
-uniform float u_time;
-uniform vec3  u_wind_direction;
-uniform float u_wind_intensity;
+// Own names: shadow.vert declares u_time / u_wind_direction for the foliage sway, and
+// a name declared in both stages reaches only the vertex stage on D3D / Vulkan / Metal.
+uniform float u_frag_time;
+uniform vec3  u_frag_wind; // xz direction (normalised), intensity
 
 out vec4 frag_color;
 
@@ -32,8 +33,8 @@ float dappleNoise(vec3 p) {
 
 void main() {
     if (u_shadow_dapple > 0.0) {
-        vec3 wind = vec3(u_wind_direction.x, 0.0, u_wind_direction.z);
-        float drift = u_time * (0.05 + 0.25 * clamp(u_wind_intensity, 0.0, 2.0));
+        vec3 wind = vec3(u_frag_wind.x, 0.0, u_frag_wind.y);
+        float drift = u_frag_time * (0.05 + 0.25 * clamp(u_frag_wind.z, 0.0, 2.0));
         vec3 p = v_shadow_world / 0.45 + wind * drift;
         float n = dappleNoise(p) * 0.65 + dappleNoise(p * 2.3 + 7.1) * 0.35;
         // n centres on 0.5: map the dapple amount onto the threshold so 0.5 opens
