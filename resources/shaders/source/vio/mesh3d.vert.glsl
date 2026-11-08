@@ -249,8 +249,45 @@ vec3 bodyWave(vec3 pos, mat4 model, float time) {
     return pos;
 }
 
+// Per-instance random numbers from the instance's origin: multiply, add, fract only, so
+// every GPU draws the same (a sine hash depends on the driver's precision).
+vec3 originHash(mat4 model) {
+    vec3 p = fract(model[3].xyz * vec3(0.1031, 0.1030, 0.0973));
+    p += dot(p, p.yxz + 33.33);
+    return fract((p.xxy + p.yxx) * p.zyx);
+}
+
+// Breathing (Material::$breathing, shader plan 6.2): the vertices in a band of the
+// object's height (the chest) swell along their normal and settle again, each instance
+// in its own rhythm.
+//   u_breath = (amplitude in metres, breaths per second, band bottom y, band top y)
+uniform vec4 u_breath;
+
+vec3 breathe(vec3 pos, mat4 model, float time) {
+    if (u_breath.x <= 0.0 || u_breath.w <= u_breath.z) return pos;
+    float h = (pos.y - u_breath.z) / (u_breath.w - u_breath.z);
+    float band = smoothstep(0.0, 0.35, h) * (1.0 - smoothstep(0.65, 1.0, h));
+    float phase = originHash(model).x * 6.2831853;
+    float swell = 0.5 - 0.5 * cos(6.2831853 * time * u_breath.y + phase);
+    float scale = max((length(model[0].xyz) + length(model[1].xyz) + length(model[2].xyz)) / 3.0, 1e-4);
+    return pos + normalize(a_normal) * (u_breath.x * swell * band / scale);
+}
+
+// Instance colour variation (Material::$instanceTint, shader plan 6.2): each instance a
+// little lighter or darker and a touch warmer or cooler, from its origin.
+uniform float u_instance_tint;
+flat out vec3 v_instance_tint;
+
+vec3 instanceTint(mat4 model) {
+    if (u_instance_tint <= 0.0) return vec3(1.0);
+    vec3 h = originHash(model) - 0.5;
+    float value = 1.0 + h.y * 0.35 * u_instance_tint;
+    return value * vec3(1.0 + h.z * 0.14 * u_instance_tint, 1.0, 1.0 - h.z * 0.14 * u_instance_tint);
+}
+
 // Wave + cloth + foliage displacement of an object-space vertex at a given clock.
 vec3 animatePosition(vec3 pos, mat4 model, float time, float grassHash) {
+    pos = breathe(pos, model, time);
     pos = bodyWave(pos, model, time);
     if (u_vertex_anim == 1) {
         vec4 worldPosRaw = model * vec4(pos, 1.0);
@@ -383,6 +420,7 @@ void main() {
     }
 
     v_uv = a_uv;
+    v_instance_tint = instanceTint(model);
     v_lightSpacePos = u_light_space_matrix * worldPos;
     gl_Position = u_projection * u_view * worldPos;
 

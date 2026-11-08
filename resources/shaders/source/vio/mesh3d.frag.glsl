@@ -127,6 +127,8 @@ uniform float u_ssr_intensity;
 // the only reflection cue and stays active. Mirrors u_ssao_enabled.
 uniform int   u_ssr_enabled;
 uniform int   u_volumetric_fog;
+// Instance colour variation from the vertex stage (1 = none).
+flat in vec3 v_instance_tint;
 // Splatted ground (Material::$splatLayers, shader plan 5.1): layer count (0 = off), the
 // world area the splat map (the albedo texture) covers, the blend's sharpness, and per
 // layer rgb + roughness and pattern code, pattern scale, height weight.
@@ -1917,7 +1919,7 @@ void main() {
     }
 #endif // PHPOLYGON_OMIT_NORMAL_PATTERNS
 
-    vec3 texAlbedo = splatOn ? splatAlbedo : u_albedo;
+    vec3 texAlbedo = (splatOn ? splatAlbedo : u_albedo) * v_instance_tint;
     if (u_has_albedo_texture == 1 && !splatOn) {
 #ifdef PHPOLYGON_MOTION
         // Temporal upscaling reconstructs display-resolution detail: pick the

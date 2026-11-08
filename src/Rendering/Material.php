@@ -450,6 +450,22 @@ class Material
         /** @var array{0: float, 1: float, 2: float, 3: float} */
         public readonly array $splatArea = [0.0, 0.0, 100.0, 100.0],
         public readonly float $splatSharpness = 6.0,
+        /**
+         * Breathing (shader plan 6.2): [amplitude in metres, breaths per second, band
+         * bottom, band top] - the vertices between the band's heights (object space, e.g.
+         * the chest of a torso) swell along their normal and settle, each instance in its
+         * own rhythm. Amplitude 0 = off. Give the torso its own material when sleeves share
+         * the look, so only the chest breathes.
+         *
+         * @var array{0: float, 1: float, 2: float, 3: float}
+         */
+        public readonly array $breathing = [0.0, 0.25, 0.0, 0.0],
+        /**
+         * Instance colour variation (shader plan 6.2): 0..1 - each instance (crowd, trees,
+         * crates) a little lighter or darker and warmer or cooler, picked from where it
+         * stands; no instance data needed.
+         */
+        public readonly float $instanceTint = 0.0,
     ) {}
 
     /**
@@ -772,6 +788,8 @@ class Material
             splatLayers: $this->splatLayers,
             splatArea: $this->splatArea,
             splatSharpness: $this->splatSharpness,
+            breathing: $this->breathing,
+            instanceTint: $this->instanceTint,
         );
     }
 

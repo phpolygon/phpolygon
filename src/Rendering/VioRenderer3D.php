@@ -8453,6 +8453,8 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             'u_use_environment_map' => $material->useEnvironmentMap ? 1 : 0,
             'u_normal_pattern'      => NormalPattern::codeFor($material->normalPattern),
             'u_splat_count'         => (float) min(4, count($material->splatLayers)),
+            'u_breath'              => [(float) $material->breathing[0], (float) $material->breathing[1], (float) $material->breathing[2], (float) $material->breathing[3]],
+            'u_instance_tint'       => $material->instanceTint,
             'u_splat_area'          => [$material->splatArea[0], $material->splatArea[1], max(1.0e-3, $material->splatArea[2]), max(1.0e-3, $material->splatArea[3])],
             'u_splat_sharpness'     => $material->splatSharpness,
             'u_normal_scale'        => $material->normalScale,
