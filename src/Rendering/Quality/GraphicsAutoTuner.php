@@ -181,11 +181,7 @@ final class GraphicsAutoTuner
             $samples[] = (hrtime(true) - $start) / 1_000_000.0;
         }
 
-        // self::MEASURE_FRAMES is always > 0 so $samples is never empty.
-        sort($samples);
-        $idx = (int)floor(count($samples) * 0.95);
-        $idx = max(0, min(count($samples) - 1, $idx));
-        return $samples[$idx];
+        return FrameTimes::percentile($samples, 0.95);
     }
 
     /**
