@@ -59,12 +59,14 @@ class PlaneMesh
                 $bl = $tl + $cols;
                 $br = $bl + 1;
 
+                // Counter-clockwise seen from +Y, so the geometric front face
+                // agrees with the +Y vertex normal (gl_FrontFacing shading).
                 $indices[] = $tl;
+                $indices[] = $br;
                 $indices[] = $tr;
-                $indices[] = $br;
                 $indices[] = $tl;
-                $indices[] = $br;
                 $indices[] = $bl;
+                $indices[] = $br;
             }
         }
 

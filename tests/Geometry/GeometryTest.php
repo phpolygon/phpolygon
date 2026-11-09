@@ -101,6 +101,22 @@ class GeometryTest extends TestCase
         }
     }
 
+    public function testPlaneMeshTrianglesFaceAlongTheirNormal(): void
+    {
+        // The shader flips N on back faces (gl_FrontFacing), so a plane wound
+        // against its +Y normal would shade as its own underside from above.
+        $mesh = PlaneMesh::generate(4.0, 2.0, 3);
+        $v = $mesh->vertices;
+        $idx = $mesh->indices;
+        for ($t = 0; $t < count($idx); $t += 3) {
+            [$a, $b, $c] = [$idx[$t] * 3, $idx[$t + 1] * 3, $idx[$t + 2] * 3];
+            $e1 = [$v[$b] - $v[$a], $v[$b + 1] - $v[$a + 1], $v[$b + 2] - $v[$a + 2]];
+            $e2 = [$v[$c] - $v[$a], $v[$c + 1] - $v[$a + 1], $v[$c + 2] - $v[$a + 2]];
+            $ny = $e1[2] * $e2[0] - $e1[0] * $e2[2];
+            $this->assertGreaterThan(0.0, $ny, "triangle {$t} faces up");
+        }
+    }
+
     // ─── MeshRegistry ─────────────────────────────────────────────────────────
 
     public function testMeshRegistryRegisterAndGet(): void
