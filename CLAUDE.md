@@ -105,6 +105,16 @@ moves any of them into another space (the room's world matrix); exact for transl
 and quarter turns, which is how rooms are normally placed. Normals are normalised on
 construction; a zero normal or a zero-sized opening throws.
 
+### Turned groups — `Scene\SceneFrame`
+A room or hall that stands at an angle to the world axes is built as if its origin were
+(0, 0, 0) and its axes the world's, then placed: `SceneFrame::mark($builder)` before
+building, `(new SceneFrame($origin, $yaw))->place($builder, $mark)` after. Every top-level
+entity declared in between moves to `origin + yaw · position` and gets the turn in its OWN
+rotation (children follow their parent). Not a parent transform on purpose: a box collider
+collides as an oriented box only with its own rotation; turned through a parent it collides
+as its world AABB. Sockets the prefab hands back go through `point()`, `direction()` and
+`yaw()` (object yaw as in `Quaternion::fromEuler(0, yaw, 0)`).
+
 ### Render interface: Layered
 - `RenderContextInterface` — base: `beginFrame()`, `endFrame()`, `clear()`,
   `setViewport()`
