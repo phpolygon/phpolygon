@@ -237,7 +237,7 @@ class VioRenderer2D implements Renderer2DInterface, EffectRenderer2DInterface, A
      * renders into its own target, which the batch already holds as a sprite at the
      * effect's place in the draw order.
      *
-     * @var list<array{0: Effect2D, 1: \VioRenderTarget, 2: int, 3: int, 4: array<string, int|float|list<float>>, 5: array<string, Texture>, 6: list<float>}>
+     * @var list<array{0: Effect2D, 1: \VioRenderTarget, 2: int, 3: int, 4: array<string, int|float|list<float>>, 5: array<string, Texture>, 6: list<float>, 7: array{0: float, 1: float, 2: float, 3: float}}>
      */
     private array $effectJobs = [];
 

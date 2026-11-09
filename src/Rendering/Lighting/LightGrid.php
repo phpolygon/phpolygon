@@ -87,8 +87,8 @@ final class LightGrid
 
         // Strongest first, so a full cell drops the faint ones.
         $order = array_keys($lights);
-        $strength = static fn (array $l): float => ($l[4] + $l[5] + $l[6]) * $l[3];
-        usort($order, static fn (int $a, int $b): int => $strength($lights[$b]) <=> $strength($lights[$a]) ?: $a <=> $b);
+        $strength = static fn (int $i): float => ($lights[$i][4] + $lights[$i][5] + $lights[$i][6]) * $lights[$i][3];
+        usort($order, static fn (int $a, int $b): int => $strength($b) <=> $strength($a) ?: $a <=> $b);
 
         $lists = [];
         foreach ($order as $i) {
@@ -113,12 +113,16 @@ final class LightGrid
             $cells[2 * $c + 1] = count($list);
             array_push($indices, ...$list);
         }
-        $this->cells = $cells;
+        $this->cells = array_values($cells);
         // An empty list would be a zero-sized buffer.
         $this->indices = $indices === [] ? [0] : $indices;
     }
 
-    /** The lights a world point at (x, z) reads, as the shader does. */
+    /**
+     * The lights a world point at (x, z) reads, as the shader does.
+     *
+     * @return list<int>
+     */
     public function lightsAt(float $x, float $z): array
     {
         $cx = (int) floor(($x - $this->originX) / $this->cell);
@@ -131,13 +135,21 @@ final class LightGrid
         return array_slice($this->indices, $this->cells[2 * $c], $this->cells[2 * $c + 1]);
     }
 
-    /** u_light_grid = (origin x, origin z, 1/cell, 1 = on). */
+    /**
+     * u_light_grid = (origin x, origin z, 1/cell, 1 = on).
+     *
+     * @return list<float>
+     */
     public function gridUniform(): array
     {
         return [$this->originX, $this->originZ, 1.0 / $this->cell, 1.0];
     }
 
-    /** u_light_grid_dims = (nx, nz, 0, 0). */
+    /**
+     * u_light_grid_dims = (nx, nz, 0, 0).
+     *
+     * @return list<float>
+     */
     public function dimsUniform(): array
     {
         return [(float) $this->nx, (float) $this->nz, 0.0, 0.0];
@@ -153,7 +165,11 @@ final class LightGrid
 
     public function cellBytes(): string
     {
-        $f = static fn (float $v): int => unpack('V', pack('g', $v))[1];
+        $f = static function (float $v): int {
+            $u = unpack('V', pack('g', $v));
+
+            return is_array($u) && is_int($u[1] ?? null) ? $u[1] : 0;
+        };
         $header = [$this->nx, $this->nz, $f($this->originX), $f($this->originZ), $f(1.0 / $this->cell),
             intdiv(count($this->lights), 8), count($this->indices), 0];
 

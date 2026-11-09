@@ -105,25 +105,40 @@ final class DecalMeshBuilder
         return $out;
     }
 
-    /** @param list<float> $a @param list<float> $b @return list<float> */
+    /**
+     * @param list<float> $a
+     * @param list<float> $b
+     * @return list<float>
+     */
     private static function lerp(array $a, array $b, float $t): array
     {
         return [$a[0] + ($b[0] - $a[0]) * $t, $a[1] + ($b[1] - $a[1]) * $t, $a[2] + ($b[2] - $a[2]) * $t];
     }
 
-    /** @param list<float> $a @param list<float> $b @return list<float> */
+    /**
+     * @param list<float> $a
+     * @param list<float> $b
+     * @return list<float>
+     */
     private static function sub(array $a, array $b): array
     {
         return [$a[0] - $b[0], $a[1] - $b[1], $a[2] - $b[2]];
     }
 
-    /** @param list<float> $a @param list<float> $b @return list<float> */
+    /**
+     * @param list<float> $a
+     * @param list<float> $b
+     * @return list<float>
+     */
     private static function cross(array $a, array $b): array
     {
         return [$a[1] * $b[2] - $a[2] * $b[1], $a[2] * $b[0] - $a[0] * $b[2], $a[0] * $b[1] - $a[1] * $b[0]];
     }
 
-    /** @param list<float> $a @return list<float> */
+    /**
+     * @param list<float> $a
+     * @return list<float>
+     */
     private static function normalize(array $a): array
     {
         $l = sqrt($a[0] * $a[0] + $a[1] * $a[1] + $a[2] * $a[2]);

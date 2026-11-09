@@ -379,10 +379,9 @@ class Material
          * min x, min y, min z, extent x, extent y, extent z] from the bake. Needs
          * more than 17 texture units; the mesh then plays the animation in place
          * (no shadow of its own: the shadow pass keeps the rest pose out).
-         *
-         * @var list<float>
          */
         public readonly ?string $vatTexture = null,
+        /** @var list<float> */
         public readonly array $vatInfo = [],
         /**
          * > 0: pixels whose albedo-texture alpha lies below it are cut out (leaves,
@@ -587,9 +586,7 @@ class Material
     /** This material with another weathering susceptibility (0 = never weathers). */
     public function withWeathering(float $weathering): self
     {
-        $m = $this->copy();
-
-        return new self(...[...get_object_vars($m), 'weathering' => max(0.0, $weathering)]);
+        return $this->derive(['weathering' => max(0.0, $weathering)]);
     }
 
     /**
@@ -602,11 +599,9 @@ class Material
     public function withWetness(float $wetness): self
     {
         $w = max(0.0, min(1.0, $wetness));
-        $m = $this->copy();
         $dark = 1.0 - 0.5 * $w * (1.0 - max(0.0, min(1.0, $this->metallic)));
 
-        return new self(...[
-            ...get_object_vars($m),
+        return $this->derive([
             'albedo' => new Color($this->albedo->r * $dark, $this->albedo->g * $dark, $this->albedo->b * $dark, $this->albedo->a),
             'roughness' => $this->roughness + (max($this->roughness * 0.35, 0.08) - $this->roughness) * $w,
             'sheen' => $this->sheen * (1.0 - 0.8 * $w),
@@ -620,9 +615,7 @@ class Material
      */
     public function withFadeDistance(float $start, float $end): self
     {
-        $m = $this->copy();
-
-        return new self(...[...get_object_vars($m), 'fadeDistance' => [max(0.0, $start), max(0.0, $end)]]);
+        return $this->derive(['fadeDistance' => [max(0.0, $start), max(0.0, $end)]]);
     }
 
     /**
@@ -632,9 +625,7 @@ class Material
      */
     public function withFadeInDistance(float $start, float $end): self
     {
-        $m = $this->copy();
-
-        return new self(...[...get_object_vars($m), 'fadeDistance' => [-max(0.0, $start), -max(1e-3, $end)]]);
+        return $this->derive(['fadeDistance' => [-max(0.0, $start), -max(1e-3, $end)]]);
     }
 
     /** This material with another emission colour (e.g. a glow that fades in at night). */
@@ -714,6 +705,17 @@ class Material
                 min(1.0, $this->albedo->b * 0.8),
             ),
         );
+    }
+
+    /**
+     * A copy of this material with the given constructor fields replaced (keys are
+     * the constructor's parameter names).
+     *
+     * @param array<string, mixed> $changes
+     */
+    private function derive(array $changes): self
+    {
+        return (new \ReflectionClass(self::class))->newInstanceArgs([...get_object_vars($this->copy()), ...$changes]);
     }
 
     /**

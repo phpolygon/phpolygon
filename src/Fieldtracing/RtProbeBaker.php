@@ -140,6 +140,6 @@ final class RtProbeBaker
             return null;
         }
         $data = unpack('f*', substr($bytes, 0, $probes * 48));
-        return $data === false ? null : array_values($data);
+        return $data === false ? null : array_values(array_map(static fn (mixed $v): float => is_float($v) ? $v : 0.0, $data));
     }
 }

@@ -515,8 +515,6 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
     private int $spotShadowIndex = -1;
     /** @var list<float> */
     private array $spotShadowMatrix = [];
-    /** @var list<array{0: \VioMesh, 1: string, 2: int, 3?: bool}>|null Shadow draws of this frame. */
-    private ?array $frameShadowDraws = null;
     /** @var list<array{0: \VioMesh, 1: string, 2: int, 3?: bool}>|null Local-light shadow draws of this frame. */
     private ?array $frameLocalShadowDraws = null;
     private const SHADOW_ORTHO_SIZE = 60.0;
@@ -2507,7 +2505,9 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         }
         $this->froxelInjectTarget ??= vio_render_target($this->ctx, ['width' => self::FROXEL_ATLAS_W, 'height' => self::FROXEL_ATLAS_H, 'hdr' => true]) ?: null;
         $this->froxelVolumeTarget ??= vio_render_target($this->ctx, ['width' => self::FROXEL_ATLAS_W, 'height' => self::FROXEL_ATLAS_H, 'hdr' => true]) ?: null;
-        if ($this->froxelInjectTarget === null || $this->froxelVolumeTarget === null) {
+        $inject = $this->froxelInjectTarget;
+        $volume = $this->froxelVolumeTarget;
+        if ($inject === null || $volume === null) {
             return false;
         }
         $vm = $view->toArray();
@@ -2517,7 +2517,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             $vm[8], $vm[9], $vm[10], 0.0,
             0.0, 0.0, 0.0, 1.0,
         ]);
-        $this->froxelInvVp = $proj->multiply($rotView)->inverse()->toArray();
+        $this->froxelInvVp = array_values($proj->multiply($rotView)->inverse()->toArray());
         $this->froxelForward = [-$vm[2], -$vm[6], -$vm[10]];
         $this->froxelFar = max(30.0, min(300.0, $fogFar));
         $cam = $this->cameraPosition ?? new Vec3(0.0, 0.0, 0.0);
@@ -2558,10 +2558,10 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         vio_unbind_render_target($this->ctx);
 
         // 2. Integrate along the view rays.
-        vio_bind_render_target($this->ctx, $this->froxelVolumeTarget);
+        vio_bind_render_target($this->ctx, $volume);
         vio_viewport($this->ctx, 0, 0, self::FROXEL_ATLAS_W, self::FROXEL_ATLAS_H);
         $this->bindPostProcessPipeline('froxel_integrate', true);
-        vio_bind_texture($this->ctx, vio_render_target_texture($this->froxelInjectTarget), 0);
+        vio_bind_texture($this->ctx, vio_render_target_texture($inject), 0);
         vio_set_uniform($this->ctx, 'u_froxel_inject', 0);
         vio_set_uniform($this->ctx, 'u_froxel_far', $this->froxelFar);
         vio_draw($this->ctx, $quad);
@@ -2611,11 +2611,14 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
     /** Add the froxel fog light over the opaque scene and the sky (additive, into the scene target). */
     private function applyFroxelFog(?VioRenderTarget $hdrTarget, int $w, int $h): void
     {
-        if ($this->froxelVolumeTarget === null || $this->screenQuad === null) {
+        $volume = $this->froxelVolumeTarget;
+        $quad = $this->screenQuad;
+        if ($volume === null || $quad === null) {
             return;
         }
         $this->captureSceneDepth($hdrTarget, $w, $h);
-        if (!$this->sceneDepthCopied || $this->sceneDepthCopy === null) {
+        $depthCopy = $this->sceneDepthCopy;
+        if (!$this->sceneDepthCopied || $depthCopy === null) {
             return;
         }
         $mrt = $this->mrtThisFrame;
@@ -2624,11 +2627,11 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         vio_set_uniform($this->ctx, 'u_camera_forward', $this->froxelForward);
         vio_set_uniform($this->ctx, 'u_froxel_far', $this->froxelFar);
         vio_set_uniform($this->ctx, 'u_viewport_size', [(float) $w, (float) $h]);
-        vio_bind_texture($this->ctx, vio_render_target_texture($this->froxelVolumeTarget), 0);
+        vio_bind_texture($this->ctx, vio_render_target_texture($volume), 0);
         vio_set_uniform($this->ctx, 'u_froxel_volume', 0);
-        vio_bind_texture($this->ctx, vio_render_target_texture($this->sceneDepthCopy), 1);
+        vio_bind_texture($this->ctx, vio_render_target_texture($depthCopy), 1);
         vio_set_uniform($this->ctx, 'u_scene_depth', 1);
-        vio_draw($this->ctx, $this->screenQuad);
+        vio_draw($this->ctx, $quad);
         // The mesh programs bound textures on these units: the transparent pass re-binds its own.
         $this->variantUniformsUploaded = [];
         $this->frameUniformsShaderId = null;
@@ -2736,7 +2739,8 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             $this->minimapTarget = vio_render_target($this->ctx, ['width' => $req['size'], 'height' => $req['size']]) ?: null;
             $this->minimapSize = $req['size'];
         }
-        if ($this->minimapTarget === null) {
+        $minimapTarget = $this->minimapTarget;
+        if ($minimapTarget === null) {
             return;
         }
         if (!isset($this->shaderCache['minimap'])) {
@@ -2756,7 +2760,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         $view = Mat4::lookAt($eye, new Vec3($req['cx'], $req['low'], $req['cz']), new Vec3(0.0, 0.0, -1.0));
         $proj = Mat4::orthographic(-$half, $half, -$half, $half, 1.0, 1200.0);
         $s = $req['size'];
-        vio_bind_render_target($this->ctx, $this->minimapTarget);
+        vio_bind_render_target($this->ctx, $minimapTarget);
         vio_viewport($this->ctx, 0, 0, $s, $s);
         vio_clear($this->ctx, 0.05, 0.08, 0.12, 1.0);
         vio_bind_pipeline($this->ctx, $this->pipelineCache[$key]);
@@ -2799,9 +2803,12 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         return self::$backdrop;
     }
 
+    /**
+     * @param array{lift: list<float>, gamma: list<float>, gain: list<float>, saturation: float, vignette: float, viewport: list<float>, hdr: int, exposure: float, pq: int, paperWhite: float} $post
+     */
     private function drawPassthrough(VioTexture $sceneTex, VioMesh $quad, ?VioTexture $bloomTex, array $post): void
     {
-        self::$backdrop = ['texture' => $sceneTex, 'hdr' => ($post['hdr'] ?? 0) === 1, 'exposure' => (float) ($post['exposure'] ?? 1.0)];
+        self::$backdrop = ['texture' => $sceneTex, 'hdr' => $post['hdr'] === 1, 'exposure' => $post['exposure']];
         $this->bindPostProcessPipeline('passthrough_blit');
         vio_bind_texture($this->ctx, $sceneTex, 0);
         vio_set_uniform($this->ctx, 'u_source', 0);
@@ -3624,7 +3631,11 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         return \PHPolygon\Fieldtracing\RtProbeBaker::tryFill($this->ctx, $this->rtScene, $this->rtAlbedoBytes, $origin, $pnx, $pny, $pnz, $pcell, $nDir, $sunDir);
     }
 
-    /** Collect this frame's static opaque draws for next frame's acceleration structure. */
+    /**
+     * Collect this frame's static opaque draws for next frame's acceleration structure.
+     *
+     * @param list<object> $commands
+     */
     private function collectRayTracedScene(array $commands): void
     {
         if (!($this->settings->rayTracedShadows || $this->settings->rayTracedReflections || $this->settings->rayTracedProbes || $this->settings->rayTracedGi) || !$this->rayQueryAvailable()) {
@@ -3644,7 +3655,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
                     continue;
                 }
                 $t = $cmd->modelMatrix->toArray();
-                $inst[] = ['mesh' => $mesh, 'transform' => $t];
+                $inst[] = ['mesh' => $mesh, 'transform' => array_values($t)];
                 $em = max($mat->emission->r, $mat->emission->g, $mat->emission->b);
                 array_push($albedo, $mat->albedo->r, $mat->albedo->g, $mat->albedo->b, $em);
                 $key .= $cmd->meshId . spl_object_id($cmd->modelMatrix) . ';';
@@ -3658,7 +3669,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
                 for ($i = 0; $i + 15 < count($flat); $i += 16) {
                     $t = array_slice($flat, $i, 16);
                     $t[3] = 0.0; $t[7] = 0.0; $t[11] = 0.0;
-                    $inst[] = ['mesh' => $mesh, 'transform' => $t];
+                    $inst[] = ['mesh' => $mesh, 'transform' => array_values($t)];
                     array_push($albedo, $mat->albedo->r, $mat->albedo->g, $mat->albedo->b, max($mat->emission->r, $mat->emission->g, $mat->emission->b));
                 }
                 $key .= ($cmd->staticKey ?? $cmd->meshId) . count($flat) . ';';
@@ -4660,7 +4671,8 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         ProcModeShaderRegistry::assertUniqueUniforms($this->loadShader('mesh3d.vert.glsl'), $this->loadShader('mesh3d.frag.glsl'));
         // The backend's own texture units (php-vio vio_texture_units, its
         // SAMPLER-LIMITS-PLAN): the snippet sampler budget follows them.
-        ProcModeShaderRegistry::setTextureUnits(function_exists('vio_texture_units') ? (int) vio_texture_units($this->ctx)['units'] : null);
+        $units = function_exists('vio_texture_units') ? (vio_texture_units($this->ctx)['units'] ?? null) : null;
+        ProcModeShaderRegistry::setTextureUnits(is_int($units) ? $units : null);
         ProcModeShaderRegistry::assertSamplerBudget();
         // After the unit count is known: the pyramid takes the highest unit.
         $this->hizUnitBuilt = $this->settings->occlusionCulling ? $this->hizUnit() : -1;
@@ -5816,7 +5828,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             vio_set_uniform($this->ctx, 'u_proj11', $p[5]);
             vio_set_uniform($this->ctx, 'u_uv_flip_y', $this->conventions()->flipRenderTargetClipY() ? -1.0 : 1.0);
         }
-        if (!$on || $view === null || $projection === null || $sun === null) {
+        if (!$on || $projection === null) {
             vio_set_uniform($this->ctx, 'u_contact', [0.0, 0.0, 0.0, 0.0]);
             return;
         }
@@ -6080,7 +6092,6 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
      */
     private function renderShadowPass(RenderCommandList $commandList, array $dirLights): bool
     {
-        $this->frameShadowDraws = null;
         $this->frameLocalShadowDraws = null;
         if ($this->settings->shadowQuality === \PHPolygon\Rendering\Quality\ShadowQuality::Off) {
             return false;
@@ -6120,7 +6131,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         // the draw count tiny, and drawing every caster into every cascade is free
         // on this CPU-bound path (off-box casters clip to the cascade ortho box;
         // the shadow result is identical to the old per-cascade-culled version).
-        $shadowDraws = $this->frameShadowDraws = $this->collectShadowDraws($commandList);
+        $shadowDraws = $this->collectShadowDraws($commandList);
 
         PerfProfiler::begin('render3d.shadow.draw');
         $this->cascadeLightSpaceMatrices = [];
@@ -7120,6 +7131,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             $this->pointShadowCube = $cube;
             $this->pointShadowRes = $res;
         }
+        $pointTarget = $this->pointShadowTarget;
         $draws = $this->frameLocalShadowDraws ??= $this->collectShadowDraws($commandList, true);
 
         $proj = Mat4::perspective(M_PI / 2.0, 1.0, self::POINT_SHADOW_NEAR, $light->radius);
@@ -7139,7 +7151,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         $pos = $light->position;
         PerfProfiler::begin('render3d.shadow.point');
         foreach ($faces as $face => [$forward, $up]) {
-            vio_bind_render_target($this->ctx, $this->pointShadowTarget, $face);
+            vio_bind_render_target($this->ctx, $pointTarget, $face);
             vio_viewport($this->ctx, 0, 0, $res, $res);
             vio_clear($this->ctx, 1.0, 1.0, 1.0, 1.0);
             $this->bindShadowPipeline();
@@ -7625,9 +7637,9 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
      * haze) for one view: $invVP is inverse(projection * rotation-only view).
      * Shared by the on-screen sky and the environment-cubemap face passes.
      *
-     * @param float[] $invVP column-major float[16]
+     * @param array<float> $invVP column-major float[16]
+     * @param int $mode 0 every layer, 1 only the clouds (into the cache), 2 every layer with the clouds from the cache
      */
-    /** @param int $mode 0 every layer, 1 only the clouds (into the cache), 2 every layer with the clouds from the cache */
     private function drawSkyLayers(SetSky $sky, array $invVP, bool $hdr, bool $mrt = false, int $mode = 0): void
     {
         $quad = $this->screenQuad;
@@ -7713,14 +7725,16 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             $wx = $wl > 1e-6 ? $wd->x / $wl : 1.0;
             $wz = $wl > 1e-6 ? $wd->z / $wl : 0.0;
 
-            if ($mode === 2 && $this->skyCloudCube !== null && $this->skyCloudCubeNext !== null) {
+            $cloudCube = $this->skyCloudCube;
+            $cloudNext = $this->skyCloudCubeNext;
+            if ($mode === 2 && $cloudCube !== null && $cloudNext !== null) {
                 $this->bindSkyPipeline('sky_cloud_cache', VIO_BLEND_ALPHA, $hdr, $mrt);
                 vio_set_uniform($this->ctx, 'u_sky_inv_vp', $invVP);
                 vio_set_uniform($this->ctx, 'u_cloud_cache', 0);
                 vio_set_uniform($this->ctx, 'u_cloud_cache_next', 1);
                 vio_set_uniform($this->ctx, 'u_cloud_blend', $this->skyCloudBlend);
-                vio_bind_cubemap($this->ctx, $this->skyCloudCube, 0);
-                vio_bind_cubemap($this->ctx, $this->skyCloudCubeNext, 1);
+                vio_bind_cubemap($this->ctx, $cloudCube, 0);
+                vio_bind_cubemap($this->ctx, $cloudNext, 1);
                 vio_draw($this->ctx, $quad);
             } else {
             $this->bindSkyPipeline('sky_clouds', $mode === 1 ? VIO_BLEND_NONE : VIO_BLEND_ALPHA, $hdr, $mrt);
@@ -8172,7 +8186,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
      * to its own sky where nothing was drawn.
      *
      * @param list<object> $commands
-     * @param array<string, mixed> $frameState
+     * @param array{ambientColor: Color, ambientIntensity: float, dirLights: list<SetDirectionalLight>, pointLights: list<AddPointLight>, spotLights: list<AddSpotLight>, rectLights: list<AddRectLight>, fogColor: Color, fogNear: float, fogFar: float, waveEnabled: bool, waveAmplitude: float, waveFrequency: float, wavePhase: float, ftMode: \PHPolygon\Rendering\Quality\FieldtracingMode, ftIntensity: float, ftAoRadius: float} $frameState
      * @param list<SetDirectionalLight> $dirLights
      */
     private function renderPlanarReflectionPass(array $commands, array $frameState, bool $hasShadowMap, array $dirLights): void
@@ -8342,11 +8356,11 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
     private ?bool $lightGridSupported = null;
     private ?string $lightGridKey = null;
     private ?Lighting\LightGrid $lightGrid = null;
-    /** @var array{0: mixed, 1: mixed, 2: mixed}|null lights, cells, indices */
+    /** @var array{0: \VioBuffer|false, 1: \VioBuffer|false, 2: \VioBuffer|false}|null lights, cells, indices */
     private ?array $lightGridBuffers = null;
-    /** @var array{0: mixed, 1: mixed, 2: mixed}|null placeholders while the grid is off */
+    /** @var array{0: \VioBuffer|false, 1: \VioBuffer|false, 2: \VioBuffer|false}|null placeholders while the grid is off */
     private ?array $lightGridEmpty = null;
-    /** @var list<array{0: mixed, 1: mixed, 2: mixed}> superseded grid buffers, kept for frames in flight */
+    /** @var list<array{0: \VioBuffer|false, 1: \VioBuffer|false, 2: \VioBuffer|false}> superseded grid buffers, kept for frames in flight */
     private array $lightGridRetired = [];
 
     /**
@@ -8445,7 +8459,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         return $this->conventions()->name() === 'd3d11';
     }
 
-    /** @param array{0: mixed, 1: mixed, 2: mixed} $buffers */
+    /** @param array<int, \VioBuffer|false|null> $buffers */
     private function bindLightGridBuffers(array $buffers): void
     {
         foreach ($buffers as $i => $buffer) {
@@ -9487,7 +9501,8 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             ]) ?: null;
             $this->hizSize = [$hw, $hh, (int) floor(log(max($hw, $hh), 2)) + 1];
         }
-        if ($this->hizTarget === null) {
+        $hizTarget = $this->hizTarget;
+        if ($hizTarget === null) {
             return false;
         }
         if (!isset($this->shaderCache['hiz_downsample'])) {
@@ -9498,7 +9513,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             }
         }
         vio_unbind_render_target($this->ctx);
-        vio_bind_render_target($this->ctx, $this->hizTarget);
+        vio_bind_render_target($this->ctx, $hizTarget);
         // Created with the depth-only target bound: D3D12 bakes its formats into the PSO.
         if (!isset($this->pipelineCache['hiz_downsample'])) {
             $pipeline = $this->createPipeline([
@@ -9522,7 +9537,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         vio_set_uniform($this->ctx, 'u_depth', 0);
         vio_draw($this->ctx, $quad);
         vio_unbind_render_target($this->ctx);
-        $mips = vio_generate_mipmaps($this->ctx, $this->hizTarget);
+        $mips = vio_generate_mipmaps($this->ctx, $hizTarget);
         $this->restoreSceneTarget($w, $h);
         $this->gpuMark('hiz');
         return $mips !== false;
@@ -9862,7 +9877,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         $hiz = $this->hizUnitBuilt >= 0 && $pass === 'opaque' && $this->hizReady && $this->hizTarget !== null;
         if ($this->hizUnitBuilt >= 0 && $pass === 'opaque') {
             // The task stage always declares the pyramid: something valid is bound.
-            $tex = $hiz && $this->hizTarget !== null ? vio_render_target_texture($this->hizTarget) : $this->whiteTexture;
+            $tex = $hiz ? vio_render_target_texture($this->hizTarget) : $this->whiteTexture;
             if ($tex !== null) {
                 vio_bind_texture($this->ctx, $tex, $this->hizUnitBuilt);
             }
@@ -10312,7 +10327,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         }
 
         // Rectangular area lights (mesh3d: exact form factor + representative point).
-        $rects = $state['rectLights'] ?? [];
+        $rects = $state['rectLights'];
         $rectCount = min(count($rects), 4);
         vio_set_uniform($this->ctx, 'u_rect_light_count', $rectCount);
         vio_set_uniform($this->ctx, 'u_season_grade', $this->seasonGrade);

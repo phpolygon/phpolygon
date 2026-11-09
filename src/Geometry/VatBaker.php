@@ -47,8 +47,8 @@ final class VatBaker
                 for ($a = 0; $a < 3; $a++) {
                     $q[$a] = (int) round(($f->vertices[$i + $a] - $min[$a]) / $extent[$a] * 65535.0);
                 }
-                $rgba .= chr($q[0] >> 8) . chr($q[0] & 0xFF) . chr($q[1] >> 8) . chr($q[1] & 0xFF)
-                       . chr($q[2] >> 8) . chr($q[2] & 0xFF) . "\0\xFF";
+                $rgba .= chr(($q[0] >> 8) & 0xFF) . chr($q[0] & 0xFF) . chr(($q[1] >> 8) & 0xFF) . chr($q[1] & 0xFF)
+                       . chr(($q[2] >> 8) & 0xFF) . chr($q[2] & 0xFF) . "\0\xFF";
             }
         }
 

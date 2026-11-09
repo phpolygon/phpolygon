@@ -130,7 +130,8 @@ final class GpuPartAnimator
         $r = [];
         for ($c = 0; $c < 4; $c++) {
             for ($row = 0; $row < 4; $row++) {
-                $r[$c * 4 + $row] = $a[$row] * $b[$c * 4] + $a[4 + $row] * $b[$c * 4 + 1] + $a[8 + $row] * $b[$c * 4 + 2] + $a[12 + $row] * $b[$c * 4 + 3];
+                // Column-major, appended in index order (c * 4 + row).
+                $r[] = $a[$row] * $b[$c * 4] + $a[4 + $row] * $b[$c * 4 + 1] + $a[8 + $row] * $b[$c * 4 + 2] + $a[12 + $row] * $b[$c * 4 + 3];
             }
         }
         return $r;

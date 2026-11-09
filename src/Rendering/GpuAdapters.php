@@ -28,17 +28,11 @@ final class GpuAdapters
         } catch (\ValueError) {
             return [];
         }
-        if (!is_array($all)) {
-            return [];
-        }
         $seen = [];
         $out = [];
         foreach ($all as $list) {
-            if (!is_array($list)) {
-                continue;
-            }
             foreach ($list as $a) {
-                if (!is_array($a) || !is_string($a['name'] ?? null) || $a['name'] === '') {
+                if (!is_string($a['name'] ?? null) || $a['name'] === '') {
                     continue;
                 }
                 $type = is_string($a['device_type'] ?? null) ? $a['device_type'] : 'unknown';

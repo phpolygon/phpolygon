@@ -160,7 +160,7 @@ final class CoastTexture
             }
         }
 
-        return $out;
+        return array_values($out);
     }
     /** The texels, `width * height * 4` bytes, row 0 = minimum z. */
     public function rgba(): string

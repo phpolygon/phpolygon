@@ -67,7 +67,7 @@ final class ReflectionProbes
     /** @param list<ReflectionProbe> $probes */
     public static function set(array $probes): void
     {
-        self::$probes = array_values($probes);
+        self::$probes = $probes;
     }
 
     public static function add(ReflectionProbe $probe): void

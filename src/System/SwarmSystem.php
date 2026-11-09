@@ -28,7 +28,7 @@ class SwarmSystem extends AbstractSystem
     /** @var \WeakMap<Swarm, array{state: \VioBuffer, out: \VioBuffer, count: int}> */
     private \WeakMap $gpu;
 
-    /** @var \WeakMap<Swarm, list<float>> CPU agents, 8 floats each. */
+    /** @var \WeakMap<Swarm, array<int, float>> CPU agents, 8 floats each. */
     private \WeakMap $cpu;
 
     private float $time = 0.0;
@@ -116,7 +116,11 @@ class SwarmSystem extends AbstractSystem
         }
     }
 
-    /** Initial agents: spread over the loop, each with its phase (deterministic per seed). */
+    /**
+     * Initial agents: spread over the loop, each with its phase (deterministic per seed).
+     *
+     * @return list<float>
+     */
     public static function seedAgents(Swarm $swarm, float $cx, float $cy, float $cz): array
     {
         mt_srand($swarm->seed);
@@ -140,7 +144,7 @@ class SwarmSystem extends AbstractSystem
     /**
      * One CPU step of the kernel's steering; writes the agents' matrices.
      *
-     * @param list<float> $s agents, updated in place
+     * @param array<int, float> $s agents, updated in place
      * @return list<float> 16 floats per agent
      */
     public static function step(array &$s, Swarm $swarm, float $time, float $dt, float $cx, float $cy, float $cz): array

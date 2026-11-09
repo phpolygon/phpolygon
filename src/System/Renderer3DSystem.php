@@ -308,9 +308,8 @@ class Renderer3DSystem extends AbstractSystem
 
         // A renderer with the world light grid reads every light per cell and takes
         // up to its own limit; the others honour MAX_POINT_LIGHTS.
-        $limit = method_exists($this->renderer, 'maxPointLights')
-            ? max(self::MAX_POINT_LIGHTS, (int) $this->renderer->maxPointLights())
-            : self::MAX_POINT_LIGHTS;
+        $rendererLimit = method_exists($this->renderer, 'maxPointLights') ? $this->renderer->maxPointLights() : null;
+        $limit = is_int($rendererLimit) ? max(self::MAX_POINT_LIGHTS, $rendererLimit) : self::MAX_POINT_LIGHTS;
         if (count($candidates) > $limit) {
             usort($candidates, static fn(array $a, array $b): int => ($a[0][0] <=> $b[0][0]) ?: ($a[0][1] <=> $b[0][1]));
             $candidates = array_slice($candidates, 0, $limit);

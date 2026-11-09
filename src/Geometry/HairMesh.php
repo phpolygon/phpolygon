@@ -124,13 +124,21 @@ final class HairMesh
         return $out;
     }
 
-    /** @param list<float> $a @param list<float> $b @return list<float> */
+    /**
+     * @param list<float> $a
+     * @param list<float> $b
+     * @return list<float>
+     */
     private static function sub(array $a, array $b): array
     {
         return [$a[0] - $b[0], $a[1] - $b[1], $a[2] - $b[2]];
     }
 
-    /** @param list<float> $a @param list<float> $b @return list<float> */
+    /**
+     * @param list<float> $a
+     * @param list<float> $b
+     * @return list<float>
+     */
     private static function cross(array $a, array $b): array
     {
         return [$a[1] * $b[2] - $a[2] * $b[1], $a[2] * $b[0] - $a[0] * $b[2], $a[0] * $b[1] - $a[1] * $b[0]];
@@ -142,7 +150,10 @@ final class HairMesh
         return sqrt($a[0] * $a[0] + $a[1] * $a[1] + $a[2] * $a[2]);
     }
 
-    /** @param list<float> $a @return list<float> */
+    /**
+     * @param list<float> $a
+     * @return list<float>
+     */
     private static function norm(array $a): array
     {
         $l = self::len($a);

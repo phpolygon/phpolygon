@@ -47,26 +47,6 @@ final class MeshletBuilder
         $local = [];      // mesh vertex -> local index of the open meshlet
         $triangles = [];  // packed triangles of the open meshlet
 
-        $flush = function () use (&$meshlets, &$stream, &$count, &$local, &$triangles, $mesh): void {
-            if ($triangles === []) {
-                return;
-            }
-            $vertexOffset = count($stream);
-            $order = array_keys($local);
-            foreach ($order as $v) {
-                $stream[] = $v;
-            }
-            $triangleOffset = count($stream);
-            foreach ($triangles as $t) {
-                $stream[] = $t;
-            }
-            [$cx, $cy, $cz, $r] = self::sphere($mesh->vertices, $order);
-            $meshlets .= pack('V4', $vertexOffset, count($order), $triangleOffset, count($triangles)) . pack('g4', $cx, $cy, $cz, $r);
-            $count++;
-            $local = [];
-            $triangles = [];
-        };
-
         foreach ($order as $t) {
             $tri =[(int) $indices[$t * 3], (int) $indices[$t * 3 + 1], (int) $indices[$t * 3 + 2]];
             $new = 0;
@@ -76,7 +56,7 @@ final class MeshletBuilder
                 }
             }
             if (count($local) + $new > $maxVertices || count($triangles) >= $maxTriangles) {
-                $flush();
+                self::flush($mesh, $meshlets, $stream, $count, $local, $triangles);
             }
             $ids = [];
             foreach ($tri as $v) {
@@ -87,7 +67,7 @@ final class MeshletBuilder
             }
             $triangles[] = $ids[0] | ($ids[1] << 8) | ($ids[2] << 16);
         }
-        $flush();
+        self::flush($mesh, $meshlets, $stream, $count, $local, $triangles);
 
         return new MeshletData(
             $count,
@@ -98,12 +78,41 @@ final class MeshletBuilder
     }
 
     /**
+     * Close the open meshlet: its vertices and packed triangles go to the stream, its
+     * record (offsets, counts, bounding sphere) to $meshlets.
+     *
+     * @param list<int> $stream
+     * @param array<int, int> $local mesh vertex -> local index
+     * @param list<int> $triangles
+     */
+    private static function flush(MeshData $mesh, string &$meshlets, array &$stream, int &$count, array &$local, array &$triangles): void
+    {
+        if ($triangles === []) {
+            return;
+        }
+        $vertexOffset = count($stream);
+        $order = array_keys($local);
+        foreach ($order as $v) {
+            $stream[] = $v;
+        }
+        $triangleOffset = count($stream);
+        foreach ($triangles as $t) {
+            $stream[] = $t;
+        }
+        [$cx, $cy, $cz, $r] = self::sphere($mesh->vertices, $order);
+        $meshlets .= pack('V4', $vertexOffset, count($order), $triangleOffset, count($triangles)) . pack('g4', $cx, $cy, $cz, $r);
+        $count++;
+        $local = [];
+        $triangles = [];
+    }
+
+    /**
      * Triangle order along a Z curve through their centroids (10 bits per axis of
      * the mesh box): neighbours in the order are neighbours in space, so meshlets
      * come out as compact patches instead of rings around the mesh.
      *
-     * @param array<int, float|int> $positions
-     * @param array<int, int> $indices
+     * @param array<float|int> $positions
+     * @param array<int> $indices
      * @return list<int>
      */
     private static function spatialOrder(array $positions, array $indices, int $triangleCount): array
@@ -149,7 +158,7 @@ final class MeshletBuilder
      * Bounding sphere of the given vertices: centre of their box, radius to the
      * farthest one.
      *
-     * @param array<int, float|int> $positions flat x, y, z
+     * @param array<float|int> $positions flat x, y, z
      * @param list<int> $vertices
      * @return array{float, float, float, float}
      */

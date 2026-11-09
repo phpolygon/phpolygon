@@ -99,7 +99,11 @@ final class ParticleColor
         return self::pack($l[1], $l[2], $l[3], $l[4]);
     }
 
-    /** A colour for a gradient stop. */
+    /**
+     * A colour for a gradient stop.
+     *
+     * @return array{0: float, 1: Color}
+     */
     public static function stop(float $t, Color $c): array
     {
         return [$t, $c];
