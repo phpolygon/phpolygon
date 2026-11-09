@@ -4929,7 +4929,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         }
         if ($this->lightGridSupported()) {
             $source = self::withDefine($source, 'PHPOLYGON_LIGHT_GRID');
-            if ($this->conventions()->name() === 'd3d11') {
+            if ($this->fragmentStorageSharesTargets()) {
                 $source = self::withDefine($source, 'PHPOLYGON_UAV_SHARE_TARGETS');
             }
             // std430 storage blocks under #version 410 need the extension; right after
@@ -8380,6 +8380,24 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
      */
     private function uploadLightGrid(array $pointLights, float $piScale): void
     {
+        // Where fragment UAVs share the output-merger slots with the render targets
+        // (D3D11: u4..u7 behind the targets), a bound grid buffer takes the slot of
+        // the motion (4) and reactive (5) attachment and the vectors are never
+        // written. The motion programs leave the grid out anyway, so a temporal
+        // frame unbinds it for every pass (the planar mirror included) and lights
+        // with the eight nearest point lights.
+        // Unbinding touches the same slots, so it happens only while buffers are bound.
+        if ($this->temporalFrame !== null && $this->fragmentStorageSharesTargets()) {
+            if ($this->lightGridBound) {
+                for ($binding = 1; $binding <= 3; $binding++) {
+                    vio_bind_fragment_storage_buffer($this->ctx, null, $binding);
+                }
+                $this->lightGridBound = false;
+            }
+            vio_set_uniform($this->ctx, 'u_light_grid', [0.0, 0.0, 1.0, 0.0]);
+            vio_set_uniform($this->ctx, 'u_light_grid_dims', [1.0, 1.0, 0.0, 0.0]);
+            return;
+        }
         if (count($pointLights) <= 8) {
             $this->lightGridEmpty ??= [
                 vio_storage_buffer($this->ctx, ['data' => pack('g*', 0, 0, 0, 0, 0, 0, 0, 0)]),
@@ -8421,15 +8439,25 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         vio_set_uniform($this->ctx, 'u_light_grid_dims', $this->lightGrid?->dimsUniform() ?? [1.0, 1.0, 0.0, 0.0]);
     }
 
+    /** Fragment storage buffers sit in the output-merger slots behind the render targets (D3D11). */
+    private function fragmentStorageSharesTargets(): bool
+    {
+        return $this->conventions()->name() === 'd3d11';
+    }
+
     /** @param array{0: mixed, 1: mixed, 2: mixed} $buffers */
     private function bindLightGridBuffers(array $buffers): void
     {
         foreach ($buffers as $i => $buffer) {
             if ($buffer !== false && $buffer !== null) {
                 vio_bind_fragment_storage_buffer($this->ctx, $buffer, $i + 1);
+                $this->lightGridBound = true;
             }
         }
     }
+
+    /** Light grid buffers are bound to the fragment stage (see uploadLightGrid). */
+    private bool $lightGridBound = false;
 
     /** 1x1 white cube for a snippet samplerCube with nothing to show (never an empty SRV). */
     private ?VioCubemap $whiteCubemap = null;
