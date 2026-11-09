@@ -27,6 +27,7 @@ use PHPolygon\Rendering\Command\SetWaveAnimation;
 use PHPolygon\Rendering\Command\SetWind;
 use PHPolygon\Rendering\Accessibility\ComfortMotion;
 use PHPolygon\Rendering\Effects\EffectRegistry;
+use PHPolygon\Rendering\Effects\EffectSwitches;
 use PHPolygon\Rendering\PostProcess\FullscreenPass;
 use PHPolygon\Rendering\PostProcess\FullscreenPassRegistry;
 use PHPolygon\Rendering\Reflection\PlanarReflection;
@@ -770,6 +771,13 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
                 || $previous->rayTracedReflections !== $settings->rayTracedReflections
                 || $previous->rayTracedGi !== $settings->rayTracedGi)) {
             $this->shaderRebuild = true;
+        }
+
+        // Effects switched off are compiled out of the mesh programs (EffectSwitches).
+        $effectOff = EffectSwitches::offDefines($settings);
+        if ($effectOff !== $this->effectOff) {
+            $this->effectOff = $effectOff;
+            $this->effectRebuild = $this->shadersWarmed;
         }
 
         // Bloom toggle is read live from $this->settings during render.
@@ -1578,6 +1586,14 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             $this->shadersWarmed = false;
             $this->resetDrawStateCache();
             $this->warmShaders();
+            $this->effectRebuild = false;
+        }
+        if ($this->effectRebuild) {
+            // An effect switch changed: only the mesh programs carry effect guards.
+            $this->effectRebuild = false;
+            if (isset($this->shaderCache['default'])) {
+                $this->rebuildMeshPrograms();
+            }
         }
         if ($this->shadowDirty) {
             $this->shadowDirty = false;
@@ -4880,7 +4896,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         foreach ($variantDefines as $define) {
             $source = self::withDefine($source, $define);
         }
-        foreach (array_unique([...$this->autoOmit, ...$profileOmit]) as $define) {
+        foreach (array_unique([...$this->autoOmit, ...$profileOmit, ...$this->effectOff]) as $define) {
             if (!in_array($define, $variantDefines, true)) {
                 $source = self::withDefine($source, $define);
             }
@@ -5119,6 +5135,16 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
     public function automaticShaderOmissions(): array
     {
         return $this->autoOmit;
+    }
+
+    /**
+     * The EFFECT_OFF defines the mesh programs are compiled with - tests and profiling.
+     *
+     * @return list<string>
+     */
+    public function effectShaderDefines(): array
+    {
+        return $this->effectOff;
     }
 
     private function disableAutoOmissions(\Throwable $e): void
@@ -9494,6 +9520,17 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
     private bool $bindlessBuilt = false;
     /** A setting compiled into the programs changed: rebuild them at the next frame. */
     private bool $shaderRebuild = false;
+
+    /**
+     * EFFECT_OFF defines of the effects switched off in the settings, compiled into
+     * every mesh program ({@see EffectSwitches}).
+     *
+     * @var list<string>
+     */
+    private array $effectOff = [];
+
+    /** An effect switch changed: rebuild the mesh programs at the next frame start. */
+    private bool $effectRebuild = false;
     /** @var array<string, array{0: VioTexture, 1: int}> albedo texture id -> texture and its slot code (slot * 2 + clamped) */
     private array $albedoSlots = [];
     /** Resident "has texture:slot" of the bound program, null = unknown. */
