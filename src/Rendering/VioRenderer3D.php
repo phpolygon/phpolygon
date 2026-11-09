@@ -2679,6 +2679,176 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         $this->gpuMark('scene_depth');
     }
 
+    private ?VioMesh $lightConeMesh = null;
+    private bool $lightConeFailed = false;
+    /** @var array{drawn: int, sceneDepth: bool} */
+    private array $lightConeStats = ['drawn' => 0, 'sceneDepth' => false];
+
+    /**
+     * Beams the last frame drew and whether they were cut by the scene depth (soft fade
+     * at walls) or by the depth test (hard cut, a frame without a readable depth).
+     * Test and diagnostic hook.
+     *
+     * @return array{drawn: int, sceneDepth: bool}
+     */
+    public function lightConeStats(): array
+    {
+        return $this->lightConeStats;
+    }
+
+    /**
+     * Visible spot-light beams (DrawLightCone), added into the scene target after the
+     * opaque pass, before the transparent one. With a readable depth the far faces of
+     * each cone are drawn without depth test and the shader ends the beam at the opaque
+     * surface (the scene depth copy): it fades into walls and shows from inside the
+     * cone. Without one (MSAA, no VIO_FEATURE_RENDER_TARGET_DEPTH_SAMPLE) the near faces
+     * are drawn depth-tested - a hard cut at walls, the far faces when the camera stands
+     * in the beam. Compiled at first use; GraphicsSettings effect `light_cone` off draws none.
+     * Without another scene-depth consumer the copy costs one fullscreen draw, only in
+     * frames with a beam.
+     *
+     * @param list<Command\DrawLightCone> $cones
+     */
+    private function renderLightCones(array $cones, ?VioRenderTarget $hdrTarget, int $w, int $h): void
+    {
+        $this->lightConeStats = ['drawn' => 0, 'sceneDepth' => false];
+        if ($cones === []) {
+            return;
+        }
+        $view = $this->currentViewMatrix;
+        $projection = $this->currentProjectionMatrix;
+        if ($this->lightConeFailed || $view === null || $projection === null || !$this->settings->effectEnabled(LightCones::EFFECT)) {
+            return;
+        }
+        $mrt = $this->mrtThisFrame;
+        $shaderId = $mrt ? 'light_cone_mrt' : 'light_cone';
+        if (!isset($this->shaderCache[$shaderId])) {
+            try {
+                $this->compileShaderFromFiles($shaderId, 'light_cone.vert.glsl', 'light_cone.frag.glsl', $mrt);
+            } catch (\Throwable $e) {
+                $this->lightConeFailed = true;
+                fwrite(STDERR, "[VioRenderer3D] light cones unavailable: {$e->getMessage()}\n");
+                return;
+            }
+        }
+        if ($this->lightConeMesh === null) {
+            $data = LightCones::mesh();
+            $this->lightConeMesh = vio_mesh($this->ctx, [
+                'vertices' => $this->interleaveMeshData($data),
+                'indices' => $data->indices,
+                'layout' => [
+                    ['location' => 0, 'components' => 3],
+                    ['location' => 1, 'components' => 3],
+                    ['location' => 2, 'components' => 2],
+                ],
+            ]) ?: null;
+            if ($this->lightConeMesh === null) {
+                $this->lightConeFailed = true;
+                return;
+            }
+        }
+        $mesh = $this->lightConeMesh;
+        // PHPOLYGON_LIGHT_CONE_DEPTH=0 takes the depth-tested path with a readable depth too (A/B images).
+        $useDepth = getenv('PHPOLYGON_LIGHT_CONE_DEPTH') !== '0';
+        if ($useDepth && !$this->sceneDepthCopied) {
+            $this->captureSceneDepth($hdrTarget, $w, $h);
+        }
+        $depth = $useDepth && $this->sceneDepthCopied && $this->sceneDepthCopy !== null
+            ? self::textureOrNull(vio_render_target_texture($this->sceneDepthCopy))
+            : null;
+        if ($depth === null) {
+            $this->ensureWhiteTexture();
+        }
+        $depthTexture = $depth ?? $this->whiteTexture;
+        $eye = $this->cameraPosition ?? new Vec3(0.0, 0.0, 0.0);
+        $vm = $view->toArray();
+        $hdr = $this->sceneTargetIsHdr();
+        $linear = ($hdr || $mrt) ? 1.0 : 0.0;
+        $drawn = 0;
+        PerfProfiler::begin('render3d.submit.light_cone');
+        try {
+            vio_viewport($this->ctx, 0, 0, $w, $h);
+            $bound = null;
+            foreach ($cones as $cone) {
+                $inside = $depth === null
+                    && LightCones::contains($cone->apex, $cone->direction, $cone->angle, $cone->length, $eye, 0.3);
+                $cull = $depth !== null || $inside ? VIO_CULL_FRONT : VIO_CULL_BACK;
+                $pipeline = $this->lightConePipeline($shaderId, $depth === null, $cull, $mrt, $hdr);
+                if ($pipeline === null) {
+                    continue;
+                }
+                if ($pipeline !== $bound) {
+                    vio_bind_pipeline($this->ctx, $pipeline);
+                    vio_set_uniform($this->ctx, 'u_view', $vm);
+                    vio_set_uniform($this->ctx, 'u_projection', $projection->toArray());
+                    vio_set_uniform($this->ctx, 'u_cone_eye', [$eye->x, $eye->y, $eye->z]);
+                    vio_set_uniform($this->ctx, 'u_cone_forward', [-$vm[2], -$vm[6], -$vm[10]]);
+                    vio_set_uniform($this->ctx, 'u_cone_viewport', [(float) $w, (float) $h]);
+                    if ($depthTexture !== null) {
+                        vio_set_uniform($this->ctx, 'u_cone_depth', 0);
+                        vio_bind_texture($this->ctx, $depthTexture, 0);
+                    }
+                    $bound = $pipeline;
+                }
+                $d = $cone->direction;
+                $len = max(1e-9, $d->length());
+                $c = $cone->color;
+                $k = max(0.0, $cone->intensity);
+                vio_set_uniform($this->ctx, 'u_model', LightCones::modelMatrix($cone->apex, $d, $cone->angle, $cone->length)->toArray());
+                vio_set_uniform($this->ctx, 'u_cone_apex', [$cone->apex->x, $cone->apex->y, $cone->apex->z]);
+                vio_set_uniform($this->ctx, 'u_cone_axis', [$d->x / $len, $d->y / $len, $d->z / $len]);
+                $angle = min(max($cone->angle, 0.0), LightCones::MAX_ANGLE);
+                $inner = min(max($cone->innerAngle, 0.0), $angle);
+                // smoothstep needs edge0 < edge1: a hard rim keeps a sliver of feather.
+                $cosOuter = cos($angle);
+                $cosInner = max(cos($inner), $cosOuter + 1e-4);
+                vio_set_uniform($this->ctx, 'u_cone_shape', [$cosOuter, $cosInner, $cone->length, max($cone->range, 1e-3)]);
+                vio_set_uniform($this->ctx, 'u_cone_radiance', [$c->r * $k, $c->g * $k, $c->b * $k]);
+                vio_set_uniform($this->ctx, 'u_cone_view', [min(1.0, max(0.0, $cone->axisFade)), $depth !== null ? 1.0 : 0.0, $linear, 0.0]);
+                vio_draw($this->ctx, $mesh);
+                $drawn++;
+            }
+        } finally {
+            PerfProfiler::end();
+            // The mesh programs bound textures on unit 0 and keep sticky draw state:
+            // the transparent pass binds and uploads its own again.
+            $this->resetDrawStateCache();
+            $this->variantUniformsUploaded = [];
+            $this->frameUniformsShaderId = null;
+        }
+        $this->lightConeStats = ['drawn' => $drawn, 'sceneDepth' => $depth !== null];
+        if ($drawn > 0) {
+            $this->gpuMark('light_cone');
+        }
+    }
+
+    /** Additive beam pipeline, cached per program, depth mode, culled side and target format. */
+    private function lightConePipeline(string $shaderId, bool $depthTest, int $cull, bool $mrt, bool $hdr): ?VioPipeline
+    {
+        $key = 'light_cone:' . $shaderId . ($depthTest ? ':dt' : '') . ':c' . $cull
+            . ($mrt ? ':mrt' . ($this->motionThisFrame ? ':mv' : '') : ($hdr ? ':hdr' : ''));
+        if (!isset($this->pipelineCache[$key])) {
+            $cfg = [
+                'shader' => $this->shaderCache[$shaderId],
+                'depth_test' => $depthTest,
+                'depth_write' => false,
+                'cull_mode' => $cull,
+                'blend' => VIO_BLEND_ADDITIVE,
+                'hdr' => $hdr,
+            ];
+            if ($mrt) {
+                // Scattered light is local light: attachment 1 only, like the froxel fog.
+                $cfg = $this->localOnlyMrtConfig(VIO_BLEND_ADDITIVE) + $cfg;
+            }
+            $pipeline = $this->createPipeline($cfg);
+            if ($pipeline === false) {
+                return null;
+            }
+            $this->pipelineCache[$key] = $pipeline;
+        }
+        return $this->pipelineCache[$key];
+    }
+
     /**
      * FXAA runs in the present: selected, or TAA selected on a backend without
      * the temporal path ({@see AntiAliasing::fallback()}). A frame that went
@@ -4072,6 +4242,8 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         $waveEnabled = false;
         /** @var list<DrawOutline> $outlines */
         $outlines = [];
+        /** @var list<Command\DrawLightCone> $lightCones */
+        $lightCones = [];
         $waveAmplitude = 0.3;
         $waveFrequency = 0.5;
         $wavePhase = 0.0;
@@ -4104,6 +4276,8 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
                 $rectLights[] = $cmd;
             } elseif ($cmd instanceof DrawOutline) {
                 $outlines[] = $cmd;
+            } elseif ($cmd instanceof Command\DrawLightCone) {
+                $lightCones[] = $cmd;
             } elseif ($cmd instanceof SetFog) {
                 if ($this->settings->fog) {
                     $fogColor = $cmd->color;
@@ -4463,6 +4637,8 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             $this->captureSceneColor($hdrTarget, $sceneViewportW, $sceneViewportH);
             $this->variantUniformsUploaded = [];
         }
+        // Visible spot-light beams: additive, over the opaque scene, under the glass.
+        $this->renderLightCones($lightCones, $hdrTarget, $sceneViewportW, $sceneViewportH);
         $this->bindPipeline('transparent');
         if (ProcModeShaderRegistry::sceneDepthRequired()) {
             $this->uploadSceneDepthInputs();

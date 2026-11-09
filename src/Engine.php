@@ -242,6 +242,7 @@ class Engine
         $this->graphics->bindEngine($this);
         AccessibilityEffects::register();
         \PHPolygon\Rendering\PostProcess\ImageChainEffects::register();
+        \PHPolygon\Rendering\LightCones::register();
         $this->adaptiveQuality = new AdaptiveQualityController($this);
 
         $this->hardware = (new HardwareProfiler())->detect($this->headless);

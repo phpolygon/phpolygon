@@ -669,6 +669,42 @@ its noise (-0.02 / -0.08 ms). Stored depth is (ndcZ + 1) / 2, raw ndcZ on Metal 
 (`BackendConventions::depthStoredRaw()`, see "Backends of the G-buffer effects"). `u_scene_depth_raw` of a fullscreen
 pass is that stored value.
 
+**Light cones** (`Component\LightCone`, `System\LightConeSystem`, `Command\DrawLightCone`, `Rendering\LightCones`,
+`vio/light_cone.vert|frag.glsl`; `LightConesTest`, `LightConeSystemTest`, `VioLightConeMeshTest`). The visible beam of a spot light,
+per lamp and without any fog setting (the air-wide scattering of `HeightFog::$lightHalo` in the mesh shader is a different thing and
+adds on top when both are on).
+```php
+$lamp->attach(new SpotLight(new Vec3(0.2, -1.0, -0.3), Color::hex('#FFD08C'), 4.0, 9.0, 0.38, 0.25))
+     ->attach(new LightCone(density: 0.06, length: 1.0, edgeSoftness: 0.5, axisFade: 0.6, maxDistance: 120.0));
+$world->addSystem(new LightConeSystem($commandList));   // after the camera, before Renderer3DSystem
+```
+- The cone has no colour or brightness of its own: `LightConeSystem` reads position (Transform3D), direction, angle, penumbra, range,
+  colour and intensity of the `SpotLight` on the same entity every frame, so whatever dims or switches the light does the same to the
+  beam. Brightness = colour x intensity x `density`; a light at intensity 0, `enabled = false` or no SpotLight emits nothing. Inner
+  angle = angle x (1 - max(penumbra, `edgeSoftness`)). Beams whose bounding sphere misses the frustum are skipped, the beam fades over
+  the last quarter of `maxDistance`, the `MAX_CONES` (16) nearest are drawn.
+- `VioRenderer3D` draws them after the opaque pass (and the froxel fog), before the transparent pass, additively into the scene target
+  (MRT: attachment 1, `o_local`, like the froxel fog), one unit cone mesh per beam (`LightCones::mesh()` / `modelMatrix()`, 24 sides,
+  circumscribing the exact cone). The fragment finds the stretch of the view ray inside the exact cone (`coneInterval()`), ends it at the
+  opaque surface from the scene depth copy (`captureSceneDepth()`, taken for the beams if no other consumer took it) and sums the spot
+  light's cone factor and windowed falloff at 12 jittered points. So the beam fades into walls and floors instead of ending in a line,
+  shows from inside the cone, and dims by `axisFade` x |dot(view, axis)|^6 when seen along its axis. LDR scene target: the add goes
+  through the mesh shader's ACES + gamma (a little brighter over dark ground than on an HDR or MRT target: mid-beam +209 against +183
+  of 255 in `VioLightConeMeshTest`, RTX 2080).
+- **Without a readable depth** (MSAA, no `VIO_FEATURE_RENDER_TARGET_DEPTH_SAMPLE`) the near faces are drawn depth-tested: the beam is cut
+  hard where it enters geometry, and from inside the cone the far faces show, depth-tested. `PHPOLYGON_LIGHT_CONE_DEPTH=0` forces this path
+  for A/B images. `lightConeStats()` tells tests how many beams a frame drew and on which path.
+- Light is not occluded: the shader knows where the VIEW is blocked, not where the LIGHT is (no shadow lookup). A beam that should end
+  at a wall in front of the lamp needs a shorter `length`.
+- Effect register: `LightCones::EFFECT` = `light_cone` (tier Low, unlit fallback Same, GL fallback Off, reduced motion Static, flash class
+  None; cost not measured yet), registered by the Engine at start-up, a game entry of the same name wins.
+  `GraphicsSettings::$effects['light_cone'] = false` draws no beam: the frame is byte for byte the one without beams. Vio family only; the
+  php-glfw renderer and native Vulkan ignore `DrawLightCone`. Compiled at first use (forward and `_mrt` twin), pipelines per depth mode,
+  culled side and target format. GPU mark `light_cone`, CPU section `render3d.submit.light_cone`.
+- Tested on hardware (RTX 2080, php-vio 2.43.1, 2026-11-10): D3D12, D3D11 and Vulkan give the same numbers; OpenGL (vio)
+  has no MRT, draws the forward LDR path and passes too; D3D12 WARP passes. Metal untested. In the test scene the added light 1 px above the floor contact is +1.3 of 255 with
+  the depth (+102 depth-tested), mid-beam +183.
+
 **Helper libraries** (`ProcModeShaderRegistry::registerLibrary($name, $vio, $gl = null, $programs = null)`, `ShaderLibraryRegistryTest`).
 File-scope GLSL several modes call, emitted once per program at the helpers sentinel, before the modes' own helpers (the same
 function in two modes' helpers would be defined twice). Registration order is kept, a name registered again replaces it. `$gl`
@@ -818,6 +854,7 @@ Components follow the same ECS discipline as 2D. 3D-specific components:
 | `CharacterController3D` | Capsule collision, gravity, slope detection, `stepHeight` (on every collider, see "Character collision"); `groundEntityId` names what it stands on (see "Physics queries") |
 | `Outline` | `enabled`, `color`, `widthPx`, `includeChildren` — outline this entity's mesh (and its children's) |
 | `SurfaceText` | Text fixed on a surface in world space, by literal or translation key (see "Text on surfaces") |
+| `LightCone` | Visible beam of the `SpotLight` on the same entity: `density`, `length`, `edgeSoftness`, `axisFade`, `maxDistance`, `enabled` (see "Light cones") |
 
 `Transform3D` replaces `Transform2D` in 3D scenes. Never mix 2D and 3D transform
 components on the same entity.
@@ -869,6 +906,7 @@ slept is recomputed on its first awake tick (its world matrix may be stale while
 | `WaterDisturbanceSystem` | Wake trails and swimmer rings of every `WaterDisturber` as water-shader uniforms (see "Water building blocks"); register after the systems that move them, BEFORE `Renderer3DSystem` |
 | `SurfaceTextSystem` | Keeps every `SurfaceText` on its current text and language, the only writer of those materials; register BEFORE `Renderer3DSystem` |
 | `SignalMotionSystem` | Drives `SignalTrack` / `SignalSpin` / `SignalSwitch` from `Signals` channels (see "Signal motion"); BEFORE `Transform3DSystem`, with a command list also after `Camera3DSystem` and before `Renderer3DSystem` |
+| `LightConeSystem` | `DrawLightCone` for every lit `LightCone` + `SpotLight` in view, nearest 16 (see "Light cones"); after `Camera3DSystem`, BEFORE `Renderer3DSystem` |
 | `PosePlayerSystem` | Plays `PosePlayer` clips onto bound figure parts (see "Pose clips"); after navigation and the game's figure logic, BEFORE `Transform3DSystem`; command list as with `SignalMotionSystem` |
 
 ### Vegetation — the plant family (`PHPolygon\Vegetation`)
