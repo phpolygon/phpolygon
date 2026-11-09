@@ -8,6 +8,7 @@ use PHPUnit\Framework\Attributes\Group;
 use PHPUnit\Framework\Attributes\RequiresPhpExtension;
 use PHPUnit\Framework\TestCase;
 use PHPolygon\Geometry\BoxMesh;
+use PHPolygon\Geometry\MeshData;
 use PHPolygon\Geometry\MeshRegistry;
 use PHPolygon\Geometry\PlaneMesh;
 use PHPolygon\Math\Mat4;
@@ -140,14 +141,23 @@ final class VioRendererTransparencyTest extends TestCase
         // near one and must add a second layer of tint. With a depth-writing
         // transparent pass the far face (emitted after the near face) was
         // rejected and the cube looked like a single pane.
-        // Reference: the same two faces as separate quads, far one first. One
-        // face is back-facing in the cube; it must also be lit like the quads.
-        MeshRegistry::register('quad', PlaneMesh::generate(2.0, 2.0, 1));
+        // Reference: the same two faces as separate quads, far one first, each
+        // wound and lit like its cube face - normal outwards, counter-clockwise
+        // seen from outside - so the far quad faces away from the camera
+        // (back-facing, like the cube's far face). Built here rather than from
+        // PlaneMesh, whose triangles are wound against its normal: rotated upright
+        // it was lit as a back face, which only matched the cube while the normal
+        // matrix of rotated single draws was reversed as well.
+        MeshRegistry::register('quad', new MeshData(
+            [-1.0, -1.0, 0.0, 1.0, -1.0, 0.0, 1.0, 1.0, 0.0, -1.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0],
+            [0.0, 0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0],
+            [0, 1, 2, 0, 2, 3],
+        ));
         $cube = $this->render([['pane_orange', Mat4::scaling(2.0, 2.0, 2.0)]]);
-        $upright = Mat4::rotationX(deg2rad(90.0));
         $twoPanes = $this->render([
-            ['pane_orange', Mat4::translation(0.0, 0.0, -1.0)->multiply($upright)],
-            ['pane_orange', Mat4::translation(0.0, 0.0, 1.0)->multiply($upright)],
+            ['pane_orange', Mat4::translation(0.0, 0.0, -1.0)->multiply(Mat4::rotationY(deg2rad(180.0)))],
+            ['pane_orange', Mat4::translation(0.0, 0.0, 1.0)],
         ], mesh: 'quad');
 
         $a = self::px($cube, 48, 48);
