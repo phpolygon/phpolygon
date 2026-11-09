@@ -801,3 +801,31 @@ function vio_upscaler_destroy(VioUpscaler $upscaler): void {}
 
 /** @return array{width: int, height: int}|false */
 function vio_upscaler_render_size(VioContext $context, int $provider, int $quality, int $display_width, int $display_height): array|false {}
+
+// Added for php-vio 2.43 (signatures from vio.stub.php, values from the extension).
+final class VioAccelerationStructure {}
+final class VioWindow {}
+final class VioWorkGraph {}
+function vio_bind_acceleration_structure(VioContext $context, VioAccelerationStructure $accelerationStructure, int $binding): void {}
+function vio_texture_units(VioContext $context): array {}
+function vio_acceleration_structure(VioContext $context, array $instances): VioAccelerationStructure|false {}
+function vio_acceleration_structure_update(VioContext $context, VioAccelerationStructure $accelerationStructure, array $instances): string|false {}
+function vio_bind_fragment_storage_buffer(VioContext $context, ?VioBuffer $buffer, int $binding): bool {}
+function vio_set_shading_rate_image(VioContext $context, ?string $rates, int $tilesX = 0, int $tilesY = 0): bool {}
+function vio_shading_rate_tile_size(VioContext $context): int {}
+function vio_texture_release_index(VioContext $context, VioTexture|VioCubemap $texture): bool {}
+function vio_texture_index(VioContext $context, VioTexture|VioCubemap $texture): int|false {}
+function vio_draw_mesh_tasks(VioContext $context, int $x, int $y = 1, int $z = 1): void {}
+function vio_work_graph(VioContext $context, array $desc): VioWorkGraph|false {}
+function vio_work_graph_bind_buffer(VioContext $context, VioWorkGraph $graph, VioBuffer $buffer, int $slot): void {}
+function vio_dispatch_graph(VioContext $context, VioWorkGraph $graph, string $records, int $count): void {}
+const VIO_FEATURE_RAY_QUERY = 56;
+const VIO_FEATURE_MESH_SHADER = 55;
+const VIO_FEATURE_BINDLESS = 54;
+const VIO_PATCHES = 6;
+const VIO_FEATURE_RENDER_TARGET_LAYERED = 39;
+const VIO_FEATURE_FRAGMENT_STORAGE = 27;
+const VIO_FEATURE_SHADING_RATE_IMAGE = 53;
+const VIO_FEATURE_DEPTH_MIPMAPS = 63;
+const VIO_DEPTH_REDUCE_MAX = 0;
+const VIO_FEATURE_WORK_GRAPHS = 58;

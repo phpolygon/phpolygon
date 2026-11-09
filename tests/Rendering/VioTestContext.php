@@ -17,6 +17,10 @@ final class VioTestContext
     /** @param array<string, mixed> $options */
     public static function create(int $width, int $height, array $options = []): ?\VioContext
     {
+        // Without ext-vio (the unit jobs of CI) there is no context: the test skips.
+        if (!function_exists('vio_create')) {
+            return null;
+        }
         $backend = getenv('PHPOLYGON_TEST_VIO_BACKEND') ?: 'auto';
         $config = ['width' => $width, 'height' => $height, 'headless' => true, 'vsync' => false] + $options;
         if (getenv('PHPOLYGON_TEST_VIO_HARDWARE') === '1') {
