@@ -11,6 +11,8 @@ use PHPolygon\ECS\AbstractSystem;
 use PHPolygon\ECS\World;
 use PHPolygon\Rendering\Command\SetCamera;
 use PHPolygon\Rendering\Command\SetShaderParameter;
+use PHPolygon\Rendering\PostProcess\FullscreenPassRegistry;
+use PHPolygon\Rendering\PostProcess\HeatHaze;
 use PHPolygon\Rendering\RenderCommandList;
 use PHPolygon\Rendering\ScreenProjection;
 
@@ -20,6 +22,9 @@ use PHPolygon\Rendering\ScreenProjection;
  * {@see MAX_DISTANCE}, projected to the screen with their radius as a fraction of
  * the screen height and their strength (fading with distance, following a
  * PointLight on the entity). Register after the camera, before Renderer3DSystem.
+ *
+ * It owns the pass's run-time switch: with no source in reach the pass would draw
+ * nothing, so it does not run at all that frame.
  */
 class HeatHazeSystem extends AbstractSystem
 {
@@ -37,6 +42,7 @@ class HeatHazeSystem extends AbstractSystem
     {
         $cameras = $this->commandList->ofType(SetCamera::class);
         $sources = $cameras === [] ? [] : self::sources($world, $cameras[0]);
+        FullscreenPassRegistry::setActive(HeatHaze::NAME, $sources !== []);
         $this->commandList->add(new SetShaderParameter('u_heat_count', count($sources)));
         for ($k = 0; $k < self::SLOTS; $k++) {
             $this->commandList->add(new SetShaderParameter("u_heat_sources[{$k}]", $sources[$k] ?? [0.0, 0.0, 0.0, 0.0]));

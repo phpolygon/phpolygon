@@ -10,6 +10,8 @@ use PHPolygon\Math\Vec3;
 use PHPolygon\Rendering\Command\SetCamera;
 use PHPolygon\Rendering\Command\SetShaderParameter;
 use PHPolygon\Rendering\Command\SetSky;
+use PHPolygon\Rendering\PostProcess\FullscreenPassRegistry;
+use PHPolygon\Rendering\PostProcess\SunShafts;
 use PHPolygon\Rendering\RenderCommandList;
 use PHPolygon\Rendering\ScreenProjection;
 
@@ -19,9 +21,15 @@ use PHPolygon\Rendering\ScreenProjection;
  * front of the camera, fading towards the horizon and as it leaves the screen,
  * weaker under clouds) and colour. Register after the day/night system and the
  * camera, before Renderer3DSystem.
+ *
+ * It owns the pass's run-time switch: without a sun on screen the pass would draw
+ * nothing, so it does not run at all that frame.
  */
 class SunShaftsSystem extends AbstractSystem
 {
+    /** Below this strength the shafts are invisible and the pass is switched off. */
+    public const float MIN_STRENGTH = 0.001;
+
     /**
      * @param float $strength overall strength of the shafts
      */
@@ -43,11 +51,13 @@ class SunShaftsSystem extends AbstractSystem
         $off = [0.0, 0.0, 0.0, 0.0];
         if ($skies === [] || $cameras === []) {
             $this->commandList->add(new SetShaderParameter('u_sun_shafts', $off));
+            FullscreenPassRegistry::setActive(SunShafts::NAME, false);
             return;
         }
         $sky = $skies[count($skies) - 1];
         $camera = $cameras[0];
         [$uv, $strength] = self::sunOnScreen($sky, $camera, $this->strength);
+        FullscreenPassRegistry::setActive(SunShafts::NAME, $uv !== null && $strength > self::MIN_STRENGTH);
         $this->commandList->add(new SetShaderParameter('u_sun_shafts', $uv === null ? $off : [$uv[0], $uv[1], $strength, 1.0]));
         $this->commandList->add(new SetShaderParameter('u_sun_shaft_color', [$sky->sunColor->r, $sky->sunColor->g, $sky->sunColor->b, 1.0]));
     }
