@@ -50,7 +50,7 @@ final class WaterShading
      */
     public static function register(bool $coast = true, bool $disturbances = true, ?array $programs = null): void
     {
-        $dir = dirname(__DIR__, 3) . '/resources/shaders/source/vio/water';
+        $dir = dirname(__DIR__, 3) . '/resources/shaders/lib/water';
         $glsl = '';
         if ($coast) {
             ProcModeShaderRegistry::declareSampler(self::COAST_SAMPLER, $programs);

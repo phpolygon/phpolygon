@@ -45,7 +45,7 @@ final class PlanarReflection
     {
         ProcModeShaderRegistry::declareSampler(self::SAMPLER, $programs);
         ProcModeShaderRegistry::declareUniform(self::INFO, 'vec4');
-        $path = dirname(__DIR__, 3) . '/resources/shaders/source/vio/reflection/planar_reflection.glsl';
+        $path = dirname(__DIR__, 3) . '/resources/shaders/lib/reflection/planar_reflection.glsl';
         $glsl = @file_get_contents($path);
         if ($glsl === false) {
             throw new \RuntimeException("Planar reflection library missing: {$path}");

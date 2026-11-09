@@ -179,6 +179,11 @@ program; `VioFragmentTimeTest` reads the fragment time back on the base program,
 and the MRT path.
 
 ### Shader management
+Shader text lives in files, never in PHP heredocs (`scripts/validate-shaders.php`, CI job `"Shader validation`"):
+`resources/shaders/source/` holds whole programs (`#version` first, braces closed),
+`resources/shaders/lib/` the libraries and fragments a renderer splices in (water, reflections,
+`SurfaceEffects`, tessellation control parts, meshlet mains with `@NAME@` slots filled by `strtr`).
+
 
 Games control shaders via the `Shader` facade or `$engine->shaders`:
 

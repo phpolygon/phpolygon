@@ -37,41 +37,7 @@ final class MeshletShaderSource
         $g = self::MESH_GROUP;
         $v = \PHPolygon\Geometry\MeshletBuilder::MAX_VERTICES;
         $t = \PHPolygon\Geometry\MeshletBuilder::MAX_TRIANGLES;
-        return $src . <<<GLSL
-
-            layout(local_size_x = {$g}) in;
-            layout(triangles, max_vertices = {$v}, max_primitives = {$t}) out;
-            void main() {
-                uint mb = ms_payload.meshlets[gl_WorkGroupID.x] * 8u;
-                uint vOff = ms_meshlets[mb];
-                uint vCnt = ms_meshlets[mb + 1u];
-                uint tOff = ms_meshlets[mb + 2u];
-                uint tCnt = ms_meshlets[mb + 3u];
-                SetMeshOutputsEXT(vCnt, tCnt);
-                uint li = gl_LocalInvocationIndex;
-                if (li < vCnt) {
-                    uint vi = ms_indices[vOff + li];
-                    uint vb = vi * 8u;
-                    a_position = vec3(ms_vertices[vb], ms_vertices[vb + 1u], ms_vertices[vb + 2u]);
-                    a_normal = vec3(ms_vertices[vb + 3u], ms_vertices[vb + 4u], ms_vertices[vb + 5u]);
-                    a_uv = vec2(ms_vertices[vb + 6u], ms_vertices[vb + 7u]);
-                    uint ib = ms_payload.instance * 16u;
-                    a_instance_col0 = vec4(ms_instances[ib], ms_instances[ib + 1u], ms_instances[ib + 2u], ms_instances[ib + 3u]);
-                    a_instance_col1 = vec4(ms_instances[ib + 4u], ms_instances[ib + 5u], ms_instances[ib + 6u], ms_instances[ib + 7u]);
-                    a_instance_col2 = vec4(ms_instances[ib + 8u], ms_instances[ib + 9u], ms_instances[ib + 10u], ms_instances[ib + 11u]);
-                    a_instance_col3 = vec4(ms_instances[ib + 12u], ms_instances[ib + 13u], ms_instances[ib + 14u], ms_instances[ib + 15u]);
-                    ms_VertexID = int(vi);
-                    ms_InstanceID = int(ms_payload.instance);
-                    ms_vertexMain();
-                    gl_MeshVerticesEXT[li].gl_Position = ms_Position;
-            {$copies}    }
-                for (uint t = li; t < tCnt; t += {$g}u) {
-                    uint p = ms_indices[tOff + t];
-                    gl_PrimitiveTriangleIndicesEXT[t] = uvec3(p & 255u, (p >> 8u) & 255u, (p >> 16u) & 255u);
-                }
-            }
-
-            GLSL;
+        return $src . strtr(self::lib('mesh_main.glsl'), ['@GROUP@' => (string) $g, '@MAX_VERTICES@' => (string) $v, '@MAX_TRIANGLES@' => (string) $t, '@COPIES@' => $copies]);
     }
 
     /**
@@ -84,53 +50,8 @@ final class MeshletShaderSource
         [$src] = self::transform($vertexSource, false);
         $g = self::TASK_GROUP;
         $hizDecl = $hizUnit >= 0 ? "layout(binding = {$hizUnit}) uniform sampler2D u_ms_hiz_tex;\n" : '';
-        $hizTest = $hizUnit >= 0 ? self::HIZ_TEST : '';
-        return $src . $hizDecl . <<<GLSL
-
-            layout(local_size_x = {$g}) in;
-            shared uint ms_visible;
-            void main() {
-                uint inst = gl_WorkGroupID.y + uint(u_ms_params.y);
-                uint m = gl_WorkGroupID.x * {$g}u + gl_LocalInvocationIndex;
-                if (gl_LocalInvocationIndex == 0u) {
-                    ms_visible = 0u;
-                    ms_payload.instance = inst;
-                }
-                barrier();
-                if (m < uint(u_ms_params.x) && inst < uint(u_ms_params.z)) {
-                    uint ib = inst * 16u;
-                    mat4 model = mat4(
-                        vec4(ms_instances[ib], ms_instances[ib + 1u], ms_instances[ib + 2u], 0.0),
-                        vec4(ms_instances[ib + 4u], ms_instances[ib + 5u], ms_instances[ib + 6u], 0.0),
-                        vec4(ms_instances[ib + 8u], ms_instances[ib + 9u], ms_instances[ib + 10u], 0.0),
-                        vec4(ms_instances[ib + 12u], ms_instances[ib + 13u], ms_instances[ib + 14u], 1.0));
-                    uint mb = m * 8u;
-                    vec4 c = model * vec4(uintBitsToFloat(ms_meshlets[mb + 4u]), uintBitsToFloat(ms_meshlets[mb + 5u]), uintBitsToFloat(ms_meshlets[mb + 6u]), 1.0);
-                    float s = max(length(model[0].xyz), max(length(model[1].xyz), length(model[2].xyz)));
-                    float r = (uintBitsToFloat(ms_meshlets[mb + 7u]) + u_ms_params.w) * s;
-                    mat4 vp = u_projection * u_view;
-                    vec4 r0 = vec4(vp[0][0], vp[1][0], vp[2][0], vp[3][0]);
-                    vec4 r1 = vec4(vp[0][1], vp[1][1], vp[2][1], vp[3][1]);
-                    vec4 r2 = vec4(vp[0][2], vp[1][2], vp[2][2], vp[3][2]);
-                    vec4 r3 = vec4(vp[0][3], vp[1][3], vp[2][3], vp[3][3]);
-                    vec4 planes[6] = vec4[6](r3 + r0, r3 - r0, r3 + r1, r3 - r1, r3 + r2, r3 - r2);
-                    bool visible = true;
-                    for (int i = 0; i < 6; i++) {
-                        if (dot(planes[i].xyz, c.xyz) + planes[i].w < -r * length(planes[i].xyz)) {
-                            visible = false;
-                        }
-                    }
-            {$hizTest}
-                    if (visible) {
-                        uint slot = atomicAdd(ms_visible, 1u);
-                        ms_payload.meshlets[slot] = m;
-                    }
-                }
-                barrier();
-                EmitMeshTasksEXT(ms_visible, 1u, 1u);
-            }
-
-            GLSL;
+        $hizTest = $hizUnit >= 0 ? self::lib('hiz_test.glsl') : '';
+        return $src . $hizDecl . strtr(self::lib('task_main.glsl'), ['@GROUP@' => (string) $g, '@HIZ_TEST@' => $hizTest]);
     }
 
     /**
@@ -140,41 +61,10 @@ final class MeshletShaderSource
      * pipelines exist on D3D12 / Vulkan / Metal only: render-target row 0 is the top
      * of the view and depth is stored as (ndc z + 1) / 2 on all three.
      */
-    private const HIZ_TEST = <<<'GLSL'
-                    if (visible && u_ms_hiz.w > 0.5) {
-                        vec2 lo = vec2(1e9);
-                        vec2 hi = vec2(-1e9);
-                        float nearest = 1e9;
-                        bool crossesNear = false;
-                        for (int k = 0; k < 8; k++) {
-                            vec3 p = c.xyz + r * vec3((k & 1) != 0 ? 1.0 : -1.0, (k & 2) != 0 ? 1.0 : -1.0, (k & 4) != 0 ? 1.0 : -1.0);
-                            vec4 q = vp * vec4(p, 1.0);
-                            if (q.w <= 1e-4) {
-                                crossesNear = true;
-                            } else {
-                                vec3 n = q.xyz / q.w;
-                                lo = min(lo, n.xy);
-                                hi = max(hi, n.xy);
-                                nearest = min(nearest, n.z);
-                            }
-                        }
-                        if (!crossesNear && nearest > -1.0) {
-                            vec2 uv0 = clamp(vec2(lo.x * 0.5 + 0.5, 0.5 - hi.y * 0.5), 0.0, 1.0);
-                            vec2 uv1 = clamp(vec2(hi.x * 0.5 + 0.5, 0.5 - lo.y * 0.5), 0.0, 1.0);
-                            vec2 span = (uv1 - uv0) * u_ms_hiz.xy;
-                            int lod = int(clamp(ceil(log2(max(max(span.x, span.y), 1.0))), 0.0, u_ms_hiz.z));
-                            ivec2 dim = textureSize(u_ms_hiz_tex, lod);
-                            ivec2 a = clamp(ivec2(uv0 * vec2(dim)), ivec2(0), dim - 1);
-                            ivec2 b = clamp(ivec2(uv1 * vec2(dim)), ivec2(0), dim - 1);
-                            float far = max(max(texelFetch(u_ms_hiz_tex, a, lod).r, texelFetch(u_ms_hiz_tex, ivec2(b.x, a.y), lod).r),
-                                            max(texelFetch(u_ms_hiz_tex, ivec2(a.x, b.y), lod).r, texelFetch(u_ms_hiz_tex, b, lod).r));
-                            if (nearest * 0.5 + 0.5 > far) {
-                                visible = false;
-                            }
-                        }
-                    }
-
-        GLSL;
+    private static function lib(string $name): string
+    {
+        return (string) file_get_contents(dirname(__DIR__, 2) . '/resources/shaders/lib/meshlet/' . $name);
+    }
 
     /**
      * @return array{0: string, 1: string} transformed source, varying copies for the mesh main

@@ -50,7 +50,7 @@ final class ReflectionProbes
             ProcModeShaderRegistry::declareUniform(self::boxMaxUniform($k), 'vec4');
             ProcModeShaderRegistry::declareUniform(self::positionUniform($k), 'vec4');
         }
-        $path = dirname(__DIR__, 3) . '/resources/shaders/source/vio/reflection/reflection_probes.glsl';
+        $path = dirname(__DIR__, 3) . '/resources/shaders/lib/reflection/reflection_probes.glsl';
         $glsl = @file_get_contents($path);
         if ($glsl === false) {
             throw new \RuntimeException("Reflection probe library missing: {$path}");

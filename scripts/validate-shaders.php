@@ -13,6 +13,11 @@ declare(strict_types=1);
  *   - balanced curly braces and parentheses
  *   - no remaining heredoc terminator markers
  *
+ * Checks per .glsl file under resources/shaders/lib/ (libraries and fragments a
+ * renderer splices into its programs, never compiled on their own):
+ *   - no heredoc opener or terminator left from an extraction
+ *   (no #version, and braces may stay open: a fragment can open main())
+ *
  * Checks per .metal file:
  *   - includes <metal_stdlib>
  *   - balanced curly braces
@@ -34,6 +39,7 @@ declare(strict_types=1);
 $root        = isset($argv[1]) ? rtrim((string)$argv[1], '/') : dirname(__DIR__);
 $shaderDir   = $root . '/resources/shaders/source';
 $renderDir   = $root . '/src/Rendering';
+$libDir      = $root . '/resources/shaders/lib';
 
 $errors = [];
 $checked = ['glsl' => 0, 'metal' => 0];
@@ -135,6 +141,25 @@ foreach (findFiles($shaderDir, 'glsl') as $path) {
 }
 
 // ---------------------------------------------------------------
+// 1b. Library fragments
+// ---------------------------------------------------------------
+foreach (is_dir($libDir) ? findFiles($libDir, 'glsl') : [] as $path) {
+    $rel = substr($path, strlen($root) + 1);
+    $src = file_get_contents($path);
+    if ($src === false) {
+        $errors[] = "{$rel}: cannot read file";
+        continue;
+    }
+    $checked['glsl']++;
+    if (preg_match('/^\s*(GLSL|MSL|HLSL|METAL)\w*;\s*$/m', $src)) {
+        $errors[] = "{$rel}: contains heredoc terminator - probable extraction bug";
+    }
+    if (preg_match("/<<<\\s*['\"]?(GLSL|MSL|HLSL|METAL)\\w*/i", $src)) {
+        $errors[] = "{$rel}: contains heredoc opener - probable extraction bug";
+    }
+}
+
+// ---------------------------------------------------------------
 // 2. Metal files
 // ---------------------------------------------------------------
 foreach (findFiles($shaderDir, 'metal') as $path) {
@@ -170,7 +195,7 @@ foreach ($rendererFiles as $path) {
         continue;
     }
     if (preg_match($heredocPattern, $src, $m)) {
-        $errors[] = "{$rel}: contains embedded shader heredoc '{$m[0]}'. Move the shader to resources/shaders/source/ and load via file_get_contents().";
+        $errors[] = "{$rel}: contains embedded shader heredoc '{$m[0]}'. Move the shader to resources/shaders/source/ (a whole program) or resources/shaders/lib/ (a library or fragment) and load via file_get_contents().";
     }
 }
 

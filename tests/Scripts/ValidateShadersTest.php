@@ -41,6 +41,27 @@ final class ValidateShadersTest extends TestCase
         self::assertStringContainsString('shader validator: OK', $stdout);
     }
 
+    public function testALibraryFragmentNeedsNoVersionNorClosedBraces(): void
+    {
+        $this->writeGoodGlsl('mesh.vert.glsl', "void main(){}\n");
+        mkdir($this->root . '/resources/shaders/lib/stage', 0o777, true);
+        // A fragment that opens main() for code the renderer appends.
+        file_put_contents($this->root . '/resources/shaders/lib/stage/head.glsl', "float f(float x) { return x; }\nvoid main() {\n");
+        [$rc, $stdout, $stderr] = $this->runValidator();
+        self::assertSame(0, $rc, "A library fragment must pass. stderr:\n{$stderr}");
+        self::assertStringContainsString('shader validator: OK', $stdout);
+    }
+
+    public function testAHeredocLeftInALibraryFails(): void
+    {
+        $this->writeGoodGlsl('mesh.vert.glsl', "void main(){}\n");
+        mkdir($this->root . '/resources/shaders/lib', 0o777, true);
+        file_put_contents($this->root . '/resources/shaders/lib/left.glsl', "void f() {}\n    GLSL;\n");
+        [$rc, , $stderr] = $this->runValidator();
+        self::assertSame(1, $rc);
+        self::assertStringContainsString('heredoc terminator', $stderr);
+    }
+
     public function testHeredocOpenerInRendererFails(): void
     {
         $this->writeGoodGlsl('mesh.vert.glsl', "void main(){}\n");

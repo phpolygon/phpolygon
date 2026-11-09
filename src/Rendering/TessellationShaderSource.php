@@ -59,43 +59,19 @@ final class TessellationShaderSource
             $short = substr($name, 2);
             $src .= "layout(location = {$i}) in {$type} tc_{$short}[];\nlayout(location = {$i}) out {$type} te_{$short}[];\n";
         }
-        $src .= <<<'GLSL'
-
-            float tessEdgeLevel(vec3 a, vec3 b, vec3 eye) {
-                float d = distance((a + b) * 0.5, eye);
-                float t = clamp((d - u_tess.y) / max(u_tess.z - u_tess.y, 1e-3), 0.0, 1.0);
-                return max(1.0, mix(u_tess.x, 1.0, t));
-            }
-
-            void main() {
-
-            GLSL;
+        $src .= self::lib('control_head.glsl');
         foreach (self::ATTRS as [, $name]) {
             $short = substr($name, 2);
             $src .= "    te_{$short}[gl_InvocationID] = tc_{$short}[gl_InvocationID];\n";
         }
-        $src .= <<<'GLSL'
-                if (gl_InvocationID == 0) {
-                    mat4 tessModel = u_tess_instanced == 1
-                        ? mat4(vec4(tc_instance_col0[0].xyz, 0.0), vec4(tc_instance_col1[0].xyz, 0.0), vec4(tc_instance_col2[0].xyz, 0.0), vec4(tc_instance_col3[0].xyz, 1.0))
-                        : u_tess_model;
-                    vec3 eye = u_tess_eye;
-                    vec3 p0 = (tessModel * vec4(tc_position[0], 1.0)).xyz;
-                    vec3 p1 = (tessModel * vec4(tc_position[1], 1.0)).xyz;
-                    vec3 p2 = (tessModel * vec4(tc_position[2], 1.0)).xyz;
-                    float l0 = u_tess.w > 0.5 ? tessEdgeLevel(p1, p2, eye) : 1.0;
-                    float l1 = u_tess.w > 0.5 ? tessEdgeLevel(p2, p0, eye) : 1.0;
-                    float l2 = u_tess.w > 0.5 ? tessEdgeLevel(p0, p1, eye) : 1.0;
-                    gl_TessLevelOuter[0] = l0;
-                    gl_TessLevelOuter[1] = l1;
-                    gl_TessLevelOuter[2] = l2;
-                    gl_TessLevelInner[0] = max(l0, max(l1, l2));
-                }
-                gl_out[gl_InvocationID].gl_Position = gl_in[gl_InvocationID].gl_Position;
-            }
-
-            GLSL;
+        $src .= self::lib('control_tail.glsl');
         return $src;
+    }
+
+    /** A fragment of the control stage from resources/shaders/lib/tessellation/. */
+    private static function lib(string $name): string
+    {
+        return (string) file_get_contents(dirname(__DIR__, 2) . '/resources/shaders/lib/tessellation/' . $name);
     }
 
     public static function evaluation(string $vertexSource): string
