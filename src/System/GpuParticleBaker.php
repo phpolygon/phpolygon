@@ -252,7 +252,11 @@ final class GpuParticleBaker
         };
 
         vec4 colUnpack(float v) {
-            v = floor(v + 0.5);
+            // + 0.25, not + 0.5: from 2^23 (alpha >= 32/63) a float has no fraction
+            // bits, v + 0.5 lies exactly between two floats and rounds an odd v up
+            // to the next even one - red overflowed into green. + 0.25 rounds back
+            // to v there and is exact below.
+            v = floor(v + 0.25);
             return vec4(mod(v, 64.0), mod(floor(v / 64.0), 64.0), mod(floor(v / 4096.0), 64.0), floor(v / 262144.0)) / 63.0;
         }
         float colPack(vec4 c) {

@@ -12,6 +12,8 @@ use PHPolygon\Rendering\Color;
  * colour travels as ONE float in the instance parameters (v_instance_params.x): six
  * bits per channel, RGBA in 24 bits - exactly representable in a 32-bit float, so
  * the CPU path, the step kernel and the billboard kernel all carry it unchanged.
+ * A shader that unpacks it rounds with floor(v + 0.25), never + 0.5: from 2^23 up
+ * (alpha >= 32/63) the float has no fraction bits and v + 0.5 rounds an odd v up.
  * Materials with Material::$particleTint multiply albedo, emission and alpha by it.
  */
 final class ParticleColor

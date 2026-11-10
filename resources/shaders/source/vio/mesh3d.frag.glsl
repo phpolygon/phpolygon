@@ -2258,7 +2258,9 @@ void main() {
     vec3 particleRgb = vec3(1.0);
 #ifdef PHPOLYGON_INSTANCE_PARAMS
     if (u_particle_tint > 0.5 && v_instance_params.x > 0.0) {
-        float pv = floor(v_instance_params.x + 0.5);
+        // + 0.25, not + 0.5: packed values from 2^23 up (alpha >= 32/63) have no
+        // fraction bits; + 0.5 rounds an odd one up to the next even float.
+        float pv = floor(v_instance_params.x + 0.25);
         vec4 pc = vec4(mod(pv, 64.0), mod(floor(pv / 64.0), 64.0), mod(floor(pv / 4096.0), 64.0), floor(pv / 262144.0)) / 63.0;
         particleRgb = pc.rgb;
         albedo *= pc.rgb;
