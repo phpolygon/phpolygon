@@ -1268,10 +1268,13 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
      * (`PHPOLYGON_PRECISE_HASH`, see `hash21` in vio/mesh3d.frag). On Vulkan the driver
      * rounds the same lattice point differently depending on how it was reached, so value
      * noise breaks at every cell edge and the bump / noise normal patterns read as
-     * per-pixel grain. Direct3D stays on the plain hash and keeps its frames byte for byte;
-     * Metal is unmeasured. PHPOLYGON_PRECISE_HASH=0 switches it off, =1 on for every backend.
+     * per-pixel grain. D3D12 too, less often - and there the rounding also follows the
+     * program: a material drawn by a variant or a slimmer base program shaded the noise
+     * of the default surface detail differently (NVIDIA). D3D11 gives the plain and the
+     * pinned hash byte for byte and stays plain; Metal is unmeasured.
+     * PHPOLYGON_PRECISE_HASH=0 switches it off, =1 on for every backend.
      */
-    private const PRECISE_HASH_BACKENDS = ['vulkan'];
+    private const PRECISE_HASH_BACKENDS = ['vulkan', 'd3d12'];
 
     /** Whether the mesh shader is compiled with the order-pinned hash on $backend (a vio backend name). */
     public static function preciseHashOn(string $backend): bool

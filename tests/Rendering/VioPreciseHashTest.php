@@ -34,7 +34,10 @@ use PHPolygon\Rendering\VioRenderer3D;
  * A snippet paints noise() as grey over a wall, about 18 px per cell, and the test
  * counts the jumps between neighbouring pixels that smooth noise cannot make.
  * Measured 2026-11-03 (php-vio 2.40.3), jumps with the plain / pinned hash: Vulkan
- * RTX 2080 283 / 0, D3D12 RTX 2080 55 / 0, D3D12 WARP 0 / 0.
+ * RTX 2080 283 / 0, D3D12 RTX 2080 55 / 0, D3D12 WARP 0 / 0. Measured 2026-11-10 (php-vio 2.43.1):
+ * Vulkan RTX 2080 283 / 0, Vulkan UHD 630 89 / 0 (pinned 39 while noise() still added the
+ * corner offsets in floats), D3D12 RTX 2080 60 / 0, D3D12 UHD 630 0 / 0, D3D11 both 0 / 0 with
+ * the plain and the pinned frame byte for byte the same.
  */
 final class VioPreciseHashTest extends TestCase
 {
@@ -59,11 +62,11 @@ final class VioPreciseHashTest extends TestCase
         }
     }
 
-    public function testThePinnedHashIsOnForVulkanOnly(): void
+    public function testThePinnedHashIsOnForVulkanAndD3D12(): void
     {
         self::assertTrue(VioRenderer3D::preciseHashOn('vulkan'));
-        self::assertFalse(VioRenderer3D::preciseHashOn('d3d12'), 'Direct3D keeps its frames byte for byte');
-        self::assertFalse(VioRenderer3D::preciseHashOn('d3d11'));
+        self::assertTrue(VioRenderer3D::preciseHashOn('d3d12'), 'the rounding follows the program (VioShaderVariantRenderTest)');
+        self::assertFalse(VioRenderer3D::preciseHashOn('d3d11'), 'plain and pinned hash agree byte for byte');
         self::assertFalse(VioRenderer3D::preciseHashOn('metal'), 'unmeasured');
     }
 

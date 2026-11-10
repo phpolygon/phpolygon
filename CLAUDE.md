@@ -530,8 +530,14 @@ made next on the same context believed nothing was bound and its reactive attach
 hundred units out) is a different hash. `noise()` reads each lattice point from both cells beside it, and a driver that fuses or
 reorders the dot product differently at the two reads breaks value noise at every cell edge; where a cell is smaller than a pixel
 the `bumps` / `noise` normal patterns (and everything else built on `noise()`, snippets included) turn into per-pixel grain.
-`PHPOLYGON_PRECISE_HASH` compiles the hash with `precise` and a fixed `fma` order. On for Vulkan only; Direct3D keeps the plain
-hash and its frames byte for byte, Metal is unmeasured. `PHPOLYGON_PRECISE_HASH=0` / `=1` switch it off / on for every backend.
+`PHPOLYGON_PRECISE_HASH` compiles the hash with `precise` and a fixed `fma` order, and `noise()` takes its four corners from the
+integer lattice point (`precise` does not reach the `i + vec2(1,0)` in the caller; with float corners the Intel UHD 630 Vulkan
+driver still broke 39 edges of the test wall). On for Vulkan and, since 2026-11-10, D3D12: there the rounding also follows the
+program, so a material drawn by a shader variant or a slimmer base program shaded the default surface detail's noise differently
+(`VioShaderVariantRenderTest` MRT, RTX 2080: 69 bytes off by 1-3; the default surface detail makes every rough material read
+`noise()` since 953714a). D3D12 frames changed with it: on the noise wall of `VioPreciseHashTest` 1230 of 16384 pixels, mean |diff| 1.9 (RTX 2080),
+2815 pixels, mean 5.8 (UHD 630). D3D11 gives plain and pinned hash byte for byte and stays plain; Metal is unmeasured.
+`PHPOLYGON_PRECISE_HASH=0` / `=1` switch it off / on for every backend.
 Measured 2026-11-03, php-vio 2.40.3, noise painted as grey at ~18 px per cell, neighbour jumps > 40 with plain / pinned hash:
 Vulkan RTX 2080 283 / 0, D3D12 RTX 2080 55 / 0 (the defect exists there too, rarer), D3D12 WARP 0 / 0. Patterned ground from
 40 m (960x540, `bumps` x6, FXAA, AO Medium, v0.97.0), mean |L - 3x3 mean| over the ground: Vulkan 0.88 -> 0.45, D3D12 0.46

@@ -478,8 +478,19 @@ float noise(vec2 p) {
     vec2 i = floor(p);
     vec2 f = fract(p);
     f = f * f * (3.0 - 2.0 * f);
+#ifdef PHPOLYGON_PRECISE_HASH
+    // The corners from the integer lattice point: `precise` in hash21() does not reach
+    // the `i + vec2(1,0)` out here. With the corners added in floats the Intel UHD 630
+    // Vulkan driver still broke 39 cell edges of VioPreciseHashTest's wall, from the
+    // integer lattice none (2026-11-10). Integer sums are exact, and an exact integer
+    // converts to the same float in both cells.
+    ivec2 c = ivec2(i);
+    return mix(mix(hash21(vec2(c)), hash21(vec2(c + ivec2(1, 0))), f.x),
+               mix(hash21(vec2(c + ivec2(0, 1))), hash21(vec2(c + ivec2(1, 1))), f.x), f.y);
+#else
     return mix(mix(hash21(i), hash21(i + vec2(1,0)), f.x),
                mix(hash21(i + vec2(0,1)), hash21(i + vec2(1,1)), f.x), f.y);
+#endif // PHPOLYGON_PRECISE_HASH
 }
 
 float fbm2(vec2 p) {
