@@ -123,6 +123,8 @@ const VIO_SHADING_RATE_4X4 = 4;
 const VIO_FEATURE_RENDER_TARGET_DEPTH_SAMPLE = 68;
 const VIO_FEATURE_RENDER_TARGET_STORAGE = 69;
 const VIO_FEATURE_UPSCALER_NATIVE = 70;
+// HLSL stage override (hull/domain shaders handed in as HLSL); probed with defined() / constant()
+const VIO_FEATURE_HLSL_STAGE_OVERRIDE = 44;
 const VIO_MAX_COLOR_ATTACHMENTS = 8;
 const VIO_RT_DEPTH = -1; // vio_render_target_texture($rt, VIO_RT_DEPTH): depth of a colour target
 const VIO_UPSCALER_FSR3 = 1;
