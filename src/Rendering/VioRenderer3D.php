@@ -8653,8 +8653,14 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         }
     }
 
-    /** Light grid buffers are bound to the fragment stage (see uploadLightGrid). */
-    private bool $lightGridBound = false;
+    /**
+     * Light grid buffers may be bound to the fragment stage (see uploadLightGrid). The
+     * binding belongs to the context, not to this renderer: another renderer on the same
+     * context may have left its grid bound (D3D11: a forward renderer before a temporal
+     * one, whose reactive attachment then stayed empty). So a new renderer starts as if
+     * bound, and its first temporal frame clears the slots.
+     */
+    private bool $lightGridBound = true;
 
     /** 1x1 white cube for a snippet samplerCube with nothing to show (never an empty SRV). */
     private ?VioCubemap $whiteCubemap = null;

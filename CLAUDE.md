@@ -520,6 +520,11 @@ entries behind, and the next context hands the same ids out again - stale shadow
 the first draw (access violation, `VioGrassRenderTest` after any OpenGL test in the full group, 2026-11-10), or an empty image.
 The DLSS probe holds the renderer weakly for this; `VioRendererLifetimeTest` checks that a renderer is freed with its variable.
 
+**Context state is not renderer state.** Bindings a renderer makes outlive it on the context. The light grid's fragment storage
+buffers sit in D3D11's output-merger slots behind the render targets; a forward renderer left them bound, the temporal renderer
+made next on the same context believed nothing was bound and its reactive attachment stayed empty (`VioReactiveMaterialTest`,
+2026-11-10). A new renderer therefore starts as if the grid were bound and clears the slots in its first temporal frame.
+
 **Sine hash, pinned per backend** (`VioRenderer3D::preciseHashOn()`, `PRECISE_HASH_BACKENDS`, `VioPreciseHashTest`). `hash21` in
 `vio/mesh3d.frag` is `fract(sin(dot(p, c)) * 43758.5453)`: one ulp of the dot product (near 1e6 for lattice points a few
 hundred units out) is a different hash. `noise()` reads each lattice point from both cells beside it, and a driver that fuses or
