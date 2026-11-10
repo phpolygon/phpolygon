@@ -68,6 +68,16 @@ final class TessellationShaderSource
         return $src;
     }
 
+    /**
+     * The control stage as a Direct3D hull shader, for php-vio's HLSL stage override
+     * (VIO_FEATURE_HLSL_STAGE_OVERRIDE): the hull shader php-vio transpiles from
+     * {@see control()} makes the Intel D3D12 shader compiler abort the process.
+     */
+    public static function controlHlsl(): string
+    {
+        return self::lib('control.hlsl');
+    }
+
     /** A fragment of the control stage from resources/shaders/lib/tessellation/. */
     private static function lib(string $name): string
     {

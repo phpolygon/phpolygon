@@ -9554,6 +9554,17 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             && vio_supports_feature($this->ctx, VIO_FEATURE_TESSELLATION);
     }
 
+    /**
+     * Direct3D takes the control stage as the engine's own hull shader
+     * (TessellationShaderSource::controlHlsl()) where php-vio accepts HLSL stages.
+     */
+    private function hullShaderOverride(): bool
+    {
+        return $this->conventions()->isDirect3D()
+            && defined('VIO_FEATURE_HLSL_STAGE_OVERRIDE')
+            && vio_supports_feature($this->ctx, (int) constant('VIO_FEATURE_HLSL_STAGE_OVERRIDE'));
+    }
+
     /** The vertex / control / evaluation twin of a scene program (TessellationShaderSource). */
     private function tessShader(string $program): ?\VioShader
     {
@@ -9566,14 +9577,18 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             return null;
         }
         $start = hrtime(true);
+        $config = [
+            'vertex' => TessellationShaderSource::vertex(),
+            'tess_control' => TessellationShaderSource::control(),
+            'tess_eval' => TessellationShaderSource::evaluation($src[0]),
+            'fragment' => $src[1],
+            'format' => $this->conventions()->shaderSourceFormat(),
+        ];
+        if ($this->hullShaderOverride()) {
+            $config['hlsl'] = ['tess_control' => TessellationShaderSource::controlHlsl()];
+        }
         try {
-            $shader = vio_shader($this->ctx, [
-                'vertex' => TessellationShaderSource::vertex(),
-                'tess_control' => TessellationShaderSource::control(),
-                'tess_eval' => TessellationShaderSource::evaluation($src[0]),
-                'fragment' => $src[1],
-                'format' => $this->conventions()->shaderSourceFormat(),
-            ]);
+            $shader = vio_shader($this->ctx, $config);
         } catch (\RuntimeException $e) {
             fwrite(STDERR, "[VioRenderer3D] tessellation unavailable for '{$program}': {$e->getMessage()}\n");
             $shader = false;

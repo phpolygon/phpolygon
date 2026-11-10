@@ -182,7 +182,7 @@ and the MRT path.
 Shader text lives in files, never in PHP heredocs (`scripts/validate-shaders.php`, CI job `"Shader validation`"):
 `resources/shaders/source/` holds whole programs (`#version` first, braces closed),
 `resources/shaders/lib/` the libraries and fragments a renderer splices in (water, reflections,
-`SurfaceEffects`, tessellation control parts, meshlet mains with `@NAME@` slots filled by `strtr`).
+`SurfaceEffects`, tessellation control parts and the Direct3D hull shader `control.hlsl`, meshlet mains with `@NAME@` slots filled by `strtr`).
 
 
 Games control shaders via the `Shader` facade or `$engine->shaders`:
@@ -524,6 +524,13 @@ The DLSS probe holds the renderer weakly for this; `VioRendererLifetimeTest` che
 buffers sit in D3D11's output-merger slots behind the render targets; a forward renderer left them bound, the temporal renderer
 made next on the same context believed nothing was bound and its reactive attachment stayed empty (`VioReactiveMaterialTest`,
 2026-11-10). A new renderer therefore starts as if the grid were bound and clears the slots in its first temporal frame.
+
+**Tessellation hull shader on Direct3D.** Where php-vio takes HLSL stages (`VIO_FEATURE_HLSL_STAGE_OVERRIDE`) the control stage
+goes in as the engine's own hull shader (`resources/shaders/lib/tessellation/control.hlsl`, `TessellationShaderSource::controlHlsl()`).
+php-vio's transpiled hull shader replays the control-point main three times inside the patch constant function; with edge levels
+that depend on the control points the Intel UHD 630 D3D12 driver aborts the process while creating the pipeline ("internal
+compiler error, abnormal program termination", 2026-11-10, php-vio 2.43.1). The HLSL has to declare the GLSL control stage's
+uniforms in the same order (`TessellationShaderSourceTest`).
 
 **Sine hash, pinned per backend** (`VioRenderer3D::preciseHashOn()`, `PRECISE_HASH_BACKENDS`, `VioPreciseHashTest`). `hash21` in
 `vio/mesh3d.frag` is `fract(sin(dot(p, c)) * 43758.5453)`: one ulp of the dot product (near 1e6 for lattice points a few
