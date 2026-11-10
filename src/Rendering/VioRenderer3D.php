@@ -9236,6 +9236,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         $u = [
             'u_albedo'              => [$material->albedo->r, $material->albedo->g, $material->albedo->b],
             'u_emission'            => [$material->emission->r, $material->emission->g, $material->emission->b],
+            'u_emission_mask'       => $material->emissionByTextureAlpha ? 1.0 : 0.0,
             'u_roughness'           => $material->roughness,
             'u_metallic'            => $material->metallic,
             'u_alpha'               => $material->alpha,

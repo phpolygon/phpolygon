@@ -477,6 +477,15 @@ class Material
          * with. Null = by id prefix or the smallest covering profile.
          */
         public readonly ?string $shaderProfile = null,
+        /**
+         * The albedo texture's alpha scales $emission: the surface glows only where
+         * the texture is opaque (the ink of a text texture, the lit cells of a
+         * sign), the rest stays a lit surface. Without an albedo texture the
+         * emission is 0. Changing $emission (withEmission()) dims or switches the
+         * glow as on any material. Backends that do not sample the albedo texture
+         * emit nothing for such a material.
+         */
+        public readonly bool $emissionByTextureAlpha = false,
     ) {}
 
     /**
@@ -634,6 +643,12 @@ class Material
         return $this->copy(emission: $emission);
     }
 
+    /** This material with its emission scaled by the albedo texture's alpha (see {@see $emissionByTextureAlpha}). */
+    public function withEmissionByTextureAlpha(bool $on = true): self
+    {
+        return $this->copy(emissionByTextureAlpha: $on);
+    }
+
     /**
      * This material showing a texture (null = none) over the given albedo, or
      * with its albedo kept.
@@ -740,6 +755,7 @@ class Material
         bool $clearBodyWave = false,
         ?string $normalTexture = null,
         bool $clearNormalTexture = false,
+        ?bool $emissionByTextureAlpha = null,
     ): self {
         return new self(
             albedo: $albedo ?? $this->albedo,
@@ -828,6 +844,7 @@ class Material
             instanceTint: $this->instanceTint,
             shadowDapple: $this->shadowDapple,
             shaderProfile: $this->shaderProfile,
+            emissionByTextureAlpha: $emissionByTextureAlpha ?? $this->emissionByTextureAlpha,
         );
     }
 

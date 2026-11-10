@@ -83,7 +83,7 @@ final class SurfaceTextBaker
         $text = $this->resolveText($surface, $locale);
         [$width, $height] = $this->pixelSize($surface);
 
-        return 'surface_text_' . md5(implode("\n", [
+        $content = [
             self::BAKE_VERSION,
             $text,
             $this->fonts->signature($surface->fontId, $locale, $text),
@@ -93,7 +93,15 @@ final class SurfaceTextBaker
             self::colorKey($surface->inkColor()),
             self::colorKey($surface->plateColor()),
             sprintf('%.5f %d %.5f %.5f', $surface->padding, $surface->maxLines, $surface->lineHeight, $surface->maxFontSize),
-        ]));
+        ];
+        // Ink in the alpha channel is other pixels; the glow colour is not (it
+        // lives in the material), so a sign dimmed at night keeps its texture.
+        // Surfaces without glow keep the ids, and prebaked files, they had.
+        if ($surface->inkGlows()) {
+            $content[] = 'ink-alpha';
+        }
+
+        return 'surface_text_' . md5(implode("\n", $content));
     }
 
     /** How the text sits on the surface in $locale; null without a rasterizer. */
@@ -138,7 +146,7 @@ final class SurfaceTextBaker
         }
         [$width, $height] = $this->pixelSize($surface);
 
-        return $this->rasterizer->render($faces, $layout, $width, $height, $surface->inkColor(), $surface->plateColor(), $surface->lineHeight);
+        return $this->rasterizer->render($faces, $layout, $width, $height, $surface->inkColor(), $surface->plateColor(), $surface->lineHeight, $surface->inkGlows());
     }
 
     /**
@@ -179,6 +187,11 @@ final class SurfaceTextBaker
     /**
      * The material showing $surface in $locale, its texture loaded. Falls back to
      * {@see plainMaterial()} when there can be no texture.
+     *
+     * With {@see SurfaceText::$inkEmission} the material's emission is that colour,
+     * behind the texture's alpha (the ink). The material is registered once per
+     * id: a system that changes its emission later (dimming, power) keeps its
+     * change, and has to apply it to ids that appear later (another language).
      */
     public function materialFor(SurfaceText $surface, string $locale): string
     {
@@ -187,14 +200,25 @@ final class SurfaceTextBaker
         }
         $textureId = $this->textureId($surface, $locale);
         $id = self::materialPrefix($surface) . substr($textureId, strlen('surface_text_')) . self::materialSuffix($surface);
+        $glow = $surface->inkGlows() ? $surface->inkEmission : null;
+        if ($glow !== null) {
+            $id .= '_glow_' . substr(md5(self::colorKey($glow)), 0, 8);
+        }
         if (!MaterialRegistry::has($id)) {
-            MaterialRegistry::register($id, self::baseOf($surface)->withAlbedoTexture($textureId, Color::white()));
+            $material = self::baseOf($surface)->withAlbedoTexture($textureId, Color::white());
+            if ($glow !== null) {
+                $material = $material->withEmission(new Color($glow->r, $glow->g, $glow->b))->withEmissionByTextureAlpha();
+            }
+            MaterialRegistry::register($id, $material);
         }
 
         return $id;
     }
 
-    /** The surface without text: its background colour on its base material. */
+    /**
+     * The surface without text: its background colour on its base material. No
+     * ink, so no glow either.
+     */
     public static function plainMaterial(SurfaceText $surface): string
     {
         $id = self::materialPrefix($surface) . 'plain_' . md5(self::colorKey($surface->plateColor()) . self::materialSuffix($surface));
@@ -271,6 +295,10 @@ final class SurfaceTextBaker
 
     private static function materialPrefix(SurfaceText $surface): string
     {
+        if ($surface->materialPrefix !== '') {
+            return $surface->materialPrefix . ($surface->unlit ? 'unlit_' : '');
+        }
+
         return $surface->unlit ? self::UNLIT_MATERIAL_PREFIX : 'surface_text_';
     }
 

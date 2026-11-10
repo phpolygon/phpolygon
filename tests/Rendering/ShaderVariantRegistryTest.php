@@ -25,8 +25,10 @@ final class ShaderVariantRegistryTest extends TestCase
      * sha256 of mesh3d.frag as the preprocessor leaves it without any define, whitespace
      * collapsed, at the release of the shader plan (v0.101.0). A change to the default
      * program is a decision: update this hash in the commit that makes it and say why.
+     * Changed for emission behind the albedo texture's alpha (u_emission_mask, glowing
+     * text on surfaces): off by default, the frames of other materials stay the same.
      */
-    private const VIO_FRAG_RELEASE = 'd36b8d0b263229926d11d13bbca917c5fb034abb80f81d329e49e78c2278f841';
+    private const VIO_FRAG_RELEASE = '2974807e5f0f50b1a5779abbf870e137953f289f28c5afacb9663433dbe6eb4b';
 
     protected function setUp(): void
     {

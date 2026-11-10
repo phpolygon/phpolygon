@@ -1103,6 +1103,26 @@ TextPlate::place($builder, 'Exit_Sign', $faceCentre, $faceNormal, new SurfaceTex
   shader reads them as linear albedo: hand in `Color::srgb('#...')` for a hex colour, like any albedo.
   A scene file may leave out any key: the properties have inline defaults, and the two colours, which
   cannot, are read through `inkColor()` / `plateColor()`.
+- **Glowing letters** (`SurfaceText::$inkEmission`, linear HDR colour, null/black = off): the letters give
+  off light, the plate around them stays a lit surface (a sign at night). The texture then carries the ink
+  coverage in its alpha (`TextRasterizer::render(..., inkAlpha: true)`, its own texture id: `'ink-alpha'` joins
+  the content hash only for glowing surfaces, so every other id and prebaked file stays), and the text material
+  gets `emission = inkEmission` with `Material::$emissionByTextureAlpha` (`withEmissionByTextureAlpha()`): the
+  vio mesh shader multiplies `u_emission` by the albedo texture's alpha (`u_emission_mask`, one extra fetch on
+  those materials only; without a texture the emission is 0), the vio `unlit` shader the same. The glow is the
+  material's emission, so a system that dims or zeroes the emission of the id (`withEmission()` keeps the flag)
+  dims or switches the letters; the baker registers an id once and leaves later changes alone, but ids that
+  appear later (another language, `_glow_<hash>` per colour) start at `inkEmission`. The plain plate
+  (`plainMaterial()`) has no ink and no glow. The php-glfw OpenGL renderer samples no albedo texture and emits
+  nothing for such a material; the native Vulkan renderer has no emission. Default off: frames byte for byte
+  those of v0.102.0 on D3D12, D3D11, Vulkan and OpenGL (RTX 2080 hardware adapter, php-vio 2.43.1, 2026-11-10, a
+  plate with a backdrop lit and in the dark, 320x160). The mask is applied inside a uniform branch on purpose: as a
+  plain multiply by 1 it moved 949 channels of an untextured backdrop by 1 on NVIDIA D3D12 (driver codegen; WARP,
+  D3D11, Vulkan, OpenGL unchanged). Metal goes through the same shader, not run. `VioSurfaceTextRenderTest::testGlowingInkLightsOnlyTheLettersInTheDark`.
+- **Material ids of a game's family** (`SurfaceText::$materialPrefix`, '' = `surface_text_` /
+  `UNLIT_MATERIAL_PREFIX`): the text and plain materials start with the game's prefix (`<prefix>unlit_` for an
+  unlit surface; map that one for the unlit proc mode), so proc-mode mappings and systems that switch emission
+  by id prefix take the signs in. Texture ids keep `surface_text_`.
 - **`Prefab\TextPlate`**: `place(builder, name, center, normal, text, ?backAt, ?up, standoff, ?parent, blankBack)`
   puts a quad `standoff` (2 cm) in front of a point ON the carrier's face; `Geometry\QuadMesh` (XY, normal
   +Z, one-sided, UVs in image coordinates: u along +X, v = 0 at the top edge, so a top-row-first upload
@@ -1113,8 +1133,9 @@ TextPlate::place($builder, 'Exit_Sign', $faceCentre, $faceNormal, new SurfaceTex
   text, no `SurfaceText` on it); on a carrier the carrier hides it. `TextPlate::facing()` is the rotation alone, for callers with
   their own entity. The material of the entity is `SurfaceTextBaker::plainMaterial()` until the
   system takes over.
-- **Why an opaque plate.** The mesh shaders take only `.rgb` from a texture; alpha comes from the
-  material. So the plate's background is baked in, and the surface is the visible front of the plate.
+- **Why an opaque plate.** The mesh shaders take only `.rgb` from a texture for the colour; alpha comes from the
+  material (texture alpha only cuts out with `alphaCutoff` or masks emission with `emissionByTextureAlpha`).
+  So the plate's background is baked in, and the surface is the visible front of the plate.
   Base material with `alpha < 1` gives a pane with text at one alpha. No shader changes.
 - **`Rendering\Text\TextRasterizer`** (`vio_text_bitmap`, needs no GD and no GPU): each line separately
   through bidi, shaping and the fallback chain; lines broken in logical order with `TextWrap` (CJK

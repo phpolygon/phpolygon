@@ -1077,7 +1077,11 @@ class OpenGLRenderer3D implements Renderer3DInterface, AnimationClockInterface
         $material = MaterialRegistry::get($materialId);
         if ($material !== null) {
             $this->setUniformVec3('u_albedo', [$material->albedo->r, $material->albedo->g, $material->albedo->b]);
-            $this->setUniformVec3('u_emission', [$material->emission->r, $material->emission->g, $material->emission->b]);
+            // This backend samples no albedo texture, so emission behind its
+            // alpha (the ink of a text plate) has nothing to glow through.
+            $this->setUniformVec3('u_emission', $material->emissionByTextureAlpha
+                ? [0.0, 0.0, 0.0]
+                : [$material->emission->r, $material->emission->g, $material->emission->b]);
             $this->setUniformFloat('u_roughness', $material->roughness);
             $this->setUniformFloat('u_metallic', $material->metallic);
             $this->setUniformFloat('u_alpha', $material->alpha);

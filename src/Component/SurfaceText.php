@@ -90,6 +90,26 @@ class SurfaceText extends AbstractComponent
     #[Property(editorHint: 'asset:material')]
     public string $baseMaterial = '';
 
+    /**
+     * Light the letters give off themselves (a lit sign at night), linear HDR
+     * colour. Only the ink glows, the background stays a lit plate. It is the
+     * emission of the text material (Material::$emissionByTextureAlpha): whatever
+     * scales or zeroes that emission dims or switches the letters. null or black =
+     * no glow, the material of earlier versions.
+     */
+    #[Property(editorHint: 'color')]
+    public ?Color $inkEmission = null;
+
+    /**
+     * Start of the material ids of this surface instead of `surface_text_` (or
+     * {@see \PHPolygon\Rendering\Text\SurfaceTextBaker::UNLIT_MATERIAL_PREFIX}),
+     * so a game sorts its signs into its own material families: proc-mode
+     * mappings, systems that switch emission by id prefix. An unlit surface gets
+     * `<prefix>unlit_`. '' = the engine's prefixes.
+     */
+    #[Property]
+    public string $materialPrefix = '';
+
     /*
      * Inline defaults, because the serializer builds this class without its
      * constructor and skips keys a scene file leaves out. The two colours cannot
@@ -121,6 +141,8 @@ class SurfaceText extends AbstractComponent
         float $minFontSize = 0.05,
         bool $unlit = false,
         string $baseMaterial = '',
+        ?Color $inkEmission = null,
+        string $materialPrefix = '',
     ) {
         $this->text = $text;
         $this->textKey = $textKey;
@@ -137,6 +159,16 @@ class SurfaceText extends AbstractComponent
         $this->minFontSize = $minFontSize;
         $this->unlit = $unlit;
         $this->baseMaterial = $baseMaterial;
+        $this->inkEmission = $inkEmission;
+        $this->materialPrefix = $materialPrefix;
+    }
+
+    /** Whether the letters give off light ({@see $inkEmission} set and not black). */
+    public function inkGlows(): bool
+    {
+        $e = $this->inkEmission;
+
+        return $e !== null && max($e->r, $e->g, $e->b) > 0.0;
     }
 
     public function inkColor(): Color

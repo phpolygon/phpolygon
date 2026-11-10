@@ -97,6 +97,7 @@ uniform vec3  u_grass_tip;        // Material::$grassTip
 uniform vec4  u_grass_look;       // bands (0 = smooth), variation, root shade, patch noise scale
 uniform vec2  u_grass_far_fade;   // SetGrass full / fade range (fragment copy)
 uniform vec3 u_emission;
+uniform float u_emission_mask;    // 1: the albedo texture's alpha scales u_emission (Material::$emissionByTextureAlpha)
 uniform float u_roughness;
 uniform float u_metallic;
 uniform float u_alpha;
@@ -1930,6 +1931,9 @@ void main() {
 #endif // PHPOLYGON_OMIT_NORMAL_PATTERNS
 
     vec3 texAlbedo = (splatOn ? splatAlbedo : u_albedo) * v_instance_tint;
+    // Emission behind the texture's alpha glows only where the texture is opaque
+    // (the ink of a text plate); without a texture there is nothing to glow.
+    float emissionMask = 0.0;
     if (u_has_albedo_texture == 1 && !splatOn) {
 #ifdef PHPOLYGON_MOTION
         // Temporal upscaling reconstructs display-resolution detail: pick the
@@ -1971,6 +1975,9 @@ void main() {
             discard;
         }
 #endif
+        if (u_emission_mask > 0.5) {
+            emissionMask = albedoGrad(fbUv, uvDx * mipScale * fbScale, uvDy * mipScale * fbScale).a;
+        }
     }
 
     // ---- Material selection ----
@@ -2862,6 +2869,11 @@ void main() {
 
     // Emissive looks (shader plan 5.4).
     vec3 emission = u_emission * particleRgb;
+    // Applied in a branch: a multiply by 1 on every other material changed how
+    // NVIDIA's D3D12 driver compiled the lighting (1 LSB on unrelated surfaces).
+    if (u_emission_mask > 0.5) {
+        emission *= emissionMask;
+    }
 #ifndef PHPOLYGON_OMIT_EMISSIVE_LOOK
     if (u_emissive_look.x > 0.0 && dot(emission, vec3(1.0)) > 0.0) {
         // Windows: a grid on the wall plane (2.2 m x 2.8 m), a share of them lit

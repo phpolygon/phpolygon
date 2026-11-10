@@ -47,7 +47,7 @@ final class SurfaceTextDirectoryStore implements SurfaceTextStoreInterface
 
     /**
      * Every level down to 1 x 1, base first, each a box filter of the one above
-     * (an odd edge drops its last row or column).
+     * in all four channels (an odd edge drops its last row or column).
      *
      * @return list<string>
      */
@@ -64,10 +64,10 @@ final class SurfaceTextDirectoryStore implements SurfaceTextStoreInterface
                 $base = ($height > 1 ? $y * 2 : $y) * $width * 4;
                 for ($x = 0; $x < $nextWidth; $x++) {
                     $a = $base + ($width > 1 ? $x * 8 : 0);
-                    for ($c = $a, $end = $a + 3; $c < $end; $c++) {
+                    // Alpha too: it carries the ink of a glowing text (255 stays 255).
+                    for ($c = $a, $end = $a + 4; $c < $end; $c++) {
                         $out .= chr((ord($rgba[$c]) + ord($rgba[$c + $stepX]) + ord($rgba[$c + $stride]) + ord($rgba[$c + $stride + $stepX]) + 2) >> 2);
                     }
-                    $out .= "\xFF";
                 }
             }
             $levels[] = $rgba = $out;

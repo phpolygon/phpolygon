@@ -121,7 +121,7 @@ final class VioSurfaceTextRenderTest extends TestCase
     }
 
     /** @param list<object> $draws */
-    private function image(array $draws, Vec3 $eye): string
+    private function image(array $draws, Vec3 $eye, float $ambient = 1.0): string
     {
         self::assertNotNull($this->ctx);
         self::assertNotNull($this->textures);
@@ -134,7 +134,7 @@ final class VioSurfaceTextRenderTest extends TestCase
         $renderer = $this->renderer;
         $list = new RenderCommandList();
         $list->add(new SetCamera(Mat4::lookAt($eye, new Vec3(0.0, 0.0, 0.0), new Vec3(0.0, 1.0, 0.0)), Mat4::perspective(deg2rad(50.0), 1.0, 0.05, 500.0)));
-        $list->add(new SetAmbientLight(new Color(1.0, 1.0, 1.0), 1.0));
+        $list->add(new SetAmbientLight(new Color(1.0, 1.0, 1.0), $ambient));
         $list->add(new SetDirectionalLight((new Vec3(0.0, -0.2, -1.0))->normalize(), new Color(1.0, 1.0, 1.0), 0.0));
         foreach ($draws as $draw) {
             $list->add($draw);
@@ -362,6 +362,62 @@ final class VioSurfaceTextRenderTest extends TestCase
         self::assertGreaterThan(50, self::lit($images['ja']));
         self::assertGreaterThan(50, self::differing($images['ar'], $images['ja']));
         self::assertGreaterThan(50, self::differing($latin, $images['ja']));
+    }
+
+    /**
+     * A glowing sign in the dark: the letters light up, the plate around them
+     * does not, and zeroing the material's emission (a game's power switch)
+     * gives the dark sign back.
+     */
+    #[DataProvider('backends')]
+    #[RequiresFunction('vio_text_bitmap')]
+    public function testGlowingInkLightsOnlyTheLettersInTheDark(string $backend): void
+    {
+        $this->open($backend);
+        self::assertNotNull($this->textures);
+        $locale = new LocaleManager('en', 'en');
+        $baker = new SurfaceTextBaker($locale, $this->textures);
+        $make = static fn(?Color $glow): SurfaceText => new SurfaceText(
+            // A black plate: in the light only the letters pass lit(), so that count is the ink.
+            text: 'HIH', width: 1.0, height: 0.5, color: new Color(0.9, 0.9, 0.9), background: new Color(0.0, 0.0, 0.0), inkEmission: $glow, materialPrefix: 'glow_test_',
+        );
+        $matrix = Mat4::trs(new Vec3(0.0, 0.0, 0.0), Quaternion::identity(), new Vec3(1.0, 0.5, 1.0));
+        $eye = new Vec3(0.0, 0.0, 1.5);
+        $draw = static fn(string $material): array => [new DrawMesh(QuadMesh::UNIT_ID, $material, $matrix)];
+
+        $plain = $baker->materialFor($make(null), 'en');
+        $glowing = $baker->materialFor($make(new Color(3.0, 2.0, 0.5)), 'en');
+        self::assertStringStartsWith('glow_test_', $glowing);
+
+        $ink = self::lit($this->image($draw($plain), $eye));
+        $dark = $this->image($draw($plain), $eye, 0.02);
+        $glow = $this->image($draw($glowing), $eye, 0.02);
+
+        self::assertLessThan(5, self::lit($dark), 'without glow the sign is dark');
+        self::assertGreaterThan(50, $ink, 'the letters show in the light');
+        // Pixels the glow changed: the letters (and their filtered edges), not the plate.
+        $changed = self::differingBy($dark, $glow, 24);
+        self::assertGreaterThan($ink / 2, $changed, 'the letters glow');
+        self::assertLessThan($ink * 2, $changed, 'the plate around them does not');
+
+        $material = MaterialRegistry::get($glowing);
+        self::assertNotNull($material);
+        MaterialRegistry::register($glowing, $material->withEmission(new Color(0.0, 0.0, 0.0)));
+        $off = $this->image($draw($glowing), $eye, 0.02);
+        self::assertSame(0, self::differingBy($dark, $off, 2), 'emission 0 switches the letters off');
+    }
+
+    private static function differingBy(string $a, string $b, int $threshold): int
+    {
+        $count = 0;
+        for ($i = 0, $n = strlen($a); $i < $n; $i++) {
+            if ($i % 4 !== 3 && abs(ord($a[$i]) - ord($b[$i])) > $threshold) {
+                $count++;
+                $i += 3 - $i % 4;
+            }
+        }
+
+        return $count;
     }
 
     private static function lit(string $image): int

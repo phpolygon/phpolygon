@@ -181,4 +181,15 @@ class MaterialTest extends TestCase
         $this->assertSame(1.0, $m->withWetness(3.0)->wetness);
         $this->assertSame(0.0, $m->withWetness(-1.0)->wetness);
     }
+
+    public function testEmissionBehindTextureAlphaSurvivesEveryDerivedCopy(): void
+    {
+        $this->assertFalse(Material::default()->emissionByTextureAlpha);
+        $m = Material::emissive(Color::white(), new Color(2.0, 2.0, 2.0))->withEmissionByTextureAlpha();
+        $this->assertTrue($m->emissionByTextureAlpha);
+        $this->assertTrue($m->withEmission(new Color(0.0, 0.0, 0.0))->emissionByTextureAlpha, 'dimming keeps the mask');
+        $this->assertTrue($m->withAlbedoTexture('t')->emissionByTextureAlpha);
+        $this->assertTrue($m->withWetness(0.5)->emissionByTextureAlpha);
+        $this->assertFalse($m->withEmissionByTextureAlpha(false)->emissionByTextureAlpha);
+    }
 }

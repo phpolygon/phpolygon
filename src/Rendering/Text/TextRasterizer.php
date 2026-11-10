@@ -102,10 +102,12 @@ final class TextRasterizer
      * RGBA8 pixels, top row first: $background with the text of $fit centred in $color.
      * The colours are written as they are, blending happens on these values. The
      * mesh shader reads them as linear albedo, so this is a blend in linear light.
+     * Alpha is 255, or with $inkAlpha the ink coverage (0 on the background), which
+     * a material with Material::$emissionByTextureAlpha lights.
      *
      * @param list<VioFontFace> $faces
      */
-    public function render(array $faces, TextFit $fit, int $width, int $height, Color $color, Color $background, float $lineHeight): string
+    public function render(array $faces, TextFit $fit, int $width, int $height, Color $color, Color $background, float $lineHeight, bool $inkAlpha = false): string
     {
         $coverageRows = $this->coverage($faces, $fit, $width, $height, $lineHeight);
 
@@ -118,7 +120,7 @@ final class TextRasterizer
                 (int) round($from[0] + ($to[0] - $from[0]) * $c / 255),
                 (int) round($from[1] + ($to[1] - $from[1]) * $c / 255),
                 (int) round($from[2] + ($to[2] - $from[2]) * $c / 255),
-                255,
+                $inkAlpha ? $c : 255,
             );
         }
 

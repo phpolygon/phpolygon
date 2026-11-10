@@ -5,6 +5,7 @@ in vec2 v_uv;
 
 uniform vec3 u_albedo;
 uniform vec3 u_emission;
+uniform float u_emission_mask; // 1: the albedo texture's alpha scales u_emission
 uniform float u_alpha;
 uniform vec3 u_fog_color;
 uniform float u_fog_near;
@@ -45,11 +46,15 @@ vec3 invToneMapInvGamma(vec3 displayColor) {
 
 void main() {
     vec3 baseAlbedo = u_albedo;
+    float emissionMask = u_emission_mask > 0.5 ? 0.0 : 1.0;
     if (u_has_albedo_texture == 1) {
         vec4 texColor = texture(u_albedo_texture, v_uv);
         baseAlbedo *= texColor.rgb;
+        if (u_emission_mask > 0.5) {
+            emissionMask = texColor.a;
+        }
     }
-    vec3 color = baseAlbedo + u_emission;
+    vec3 color = baseAlbedo + u_emission * emissionMask;
     float dist = length(v_worldPos - u_camera_pos);
     float fogFactor = clamp((dist - u_fog_near) / (u_fog_far - u_fog_near), 0.0, 1.0);
     color = mix(color, u_fog_color, fogFactor);

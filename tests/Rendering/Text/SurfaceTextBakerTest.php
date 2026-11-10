@@ -248,4 +248,128 @@ final class SurfaceTextBakerTest extends TestCase
         self::assertSame([64, 16, 8, 4], array_map('strlen', $chain));
         self::assertSame(pack('C4', 200, 100, 0, 255), $chain[3]);
     }
+
+    public function testMipChainFiltersTheInkInTheAlphaChannel(): void
+    {
+        // Half the pixels ink (alpha 255), half background (alpha 0).
+        $chain = SurfaceTextDirectoryStore::mipChain(str_repeat(pack('C4', 10, 10, 10, 255) . pack('C4', 10, 10, 10, 0), 2), 2, 2);
+
+        self::assertSame(128, ord($chain[1][3]));
+    }
+
+    private static function glowing(string $text = 'Exit', ?Color $glow = null, string $prefix = ''): SurfaceText
+    {
+        return new SurfaceText(text: $text, width: 1.0, height: 0.25, inkEmission: $glow ?? new Color(2.0, 1.5, 0.5), materialPrefix: $prefix);
+    }
+
+    /** A store that has every texture, so materials resolve without a rasterizer. */
+    private static function prebaked(): SurfaceTextStoreInterface
+    {
+        return new class implements SurfaceTextStoreInterface {
+            public function path(string $textureId): ?string
+            {
+                return "/baked/{$textureId}.ktx2";
+            }
+
+            public function store(string $textureId, string $rgba, int $width, int $height): void {}
+        };
+    }
+
+    public function testWithoutGlowTheIdsAndMaterialAreThoseOfEarlierVersions(): void
+    {
+        $baker = $this->baker(self::prebaked());
+        $plain = new SurfaceText(text: 'Exit', width: 1.0, height: 0.25);
+        $black = new SurfaceText(text: 'Exit', width: 1.0, height: 0.25, inkEmission: new Color(0.0, 0.0, 0.0));
+
+        self::assertSame($baker->textureId($plain, 'de'), $baker->textureId($black, 'de'));
+        self::assertSame($baker->materialFor($plain, 'de'), $baker->materialFor($black, 'de'));
+        $material = MaterialRegistry::get($baker->materialFor($plain, 'de'));
+        self::assertNotNull($material);
+        self::assertFalse($material->emissionByTextureAlpha);
+        self::assertSame(0.0, $material->emission->r);
+        self::assertStringStartsWith('surface_text_', $baker->materialFor($plain, 'de'));
+    }
+
+    public function testGlowingInkIsTheMaterialsEmissionBehindTheTextureAlpha(): void
+    {
+        $baker = $this->baker(self::prebaked());
+        $glow = self::glowing();
+        $id = $baker->materialFor($glow, 'de');
+        $material = MaterialRegistry::get($id);
+
+        self::assertNotNull($material);
+        self::assertTrue($material->emissionByTextureAlpha);
+        self::assertSame([2.0, 1.5, 0.5], [$material->emission->r, $material->emission->g, $material->emission->b]);
+        self::assertSame($baker->textureId($glow, 'de'), $material->albedoTexture);
+
+        // Other pixels (ink in alpha), so another texture; another colour, another material.
+        self::assertNotSame($baker->textureId(new SurfaceText(text: 'Exit', width: 1.0, height: 0.25), 'de'), $baker->textureId($glow, 'de'));
+        self::assertSame($baker->textureId($glow, 'de'), $baker->textureId(self::glowing(glow: new Color(0.5, 0.5, 0.5)), 'de'), 'the glow colour is not in the texture');
+        self::assertNotSame($id, $baker->materialFor(self::glowing(glow: new Color(0.5, 0.5, 0.5)), 'de'));
+
+        // The plate without text has no ink to glow.
+        $plain = MaterialRegistry::get(SurfaceTextBaker::plainMaterial($glow));
+        self::assertNotNull($plain);
+        self::assertFalse($plain->emissionByTextureAlpha);
+        self::assertSame(0.0, $plain->emission->r);
+    }
+
+    /**
+     * A game switches signs by material id prefix: its prefix on the ids, and a
+     * changed emission (the switch) survives the system asking again.
+     */
+    public function testMaterialPrefixPutsTheSurfaceIntoTheGamesFamily(): void
+    {
+        $baker = $this->baker(self::prebaked());
+        $sign = self::glowing(prefix: 'shop_sign_');
+        $id = $baker->materialFor($sign, 'de');
+
+        self::assertStringStartsWith('shop_sign_', $id);
+        self::assertStringStartsWith('shop_sign_', SurfaceTextBaker::plainMaterial($sign));
+        self::assertStringStartsWith('shop_sign_unlit_', $baker->materialFor(new SurfaceText(text: 'Exit', unlit: true, materialPrefix: 'shop_sign_'), 'de'));
+        self::assertSame(
+            substr($baker->materialFor(self::glowing(), 'de'), strlen('surface_text_')),
+            substr($id, strlen('shop_sign_')),
+            'only the prefix differs',
+        );
+
+        $material = MaterialRegistry::get($id);
+        self::assertNotNull($material);
+        MaterialRegistry::register($id, $material->withEmission(new Color(0.0, 0.0, 0.0)));
+        self::assertSame($id, $baker->materialFor($sign, 'de'));
+        $off = MaterialRegistry::get($id);
+        self::assertNotNull($off);
+        self::assertSame(0.0, $off->emission->r, 'the switched-off emission stays');
+        self::assertTrue($off->emissionByTextureAlpha, 'withEmission keeps the mask');
+    }
+
+    #[RequiresFunction('vio_text_bitmap')]
+    public function testGlowingTextCarriesItsInkInTheAlphaChannel(): void
+    {
+        $baker = $this->baker();
+        $plain = $baker->rasterize(new SurfaceText(text: 'Exit', width: 1.0, height: 0.25), 'de');
+        $glow = $baker->rasterize(self::glowing(), 'de');
+        self::assertNotNull($plain);
+        self::assertNotNull($glow);
+
+        $alphas = static function (string $rgba): array {
+            $count = [];
+            for ($i = 3, $n = strlen($rgba); $i < $n; $i += 4) {
+                $a = ord($rgba[$i]);
+                $count[$a === 0 ? 'none' : ($a === 255 ? 'full' : 'edge')] = ($count[$a === 0 ? 'none' : ($a === 255 ? 'full' : 'edge')] ?? 0) + 1;
+            }
+            return $count;
+        };
+        self::assertSame(['full' => strlen($plain) / 4], $alphas($plain), 'without glow every pixel is opaque, as before');
+        $counts = $alphas($glow);
+        self::assertGreaterThan($counts['full'] ?? 0, $counts['none'] ?? 0, 'most of a sign is background');
+        self::assertGreaterThan(0, $counts['full'] ?? 0, 'the strokes are ink');
+
+        // The colours are the same pixels; only alpha differs.
+        for ($i = 0, $n = strlen($plain); $i < $n; $i += 4) {
+            if (substr($plain, $i, 3) !== substr($glow, $i, 3)) {
+                self::fail("colour differs at byte {$i}");
+            }
+        }
+    }
 }
