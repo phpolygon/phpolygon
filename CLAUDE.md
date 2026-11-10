@@ -512,6 +512,14 @@ buffer in a function-static that outlives the device. A later context whose draw
 is removed (`DXGI_ERROR_DRIVER_INTERNAL_ERROR`), on WARP and on hardware (RTX 2080, 2026-11-06). Only processes that open several D3D11
 contexts meet it (`VioGrassRenderTest`, `VioSurfaceTextRenderTest` in the full group, not alone). Nothing in the engine works around it.
 
+**A renderer goes with its last reference.** `VioRenderer3D` must never sit in a reference cycle (closures bound to `$this` in
+its own properties, a child holding it back): its GPU objects would then live until the cycle collector runs, possibly after the
+context was destroyed. On OpenGL that hit an open php-vio defect (2.43.1): the per-program caches (`gl_shadow_cache`, not cleared
+when a context ends; `gl_uloc_cache` is) are keyed by GL program id only, a program still referenced at `vio_destroy` leaves its
+entries behind, and the next context hands the same ids out again - stale shadow-sampler locations, then a stack overwrite in
+the first draw (access violation, `VioGrassRenderTest` after any OpenGL test in the full group, 2026-11-10), or an empty image.
+The DLSS probe holds the renderer weakly for this; `VioRendererLifetimeTest` checks that a renderer is freed with its variable.
+
 **Sine hash, pinned per backend** (`VioRenderer3D::preciseHashOn()`, `PRECISE_HASH_BACKENDS`, `VioPreciseHashTest`). `hash21` in
 `vio/mesh3d.frag` is `fract(sin(dot(p, c)) * 43758.5453)`: one ulp of the dot product (near 1e6 for lattice points a few
 hundred units out) is a different hash. `noise()` reads each lattice point from both cells beside it, and a driver that fuses or

@@ -3403,10 +3403,17 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             || !$this->temporalSupported()) {
             return null;
         }
+        // The probe lives in a property of this renderer: closures bound to $this would
+        // make a cycle, and the renderer with every GPU object it owns would outlive its
+        // last variable until the cycle collector runs - possibly after its context was
+        // destroyed (php-vio's OpenGL program caches then serve a new context stale
+        // entries). Held weakly, the renderer is freed as soon as nobody holds it.
+        $self = \WeakReference::create($this);
         return $this->dlssProbe ??= new Quality\LazyUpscalerProbe(
             Quality\Upscaler::Dlss->value . '@' . vio_backend_name($this->ctx),
-            fn(): Quality\UpscalerProbeResult => $this->queryUpscalerProvider(Quality\Upscaler::Dlss),
-            $this->upscalerDeviceKey(...),
+            static fn(): Quality\UpscalerProbeResult => $self->get()?->queryUpscalerProvider(Quality\Upscaler::Dlss)
+                ?? new Quality\UpscalerProbeResult(false, 'renderer released', cacheable: false),
+            static fn(): ?string => $self->get()?->upscalerDeviceKey(),
             $this->upscalerProbeCachePath !== '' ? new Quality\UpscalerProbeCache($this->upscalerProbeCachePath) : null,
         );
     }
