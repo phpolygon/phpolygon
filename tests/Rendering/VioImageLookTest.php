@@ -201,9 +201,24 @@ final class VioImageLookTest extends TestCase
         }
     }
 
+    /**
+     * Exposure, the tonemappers and bloom above its linear threshold act on the FP16 scene
+     * path. The OpenGL family renders an LDR scene by design (forward surrogates, see
+     * VioRenderer3D::screenSpaceEffectsSupported()): its colours come tonemapped from the
+     * mesh shader and never exceed 1.
+     */
+    private function requireHdrScene(): void
+    {
+        self::assertNotNull($this->ctx);
+        if (vio_backend_name($this->ctx) === 'opengl') {
+            $this->markTestSkipped('OpenGL renders an LDR scene: exposure, tonemap and bloom above the threshold need the HDR scene path');
+        }
+    }
+
     public function testExposureBrightensAndTheSigmoidKeepsMidGrey(): void
     {
-        $base = $this->image(self::settings(), new ImageLook(deband: 0.0001));
+        $this->requireHdrScene();
+        $base =$this->image(self::settings(), new ImageLook(deband: 0.0001));
         $up = $this->image(self::settings(), new ImageLook(exposureEv: 1.0));
         self::assertGreaterThan(self::luma($base, 10, 10) + 0.05, self::luma($up, 10, 10));
         $sigmoid = $this->image(self::settings(), new ImageLook(tonemapper: Tonemapper::Sigmoid));
@@ -213,6 +228,7 @@ final class VioImageLookTest extends TestCase
 
     public function testAutoExposureBringsADarkAndABrightSceneCloser(): void
     {
+        $this->requireHdrScene();
         $fixedDark = self::luma($this->image(self::settings(), new ImageLook(deband: 0.0001), ambient: 0.05), 10, 10);
         $fixedBright = self::luma($this->image(self::settings(), new ImageLook(deband: 0.0001), ambient: 1.2), 10, 10);
         $auto = new ImageLook(autoExposure: new AutoExposure(reference: 0.1, minEv: -4.0, maxEv: 4.0));
@@ -227,6 +243,7 @@ final class VioImageLookTest extends TestCase
 
     public function testTheBloomChainSpreadsFurtherThanTheSingleBlur(): void
     {
+        $this->requireHdrScene();
         $none = $this->image(self::settings(false), new ImageLook(deband: 0.0001));
         $single = $this->image(self::settings(true), new ImageLook(deband: 0.0001));
         $chain = $this->image(self::settings(true), new ImageLook(bloomLevels: 5, bloomScatter: 0.8));

@@ -672,7 +672,8 @@ $list->add(new SetImageLook(new ImageLook(autoExposure: new AutoExposure(referen
   `sharpen` runs FSR 1's RCAS after FXAA / passthrough on the path without upscaler (FSR 1 and the temporal present sharpen already).
   Then the Final passes and the accessibility pass as before.
 - Bloom still needs `GraphicsSettings::$bloom`; exposure and tonemap only act on the HDR scene path (`$hdr`), an LDR scene comes
-  tonemapped from the mesh shader and gets bloom, LUT and the rest.
+  tonemapped from the mesh shader and gets bloom, LUT and the rest. The OpenGL family always renders the LDR scene, where nothing
+  reaches the default bloom threshold (1.3 linear); `VioImageLookTest` skips its exposure, auto-exposure and bloom-chain cases there.
 - **Comfort options win**, enforced in `VioImageChain::finishUniforms()` (pure, tested): no saturation pulse while the player lowers world
   saturation or asks for reduced motion; no grain and no colour fringes while the contrast mode is on (its Sobel outlines would trace
   them); grain stands still under reduced motion. Auto exposure adapts over seconds and runs before the flash limit, which sees the
