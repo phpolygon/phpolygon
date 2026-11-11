@@ -4,8 +4,9 @@
  * PHPolygon — OpenGL backend example
  *
  * Renders a spinning procedural box using the OpenGLRenderer3D backend.
- * Identical scene to vulkan_spinning_box.php and metal_spinning_box.php — swap
- * renderBackend3D to compare backends.
+ * Identical scene to vulkan_spinning_box.php — swap renderBackend3D to compare
+ * backends. With ext-vio loaded the engine renders through VioRenderer3D
+ * instead, unless EngineConfig::$useNative3D is set.
  *
  * Requirements:
  *   - ext-glfw (php-glfw), OpenGL 4.1
