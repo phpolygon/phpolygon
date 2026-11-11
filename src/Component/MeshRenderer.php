@@ -13,8 +13,27 @@ use PHPolygon\ECS\Attribute\Serializable;
 #[Category('Rendering')]
 class MeshRenderer extends AbstractComponent
 {
+    /**
+     * Change notification for {@see \PHPolygon\Visibility\VisibilityService}:
+     * set on bind (World::observe's attach callback, see bindChangeQueue())
+     * so the $visible/$meshId hooks below can mark this entity without the
+     * service walking the whole MeshRenderer pool every frame. Null while
+     * unattached (construction, hydration, a cloned-but-not-yet-attached
+     * prefab component) - the hooks just no-op then, since the service
+     * registers every newly attached MeshRenderer once anyway.
+     */
+    private ?MeshRendererChangeQueue $changeQueue = null;
+
+    /** Entity id this instance is bound to; meaningless while $changeQueue is null. */
+    private int $boundEntityId = 0;
+
     #[Property(editorHint: 'asset:mesh')]
-    public string $meshId;
+    public string $meshId {
+        set {
+            $this->meshId = $value;
+            $this->notifyChanged();
+        }
+    }
 
     #[Property(editorHint: 'asset:material')]
     public string $materialId;
@@ -27,9 +46,19 @@ class MeshRenderer extends AbstractComponent
      * Inline default so {@see \PHPolygon\ECS\Serializer\AttributeSerializer::fromArray}
      * (which constructs via newInstanceWithoutConstructor()) leaves the typed
      * property in a defined state for legacy data that predates this field.
+     *
+     * Toggling this is also one of VisibilityService's three maintenance
+     * events for its SpatialIndex: the entry is removed while false and
+     * re-registered when set back to true, so an invisible mesh never costs
+     * a cell membership or classification.
      */
     #[Property]
-    public bool $visible = true;
+    public bool $visible = true {
+        set {
+            $this->visible = $value;
+            $this->notifyChanged();
+        }
+    }
 
     /**
      * When true, this mesh is NOT written into the deferred G-buffer that drives
@@ -74,5 +103,41 @@ class MeshRenderer extends AbstractComponent
         $this->visible = $visible;
         $this->excludeFromGbuffer = $excludeFromGbuffer;
         $this->batchable = $batchable;
+    }
+
+    /**
+     * Rebinding after a clone (prefab instancing clones authored components
+     * before attaching them, see SceneBuilder::materializeDeclaration()):
+     * the clone is not attached to anything yet, so it must start unbound -
+     * otherwise it would mark the ORIGINAL's entity id changed on its first
+     * write, and World::observe's attach callback would never get a chance
+     * to bind it to its own id. Mirrors Transform3D::__clone().
+     */
+    public function __clone(): void
+    {
+        $this->changeQueue = null;
+        $this->boundEntityId = 0;
+    }
+
+    /**
+     * Bind this instance to its entity id and VisibilityService's change
+     * queue. Called from the attach callback registered through
+     * {@see \PHPolygon\ECS\World::observe()} - never call this directly.
+     */
+    public function bindChangeQueue(int $entityId, MeshRendererChangeQueue $queue): void
+    {
+        $this->boundEntityId = $entityId;
+        $this->changeQueue = $queue;
+    }
+
+    /** Called from the matching detach callback - never call this directly. */
+    public function unbindChangeQueue(): void
+    {
+        $this->changeQueue = null;
+    }
+
+    private function notifyChanged(): void
+    {
+        $this->changeQueue?->mark($this->boundEntityId);
     }
 }

@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace PHPolygon\ECS;
 
+use PHPolygon\Activity\ActivityTier;
 use PHPolygon\Component\Transform2D;
 use PHPolygon\Component\Transform3D;
 use PHPolygon\Log\Log;
@@ -42,6 +43,25 @@ class World
 
     /** @var array<int, bool> Entities currently dormant (resident, iteration-excluded). */
     private array $dormant = [];
+
+    /**
+     * Entities marked Far (Phase 4 of the visibility plan, 2026-11-11).
+     * UNLIKE $dormant, this does NOT move components out of $components -
+     * componentPool()/query() still see a Far entity exactly as before, so a
+     * system that never calls {@see componentPoolFar()} or checks
+     * {@see isFar()} itself keeps processing it every tick without any
+     * change (see {@see ActivityTier}'s and {@see \PHPolygon\ECS\AbstractSystem::tierPolicy()}'s
+     * docblocks on why - a Far entity must not silently disappear from an
+     * unmodified system's loop). Only a system that explicitly opts in
+     * (reads {@see componentPoolFar()}, or skips ids this set contains) gets
+     * different behaviour for a Far entity.
+     *
+     * @var array<int, true>
+     */
+    private array $far = [];
+
+    /** @var array<class-string, true> see registerPassiveComponent() */
+    private array $passiveComponents = [];
 
     /** @var list<SystemInterface> */
     private array $systems = [];
@@ -150,7 +170,7 @@ class World
             unset($this->components[$class][$id], $this->dormantComponents[$class][$id]);
         }
 
-        unset($this->entityComponents[$id], $this->alive[$id], $this->entityCache[$id], $this->dormant[$id]);
+        unset($this->entityComponents[$id], $this->alive[$id], $this->entityCache[$id], $this->dormant[$id], $this->far[$id]);
         $this->freeList[] = $id;
         $this->structuralVersion++;
     }
@@ -409,6 +429,130 @@ class World
         return isset($this->dormant[$entityId]);
     }
 
+    // --- Activity tiers (Phase 4 of the visibility plan) ---
+
+    /**
+     * Moves an entity between Visible/Near (collapsed - see below), Far and
+     * Dormant. Dormant goes through {@see setEntityDormant()} unchanged; Far
+     * only flips a membership flag ($far), components stay resident in the
+     * normal pool (see $far's own docblock). Visible and Near both mean
+     * "not Far, not Dormant" at the World level - there is no storage
+     * difference between them (nothing here ever treats a Near entity
+     * differently from a fully Visible one), so {@see entityTier()} can only
+     * ever answer Visible for either; a caller that needs the Near
+     * distinction itself (e.g. {@see \PHPolygon\Activity\ActivitySystem}'s
+     * hysteresis) must track it separately.
+     *
+     * Like {@see setEntityDormant()}, this does NOT walk a Transform
+     * hierarchy - the CALLER must apply the same tier to a whole subtree
+     * (see that method's docblock for why: a lone dormant/far child under an
+     * active parent, or vice versa, produces stale/mis-parented transforms).
+     */
+    public function setEntityTier(int $entityId, ActivityTier $tier): void
+    {
+        if (!isset($this->alive[$entityId])) {
+            return;
+        }
+        if ($tier === ActivityTier::Dormant) {
+            unset($this->far[$entityId]);
+            $this->setEntityDormant($entityId, true);
+            return;
+        }
+        if ($this->isDormant($entityId)) {
+            $this->setEntityDormant($entityId, false);
+        }
+        if ($tier === ActivityTier::Far) {
+            $this->far[$entityId] = true;
+        } else {
+            unset($this->far[$entityId]);
+        }
+    }
+
+    /**
+     * Bulk form of {@see setEntityTier()} - the entry point for an
+     * {@see \PHPolygon\Component\ActivityRegion}'s whole entity-id set.
+     *
+     * @param iterable<int> $entityIds
+     */
+    public function setEntitiesTier(iterable $entityIds, ActivityTier $tier): void
+    {
+        foreach ($entityIds as $entityId) {
+            $this->setEntityTier($entityId, $tier);
+        }
+    }
+
+    public function isFar(int $entityId): bool
+    {
+        return isset($this->far[$entityId]);
+    }
+
+    /**
+     * Visible/Near collapse to Visible here - see {@see setEntityTier()} on
+     * why the World level cannot distinguish them.
+     */
+    public function entityTier(int $entityId): ActivityTier
+    {
+        if ($this->isDormant($entityId)) {
+            return ActivityTier::Dormant;
+        }
+        if ($this->isFar($entityId)) {
+            return ActivityTier::Far;
+        }
+        return ActivityTier::Visible;
+    }
+
+    /**
+     * Direct read access to a component pool FILTERED to Far-tier entities
+     * only - the entry point for a system whose {@see \PHPolygon\ECS\AbstractSystem::tierPolicy()}
+     * declares a far core and therefore wants to skip these ids in its own
+     * componentPool()/query() loop (that loop still sees them - see $far's
+     * docblock) and hand them to {@see \PHPolygon\Simulation\FarSimulationRunner}
+     * instead. Empty when nothing is Far. O(count($far)), not O(pool size).
+     *
+     * @param class-string<ComponentInterface> $componentClass
+     * @return array<int, ComponentInterface>
+     */
+    public function componentPoolFar(string $componentClass): array
+    {
+        if ($this->far === []) {
+            return [];
+        }
+        $pool = $this->components[$componentClass] ?? [];
+        $out = [];
+        foreach ($this->far as $id => $_) {
+            if (isset($pool[$id])) {
+                $out[$id] = $pool[$id];
+            }
+        }
+        return $out;
+    }
+
+    /**
+     * Registers a component class as passive: purely visual/bookkeeping data
+     * with no live per-tick behaviour of its own (the plan's "Parken": rein
+     * visuelle unbewegte Teile dürfen je Tick nichts kosten"). This is
+     * currently a REGISTRY ONLY - {@see ComponentInterface::onUpdate()} is
+     * not actually invoked anywhere in the engine's own loop (every system
+     * reads components directly instead), so there is no per-tick callback
+     * for a passive class to skip yet. Flagged as a stub ahead of whatever
+     * future mechanism (serialization, replication, a generic per-component
+     * tick) needs this distinction - same treatment as
+     * {@see \PHPolygon\Visibility\VisibilityService::tierAt()}'s Phase-4 stub
+     * in Phase 2.
+     *
+     * @param class-string<ComponentInterface> $componentClass
+     */
+    public function registerPassiveComponent(string $componentClass): void
+    {
+        $this->passiveComponents[$componentClass] = true;
+    }
+
+    /** @param class-string<ComponentInterface> $componentClass */
+    public function isPassiveComponent(string $componentClass): bool
+    {
+        return isset($this->passiveComponents[$componentClass]);
+    }
+
     // --- Queries ---
 
     /**
@@ -583,6 +727,7 @@ class World
         $this->entityCache = [];
         $this->dormantComponents = [];
         $this->dormant = [];
+        $this->far = [];
 
         // Give every system a chance to drop per-entity-id caches. Without this
         // hook, caches keyed on int ids associate stale state with whichever

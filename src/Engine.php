@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace PHPolygon;
 
+use PHPolygon\Activity\ActivityService;
 use PHPolygon\Audio\AudioManager;
 use PHPolygon\Audio\GLFWAudioBackend;
 use PHPolygon\Audio\VioAudioBackend;
@@ -66,10 +67,29 @@ use PHPolygon\Thread\RuntimePool;
 use PHPolygon\Thread\ThreadScheduler;
 use PHPolygon\Thread\ThreadSchedulerFactory;
 use PHPolygon\UI\PerfOverlay;
+use PHPolygon\Visibility\VisibilityService;
 
 class Engine
 {
     public readonly World $world;
+
+    /**
+     * The engine's own answer to "what is in the view this frame" for
+     * $world - see the class docblock on {@see VisibilityService}. The same
+     * instance Renderer3DSystem resolves via VisibilityService::forWorld()
+     * for this World, so a game can query it directly (sees(), testSphere(),
+     * tierAt()) without going through the renderer.
+     */
+    public readonly VisibilityService $visibility;
+
+    /**
+     * `$engine->activity` - Phase 4's activity-tier facade (tier-change
+     * observers, forced-awake regions; see {@see ActivityService}). Always
+     * present but entirely inert on its own: nothing happens unless a game
+     * also constructs an {@see \PHPolygon\Activity\ActivitySystem} with this
+     * instance and registers it - the engine never does that automatically.
+     */
+    public readonly ActivityService $activity;
 
     // Game-authoritative editor sync (opt-in via enableEditorSync()).
     private ?string $editorSyncPath = null;
@@ -188,6 +208,8 @@ class Engine
         self::log('Extensions: vio=' . (extension_loaded('vio') ? 'yes' : 'no') . ', glfw=' . (extension_loaded('glfw') ? 'yes' : 'no') . ', opengl=' . (extension_loaded('opengl') ? 'yes' : 'no'));
 
         $this->world = new World();
+        $this->visibility = VisibilityService::forWorld($this->world);
+        $this->activity = new ActivityService();
         $this->input = $config->input ?? ($this->useVio ? new VioInput() : new Input());
         $this->events = new EventDispatcher();
         $this->clock = new Clock();

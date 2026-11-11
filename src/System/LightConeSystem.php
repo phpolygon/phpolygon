@@ -11,10 +11,10 @@ use PHPolygon\ECS\AbstractSystem;
 use PHPolygon\ECS\World;
 use PHPolygon\Rendering\Command\DrawLightCone;
 use PHPolygon\Rendering\Command\SetCamera;
-use PHPolygon\Rendering\Frustum;
 use PHPolygon\Rendering\LightCones;
 use PHPolygon\Rendering\RenderCommandList;
 use PHPolygon\Rendering\ScreenProjection;
+use PHPolygon\Visibility\VisibilityService;
 
 /**
  * Emits a {@see DrawLightCone} for every {@see LightCone} whose {@see SpotLight} is lit
@@ -48,14 +48,22 @@ class LightConeSystem extends AbstractSystem
     }
 
     /**
-     * The beams $camera sees, nearest first.
+     * The beams $camera sees, nearest first. Classifies VisibilityService
+     * against $camera directly (not derived from a RenderCommandList - this
+     * is a public static entry point several tests and a benchmark call
+     * with their own camera, not only render()) - the one cull spot, Phase 3
+     * of the visibility plan. A cheap memo hit when another consumer
+     * (Camera3DSystem, GrassSystem, ...) already classified the SAME camera
+     * this frame; testSphere() already returns true (never culled) with
+     * PHPOLYGON_NO_CULL=1, so that env check is gone from here too.
      *
      * @return list<DrawLightCone>
      */
     public static function cones(World $world, SetCamera $camera): array
     {
         $eye = ScreenProjection::cameraPosition($camera->viewMatrix);
-        $planes = getenv('PHPOLYGON_NO_CULL') === '1' ? null : Frustum::planes($camera->projectionMatrix, $camera->viewMatrix);
+        $visibility = VisibilityService::forWorld($world);
+        $visibility->beginFrame($camera->viewMatrix, $camera->projectionMatrix);
         $found = [];
         foreach ($world->query(LightCone::class, SpotLight::class, Transform3D::class) as $entity) {
             $cone = $entity->get(LightCone::class);
@@ -68,7 +76,7 @@ class LightConeSystem extends AbstractSystem
             $length = $light->range * min(1.0, $cone->length);
             $angle = min($light->angle, LightCones::MAX_ANGLE);
             [$centre, $radius] = LightCones::boundingSphere($apex, $light->direction, $angle, $length);
-            if ($planes !== null && Frustum::sphereOutside($planes, $centre->x, $centre->y, $centre->z, $radius)) {
+            if (!$visibility->testSphere($centre->x, $centre->y, $centre->z, $radius)) {
                 continue;
             }
             $distance = max(0.0, $centre->sub($eye)->length() - $radius);

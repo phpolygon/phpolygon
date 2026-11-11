@@ -469,4 +469,42 @@ class Transform3DSystemTest extends TestCase
         $world->update(0.016);
         $this->assertSame([$b->id], $system->movedThisTick());
     }
+
+    /**
+     * Unlike movedThisTick() (reset every update() call), drainMovedSinceLastDrain()
+     * accumulates across several update() calls and is only cleared by its
+     * own call - GameLoop::runPipelined() can run more than one fixed tick
+     * before the next render, so a consumer that drains once per rendered
+     * frame must not lose a mover from an earlier tick in that frame.
+     */
+    public function testDrainMovedSinceLastDrainAccumulatesAcrossTicks(): void
+    {
+        $world = new World();
+        $system = new Transform3DSystem();
+        $world->addSystem($system);
+
+        $a = $world->createEntity();
+        $at = new Transform3D(new Vec3(0.0, 0.0, 0.0));
+        $a->attach($at);
+        $b = $world->createEntity();
+        $bt = new Transform3D(new Vec3(1.0, 0.0, 0.0));
+        $b->attach($bt);
+
+        // First tick: both freshly attached - drain it so the next assertions
+        // only see moves caused by the two ticks below.
+        $world->update(0.016);
+        $system->drainMovedSinceLastDrain();
+
+        // Two ticks run before anything drains - simulating a render that
+        // falls behind and GameLoop::runPipelined() catching up with more
+        // than one fixed-timestep update() before the next render.
+        $at->position = new Vec3(5.0, 0.0, 0.0);
+        $world->update(0.016);
+        $bt->position = new Vec3(9.0, 0.0, 0.0);
+        $world->update(0.016);
+
+        $this->assertEqualsCanonicalizing([$a->id, $b->id], $system->drainMovedSinceLastDrain());
+        // Drained - nothing left until something moves again.
+        $this->assertSame([], $system->drainMovedSinceLastDrain());
+    }
 }

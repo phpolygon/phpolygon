@@ -212,5 +212,21 @@ class EngineConfig
          * engine reads no gamepads itself, so this polling is extra work.
          */
         public readonly bool $logGamepads = false,
+        /**
+         * Overrides for Phase 4 activity-tier radii (the plan's decision 4):
+         * null keeps {@see \PHPolygon\Activity\ActivitySystem}'s own defaults
+         * ({@see \PHPolygon\Activity\ActivitySystem::DEFAULT_NEAR_RADIUS} = 64 m).
+         * The engine never constructs an ActivitySystem itself (opt-in, like
+         * every other render-phase system) - a game that wants the override
+         * passes it through explicitly, e.g.
+         * `new ActivitySystem($engine->activity, nearRadius: $config->activityNearRadius ?? ActivitySystem::DEFAULT_NEAR_RADIUS)`.
+         */
+        public readonly ?float $activityNearRadius = null,
+        /**
+         * Far radius = GraphicsSettings::$viewDistance x this multiplier
+         * (the plan's decision 4); null keeps
+         * {@see \PHPolygon\Activity\ActivitySystem::DEFAULT_FAR_RADIUS_MULTIPLIER} (2.0).
+         */
+        public readonly ?float $activityFarRadiusMultiplier = null,
     ) {}
 }

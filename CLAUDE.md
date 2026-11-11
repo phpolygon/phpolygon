@@ -893,12 +893,15 @@ components on the same entity.
 | `Renderer3DSystem` | Collects `MeshRenderer` + `Transform3D`, builds `RenderCommandList`, flushes |
 
 `Renderer3DSystem` culling and selection (`Renderer3DSystemCullingTest`): the camera position is the
-inverse view of the queued `SetCamera`; frustum radii use the world-matrix scale (parents included);
-the coarse 256 m bin cull is trusted only while an entity still has the `worldMatrix` instance it was
-binned with (movers fall through to the sphere test); `MeshRenderer::$castShadows` travels as
-`DrawMesh::$castShadows` into the shadow pass. Point and spot lights whose influence sphere misses the
-frustum take no slot; the rest rank by the camera's distance to the sphere (0 inside), then to the
-centre, capped at `MAX_POINT_LIGHTS` / `MAX_SPOT_LIGHTS`.
+inverse view of the queued `SetCamera`; frustum radii use the world-matrix scale (parents included).
+Frustum membership for every `MeshRenderer`+`Transform3D` entity comes from
+`VisibilityService::visibleEntities()` (see "VisibilityService / SpatialIndex" below), not a local bin
+cull - a separate screen-size LOD drop still runs locally in the draw loop (`$lodNearDistance`/
+`$minScreenRatio`, the mesh's own bounding sphere via `MeshBounds`). `MeshRenderer::$castShadows`
+travels as `DrawMesh::$castShadows` into the shadow pass. Point and spot lights whose influence sphere
+misses the frustum take no slot; the rest rank by the camera's distance to the sphere (0 inside), then
+to the centre, capped at `MAX_POINT_LIGHTS` / `MAX_SPOT_LIGHTS` - their own frustum planes
+(`Renderer3DSystem::activeSetCamera()`), independent of VisibilityService.
 
 Static instanced batches (`DrawMeshInstanced::$isStatic`) are cached by `VioRenderer3D` under
 `$staticKey` (or mesh + shader + material). A Mat4 batch is re-uploaded when its count or first/last
@@ -956,11 +959,16 @@ static caster every frame regardless of range (`collectRayTracedScene()`). Light
 culled one layer up, before they reach the renderer (`LightConeSystem::cones()` tests each cone's own
 bounding sphere against the camera frustum and caps at `MAX_CONES` nearest).
 
-`Renderer3DSystem` reads the `MeshRenderer` and `Transform3D` component pools directly (same order as
-`query(MeshRenderer, Transform3D)`): thousands of hidden renderers (parts drawn through an instanced
-batch) cost a pool lookup each, not a query step. `Transform3DSystem` skips dormant entities -
-dormant roots and dormant children with their subtrees; a dormant child whose ancestor moved while it
-slept is recomputed on its first awake tick (its world matrix may be stale while it sleeps).
+`Renderer3DSystem` iterates `VisibilityService::visibleEntities()` - grid-cell order, not the
+`query(MeshRenderer, Transform3D)` pool order it used before Phase 2 of the visibility plan - and reads
+the `MeshRenderer`/`Transform3D` component pools directly by id for each: cheaper than the query's
+generator/Entity-wrapper overhead once a scene holds thousands of hidden renderers (parts drawn through
+an instanced batch). `Transform3DSystem` skips dormant entities - dormant roots and dormant children
+with their subtrees; a dormant child whose ancestor moved while it slept is recomputed on its first
+awake tick (its world matrix may be stale while it sleeps). `World::setEntityDormant()` fires no
+attach/detach event, so `VisibilityService` cannot exclude a dormant entity from its SpatialIndex
+incrementally - `visibleEntities()`/`isVisible()` filter it at READ time via `World::isDormant()`
+instead.
 
 `Transform3DSystem` does NOT walk the whole `Transform3D` pool every tick (Phase 1 of the
 visibility/activity-tier plan, `feat/transform-active-set` branch off v0.103.0, 2026-11-11):
@@ -978,9 +986,407 @@ entity's `worldMatrix` instance never changes - the identity trick other code re
 New API: `World::observe(class, onAttach, onDetach)` for incremental per-component-class indexes
 (fires from `attachComponent()`/`detachComponent()` AND from `destroyEntity()`'s/`clear()`'s own
 teardown, so an observer never misses a component leaving); `Transform3DSystem::movedThisTick():
-list<int>` - entity ids whose world matrix was rebuilt this tick, for a future spatial index to
-update incrementally instead of re-deriving visibility from scratch every frame (Phase 2, not built
-yet).
+list<int>` - entity ids whose world matrix was rebuilt the LAST `update()` call only (reset every tick,
+`Transform3DSystemTest::testMovedThisTickContent`); `Transform3DSystem::drainMovedSinceLastDrain():
+list<int>` - the same ids ACCUMULATED across possibly several fixed-timestep `update()` calls per
+rendered frame (`GameLoop::runPipelined()` can run more than one before the next render) and cleared
+only by its own call - what `VisibilityService` actually drains, once per `beginFrame()`
+(`testDrainMovedSinceLastDrainAccumulatesAcrossTicks`).
+
+### VisibilityService / SpatialIndex (Phase 2 of the visibility/activity-tier plan, 2026-11-11)
+
+`PHPolygon\Visibility\VisibilityService`, resolved per `World` via `VisibilityService::forWorld($world)`
+(one instance per `World` - a static `WeakMap<World, VisibilityService>`, so both `$engine->visibility`
+and `Renderer3DSystem` - which many tests construct standalone, without an Engine - resolve the SAME
+instance for a given World with no required constructor wiring on either side) replaces
+`Renderer3DSystem`'s former 256 m bin cull (rebuilt every 30 frames) and its full `MeshRenderer` pool
+scan.
+
+Holds a `PHPolygon\Visibility\SpatialIndex`: an XZ grid, 32 m cells (`SpatialIndex::CELL_SIZE`), flat
+per-cell handle sets - no periodic rebuild, maintained only by `register()`/`update()`/`remove()` calls
+driven from events:
+- `World::observe()` on `Transform3D` and `MeshRenderer` attach/detach (either order) registers/removes
+  the entry for a MeshRenderer+Transform3D pair;
+- `MeshRenderer`'s `$visible`/`$meshId` PHP 8.4 hooked properties mark a `MeshRendererChangeQueue`
+  (mirrors `Transform3D`'s `TransformDirtyQueue`/hooks exactly) - `$visible = false` removes the entry,
+  back to `true` re-adds it, a `$meshId` change re-derives the bounding sphere;
+- `Transform3DSystem::drainMovedSinceLastDrain()`, if a `Transform3DSystem` is registered on the World
+  (found via `World::getSystems()`, no required wiring) - a moved entry gets a fresh sphere the same
+  frame it moves, not after a rebuild delay.
+
+`beginFrame($view, $projection)` (called from `Renderer3DSystem::renderCommands()`, inside the
+`render3d.build_commands` profiler span, under its own nested `render3d.visibility`) classifies every
+occupied cell against the frustum into OUTSIDE / INSIDE / INTERSECTED (`SpatialIndex::classify()`, the
+Lengyel AABB-vs-plane test per cell, inflated by the cell's largest member radius and real Y range so a
+large object - e.g. a kilometre-wide water plane - registered near one cell's centre does not make the
+whole cell look only 32 m wide): INSIDE cells contribute every member without a further test,
+INTERSECTED cells run the exact sphere test per member. A mesh id not yet in `MeshRegistry`
+(`MeshBounds::worldSphere()` returns null) registers as `unbounded` - excluded from every cell's bounds
+and never culled, upgraded once its `meshId` changes to a known one. `null` for $view/$projection (no
+active camera) or `PHPOLYGON_NO_CULL=1` disables classification - every registered, non-dormant entry is
+visible, the same diagnostic switch `Renderer3DSystem`'s own light culling already honoured.
+
+API: `visibleEntities()` (what `Renderer3DSystem` iterates - dormant entities excluded at read time, see
+above), `isVisible(handle)`, `sees(center, radius, ?maxDistance)` and `testSphere(x, y, z, radius)` (ad
+hoc queries against the current frame's camera, independent of the index), `frame(): ?ViewVolume` (the
+raw view/projection/planes/eye, for a future consumer that needs them directly), `tierAt(x, z): bool` (a
+stub ahead of Phase 4's real `ActivityTier` enum - just "is this cell's classification OUTSIDE or not"),
+and direct `register()`/`update()`/`remove()` on `index()` for a producer that isn't `World`-driven
+(reserved for Phase 3's batches/emitters/lights - entries already carry `kind`/`owner`/`castsShadow`/
+`alwaysVisible` so that phase does not reshape them again).
+
+### Phase 3 of the visibility plan (2026-11-11): one cull spot, shadow casters, fog cap
+
+`VisibilityService::beginFrameFrom(World $world, RenderCommandList $commands)` derives `beginFrame()`'s
+inputs itself - the most recent `SetCamera`/`SetFog` and the first lit `DirectionalLight` (one sun drives
+shadows, the same assumption `VioRenderer3D`'s own shadow pass makes) - and is the entry point every
+render-phase system now calls first: `Camera3DSystem` (right after it pushes `SetCamera`, since it is the
+conventional first render-phase system), `GrassSystem`, `FoliageInstanceSystem`, `ParticleSystem` and
+`Renderer3DSystem`. `LightConeSystem::cones(World, SetCamera)` stays a public static entry point several
+tests and a benchmark call directly with their own camera, so it calls `beginFrame()` with that camera's
+matrices itself rather than deriving from a command list. Registration order no longer matters:
+`beginFrame()` memoizes on its own inputs (camera matrices BY INSTANCE IDENTITY - the engine's existing
+convention, see `Transform3DSystem`'s worldMatrix identity trick - plus fog-far, light direction and
+`SpatialIndex::version()`, a counter bumped on every `register()`/`remove()`), so the FIRST caller each
+frame does the real classification and every later caller with the same inputs is a no-op
+(`VisibilityService::memoStats()`: `viewHits`/`viewMisses`/`casterHits`/`casterMisses`). The six systems
+the plan's "Ist-Zustand" named as each computing its own frustum (`Renderer3DSystem`, `ParticleSystem`,
+`LightConeSystem`, `FoliageInstanceSystem`, `GrassSystem`, `Motion/MotionView.php`) now all go through
+`VisibilityService::testSphere()`/`sees()` instead - `MotionView` holds a `PHPolygon\Rendering\ViewVolume`
+(the same value object `frame()` returns) rather than a raw planes array, but deliberately does NOT read a
+live `VisibilityService`: its whole purpose is staying frozen at the PREVIOUS frame's camera, including
+through a frame where `capture()` sees no `SetCamera` at all - a live service would answer null then and
+wrongly unfreeze everything (see `MotionViewTest`).
+
+Shadow casters: `shadowOnlyEntities()` - entities outside `visibleEntities()` (dormant excluded, same as
+the visible set) that still cast a shadow. Classified the same way as the camera - `SpatialIndex::classify()`
+against four side planes of a prism along the sun's direction, no near/far ("a tall caster toward the sun
+always stays in"), from `PHPolygon\Rendering\SunCasterVolume::planes()` (an extraction of
+`VioRenderer3D`'s private `computeLightProjView()`/`sunCasterVolume()` - texel-snapped centre, headroom
+backoff, the `abs(dy) > 0.999` up-vector switch near the poles - `VioRenderer3D::sunCasterVolume()` now
+delegates here with its own `CASCADE_ORTHO_SIZES`/`SHADOW_MAP_RESOLUTION`; `SunCasterVolumeTest` hand-
+derives the expected planes independently to guard the extraction). `setMinShadowCasterRadius()` sieves
+casters below a world-metre threshold - an absolute-size approximation of the plan's "Texel-Schwelle für
+kleine Werfer" (a true projected-texel measure needs the renderer's actual cascade size/resolution, which
+this engine-level service does not own); 0.0 (default) never sieves - a game with its own sourced
+threshold (code-rescue's `InstancedSendPolicy::SHADOW_MIN_HEIGHT`) sets it, the engine guesses nothing.
+`Renderer3DSystem` emits every `shadowOnlyEntities()` id as an extra `DrawMesh(shadowOnly: true)` - always
+single, unbatched draws (never merged into `$batches`, so a shadow-only instance can never end up inside a
+visible batch's `DrawMeshInstanced`, which has no flag of its own), not tracked in `$lastDrawnMatrix` (the
+shadow pass reads only `modelMatrix`, never `prevModelMatrix`). `VioRenderer3D::withoutShadowOnlyDraws()`
+drops them from `$viewCommands` (the list "the camera's passes" - G-buffer, prepass, opaque, meshlets,
+transparent - draw) right after the existing `InstancedBatchCuller::visible()` filter; `collectShadowDraws()`
+(the shadow pass) needs no change at all - it already reads the full, unfiltered `$commands`, which is
+why an off-screen caster never got a shadow before: it simply never got any `DrawMesh` command at all, not
+because the shadow pass filtered it out. Minimap, planar reflection and the ray-traced scene collector
+read the full list too and are correctly unaffected: a shadow-only draw may legitimately be visible from
+THEIR viewpoint even though it is not from the main camera's (`Renderer3DSystemShadowOnlyTest`).
+
+Fog cap: `beginFrame()`'s `$fogFar` (from the active `SetFog::$far`, no cap when there is none - the
+engine applies no game-specific far-plane/view-distance logic of its own, unlike code-rescue's own
+`RenderDistanceSystem`) excludes an entry from `visibleEntities()`/`isVisible()` once its surface distance
+from the camera exceeds it - never applied to `shadowOnlyEntities()` (a caster beyond the fog still
+shadows what is in front of it).
+
+`OcclusionSource` (`setOcclusionSource()`): an optional occluder test wired into the classification's
+INTERSECTED-cell path, same place as the fog cap. No concrete implementation ships with the engine - like
+`tierAt()`'s Phase-4 stub, this only wires the call site in.
+
+`InstancedBatchCuller` is UNCHANGED (the plan's "Nicht tun" forbids redesigning the batch bounds, and
+`VioRenderer3D` - which owns it - has no ECS `World` to resolve `VisibilityService::forWorld()` with, and
+culls views the service does not classify at all: the mirrored reflection, the jittered projection, the
+minimap, the shadow prisms). `InstancedBatchCullerTest::testAgreesWithVisibilityServiceTestSphereForTheSameCameraAndSpheres()`
+confirms the two independent cull paths agree for the same camera and sphere, which is what the plan
+actually asks for ("ihr Test ruft später testSphere()/frame()").
+
+Measured 2026-11-11 (PHP 8.5.5 CLI, this sandbox, `NullRenderer3D`, `Renderer3DSystem` in isolation - no
+other Phase-3 consumer present, so the benchmark cannot show the memo's actual target - six systems
+sharing ONE real classification instead of each computing their own): with a FRESH `SetCamera`/`Mat4`
+instance every frame (a moving camera, forcing a memo miss every single frame - the realistic case; an
+earlier run that reused one `SetCamera` object for 300 frames understated this by making every frame but
+the first a near-zero-cost memo hit, the "a cache can make a measurement meaningless" trap), 6,150 mixed
+hidden/off-screen/on-screen entities, 300 frames, 3 runs each: `render3d.build_commands` went from
+~3.3-3.4 ms (Phase 2) to ~3.7-4.3 ms (Phase 3) - a measured ~10-25% REGRESSION in this system alone, from
+`beginFrameFrom()`'s own command-list/World derivation plus the new per-candidate fog/occlusion branch in
+`classifyView()`'s INTERSECTED path. With a directional light active, `shadowOnlyEntities()` added 111
+(sun straight down) to 553 (grazing sun) draws in this scenario - the count swings with sun elevation
+because the caster prism has no near/far plane, as expected; with `SetFog` active (80 m far),
+`render3d.build_commands` dropped sharply (fewer entities survive the cap) - a real win tied to that
+scenario, not a general Phase 3 effect. The multi-system benefit the plan actually targets (five fewer
+redundant `Frustum::planes()` computations when `GrassSystem`/`FoliageInstanceSystem`/`LightConeSystem`/
+`ParticleSystem` are also present) is NOT measured here - building that scenario was out of scope for this
+benchmark; reported as open, not claimed.
+
+### Phase 4 of the visibility plan (2026-11-11): activity tiers, regions, the far-simulation substrate
+
+`PHPolygon\Activity\ActivityTier` (`Visible`/`Near`/`Far`/`Dormant`). An entity never acquires any tier
+beyond Visible unless a game attaches `PHPolygon\Component\Relevance` (`mode: Always|Near|Auto`,
+`radius`) to it AND registers `PHPolygon\Activity\ActivitySystem` - the engine never does either on its
+own, satisfying the plan's explicit "Standard bleibt jeder Tick, alle": an unmodified system must not
+silently start skipping an entity just because tiers exist in the codebase now.
+
+`World`'s part is deliberately thin - Far does NOT remove an entity from `componentPool()`/`query()` the
+way Dormant does (that was the design this phase almost got wrong before review caught it): `$far` is a
+membership flag only, `componentPoolFar(class)` is a FILTERED VIEW for a system that wants to skip these
+ids itself, never the only way to reach them. `setEntityTier()`/`entityTier()`/`isFar()` mirror
+`setEntityDormant()`/`isDormant()`'s existing shape and do NOT walk a Transform hierarchy either - same
+"the CALLER toggles whole subtrees" contract. `entityTier()` can only ever answer Visible, Far or
+Dormant - Near has no World-level storage distinction from Visible (nothing there ever treats them
+differently); `ActivitySystem` tracks the Near/Visible split itself for its own hysteresis.
+`World::registerPassiveComponent()`/`isPassiveComponent()` is a pure REGISTRY stub -
+`ComponentInterface::onUpdate()` is not actually invoked anywhere in the engine's own loop (checked before
+building this), so there is no per-tick callback for a passive class to skip yet; flagged, not guessed.
+
+`AbstractSystem::tierPolicy(): PHPolygon\Activity\TierPolicy` defaults to `everyTick()` and is NOT read by
+`World::update()`/any system's own loop - only by (not yet built) Phase 6 tooling deciding whether to hand
+a system's Far entities to a far core instead of ticking them per frame. Overriding it today changes
+nothing by itself; flagged the same way `VisibilityService::tierAt()` was flagged ahead of need in Phase 2.
+`VisibilityService::tierAt()` itself is UNCHANGED (still the Phase 2 `bool` stub, "is this cell's
+classification outside or not") - upgrading its return type to `ActivityTier` was suggested during review
+but would require either duplicating `ActivitySystem`'s distance logic inside `VisibilityService` or an
+inverted dependency (Visibility depending on Activity, which already depends on Visibility); left as a
+known gap rather than guessed at.
+
+`ActivitySystem` (opt-in, constructed with `PHPolygon\Activity\ActivityService` + an optional live
+view-distance closure + near-radius/far-multiplier overrides - NOT new required `EngineConfig` fields;
+`EngineConfig::$activityNearRadius`/`$activityFarRadiusMultiplier` exist as `?float` overrides a game
+reads and passes through itself, since the engine never constructs an `ActivitySystem` automatically) is
+the only thing that ever calls `setEntityTier()` by distance. Its `update()`:
+- reads the eye from `VisibilityService::forWorld($world)->frame()?->cameraPosition`, keeping the LAST
+  known one when there is no camera this tick (the same convention `MotionView` already uses) - with no
+  eye ever seen, nothing is touched;
+- NEVER assigns Dormant to an entity `VisibilityService::isVisible()` currently considers visible (capped
+  at Far instead) - the plan's own "Nicht tun: Dormanz nicht gegen Renderkosten", enforced here rather
+  than left to the caller; the one-frame lag between "was visible last frame" and "is visible now" mirrors
+  `MotionView`'s own lag for the opposite reason;
+- applies a hysteresis band (10% of each radius, a DESIGN VALUE) at both the near and far boundaries,
+  directionally aware (which threshold variant applies depends on the entity's PREVIOUS tier), so
+  something sitting right on a boundary does not flip every tick;
+- applies the computed tier to the WHOLE `Transform3D` subtree of the `Relevance`-carrying root, mirroring
+  `setEntityDormant()`'s own documented whole-subtree requirement;
+- calls `ActivityService::notify()` once per REAL change only (idempotent re-application is silent), and
+  `VisibilityService::invalidate()` whenever Dormant is entered or left (see the dormancy/memo fix below).
+
+`RelevanceMode::Always` is never touched; `::Near` never goes below Far (capped, like the visible-entity
+guard); `::Auto` is the full range. `PHPolygon\Component\ActivityRegion` (`tag`, `wakeRadius`, reserved
+`boundsMin`/`boundsMax`) groups entities `ActivityService::requestAwake(tag, reason)`/`release(tag, reason)`
+can force to Near regardless of distance, reference-counted by `$reason` (two independent callers both
+holding a region awake don't fight over when to release it) - the plan's "Vorab-Wecken" is `$wakeRadius`,
+a margin ActivitySystem treats the entity as that much closer than it really is. Phase 4 ships TAG-based
+grouping only; `$boundsMin`/`$boundsMax` are stored but NOT read by `ActivitySystem` - spatial region
+membership is an open gap, flagged rather than guessed (code-rescue's own `RegionDormancySystem`, read
+for reference, also only needs tag/id-list grouping, not spatial bounds, for its current use).
+
+A latent Phase 3 bug the Phase 4 work surfaced in review before it shipped: `World::setEntityDormant()`
+fires no event and does not bump `SpatialIndex::version()`, so with a camera held still across
+`beginFrame()` calls, `shadowOnlyEntities()` used to bake its dormancy check into `$shadowOnlySet` at
+CLASSIFICATION time (only re-run on a memo miss) instead of filtering fresh at read time the way
+`visibleEntities()` already did - a dormant entity could keep getting shadow-only draws, and a woken
+off-screen caster could never cast again. Fixed: `shadowOnlyEntities()` now filters dormancy fresh on
+every call (mirroring `visibleEntities()`), and `VisibilityService::invalidate()` forces the next
+`beginFrame()` to reclassify from scratch - `ActivitySystem` calls it on every Dormant transition
+(`VisibilityServiceDormancyMemoTest`, written to fail against the old behaviour first).
+
+`PHPolygon\Simulation\{SimulationKernel,SimulationTransport,InlineTransport,FarSimulationRunner}` - the
+substrate Phase 6 will put a threaded transport behind, built here running everything inline on the main
+thread (the plan's "wird zuerst gebaut"). A kernel operates on PER-ENTITY scalar records, not whole-system
+state (the plan's merge-order wording - "Tick, Entity-Id, Folgenummer" - literally names entity ids):
+`export(World, id)`/`import(World, id, record)` touch the World once each, on a Near->Far handover and a
+Far->Near takeback; `step(records, dt)` is PURE (no World, no global RNG - "Zufall aus dem Datensatz" means
+any randomness lives in the record itself, e.g. a carried seed the kernel advances) and must treat every
+record independently (the result for one id must not depend on which others are present in the same
+call - `FarSimulationRunner::takeback()` relies on this to flush one record alone). `InlineTransport`
+sorts records into ascending id order before calling `step()` - the plan's determinism requirement, with
+nothing concurrent to merge yet. `FarSimulationRunner` fixes the far clock at 10 Hz (`FIXED_HZ`/`FIXED_DT`,
+the plan's decision 7) via a `GameLoop`-style accumulator per kernel name, capped at `MAX_STEPS_PER_TICK`
+(4, a design value) whole steps per `tick()` call so a stall defers rather than bursts - the DEFERRED
+remainder is never dropped, only delayed to a later `tick()` call. `takeback()` flushes every step still
+owed (via the SAME epsilon-tolerant boundary check `tick()`'s own loop uses - repeated float subtraction of
+0.1 s left the accumulator a hair below an exact multiple often enough that the first version of this
+class's OWN determinism test caught a real missing-step bug from it) before `import()`, WITHOUT
+decrementing the shared accumulator (the same owed time still reaches the record's batch siblings on a
+later `tick()` call). Result: the same handover/takeback id sequence and the same TOTAL elapsed simulated
+time import an identical record regardless of how `tick()` calls were chunked or budget-paced
+(`FarSimulationRunnerTest::testSameTotalElapsedTimeImportsAnIdenticalRecordRegardlessOfChunking`) - the
+plan's decision 6 ("gleiche Übergabefolge ergibt gleichen Zustand", not required to be bit-identical with
+real time, which this never claims either). NOT wired to `ActivitySystem` automatically - Fern-Simulation
+is voluntary per system (decision 5): a system registers its own kernel and listens to
+`ActivityService::addObserver()` itself to call `handover()`/`takeback()` for its own entities. No system
+in this engine registers one yet.
+
+`$engine->activity` (`PHPolygon\Activity\ActivityService`) is always present but fully inert until a game
+constructs an `ActivitySystem` with it - mirrors `$engine->visibility`'s always-present-but-inert-until-used
+shape from Phase 2.
+
+Measured 2026-11-11 (same sandbox and caveats as Phase 3's own numbers above - absolute figures vary
+session to session on this shared machine, only the relative comparison is load-bearing): the default
+path (no `ActivitySystem` registered) is unchanged from Phase 3's own moving-camera benchmark - nothing in
+`VisibilityService`'s or `Renderer3DSystem`'s hot path was touched beyond the dormancy-memo fix, which is
+a no-op scan when `$shadowOnlySet` is empty (no directional light). `ActivitySystem` itself, OPTED IN,
+5,000 `Relevance` entities spread over a 1 km square, 300 ticks, 3 runs: ~4.7-4.9 ms per tick - a real,
+non-trivial cost for a system that opted in (the same class of "naive full scan" cost `Transform3DSystem`
+started with before Phase 1's own optimisation - not addressed here, flagged as a future target). The
+plan's actual multi-system savings this phase enables (an opted-in system skipping its Far entities in
+favour of a 10 Hz far core) are NOT measured - no system in this engine has registered a
+`SimulationKernel` yet to show savings from.
+
+### Phase 6 of the visibility plan (2026-11-11): FarSimulationSubsystem in a thread
+
+Built directly on the hardened `ThreadScheduler` (Phase 5 of this plan, a separate branch merged in before
+this phase started: kept `parallel\Future`s instead of discarding them, `pollAll()`/`recvAll()` split and
+bounded instead of an unconditional blocking `Channel::recv()`, dead-worker detection, the `__log`/
+`__timings` side channel). `PHPolygon\Simulation\ChannelTransport implements SimulationTransport` is the
+threaded counterpart of Phase 4's `InlineTransport`; `PHPolygon\Simulation\FarSimulationSubsystem
+implements \PHPolygon\Thread\SubsystemInterface` is the bridge between the two unrelated abstractions -
+`SimulationKernel`'s per-entity-record contract (Phase 4) and `ThreadScheduler`'s whole-subsystem
+send/poll cycle (pre-existing). Carries only the kernel's class NAME (a string) and scalar records across
+the channel, never an object - "keine ECS-Objekte und kein voller Weltzustand über Kanäle", the same
+constraint Phase 4's per-entity records already satisfied for the inline case. A kernel used with
+`ChannelTransport` needs a no-argument constructor: the worker thread reconstructs a fresh instance per
+job from the class name alone (`new $kernelClass()`), the same way `ThreadScheduler::boot()` already
+instantiates every registered `SubsystemInterface`.
+
+`ThreadScheduler::register()`/`boot()` construct the `SubsystemInterface` themselves (`new
+$subsystemClass()`, no constructor arguments) - `ChannelTransport` cannot inject its own
+`FarSimulationSubsystem` instance, so its constructor resolves the ACTUAL registered one back out via
+`ThreadScheduler::getSubsystems()[$name]` instead (throws `InvalidArgumentException` if that name is not
+a booted `FarSimulationSubsystem`). `ChannelTransport::step()` stays SYNCHRONOUS from
+`FarSimulationRunner`'s point of view - `queueJob()`, then `sendAll()`+`pollAll($timeoutMicros)` (blocking,
+`ThreadScheduler::DEFAULT_POLL_TIMEOUT_US` by default - the SAME `parallel\Events` code path the engine
+log's own worker thread already runs in production on every ZTS platform including macOS ARM), then reads
+the result back and throws `RuntimeException` if the worker never answered. Passing `timeoutMicros: 0`
+switches to the OTHER `Events` path (non-blocking) the Phase 5 scheduler-hardening work itself flagged as
+the real open risk there, unexercised by any shipped code - `ChannelTransportTest::testChannelTransportThrowsWhenTheWorkerDoesNotAnswerInTime()`
+deliberately uses it to trigger the error path, but production code should not pass 0 here without
+separately verifying that platform. REQUIRES a `ThreadScheduler` with ONLY a `FarSimulationSubsystem`
+registered - `sendAll()`/`pollAll()` act on every registered subsystem, not one by name, so sharing the
+scheduler with an unrelated subsystem (AI, physics, audio) would send/poll that one too on every
+`step()` call here; a game wanting both gets a dedicated scheduler for far-simulation.
+
+`FarSimulationRunner::takebackAll(World $world)` (new) flushes and imports EVERY currently handed-over
+record across every registered kernel - the plan's "Snapshot beim Speichern": far-simulation state must
+reach a save file even while a record sits mid-flight in a worker thread. Needed no transport-specific
+code at all - `takeback()`'s existing flush already calls the kernel's TRANSPORT, not the kernel directly,
+and `ChannelTransport::step()` already blocks until the worker answers, exactly like `InlineTransport` has
+always done synchronously.
+
+The required parity (Phase 4's determinism contract, extended to the threaded transport): for the same
+records and dt, `InlineTransport` and `ChannelTransport` import an IDENTICAL state
+(`ChannelTransportTest::testInlineAndChannelTransportProduceAnIdenticalResultForTheSameInput()`,
+`testFarSimulationRunnerWithChannelTransportMatchesInlineOverSeveralTicks()` - the same `FarSimulationRunner`
+driving both transports for 7 ticks lands on the same record). All real-threading tests (this test class,
+mirroring `ThreadSchedulerHardeningTest`'s own pattern) require ZTS PHP with ext-parallel and keep the
+same orphaned-worker safety net in `tearDown()` - an unshut-down worker blocked on its `_in` channel's
+`recv()` can hang the whole PHPUnit process, not just the one test.
+
+Not wired to anything automatically: the plan's own wording ("Lohnt erst mit nennenswerter
+Fern-Simulation") is why this ships as scaffolding, not a default. No game system registers a
+`SimulationKernel` with either transport yet, so the real benefit (actual overlap with the main thread,
+once a kernel exists heavy enough to be worth it) stays unproven - not claimed here, exactly like Phase
+3's multi-system cull-sharing benefit and Phase 4's far-core savings were left unmeasured for the same
+reason (nothing to measure yet).
+
+Measured 2026-11-11 (same sandbox/caveats as the numbers already in this file): `InlineTransport::step()`
+vs `ChannelTransport::step()` for the SAME trivial kernel (50 records, `height += rate * dt`), 500 calls,
+2 runs - Inline ~0.006 ms/call, Channel ~15.1 ms/call, a measured ~2,400-2,500x overhead. This is the
+direct, quantified cost of one `parallel\Events`-bounded poll round trip per call, dwarfing anything a
+cheap kernel's own step() could possibly do - confirming the plan's "lohnt erst mit nennenswerter
+Fern-Simulation" is not a hedge but an accurate description of where this transport actually pays off
+(a kernel whose own step() cost approaches or exceeds this overhead, stepped rarely enough - 10 Hz, not
+the main loop's 60 - that the per-step cost still nets out ahead of running it inline on the main thread).
+
+### Phase 6b of the visibility plan (2026-11-11): the ~15ms cause, and an async pipeline
+
+Two follow-ups to Phase 6, both requested after review: find the ACTUAL cause of the measured ~15ms/call
+`ChannelTransport::step()` overhead rather than guess at it, and add an async submit()/collect() pipeline
+so a far-tick does not pay that cost synchronously on the main thread.
+
+**Finding (1), corrected**: Phase 6's report attributed the ~15ms to `ThreadScheduler::pollOne()` calling
+`\parallel\Channel::open("{$name}_out")` by NAME on every poll instead of caching a handle - that
+attribution was WRONG, disproven by a direct discriminator (`open()` by name + plain blocking `recv()`,
+no `Events`: ~0.01ms/call, same as a cached handle). Root cause, isolated with discriminator benchmarks
+(not guessed): `ThreadScheduler::boot()` creates its `_in`/`_out` channels with `\parallel\Channel::Infinite`
+(buffered) - `send()` on a buffered channel returns immediately, without the worker having consumed it
+yet. `pollOne()`'s `\parallel\Events::poll()` then has to actually WAIT for the worker to wake up, notice
+the new input, compute, and send a reply - and that wait is bounded below by this Windows build's thread
+wake-up granularity, measured directly at ~14.6-16ms minimum (submit->ready latency distribution,
+100 samples: min 14.6ms, p50 16.1ms, p90 48.5ms, max 138.5ms - also showing a long, variable tail, not a
+flat constant). An UNBUFFERED `new \parallel\Channel()` (the control the reviewer's own CPU-only check
+used) makes `send()` itself block until the worker's `recv()` takes it - a rendezvous that leaves the two
+threads already synchronised by the time `send()` returns, so the following `poll()` usually wins the race
+in well under 1ms instead of waiting out a full wake-up cycle. `addFuture()` (always added by `pollOne()`
+when the worker is alive) contributes a smaller, independent cost on top even on an unbuffered channel
+(~7.4ms average over 200 calls - roughly half the calls paying something close to the same wake-up
+latency) - not chased down further; the buffered-channel effect alone already accounts for the full
+measured ~15ms (named-lookup-per-call, cached-handle, and anonymous-vs-named channels were all ruled out
+as NOT the cause - each measured ~15ms with a buffered channel regardless, and ~0.01-15ms depending only
+on buffered-vs-not). **Labelled as Windows-measured, 2026-11-11, this dev machine, PHP 8.5.5 ZTS CLI** -
+not verified on macOS or Linux, where thread wake-up granularity is expected to differ (an estimate, not a
+measurement, until run there). This is a property of `ThreadScheduler`'s own channel setup (shared by
+every subsystem, not specific to `FarSimulationSubsystem`/`ChannelTransport`) - reported here, not fixed:
+`src/Thread/ThreadScheduler.php` belongs to the scheduler-hardening branch, out of this phase's scope. A
+plausible fix (caching per-subsystem channel handles instead of `Channel::open()` by name would not help,
+per the discriminators above - the buffering itself is the cause) would be using a bounded/synchronous
+channel for `_in`, which has its own tradeoffs (a slow worker could then block `sendAll()`) not evaluated
+here - left for whoever owns that file next.
+
+**Async submit()/collect() (2)**: `SimulationTransport` gained `submit(kernel, records, steps, dt): mixed`
+/ `collect(token, wait: false): ?array` alongside the existing `step()` (kept, not replaced - still the
+default, see below). `FarSimulationRunner::register(..., async: true)` is the opt-in per kernel;
+`tick()`'s async branch (`tickAsync()`) keeps AT MOST one job in flight per kernel: tries a non-blocking
+`collect()` of any pending job first (merging its result, `MAX_STEPS_PER_TICK`-capped chained steps,
+same bounded-backlog spirit as sync mode), then, if nothing is in flight and time is owed, `submit()`s a
+new job covering up to `MAX_STEPS_PER_TICK` chained steps. The one-far-tick pipeline latency is enforced
+STRUCTURALLY by `tickAsync()` itself (never attempting a same-call `collect()` right after its own
+`submit()`) - NOT by `InlineTransport`, whose `submit()` still computes eagerly and would happily answer
+instantly if asked; it is simply never asked that soon. This is why async is opt-in rather than the new
+default: a kernel that will only ever run on `InlineTransport` has no reason to pay an artificial tick of
+latency gaining it nothing. `takeback()`/`takebackAll()` both now call a new private `drainPending()`
+first (blocking `collect(wait: true)`) - extended from the original request (which only named
+`takebackAll()`/the save path) to `takeback()` too, per review: a single Far->Near crossing mid-game can
+hit the exact same "job mid-flight" situation a save can.
+
+Merging a collected job's result only touches ids STILL present in `$this->records[$name]`
+(`FarSimulationRunner::mergeResult()`) - defensive, not currently exercised by any test: this class's own
+discipline (`takeback()` always drains the pending job BEFORE removing anything) means no sequence of its
+own public calls can currently leave a collected result pointing at an already-removed id. Kept anyway for
+a future caller that might not share that discipline; flagged honestly as unreachable dead code under
+today's call patterns rather than implied to be routinely tested.
+
+**Sharing caveat (new gap, surfaced not fixed)**: Phase 6's `FarSimulationSubsystem` already supported
+several kernels queueing jobs on ONE shared subsystem instance (via a caller-chosen job id) - safe under
+sync `step()` because each call fully resolves (send, receive, clear "outstanding") before the next
+kernel's call starts. Async `submit()`/`collect()` does NOT fully resolve before returning, so two async
+kernels sharing one `FarSimulationSubsystem`+`ThreadScheduler` can genuinely overlap in time - and
+`ThreadScheduler::sendAll()` silently skips a subsystem already "outstanding", so a second kernel's
+`submit()` can have its job parked in `FarSimulationSubsystem`'s internal queue and never actually sent
+while the first kernel's job is still in flight, which looks from that second kernel's side like a job
+that was accepted but will not answer. Not fixed (property of `ThreadScheduler`, out of scope here) -
+each kernel registered with `async: true` needs its OWN dedicated `FarSimulationSubsystem` instance, not
+shared with another async kernel, until the scheduler gains per-subsystem queueing.
+
+**macOS ARM flag, extended**: async `collect(wait: false)` always polls with `timeoutMicros: 0` - the
+genuinely non-blocking `Events` path Phase 5's own hardening flagged as the real open risk there
+(unexercised by any shipped code before this). Async stays opt-in and off by default for exactly this
+reason, same as Phase 6's `timeoutMicros: 0` constructor option already was - nothing exercises this path
+unless a kernel is explicitly registered with `async: true`.
+
+**Measured 2026-11-11 (same machine/caveats as above)**: does async actually avoid paying the ~15ms
+blocking-wait cost on the calling thread? `submit()` alone: ~0.027-0.029ms/call. `collect(wait: false)`
+called once per attempt, after a real 100ms gap (`FarSimulationRunner::FIXED_DT`'s own period) between
+submit and collect, 200 calls, 2 runs: ~0.29-0.30ms/call average (both the misses AND the hits are cheap -
+a non-blocking poll never pays the blocking wait). So yes: the MAIN THREAD's own cost per attempt dropped
+from ~15.2ms (sync `step()`) to ~0.3ms (async `submit()`+`collect()`), a genuine, measured win for what
+async was built to fix. The more surprising number: at exactly a 100ms gap, 105-106/200 attempts (~53%)
+still found the result NOT ready - inconsistent at first glance with the ~14.6-16ms minimum latency found
+above, until a direct submit->ready latency distribution (tight 1ms-interval polling instead of one check
+at a fixed point) showed a long, variable tail (p90 48.5ms, max 138.5ms) - meaning "ready by the next
+100ms far-tick" is NOT a reliable guarantee on this machine/build, only "ready eventually, bounded by
+nothing in particular". `tickAsync()`'s design handles this correctly (a miss just keeps accumulating and
+retries next tick(), nothing dropped or corrupted - the same chunking-tolerant accounting sync mode
+already had), but the EFFECTIVE latency a game observes is better described as "at least one far-tick,
+often two or more on this measured platform" than a hard one-tick guarantee - reported honestly rather
+than claiming the one-tick number the design targets is what was actually achieved every time.
 
 Measured 2026-11-11 (PHP 8.5.5 CLI, this repo's dev machine,
 `benchmarks/micro/System/Transform3DSystemBench.php`, `benchTenThousandStaticTick`/
@@ -2670,6 +3076,99 @@ one that does takes `phpolygon/multiplayer`.
 
 ---
 
+## Thread scheduler — subsystems in worker threads (`PHPolygon\Thread`)
+
+`ThreadScheduler` runs registered `SubsystemInterface` implementations each in
+their own `parallel\Runtime` thread (ZTS + ext-parallel only); `NullThreadScheduler`
+is the single-threaded fallback used everywhere else, picked by
+`ThreadSchedulerFactory::create()`. `Engine` holds either behind the
+`ThreadScheduler|NullThreadScheduler` union (`$engine->scheduler`) and only
+pipelines through `sendAll()`/`recvAll()` each tick when it is a real
+`ThreadScheduler` with at least one subsystem registered. **The engine itself
+registers none** (`AISubsystem` is empty, `PhysicsSubsystem`/`AudioSubsystem`/...
+exist but are not wired in) — a game reaches the scheduler through
+`$engine->scheduler` or the `Scheduler` facade (`$engine->scheduler->register(...)`)
+to use one.
+
+Engine's own tick is still the original lockstep: `sendAll()` then main-thread
+systems then `recvAll()`, every tick, no overlap into the next one. A healthy
+worker still blocks the main thread for up to `DEFAULT_POLL_TIMEOUT_US` (an
+unmeasured, deliberately generous constant, not a benchmarked value) on a
+tick where it is in sync; the asynchronous, non-blocking path described below
+only starts once a subsystem has missed one deadline. `pollAll(..., 0)` (the
+genuinely non-blocking call) has no caller inside the engine yet — it exists
+for a caller that wants to check a specific subsystem itself.
+
+Per subsystem, three states instead of a single blocking round trip:
+**in sync** (answered within the last poll's bound), **behind** (missed one —
+`sendAll()` stops queueing new input onto its `_in` channel while an answer is
+still outstanding, and `recvAll()` switches to a non-blocking check for it
+every later tick instead of paying the bound again — ticks spent this way
+drop their `dt`, nothing accumulates it; a future "far simulation" phase may
+need to), **dead** (its worker's kept `parallel\Future` resolved — with or
+without an exception, and a clean `return` from `threadEntry()` outside
+`shutdown()` counts too — detected by `source`, not `type`: a Future's own
+event is also `Read`-typed, measured directly against the installed
+extension). A dead subsystem is logged once and skipped by
+`sendAll()`/`pollAll()`/`recvAll()` from then on — no restart. None of this
+touches `AISubsystem`/`PhysicsSubsystem` themselves; only the scheduler
+around them got harder to kill.
+
+```php
+$scheduler->register('physics', PhysicsSubsystem::class);
+$scheduler->boot();
+$scheduler->sendAll($world, $dt);      // skips a dead or still-outstanding subsystem
+$scheduler->recvAll($world);           // the game loop's own entry point: bound if in sync, non-blocking if behind
+$scheduler->pollAll($world, $timeoutMicros); // explicit: always honours the given bound, even for a behind subsystem (0 = non-blocking)
+$scheduler->isSubsystemAlive('physics');
+$scheduler->getDeadSubsystems();
+```
+
+`parallel\Events::setTimeout()` takes microseconds, not milliseconds,
+confirmed by measurement against the installed extension (5 000 µs against a
+50 ms worker timed out; 1 000 000 µs against the same worker delivered) — not
+documented clearly upstream. `NullThreadScheduler` has no worker to go behind
+or die independently of the main thread: a throwing `compute()` there
+propagates exactly as before this hardening (deliberately NOT caught — see
+its class doc), and `isSubsystemAlive()`/`getDeadSubsystems()` exist only so
+code written against the union can call either scheduler without an
+`instanceof` check.
+
+**Side channel.** `compute()`'s returned deltas may carry `__log` (a list of
+`['text' => string, 'context' => array?, 'level' => 'info'|'warn'|'error'?]`)
+and `__timings` (section name → elapsed nanoseconds). Both schedulers strip
+them before `applyDeltas()` and forward them — `__log` to `Log` as
+`LogCategory::System` with `subsystem` added to the context, `__timings` via
+`PerfProfiler::record()` as `thread.<name>.<section>`. Both are optional;
+existing subsystems need no change. `thread.<name>.wait` (recorded by the
+scheduler itself) is how long the main thread blocked waiting, not how long
+the worker worked — use a `__timings` entry for the latter. The scheduler's
+own lines in `game.log` (see "Engine log" above): `[error] thread worker
+died` (dead-worker detection), `[error] WARN thread worker stalled` (first
+missed deadline of a stall episode), both with `subsystem=<name>`; a
+subsystem's own `__log` entries go out as `[system]` with the same
+`subsystem=<name>` added.
+
+**macOS ARM.** `parallel\Events` itself is not new: `ThreadedLogWriter::flush()`
+already waits on it — blocking, with a timeout — and checks the same thread's
+Future (`write()`/`close()`/`readResult()`); that pairing has been live on
+every ZTS platform, including macOS ARM, since the engine log's own thread
+shipped. What IS new, and not exercised by that code, is the non-blocking
+variant (`setBlocking(false)`, no timeout) this scheduler uses whenever a
+subsystem is "behind" under `recvAll()`, or a caller passes `timeoutMicros: 0`
+to `pollAll()`. Since the engine registers no subsystem, this specific path
+is not reached by a running game yet. If non-blocking `Events` turns out to
+be unsafe on macOS ARM where the blocking variant is not, the fallback is
+`NullThreadScheduler`, unaffected either way.
+
+**Known gaps, not fixed by this hardening**: `shutdown()` still calls
+`Runtime::close()`, which joins its thread — a worker that is hung rather
+than dead (no exception, Future never `done()`, never checking its input
+channel) still makes `shutdown()` block. Whether `Engine` shuts the scheduler
+down at all on an uncaught exception from the main loop is unchecked.
+
+---
+
 ## Start language — Steam, then the system
 
 A game's first start should speak the player's language without asking. The
@@ -3400,7 +3899,10 @@ PerfProfiler::end();
 Standard section names (use the same when adding new markers):
 `engine.update`, `engine.render`, `ecs.update`, `ecs.system.<class>`,
 `render3d.build_commands`, `render3d.flush`, `render2d.frame`,
-`mesh.generate.<id>`, `texture.upload`, `physics.tick`.
+`mesh.generate.<id>`, `texture.upload`, `physics.tick`,
+`thread.scheduler.send`, `thread.scheduler.poll`, `thread.<name>.wait` (main
+thread's own book-keeping — see "Thread scheduler" below for the `thread.*`
+family, including the `thread.<name>.<custom>` a subsystem can add itself).
 
 `EngineConfig::$devMode` enables the F3 performance overlay
 (`src/UI/PerfOverlay.php`). Independent from SPX/Excimer.
