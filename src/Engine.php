@@ -36,6 +36,7 @@ use PHPolygon\Rendering\Renderer2DInterface;
 use PHPolygon\Rendering\RenderCommandList;
 use PHPolygon\Rendering\Renderer3DInterface;
 use PHPolygon\Rendering\ShaderManager;
+use PHPolygon\Rendering\ShaderWarmProgress;
 use PHPolygon\Rendering\TextureManager;
 use PHPolygon\Testing\NullTextureManager;
 use PHPolygon\Runtime\Clock;
@@ -155,6 +156,13 @@ class Engine
     /** Splash screen loading progress (0.0-1.0) and status label. */
     private float $splashProgress = 0.0;
     private string $splashLabel = '';
+
+    /** The part of the splash bar the 3D shader compile fills; the game init goes on from its end. */
+    private const float SPLASH_SHADERS_FROM = 0.4;
+    private const float SPLASH_SHADERS_TO = 0.5;
+
+    /** Least time in seconds between two splash frames of the shader compile. */
+    private const float SPLASH_SHADER_FRAME_INTERVAL = 0.1;
 
     /**
      * Splash task checklist — each entry is rendered as a status row during
@@ -1714,8 +1722,9 @@ class Engine
 
         $this->splashRendererInfo = $this->buildRendererInfo();
 
-        // Engine init phase: show "Init Engine" progress
-        $this->splashProgress = 0.5;
+        // Engine init phase: show "Init Engine" progress. Where the shader
+        // phase begins, so the bar never runs backwards into it.
+        $this->splashProgress = self::SPLASH_SHADERS_FROM;
         $this->splashLabel = 'Init Engine';
 
         $this->splashFadeAlpha = 1.0;
@@ -1759,10 +1768,24 @@ class Engine
             // $this->renderer3D property is still a VioRenderer3D.
             $renderer3D = $this->renderer3D;
             $this->splashFadeAlpha = 1.0;
-            $this->splashProgress = 0.4;
+            $this->splashProgress = self::SPLASH_SHADERS_FROM;
             $this->splashLabel = 'Compiling shaders';
             $this->renderSplashFrame();
-            $renderer3D->warmShaders();
+            // One splash frame per compiled program, but never more often than
+            // SPLASH_SHADER_FRAME_INTERVAL: from a warm shader cache the programs
+            // arrive within milliseconds, and a presented frame each would cost
+            // more than the compile. The last step is always shown.
+            $lastFrame = microtime(true);
+            $renderer3D->warmShaders(function (int $done, int $total) use (&$lastFrame): void {
+                $this->splashProgress = ShaderWarmProgress::fraction($done, $total, self::SPLASH_SHADERS_FROM, self::SPLASH_SHADERS_TO);
+                $this->splashLabel = ShaderWarmProgress::label('Compiling shaders', $done, $total);
+                $now = microtime(true);
+                if ($this->window->shouldClose() || ($done < $total && $now - $lastFrame < self::SPLASH_SHADER_FRAME_INTERVAL)) {
+                    return;
+                }
+                $lastFrame = $now;
+                $this->renderSplashFrame();
+            });
             // A selected upscaler that initialises for seconds does it here too,
             // not in the first game frame. Nothing runs for any other selection.
             if ($renderer3D->upscalerProbeDue()) {
