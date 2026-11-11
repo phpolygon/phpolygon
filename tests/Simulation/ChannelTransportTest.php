@@ -159,4 +159,118 @@ final class ChannelTransportTest extends TestCase
         $this->expectException(\InvalidArgumentException::class);
         new ChannelTransport($scheduler, 'not-registered', $world);
     }
+
+    // --- Phase 6b: async submit()/collect() through a real worker thread ---
+
+    public function testSubmitThenNonBlockingCollectReturnsNullUntilTheWorkerAnswers(): void
+    {
+        $this->skipWithoutRealThreading();
+        $scheduler = $this->bootedScheduler();
+        $world = new World();
+        $transport = new ChannelTransport($scheduler, 'far', $world);
+
+        $token = $transport->submit(new GrowthTestKernel(), [1 => ['height' => 0.0, 'rate' => 2.0]], 3, 0.1);
+
+        // Real wall time between submit and collect - see profile-channel-transport.php's
+        // and discriminators.php's finding: a non-blocking poll called too
+        // soon after a BUFFERED channel's send() just misses the worker, and
+        // retrying that poll (not blocking) is the normal non-blocking usage
+        // pattern (see FarSimulationRunner::tickAsync() - a miss just tries
+        // again on a LATER tick() call). Poll in a bounded retry loop rather
+        // than a single fixed sleep, to not make this test flaky against
+        // worker start-up jitter on a loaded CI machine.
+        $result = null;
+        for ($i = 0; $i < 50 && $result === null; $i++) {
+            usleep(10_000);
+            $result = $transport->collect($token, wait: false);
+        }
+        self::assertNotNull($result, 'the worker had up to 500ms across retries - a trivial 3-step kernel must have answered by now');
+        self::assertEqualsWithDelta(0.6, $result[1]['height'], 1e-12, '3 chained steps of rate 2.0 * dt 0.1');
+    }
+
+    public function testCollectWithWaitBlocksUntilTheWorkerAnswers(): void
+    {
+        $this->skipWithoutRealThreading();
+        $scheduler = $this->bootedScheduler();
+        $world = new World();
+        $transport = new ChannelTransport($scheduler, 'far', $world);
+
+        $token = $transport->submit(new GrowthTestKernel(), [1 => ['height' => 0.0, 'rate' => 1.0]], 1, 0.1);
+        $result = $transport->collect($token, wait: true); // no usleep() - must block for it itself
+
+        self::assertEqualsWithDelta(0.1, $result[1]['height'], 1e-12);
+    }
+
+    public function testSubmitWhileAJobIsStillOutstandingThrows(): void
+    {
+        $this->skipWithoutRealThreading();
+        $scheduler = $this->bootedScheduler();
+        $world = new World();
+        $transport = new ChannelTransport($scheduler, 'far', $world);
+
+        $transport->submit(new GrowthTestKernel(), [1 => ['height' => 0.0, 'rate' => 1.0]], 1, 0.1);
+
+        $this->expectException(\LogicException::class);
+        $transport->submit(new GrowthTestKernel(), [2 => ['height' => 0.0, 'rate' => 1.0]], 1, 0.1);
+    }
+
+    public function testCollectWithTheWrongTokenThrows(): void
+    {
+        $this->skipWithoutRealThreading();
+        $scheduler = $this->bootedScheduler();
+        $world = new World();
+        $transport = new ChannelTransport($scheduler, 'far', $world);
+        $transport->submit(new GrowthTestKernel(), [1 => ['height' => 0.0, 'rate' => 1.0]], 1, 0.1);
+
+        $this->expectException(\InvalidArgumentException::class);
+        $transport->collect('not-the-real-token', wait: true);
+    }
+
+    /**
+     * Phase 6b's async parity requirement, through a real worker thread:
+     * FarSimulationRunner::register(..., async: true) with InlineTransport
+     * vs. with ChannelTransport must import an IDENTICAL record after
+     * takebackAll() blocking-drains whatever job is still mid-flight. Per
+     * the plan's own parity-test methodology (see the non-async test above
+     * this class's sync-mode one), the authoritative comparison point is the
+     * imported state AFTER a blocking drain, not recordOf() mid-run - a
+     * non-blocking collect()'s timing naturally differs between a
+     * synchronous Inline "job" and a real thread round trip.
+     */
+    public function testAsyncInlineAndChannelTransportImportTheIdenticalRecordAfterTakebackAll(): void
+    {
+        $this->skipWithoutRealThreading();
+        $world = new World();
+
+        $inlineKernel = new GrowthTestKernel();
+        $inlineRunner = new FarSimulationRunner();
+        $inlineRunner->register('growth', $inlineKernel, new InlineTransport(), async: true);
+        $inlineRunner->handover('growth', $world, 1);
+
+        $scheduler = $this->bootedScheduler();
+        $channelKernel = new GrowthTestKernel();
+        $channelRunner = new FarSimulationRunner();
+        $channelRunner->register('growth', $channelKernel, new ChannelTransport($scheduler, 'far', $world), async: true);
+        $channelRunner->handover('growth', $world, 1);
+
+        for ($i = 0; $i < 7; $i++) {
+            $inlineRunner->tick(FarSimulationRunner::FIXED_DT);
+            $channelRunner->tick(FarSimulationRunner::FIXED_DT);
+        }
+
+        // Authoritative comparison point, per this class's own parity-test
+        // methodology note above: the IMPORTED record after a blocking
+        // drain, not recordOf() (which is null for both once takebackAll()
+        // removes the handed-over record - a vacuous comparison) and not a
+        // mid-run recordOf() read (whose async-pipeline timing need not
+        // match between a synchronous Inline "job" and a real thread round
+        // trip at every individual tick count).
+        $inlineRunner->takebackAll($world);
+        $channelRunner->takebackAll($world);
+
+        self::assertFalse($inlineRunner->isHandedOver('growth', 1));
+        self::assertFalse($channelRunner->isHandedOver('growth', 1));
+        self::assertSame($inlineKernel->imported[1], $channelKernel->imported[1]);
+        self::assertEqualsWithDelta(7.0 * FarSimulationRunner::FIXED_DT, $inlineKernel->imported[1]['height'], 1e-9);
+    }
 }

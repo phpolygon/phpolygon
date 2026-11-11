@@ -17,6 +17,17 @@ use PHPolygon\Simulation\SimulationKernel;
  */
 final class GrowthTestKernel implements SimulationKernel
 {
+    /**
+     * The record each import() call last received, for tests. import() only
+     * ever runs on the main thread (FarSimulationRunner::takeback() calls it
+     * on the SAME kernel instance it was registered with, regardless of
+     * which transport ran step()) - unaffected by a worker thread getting
+     * its OWN, separate instance of this class per {@see compute()} call.
+     *
+     * @var array<int, array<string, bool|int|float|string>>
+     */
+    public array $imported = [];
+
     public function export(World $world, int $entityId): array
     {
         return ['height' => 0.0, 'rate' => 1.0];
@@ -32,5 +43,6 @@ final class GrowthTestKernel implements SimulationKernel
 
     public function import(World $world, int $entityId, array $record): void
     {
+        $this->imported[$entityId] = $record;
     }
 }

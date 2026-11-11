@@ -26,20 +26,30 @@ use PHPolygon\Thread\ThreadScheduler;
  * would send/poll THAT subsystem too on every step() call here. A game that
  * wants both gets its own dedicated ThreadScheduler for far-simulation.
  *
- * Blocking, not non-blocking: uses `pollAll($timeoutMicros)` with
- * $timeoutMicros > 0 by default (ThreadScheduler::DEFAULT_POLL_TIMEOUT_US),
- * the SAME blocking Events path the engine log's own worker thread already
- * runs in production on every ZTS platform including macOS ARM. Passing 0
- * (a genuinely non-blocking poll) switches to the OTHER Events code path
- * ThreadScheduler's own class doc flags as the real open risk there
- * (unexercised by any shipped code) - do not pass 0 unless that has been
- * separately verified safe on the platforms this runs on.
+ * Blocking, not non-blocking: {@see step()} and {@see collect()} with
+ * $wait=true use `pollAll($timeoutMicros)` with $timeoutMicros > 0 by
+ * default (ThreadScheduler::DEFAULT_POLL_TIMEOUT_US), the SAME blocking
+ * Events path the engine log's own worker thread already runs in production
+ * on every ZTS platform including macOS ARM. {@see collect()} with
+ * $wait=false (the tick()-driven async path, Phase 6b) always polls with 0
+ * - a genuinely non-blocking poll - which switches to the OTHER Events code
+ * path ThreadScheduler's own class doc flags as the real open risk there
+ * (unexercised by any shipped code before this). A game that wants
+ * {@see FarSimulationRunner}'s `async: true` mode is choosing to exercise
+ * that path; it stays OFF by default (sync step(), async opt-in per kernel)
+ * precisely so nothing exercises it without being asked to.
+ *
+ * Async mode also needs its OWN dedicated subsystem instance per kernel -
+ * see the sharing caveat on {@see FarSimulationSubsystem}'s class doc.
  */
 final class ChannelTransport implements SimulationTransport
 {
     private readonly FarSimulationSubsystem $subsystem;
 
     private int $nextJobId = 0;
+
+    /** Non-null while an async submit()'s job has not yet been collect()ed. */
+    private ?string $pendingJobId = null;
 
     public function __construct(
         private readonly ThreadScheduler $scheduler,
@@ -60,7 +70,7 @@ final class ChannelTransport implements SimulationTransport
     public function step(SimulationKernel $kernel, array $records, float $dt): array
     {
         $jobId = 'job-' . $this->nextJobId++;
-        $this->subsystem->queueJob($jobId, $kernel::class, $records, $dt);
+        $this->subsystem->queueJob($jobId, $kernel::class, $records, 1, $dt);
 
         // $this->world is never read by FarSimulationSubsystem::prepareInput()
         // - it exists only because ThreadScheduler's sendAll()/pollAll()
@@ -76,6 +86,42 @@ final class ChannelTransport implements SimulationTransport
                 ? "ChannelTransport: worker answered but job '{$jobId}' was not among its results"
                 : "ChannelTransport: worker did not answer within {$this->timeoutMicros} microseconds");
         }
+        return $result;
+    }
+
+    public function submit(SimulationKernel $kernel, array $records, int $steps, float $dt): mixed
+    {
+        if ($this->pendingJobId !== null) {
+            throw new \LogicException(
+                "ChannelTransport: submit() called while job '{$this->pendingJobId}' is still outstanding - collect() it first.",
+            );
+        }
+        $jobId = 'job-' . $this->nextJobId++;
+        $this->subsystem->queueJob($jobId, $kernel::class, $records, $steps, $dt);
+        $this->scheduler->sendAll($this->world, $dt);
+        $this->pendingJobId = $jobId;
+        return $jobId;
+    }
+
+    public function collect(mixed $token, bool $wait = false): ?array
+    {
+        if (!is_string($token) || $token !== $this->pendingJobId) {
+            throw new \InvalidArgumentException(
+                'ChannelTransport: collect() called with a token that is not the current outstanding job.',
+            );
+        }
+
+        $this->scheduler->pollAll($this->world, $wait ? $this->timeoutMicros : 0);
+        $result = $this->subsystem->takeResult($token);
+        if ($result === null) {
+            if ($wait) {
+                throw new \RuntimeException(
+                    "ChannelTransport: worker did not answer job '{$token}' within {$this->timeoutMicros} microseconds",
+                );
+            }
+            return null; // not ready yet - the expected outcome of a non-blocking poll
+        }
+        $this->pendingJobId = null;
         return $result;
     }
 }

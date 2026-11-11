@@ -1295,6 +1295,99 @@ Fern-Simulation" is not a hedge but an accurate description of where this transp
 (a kernel whose own step() cost approaches or exceeds this overhead, stepped rarely enough - 10 Hz, not
 the main loop's 60 - that the per-step cost still nets out ahead of running it inline on the main thread).
 
+### Phase 6b of the visibility plan (2026-11-11): the ~15ms cause, and an async pipeline
+
+Two follow-ups to Phase 6, both requested after review: find the ACTUAL cause of the measured ~15ms/call
+`ChannelTransport::step()` overhead rather than guess at it, and add an async submit()/collect() pipeline
+so a far-tick does not pay that cost synchronously on the main thread.
+
+**Finding (1), corrected**: Phase 6's report attributed the ~15ms to `ThreadScheduler::pollOne()` calling
+`\parallel\Channel::open("{$name}_out")` by NAME on every poll instead of caching a handle - that
+attribution was WRONG, disproven by a direct discriminator (`open()` by name + plain blocking `recv()`,
+no `Events`: ~0.01ms/call, same as a cached handle). Root cause, isolated with discriminator benchmarks
+(not guessed): `ThreadScheduler::boot()` creates its `_in`/`_out` channels with `\parallel\Channel::Infinite`
+(buffered) - `send()` on a buffered channel returns immediately, without the worker having consumed it
+yet. `pollOne()`'s `\parallel\Events::poll()` then has to actually WAIT for the worker to wake up, notice
+the new input, compute, and send a reply - and that wait is bounded below by this Windows build's thread
+wake-up granularity, measured directly at ~14.6-16ms minimum (submit->ready latency distribution,
+100 samples: min 14.6ms, p50 16.1ms, p90 48.5ms, max 138.5ms - also showing a long, variable tail, not a
+flat constant). An UNBUFFERED `new \parallel\Channel()` (the control the reviewer's own CPU-only check
+used) makes `send()` itself block until the worker's `recv()` takes it - a rendezvous that leaves the two
+threads already synchronised by the time `send()` returns, so the following `poll()` usually wins the race
+in well under 1ms instead of waiting out a full wake-up cycle. `addFuture()` (always added by `pollOne()`
+when the worker is alive) contributes a smaller, independent cost on top even on an unbuffered channel
+(~7.4ms average over 200 calls - roughly half the calls paying something close to the same wake-up
+latency) - not chased down further; the buffered-channel effect alone already accounts for the full
+measured ~15ms (named-lookup-per-call, cached-handle, and anonymous-vs-named channels were all ruled out
+as NOT the cause - each measured ~15ms with a buffered channel regardless, and ~0.01-15ms depending only
+on buffered-vs-not). **Labelled as Windows-measured, 2026-11-11, this dev machine, PHP 8.5.5 ZTS CLI** -
+not verified on macOS or Linux, where thread wake-up granularity is expected to differ (an estimate, not a
+measurement, until run there). This is a property of `ThreadScheduler`'s own channel setup (shared by
+every subsystem, not specific to `FarSimulationSubsystem`/`ChannelTransport`) - reported here, not fixed:
+`src/Thread/ThreadScheduler.php` belongs to the scheduler-hardening branch, out of this phase's scope. A
+plausible fix (caching per-subsystem channel handles instead of `Channel::open()` by name would not help,
+per the discriminators above - the buffering itself is the cause) would be using a bounded/synchronous
+channel for `_in`, which has its own tradeoffs (a slow worker could then block `sendAll()`) not evaluated
+here - left for whoever owns that file next.
+
+**Async submit()/collect() (2)**: `SimulationTransport` gained `submit(kernel, records, steps, dt): mixed`
+/ `collect(token, wait: false): ?array` alongside the existing `step()` (kept, not replaced - still the
+default, see below). `FarSimulationRunner::register(..., async: true)` is the opt-in per kernel;
+`tick()`'s async branch (`tickAsync()`) keeps AT MOST one job in flight per kernel: tries a non-blocking
+`collect()` of any pending job first (merging its result, `MAX_STEPS_PER_TICK`-capped chained steps,
+same bounded-backlog spirit as sync mode), then, if nothing is in flight and time is owed, `submit()`s a
+new job covering up to `MAX_STEPS_PER_TICK` chained steps. The one-far-tick pipeline latency is enforced
+STRUCTURALLY by `tickAsync()` itself (never attempting a same-call `collect()` right after its own
+`submit()`) - NOT by `InlineTransport`, whose `submit()` still computes eagerly and would happily answer
+instantly if asked; it is simply never asked that soon. This is why async is opt-in rather than the new
+default: a kernel that will only ever run on `InlineTransport` has no reason to pay an artificial tick of
+latency gaining it nothing. `takeback()`/`takebackAll()` both now call a new private `drainPending()`
+first (blocking `collect(wait: true)`) - extended from the original request (which only named
+`takebackAll()`/the save path) to `takeback()` too, per review: a single Far->Near crossing mid-game can
+hit the exact same "job mid-flight" situation a save can.
+
+Merging a collected job's result only touches ids STILL present in `$this->records[$name]`
+(`FarSimulationRunner::mergeResult()`) - defensive, not currently exercised by any test: this class's own
+discipline (`takeback()` always drains the pending job BEFORE removing anything) means no sequence of its
+own public calls can currently leave a collected result pointing at an already-removed id. Kept anyway for
+a future caller that might not share that discipline; flagged honestly as unreachable dead code under
+today's call patterns rather than implied to be routinely tested.
+
+**Sharing caveat (new gap, surfaced not fixed)**: Phase 6's `FarSimulationSubsystem` already supported
+several kernels queueing jobs on ONE shared subsystem instance (via a caller-chosen job id) - safe under
+sync `step()` because each call fully resolves (send, receive, clear "outstanding") before the next
+kernel's call starts. Async `submit()`/`collect()` does NOT fully resolve before returning, so two async
+kernels sharing one `FarSimulationSubsystem`+`ThreadScheduler` can genuinely overlap in time - and
+`ThreadScheduler::sendAll()` silently skips a subsystem already "outstanding", so a second kernel's
+`submit()` can have its job parked in `FarSimulationSubsystem`'s internal queue and never actually sent
+while the first kernel's job is still in flight, which looks from that second kernel's side like a job
+that was accepted but will not answer. Not fixed (property of `ThreadScheduler`, out of scope here) -
+each kernel registered with `async: true` needs its OWN dedicated `FarSimulationSubsystem` instance, not
+shared with another async kernel, until the scheduler gains per-subsystem queueing.
+
+**macOS ARM flag, extended**: async `collect(wait: false)` always polls with `timeoutMicros: 0` - the
+genuinely non-blocking `Events` path Phase 5's own hardening flagged as the real open risk there
+(unexercised by any shipped code before this). Async stays opt-in and off by default for exactly this
+reason, same as Phase 6's `timeoutMicros: 0` constructor option already was - nothing exercises this path
+unless a kernel is explicitly registered with `async: true`.
+
+**Measured 2026-11-11 (same machine/caveats as above)**: does async actually avoid paying the ~15ms
+blocking-wait cost on the calling thread? `submit()` alone: ~0.027-0.029ms/call. `collect(wait: false)`
+called once per attempt, after a real 100ms gap (`FarSimulationRunner::FIXED_DT`'s own period) between
+submit and collect, 200 calls, 2 runs: ~0.29-0.30ms/call average (both the misses AND the hits are cheap -
+a non-blocking poll never pays the blocking wait). So yes: the MAIN THREAD's own cost per attempt dropped
+from ~15.2ms (sync `step()`) to ~0.3ms (async `submit()`+`collect()`), a genuine, measured win for what
+async was built to fix. The more surprising number: at exactly a 100ms gap, 105-106/200 attempts (~53%)
+still found the result NOT ready - inconsistent at first glance with the ~14.6-16ms minimum latency found
+above, until a direct submit->ready latency distribution (tight 1ms-interval polling instead of one check
+at a fixed point) showed a long, variable tail (p90 48.5ms, max 138.5ms) - meaning "ready by the next
+100ms far-tick" is NOT a reliable guarantee on this machine/build, only "ready eventually, bounded by
+nothing in particular". `tickAsync()`'s design handles this correctly (a miss just keeps accumulating and
+retries next tick(), nothing dropped or corrupted - the same chunking-tolerant accounting sync mode
+already had), but the EFFECTIVE latency a game observes is better described as "at least one far-tick,
+often two or more on this measured platform" than a hard one-tick guarantee - reported honestly rather
+than claiming the one-tick number the design targets is what was actually achieved every time.
+
 Measured 2026-11-11 (PHP 8.5.5 CLI, this repo's dev machine,
 `benchmarks/micro/System/Transform3DSystemBench.php`, `benchTenThousandStaticTick`/
 `benchStaticWorldTick` before vs after): 10,000 untouched entities per tick went from 4.78 ms to

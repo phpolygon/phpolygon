@@ -30,6 +30,30 @@ use PHPolygon\ECS\World;
  * caught up before import(), WITHOUT decrementing the shared accumulator
  * (the same owed time is still applied to the record's batch siblings on a
  * later tick() call - nothing is double-counted or dropped for them).
+ *
+ * Async mode (Phase 6b, {@see register()}'s $async flag, opt-in per
+ * kernel): drives the SAME transport through submit()/collect() instead of
+ * the blocking step() - one job in flight per kernel, submitted at tick N
+ * and only ever collected (non-blocking) from tick N+1 onward, never in the
+ * same tick() call that submitted it. That one-far-tick pipeline latency is
+ * enforced HERE, structurally, by never attempting a same-call collect() -
+ * not by the transport ({@see InlineTransport}'s submit() computes eagerly,
+ * same as always, and would happily return its result the instant it is
+ * asked; it is simply never asked that soon). With the SAME kernel and SAME
+ * tick() calls, async mode is therefore consistently one step behind where
+ * sync mode would be at the same point - a deliberate, measured latency,
+ * not a bug, and the reason async is opt-in rather than the default: a
+ * kernel that will only ever run on {@see InlineTransport} has no reason to
+ * pay it.
+ *
+ * Kept deliberately simple over a "real" multi-deep pipeline: at most one
+ * job is ever in flight per kernel. A tick() call behind on its clock
+ * batches up to MAX_STEPS_PER_TICK chained steps into that one job (the
+ * backlog still drains at a bounded rate per call, same spirit as sync
+ * mode's own cap), rather than queueing several jobs at once. Queueing more
+ * than one job concurrently would need per-job ordering/merge logic this
+ * phase did not build - a conservative choice, not a limit any real
+ * workload has been found to need.
  */
 final class FarSimulationRunner
 {
@@ -59,7 +83,7 @@ final class FarSimulationRunner
     private const float EPSILON = self::FIXED_DT * 1e-9;
 
     /**
-     * @var array<string, array{kernel: SimulationKernel, transport: SimulationTransport}>
+     * @var array<string, array{kernel: SimulationKernel, transport: SimulationTransport, async: bool}>
      */
     private array $kernels = [];
 
@@ -72,11 +96,32 @@ final class FarSimulationRunner
      */
     private array $records = [];
 
-    public function register(string $name, SimulationKernel $kernel, ?SimulationTransport $transport = null): void
+    /**
+     * Async mode only: the token of the one job currently in flight for a
+     * kernel, or null if none - see the class doc's "at most one job in
+     * flight per kernel".
+     *
+     * @var array<string, mixed>
+     */
+    private array $pending = [];
+
+    /** @var array<string, int> Async mode only: how many chained FIXED_DT steps $pending[$name]'s job covers. */
+    private array $pendingSteps = [];
+
+    /**
+     * @param bool $async Opt-in per kernel (Phase 6b) - drives $transport
+     *     through submit()/collect() instead of step(), see the class doc.
+     *     Leave false (default) for a kernel that should keep today's
+     *     zero-added-latency behaviour, including every kernel registered
+     *     before Phase 6b existed.
+     */
+    public function register(string $name, SimulationKernel $kernel, ?SimulationTransport $transport = null, bool $async = false): void
     {
-        $this->kernels[$name] = ['kernel' => $kernel, 'transport' => $transport ?? new InlineTransport()];
+        $this->kernels[$name] = ['kernel' => $kernel, 'transport' => $transport ?? new InlineTransport(), 'async' => $async];
         $this->accumulator[$name] ??= 0.0;
         $this->records[$name] ??= [];
+        $this->pending[$name] ??= null;
+        $this->pendingSteps[$name] ??= 0;
     }
 
     /** Near->Far: exports $entityId's current state and starts stepping it at the fixed rate. */
@@ -93,6 +138,16 @@ final class FarSimulationRunner
      * Far->Near: applies every FIXED_DT step this record is still owed
      * (see the class docblock on why), imports the caught-up record, then
      * drops it from the batch. A no-op if $entityId was never handed over.
+     *
+     * Async mode: first blocking-drains this kernel's one in-flight job (if
+     * any) via {@see drainPending()} - a job submitted before this call may
+     * cover $entityId too, and leaving it unresolved while $entityId is
+     * removed from $this->records here would risk its eventual result
+     * trying to update a record that no longer exists (drainPending()'s
+     * merge already guards against that - see its own doc - but draining
+     * now, rather than leaving it to a later tick(), is what lets a game
+     * read $entityId's live component values back immediately after this
+     * call returns instead of one tick later).
      */
     public function takeback(string $name, World $world, int $entityId): void
     {
@@ -100,6 +155,7 @@ final class FarSimulationRunner
         if ($entry === null || !isset($this->records[$name][$entityId])) {
             return;
         }
+        $this->drainPending($name);
         $owed = $this->accumulator[$name] ?? 0.0;
         while ($owed >= self::FIXED_DT - self::EPSILON) {
             $single = $entry['transport']->step($entry['kernel'], [$entityId => $this->records[$name][$entityId]], self::FIXED_DT);
@@ -118,7 +174,9 @@ final class FarSimulationRunner
      * with {@see ChannelTransport} because {@see takeback()}'s flush already
      * calls the kernel's TRANSPORT (not the kernel directly) and
      * ChannelTransport::step() itself blocks until the worker answers - the
-     * same synchronous contract {@see InlineTransport} has always had.
+     * same synchronous contract {@see InlineTransport} has always had. In
+     * async mode, {@see takeback()}'s own {@see drainPending()} call covers
+     * the "job mid-flight at save time" case the same way.
      */
     public function takebackAll(World $world): void
     {
@@ -142,6 +200,10 @@ final class FarSimulationRunner
     {
         foreach ($this->kernels as $name => $entry) {
             $this->accumulator[$name] += $dt;
+            if ($entry['async']) {
+                $this->tickAsync($name, $entry);
+                continue;
+            }
             $steps = 0;
             while ($this->accumulator[$name] >= self::FIXED_DT - self::EPSILON && $steps < self::MAX_STEPS_PER_TICK) {
                 if ($this->records[$name] !== []) {
@@ -149,6 +211,100 @@ final class FarSimulationRunner
                 }
                 $this->accumulator[$name] -= self::FIXED_DT;
                 $steps++;
+            }
+        }
+    }
+
+    /**
+     * Async mode's half of {@see tick()}: first tries to (non-blockingly)
+     * collect this kernel's one in-flight job, if any; then, if there is
+     * now no job in flight and time is owed, submits a new one covering up
+     * to MAX_STEPS_PER_TICK chained steps. Both can happen in the SAME call
+     * (collect an old job, submit a new one) - that does not shorten the
+     * one-tick latency, because the newly submitted job's own token is not
+     * even looked at until a LATER tick() call reaches the collect attempt
+     * above.
+     *
+     * @param array{kernel: SimulationKernel, transport: SimulationTransport, async: bool} $entry
+     */
+    private function tickAsync(string $name, array $entry): void
+    {
+        if ($this->pending[$name] !== null) {
+            $result = $entry['transport']->collect($this->pending[$name], wait: false);
+            if ($result !== null) {
+                $this->mergeResult($name, $result);
+                $this->accumulator[$name] -= $this->pendingSteps[$name] * self::FIXED_DT;
+                $this->pending[$name] = null;
+                $this->pendingSteps[$name] = 0;
+            }
+            // Not ready: nothing more to do this call - keep accumulating,
+            // per the plan's "nicht neu abschicken, weiter akkumulieren".
+        }
+
+        if ($this->pending[$name] !== null) {
+            return;
+        }
+        $owedSteps = (int) floor(($this->accumulator[$name] + self::EPSILON) / self::FIXED_DT);
+        if ($owedSteps <= 0) {
+            return;
+        }
+        $steps = min($owedSteps, self::MAX_STEPS_PER_TICK);
+        if ($this->records[$name] === []) {
+            // Nothing to simulate - advance the clock for free, same
+            // per-call bound as the stepped case (see tick()'s sync branch).
+            $this->accumulator[$name] -= $steps * self::FIXED_DT;
+            return;
+        }
+        $this->pending[$name] = $entry['transport']->submit($entry['kernel'], $this->records[$name], $steps, self::FIXED_DT);
+        $this->pendingSteps[$name] = $steps;
+    }
+
+    /**
+     * Async mode only: blocking-drains $name's one in-flight job, if any -
+     * used by {@see takeback()} (and therefore {@see takebackAll()}) before
+     * either reads $this->records, so a save or an individual Far->Near
+     * crossing never leaves an unresolved job behind.
+     */
+    private function drainPending(string $name): void
+    {
+        if (($this->pending[$name] ?? null) === null) {
+            return;
+        }
+        $entry = $this->kernels[$name];
+        $result = $entry['transport']->collect($this->pending[$name], wait: true);
+        if ($result === null) {
+            // Contract violation, not a normal outcome: collect(wait: true)
+            // must either return the result or throw (see SimulationTransport's
+            // own doc) - a well-behaved transport never reaches this.
+            throw new \RuntimeException("FarSimulationRunner: transport for '{$name}' returned null from a blocking collect().");
+        }
+        $this->mergeResult($name, $result);
+        $this->accumulator[$name] -= $this->pendingSteps[$name] * self::FIXED_DT;
+        $this->pending[$name] = null;
+        $this->pendingSteps[$name] = 0;
+    }
+
+    /**
+     * Applies a collected job's result into $this->records[$name], but only
+     * for ids STILL present there - defensive, not routinely exercised: with
+     * THIS class's own call discipline ({@see takeback()} always drains the
+     * pending job first, before it removes anything, so the id it is about
+     * to remove can never be part of an UNRESOLVED job by the time it is
+     * removed) there is currently no sequence of public calls that leaves a
+     * collected job's result pointing at an id already gone from
+     * $this->records. Kept anyway in case a future change (or a caller
+     * driving a transport directly, bypassing this class) ever calls
+     * collect() for a job whose ids were not all kept around for it -
+     * dropping a stale id silently is the safe failure mode, not resurrecting
+     * a record this class already considers gone.
+     *
+     * @param array<int, array<string, bool|int|float|string>> $result
+     */
+    private function mergeResult(string $name, array $result): void
+    {
+        foreach ($result as $id => $record) {
+            if (array_key_exists($id, $this->records[$name])) {
+                $this->records[$name][$id] = $record;
             }
         }
     }

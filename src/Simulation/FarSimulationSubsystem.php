@@ -31,11 +31,29 @@ use PHPolygon\Thread\SubsystemInterface;
  * {@see FarSimulationRunner}/kernel shares this subsystem's single worker
  * thread, though {@see ChannelTransport} itself only ever queues one job per
  * step() call.
+ *
+ * Phase 6b caveat on that sharing: it is only safe between kernels using
+ * {@see ChannelTransport}'s SYNCHRONOUS step() (each call fully resolves -
+ * send, receive, clear "outstanding" - before the next kernel's call can
+ * start, so two kernels sharing one subsystem are always serialised).
+ * {@see ChannelTransport::submit()}/{@see ChannelTransport::collect()}
+ * (async, Phase 6b) does NOT fully resolve before returning - a second
+ * kernel sharing the SAME subsystem instance while the first kernel's job is
+ * still in flight can have its own `sendAll()` silently skipped by
+ * {@see \PHPolygon\Thread\ThreadScheduler} (it will not queue input onto a
+ * subsystem already "outstanding"), leaving that job parked in
+ * {@see $pendingJobs} and never actually sent until the scheduler's
+ * outstanding flag clears - which, from a kernel whose OWN submit() already
+ * returned, looks like a job that was accepted but never answers. Not fixed
+ * here (it is a property of {@see \PHPolygon\Thread\ThreadScheduler}, which
+ * this phase does not touch) - each kernel registered with `async: true`
+ * needs its OWN dedicated subsystem instance (not shared with another async
+ * kernel) until/unless the scheduler gains per-subsystem queueing.
  */
 final class FarSimulationSubsystem implements SubsystemInterface
 {
     /**
-     * @var array<string, array{kernelClass: class-string<SimulationKernel>, records: array<int, array<string, bool|int|float|string>>, dt: float}>
+     * @var array<string, array{kernelClass: class-string<SimulationKernel>, records: array<int, array<string, bool|int|float|string>>, steps: int, dt: float}>
      */
     private array $pendingJobs = [];
 
@@ -43,16 +61,21 @@ final class FarSimulationSubsystem implements SubsystemInterface
     private array $results = [];
 
     /**
-     * Queues a step for the next prepareInput() - called from the main
-     * thread by {@see ChannelTransport} before it calls
-     * `ThreadScheduler::sendAll()`.
+     * Queues $steps chained applications of $dt for the next prepareInput()
+     * - called from the main thread by {@see ChannelTransport} before it
+     * calls `ThreadScheduler::sendAll()`. $steps is 1 for the plain step()
+     * path (Phase 6) and {@see FarSimulationRunner}'s chosen batch size
+     * (capped at `MAX_STEPS_PER_TICK`) for the async submit()/collect() path
+     * (Phase 6b) - both go through the same worker-side loop in
+     * {@see compute()}, so there is only one place that actually calls a
+     * kernel's step().
      *
      * @param class-string<SimulationKernel> $kernelClass
      * @param array<int, array<string, bool|int|float|string>> $records
      */
-    public function queueJob(string $jobId, string $kernelClass, array $records, float $dt): void
+    public function queueJob(string $jobId, string $kernelClass, array $records, int $steps, float $dt): void
     {
-        $this->pendingJobs[$jobId] = ['kernelClass' => $kernelClass, 'records' => $records, 'dt' => $dt];
+        $this->pendingJobs[$jobId] = ['kernelClass' => $kernelClass, 'records' => $records, 'steps' => $steps, 'dt' => $dt];
     }
 
     /**
@@ -108,15 +131,24 @@ final class FarSimulationSubsystem implements SubsystemInterface
                 }
                 $kernelClass = $job['kernelClass'] ?? null;
                 $dt = $job['dt'] ?? null;
+                $steps = $job['steps'] ?? null;
                 $records = self::asRecordMap($job['records'] ?? null);
-                if (!is_string($kernelClass) || !class_exists($kernelClass) || !is_float($dt) || $records === null) {
+                if (!is_string($kernelClass) || !class_exists($kernelClass) || !is_float($dt)
+                    || !is_int($steps) || $steps < 1 || $records === null) {
                     continue;
                 }
                 /** @var SimulationKernel $kernel */
                 $kernel = new $kernelClass();
                 // Same determinism contract InlineTransport's own step() uses.
                 ksort($records);
-                $out[$jobId] = $kernel->step($records, $dt);
+                // Chained FIXED_DT-sized steps, not one call with steps*dt -
+                // matches FarSimulationRunner::takeback()'s own catch-up loop
+                // and InlineTransport::submit()'s chaining, so async and sync
+                // batches of the same step count land on the same floats.
+                for ($i = 0; $i < $steps; $i++) {
+                    $records = $kernel->step($records, $dt);
+                }
+                $out[$jobId] = $records;
             }
         }
         return ['jobs' => $out];
