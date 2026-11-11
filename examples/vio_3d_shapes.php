@@ -48,7 +48,7 @@ $engine->onInit(function () use ($engine, &$shapeEntities): void {
     MeshRegistry::register('box',      BoxMesh::generate(1.0, 1.0, 1.0));
     MeshRegistry::register('sphere',   SphereMesh::generate(radius: 0.6, stacks: 20, slices: 28));
     MeshRegistry::register('cylinder', CylinderMesh::generate(radius: 0.5, height: 1.2, segments: 20));
-    MeshRegistry::register('wedge',    WedgeMesh::generate(1.0, 1.0, 1.0));
+    MeshRegistry::register('wedge',    WedgeMesh::generate(1.0));
     MeshRegistry::register('ground',   PlaneMesh::generate(14.0, 5.0));
 
     MaterialRegistry::register('red',   new Material(albedo: new Color(0.8, 0.25, 0.2),  roughness: 0.7, metallic: 0.0));

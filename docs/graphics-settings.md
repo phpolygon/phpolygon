@@ -104,6 +104,87 @@ spurious events, no disk writes).
 
 ---
 
+## Settings reference
+
+Every field of `GraphicsSettings` (`src/Rendering/GraphicsSettings.php`), with
+its default. The JSON key in `graphics.json` is the field name; enums are
+stored by their lower-case value.
+
+| Field | Default | Meaning |
+|---|---|---|
+| `mode` | `QualityMode::Manual` | `Manual`, `Adaptive` (the controller tunes towards `targetFps`) or `Off` (no automatic adjustment, no first-launch calibration). |
+| `targetFps` | `60.0` | Target of the adaptive controller and the calibration. |
+| `renderScale` | `1.0` | 0.5 – 2.0; down to 0.33 while a temporal upscaler is selected. |
+| `shadowQuality` | `Medium` | `Off`, `Low`, `Medium`, `High` — shadow map resolution; `Off` skips the shadow pass. |
+| `shadowDistance` | `50.0` | Stored and round-tripped; no renderer reads it at present. |
+| `viewDistance` | `200.0` | Upper bound for the far distance of `SetFog`. |
+| `antiAliasing` | `Fxaa` | `Off`, `Fxaa`, `Msaa2x`, `Msaa4x`, `Taa`. |
+| `anisotropy` | `4` | 1, 2, 4, 8 or 16; other values snap to the nearest. |
+| `vsync` | `true` | Forwarded to the window. |
+| `fpsCap` | `0` | 0 = uncapped; 30, 60, 120 or 144. Any other value becomes 0. |
+| `textureQuality` | `Full` | `Full`, `Half`, `Quarter` — a LOD bias so smaller mip levels are sampled. |
+| `shaderQuality` | `Full` | `Full` or `Unlit` (every draw through the `unlit` shader). |
+| `cloudShadows` | `true` | Cloud shadows on the ground. |
+| `bloom` | `true` | Bloom in the post chain. |
+| `hdr` | `true` | FP16 scene target; the source of the highlights. |
+| `fog` | `true` | `SetFog` distance fog; off pushes it out of range. |
+| `meshLod` | `High` | `High`, `Medium`, `Low` — read by geometry generators at world build; not enforced by the renderer. |
+| `ambientOcclusion` | `Medium` | `ScreenSpaceAO`: `Off`, `Low`, `Medium`, `High`. |
+| `colorGrading` | `Neutral` | `ColorGradingPreset`. |
+| `vignetteIntensity` | `0.0` | 0 – 1. |
+| `volumetricFog` | `false` | Shadowed light scattering along the view ray. |
+| `froxelFog` | `false` | With `volumetricFog`: the fog light is computed once per frame in a 160 x 90 x 64 grid over the view instead of a march per pixel. Needs a backend that samples scene depth. |
+| `ssr` | `Off` | `ScreenSpaceReflections`: `Off`, `Low`, `High`. |
+| `fieldtracing` | `Off` | `FieldtracingMode`: `Off`, `ProbesOnly`, `SdfOcclusion`, `SdfBounce`. |
+| `surfaceRelief` | `Parallax` | `Off`, `Cavity`, `Parallax`. |
+| `upscaler` | `Off` | `Off`, `Fsr1`, `Taau`, `Fsr3`, `Dlss`. |
+| `upscaleSharpness` | `0.9` | 0 = soft, 1 = strongest. |
+| `upscaleQuality` | `Custom` | Render-scale preset of the upscaler; `Custom` leaves `renderScale` in charge. |
+| `grassQuality` | `Medium` | `Off`, `Low`, `Medium`, `High`, `Ultra`, `Realistic`. |
+| `shadingRate` | `Full` | `Full`, `Half` (2x2 blocks), `Quarter` (4x4) — variable rate shading of the 3D scene pass; ignored without the feature. |
+| `foveatedShading` | `false` | Coarser shading at the screen edges (VRS Tier 2). |
+| `lowLatency` | `false` | The CPU runs at most one frame ahead of presentation (waitable swapchain on D3D11 / D3D12). Applied when the window is created. |
+| `hdrOutput` | `false` | HDR10 display output (D3D11 / D3D12) when the display is in HDR mode. Applied when the window is created. |
+| `hdrPaperWhite` | `200.0` | Display white in nits for `hdrOutput`, 80 – 1000. |
+| `depthPrepass` | `false` | Opaque surfaces write depth first, shading then runs once per pixel. |
+| `skyCloudCache` | `false` | Raymarched clouds into a cube twice a second. |
+| `temporalSsao` | `false` | SSAO accumulated over frames while the camera holds still. |
+| `microShadows` | `false` | Direct light at a grazing angle does not reach into occluded cavities; sky light there comes from the cavity's opening. |
+| `screenSpaceSss` | `false` | Screen-space subsurface scattering for materials with subsurface (MRT path). |
+| `screenSpaceGi` | `false` | Screen-space radiosity: one bounce of the direct light between neighbouring pixels (MRT path). |
+| `bakedLight` | `false` | Sky and sun visibility baked once from the SDF, looked up per pixel where a light volume was provided (`SetBakedLight`). |
+| `rayTracedShadows`, `rayTracedReflections`, `rayTracedProbes`, `rayTracedGi` | `false` | Ray-traced sun shadows, reflections on smooth surfaces, probe-field update and one-bounce diffuse light. Need `VIO_FEATURE_RAY_QUERY`. |
+| `meshShaders` | `false` | Instanced opaque batches as frustum-culled meshlets (`VIO_FEATURE_MESH_SHADER`). |
+| `occlusionCulling` | `false` | Hi-Z culling of meshlets the depth prepass hides; needs `meshShaders` and `depthPrepass`. |
+| `bindlessMaterials` | `false` | Albedo from the texture table, per-instance textures in one draw (`VIO_FEATURE_BINDLESS`). |
+| `gpu` | `''` | GPU by name as `GpuAdapters::available()` lists it; `''` = automatic. Applied after a restart; a GPU that is gone falls back to automatic. |
+| `effects` | `[]` | On/off state of a game's own effects by name (`effectEnabled($name)`); `with(effects: …)` merges name by name. |
+| `accessibility` | defaults | `AccessibilitySettings`, see below. Saved only when it differs from the defaults. |
+
+`$engine->graphics->capabilities()` says which of these the active renderer
+can apply (see "Hardware capabilities" below).
+
+### Accessibility (`AccessibilitySettings`)
+
+A value object of its own inside `GraphicsSettings`; quality presets and the
+adaptive controller never touch it.
+
+| Field | Default | Meaning |
+|---|---|---|
+| `colorVision` | `ColorVisionMode::Off` | `Protanopia`, `Deuteranopia`, `Tritanopia`: the image is corrected for that deficiency. |
+| `colorVisionStrength` | `1.0` | 0 – 1, how much of the correction is applied. |
+| `colorVisionSimulate` | `false` | Developer view: show what a viewer with `colorVision` sees. |
+| `worldSaturation` | `1.0` | 1 = unchanged, 0 = grey; the UI keeps its colours. |
+| `contrast` | `0.0` | 0 – 1: steeper tone curve plus dark outlines along luminance edges. |
+| `reducedMotion` | `false` | Holds or slows the shader time of registered effects. |
+| `motionScale` | `0.25` | Speed of reduced effects while `reducedMotion` is on. |
+| `flashLimit` | `false` | Photosensitivity: limits how fast the mean brightness of the 3D image may change. |
+| `nightBoost` | `0.0` | 0 – 1: lifts the shadows of a dark image. |
+| `comfortVignette` | `0.0` | 0 – 1: darkens the edge of the view while the camera turns or moves fast. |
+| `focusDim` | `0.0` | 0 – 1: dims the 3D image outside the game's focus region (`SetFocusRegion`). |
+
+---
+
 ## Adaptive mode
 
 ```php
@@ -201,6 +282,48 @@ The auto-tuner does not require any special API on the Scene - the same
 
 ---
 
+## Tour benchmark (a game's own route)
+
+`Quality\TourBenchmark` tunes the settings while the game drives through its
+own world. It renders nothing itself: the game shows the current station,
+applies `settings()` and feeds every rendered frame's time to `frame()`.
+
+```php
+use PHPolygon\Rendering\Quality\TourBenchmark;
+use PHPolygon\Rendering\Quality\TourStation;
+
+$tour = new TourBenchmark(
+    stations: [
+        new TourStation('Harbour', new Vec3(0.0, 2.0, 0.0), new Vec3(10.0, 2.0, -5.0)),
+        new TourStation('Market', new Vec3(40.0, 3.0, 12.0), new Vec3(30.0, 2.0, 20.0)),
+    ],
+    targetFps: 60.0,
+    start: $engine->graphics->settings(),
+);
+```
+
+At each station the camera settles (`settleSeconds`, 0.5 by default), then
+`measureFrames` (120) frame times are taken. When the frame time at
+`percentile` (0.99, the "1 % lows") misses the budget `1000 / targetFps`, the
+settings go one step down the `AdaptiveTierStack` and the station is measured
+again. After the tour, when even the slowest station keeps `headroom` (20 %)
+of the budget free, one step up is tried and checked on the slowest stations.
+`station()`, `takeStationChange()`, `progress()`, `done()`, `abort()` and
+`result()` (a `TourBenchmarkResult` with the final settings, the time per
+station and the list of changes) drive the game's side.
+
+---
+
+## Choosing the GPU
+
+`GraphicsSettings::$gpu` names the adapter to render on.
+`GpuAdapters::available()` lists the hardware adapters php-vio reports (name,
+type, VRAM; software rasterisers are left out), discrete cards first;
+`GpuAdapters::isAvailable($name)` checks one. The choice is stored by name and
+applied when the window opens, i.e. after a restart.
+
+---
+
 ## What lives where
 
 | Concern                                | File |
@@ -213,6 +336,10 @@ The auto-tuner does not require any special API on the Scene - the same
 | Adaptive controller                    | `src/Rendering/Quality/AdaptiveQualityController.php` |
 | Cost-impact stack                      | `src/Rendering/Quality/AdaptiveTierStack.php` |
 | Result record                          | `src/Rendering/Quality/BenchmarkResult.php` |
+| Tour benchmark                         | `src/Rendering/Quality/TourBenchmark.php`, `TourStation.php`, `TourBenchmarkResult.php` |
+| Hardware capabilities                  | `src/Rendering/Quality/GraphicsCapabilities.php` |
+| Accessibility settings                 | `src/Rendering/Accessibility/AccessibilitySettings.php` |
+| GPU adapters                           | `src/Rendering/GpuAdapters.php` |
 | UI panel                               | `src/UI/GraphicsOptionsPanel.php` |
 | Events                                 | `src/Event/Graphics*.php`, `QualityChangeRequest.php` |
 
@@ -221,13 +348,13 @@ The auto-tuner does not require any special API on the Scene - the same
 ## Pitfalls
 
 - **Render scale is honoured by every backend.** MSAA is wired into
-  OpenGL and Vio (multisample renderbuffer + resolve blit); on Metal
-  the offscreen FBO is single-sample only - the `AntiAliasing::Msaa*`
-  modes degrade to FXAA at present. Vulkan owns its own multisample
-  image attachment and re-probes the supported sample count per
-  context. MSAA may silently fall back to single-sample on backends
-  /drivers that reject the requested sample count - a single STDERR
-  diagnostic is logged once per process, but no error is raised.
+  OpenGL and Vio (multisample target + resolve); on Vio
+  `capabilities()->msaa` reports whether the active php-vio backend has
+  multisampled render targets. The standalone Vulkan renderer owns its
+  own multisample image attachment and re-probes the supported sample
+  count per context. MSAA may silently fall back to single-sample on
+  backends / drivers that reject the requested sample count - a single
+  STDERR diagnostic is logged once per process, but no error is raised.
 - **Hardware fingerprints are coarse.** Two machines with identical OS /
   arch will hash the same until you call `updateHardwareFingerprintFromGl()`
   after the GL context is current. Most games can skip that refinement -
@@ -253,11 +380,15 @@ shader-side: no extra GPU memory, no precomputed assets.
 
 ### `ScreenSpaceAO`
 
-Per-fragment curvature-based ambient occlusion. Darkens corners and
-crevices via screen-space normal derivatives. Tiers map to a single
-`u_ao_strength` uniform: `Off=0.0`, `Low=0.4`, `Medium=0.7`, `High=1.0`
-(the default is `Medium`). A future depth-buffer SSAO pass can replace
-the in-shader path without changing the enum or uniform name.
+Two contributions are layered:
+
+- Per-fragment curvature-based ambient occlusion. Darkens corners and
+  crevices via screen-space normal derivatives. Tiers map to a single
+  `u_ao_strength` uniform: `Off=0.0`, `Low=0.4`, `Medium=0.7`, `High=1.0`
+  (the default is `Medium`).
+- At `Medium` and `High` the Vio renderer adds a depth + normal SSAO pass
+  (G-buffer, hemisphere kernel, blur) on Direct3D 11 / 12, Vulkan and
+  Metal. php-vio's OpenGL backend keeps the curvature term alone.
 
 ### `ColorGradingPreset`
 
@@ -382,6 +513,7 @@ What the game provides for the native upscalers (a build does the first three fr
 - MSAA and a real TAA pass
 - SSR and the SDF fieldtracing tiers
 - surface relief and the upscalers that run here; `upscalerNote()` says why one does not (FSR 3 / DLSS: php-vio's `vio_upscaler_info()['reason']` - missing runtime library, not an RTX GPU, driver too old, software adapter ...)
+- ray tracing (`$rayTracing`), mesh shaders (`$meshShaders`), Hi-Z occlusion culling (`$occlusionCulling`), bindless materials (`$bindless`) and the G-buffer passes (`$screenSpaceEffects`)
 
 Asking for DLSS takes seconds the first time on a device, so the engine asks only when it has to: when DLSS is selected, and when a settings screen calls `capabilities()`. That call never blocks. While the answer is out, `isUpscalerPending(Upscaler::Dlss)` is true and DLSS is not offered; the answer lands in `<shaderCachePath>/upscaler-probe.json`, so the next process has it at once. Call `capabilities()` from the settings screen, not while starting up, and draw the note of a pending upscaler if you list upscalers yourself.
 
@@ -408,12 +540,11 @@ roughness; flakes are jittered tangent-space normal perturbations.
 
 ### Camera-following shadow
 
-`ShadowMapRenderer::updateLightMatrix(direction, cameraTarget)` and
-`VioRenderer3D::computeLightSpaceMatrix(direction, cameraTarget)` both
-accept an optional camera centre. When supplied the shadow frustum
-follows the camera and is texel-snapped to the shadow-map grid.
-Required for stable open-world shadows; both backends pass the camera
-position automatically.
+`ShadowMapRenderer::updateLightMatrix(direction, cameraTarget)` accepts
+an optional camera centre. When supplied the shadow frustum follows the
+camera and is texel-snapped to the shadow-map grid. Required for stable
+open-world shadows. The Vio renderer centres its three shadow cascades
+on the camera position of the frame.
 
 ### Area lights (`AreaLightHelper`)
 
@@ -459,9 +590,10 @@ On the **OpenGL backend** the engine ships a real composite pass
 - SSR and FXAA are mutually exclusive in the present pipeline (FXAA
   would need a temp render target to break the read/write cycle).
 
-On **Vio + Metal** the same `u_ssr_intensity` uniform amplifies the
-wetness IBL contribution so games get a visible response from the
-setting without needing the depth-buffer pass to migrate first.
+On the **Vio renderer** the `Low` and `High` tiers run a ray-marched pass
+against the G-buffer and the HDR scene colour on Direct3D 11 / 12, Vulkan
+and Metal. With the tier `Off`, and on php-vio's OpenGL backend, the same
+`u_ssr_intensity` uniform amplifies the wetness IBL contribution instead.
 
 ### Temporal anti-aliasing (`AntiAliasing::Taa`)
 
@@ -477,12 +609,16 @@ OpenGL ships a real TAA pass (`OpenGLTaaPass`):
 - TAA and SSR are mutually exclusive (TAA needs the resolved colour
   as input, SSR writes directly to the backbuffer).
 
-`AntiAliasing::fallback()` still maps `Taa -> Fxaa` so backends that
-haven't migrated (Vio, Metal) silently degrade rather than blank-frame.
-The OpenGL backend ignores `fallback()` because its TAA path is real.
+The Vio renderer resolves TAA with `VioTaaPass` (jittered projection,
+motion vectors, reprojected and clipped history; the same pass upsamples
+for `Upscaler::Taau`). It needs MRT plus
+`VIO_FEATURE_RENDER_TARGET_DEPTH_SAMPLE`;
+`capabilities()->temporalAntiAliasing` reports it. Where a renderer cannot
+run it, `AntiAliasing::fallback()` maps `Taa -> Fxaa` rather than
+blank-framing.
 
 ### Showcase
 
-`examples/quality_showcase.php` exercises every item above with live
-F1..F7 toggles. Use it as the visual reference when modifying any
-mesh-shader path.
+`examples/quality_showcase.php` exercises the mesh-shader items of this
+section with live F1..F8 toggles. Use it as the visual reference when
+modifying any mesh-shader path.

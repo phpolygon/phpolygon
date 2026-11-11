@@ -23,7 +23,9 @@ existing patterns in `tests/` (PSR-4, namespaced under `PHPolygon\Tests\`).
 | `ScreenshotComparer` | Pixel-level comparison using YIQ colour space (Pixelmatch algorithm) |
 | `ComparisonResult` | Result object with `passes()`, tolerances, diff path |
 | `VisualTestCase` | PHPUnit trait — Playwright-style `assertScreenshot()` |
+| `GameTestCase` | Base class for a game's own tests: a fresh headless `Engine` per test, scene / tick helpers, assertions on entities and the emitted 3D render commands |
 | `NullTextureManager` | Headless texture stubs for scene rendering tests |
+| `Shader\HeadlessShaderHarness` | Runs real GLSL against a php-vio context that shows no window and reads the pixels back (shader image tests) |
 
 ---
 
@@ -48,25 +50,46 @@ live game.
 ## 3D scene testing
 
 3D scenes are tested via `NullRenderer3D` — the command list is inspected
-structurally rather than pixel-compared (no GPU in CI):
+structurally rather than pixel-compared (no GPU needed). `GameTestCase`
+creates the headless engine (`EngineConfig(headless: true, is3D: true)`,
+override `engineConfig()` to change it) and carries the helpers:
 
 ```php
-public function testPhpDistrictBuildsCorrectly(): void
+use PHPolygon\Engine;
+use PHPolygon\Rendering\Command\DrawMesh;
+use PHPolygon\Testing\GameTestCase;
+
+final class DistrictTest extends GameTestCase
 {
-    $engine = $this->create3DTestEngine();
-    $engine->scenes->load(PhpDistrictScene::class);
-    $engine->tick(0.016);
+    protected function registerScenes(Engine $engine): void
+    {
+        $engine->scenes->register('district', DistrictScene::class);
+    }
 
-    $commands = $engine->renderer3d->getLastCommandList();
-    $draws = $commands->ofType(DrawMesh::class);
+    public function testDistrictBuildsCorrectly(): void
+    {
+        $this->loadScene('district');
+        $this->assertEntityExists('district', 'Player');
+        $this->tick();                       // one update step of 1/60 s
 
-    $this->assertCount(20, $draws); // 20 buildings
-    $this->assertSame('cobblestone', $draws[0]->materialId);
+        $commands = $this->renderCommands(); // world->render(), then the list NullRenderer3D received
+        $draws = $commands->ofType(DrawMesh::class);
+
+        $this->assertCount(20, $draws);      // 20 buildings
+        $this->assertSame('cobblestone', $draws[0]->materialId);
+        $this->assertDrawsMesh('plane_1x1', $commands);
+    }
 }
 ```
 
-Pixel-level VRT for 3D scenes (OpenGL framebuffer capture) is performed
-locally, not in CI headless mode.
+`renderCommands()` returns what the game's own systems submitted (for example
+`Renderer3DSystem`); a scene that registers none yields an empty list. Further
+assertions: `assertEntityCount()`, `assertSceneLoaded()`,
+`assertMeshDrawCount()`, `assertPointLightCount()`.
+
+Pixel tests of the 3D shaders run against a real php-vio context through
+`HeadlessShaderHarness` (`tests/Rendering/Shader`); they skip where no context
+can be opened. CI runs them on Mesa's software OpenGL and Vulkan, see below.
 
 ### OpenGL version matrix (Docker + Mesa)
 
@@ -139,11 +162,14 @@ lavapipe — like the font platform suffix).
 - Headless contexts report 1:1 sizes (`vio_framebuffer_size()` == requested), so
   viewports and read-back buffers match the pixels returned.
 
-**Remaining blocker for CI:** building php-vio on the runners (it bundles
-Metal/D3D/Vulkan + SPIRV-Cross) is a large per-platform build, heavier than the
-php-glfw build. Until that is wired, native-backend pixel VRT stays out of CI to
-avoid red, unverifiable jobs. The Docker OpenGL matrix above is the shipping
-pixel-capable path; `GdRenderer2D` covers 2D layout regression.
+**In CI today** (`.github/workflows/ci.yml`): the job `vio-shaders` installs
+ext-vio from the latest php-vio release and runs `tests/Rendering/Shader` twice
+on Linux, on Mesa llvmpipe (OpenGL) and on lavapipe (Vulkan,
+`PHPOLYGON_SHADER_HARNESS_BACKEND=vulkan`), with `--fail-on-skipped` so a
+context that does not open cannot turn the job green. `vrt-vio` runs the whole
+suite against a php-vio built in Docker (see above). Windows (D3D / WARP) and
+macOS (Metal) pixel tests are not part of CI; the `native-gpu` group is run
+locally on the target GPU. `GdRenderer2D` covers 2D layout regression.
 
 ---
 
