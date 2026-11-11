@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace PHPolygon;
 
+use PHPolygon\Activity\ActivityService;
 use PHPolygon\Audio\AudioManager;
 use PHPolygon\Audio\GLFWAudioBackend;
 use PHPolygon\Audio\VioAudioBackend;
@@ -12,6 +13,7 @@ use PHPolygon\ECS\World;
 use PHPolygon\Event\EventDispatcher;
 use PHPolygon\Geometry\MeshCache;
 use PHPolygon\Locale\LocaleManager;
+use PHPolygon\Log\Log;
 use PHPolygon\Rendering\Accessibility\AccessibilityEffects;
 use PHPolygon\Rendering\AnimationClockInterface;
 use PHPolygon\Rendering\Camera2D;
@@ -36,6 +38,7 @@ use PHPolygon\Rendering\Renderer2DInterface;
 use PHPolygon\Rendering\RenderCommandList;
 use PHPolygon\Rendering\Renderer3DInterface;
 use PHPolygon\Rendering\ShaderManager;
+use PHPolygon\Rendering\ShaderWarmProgress;
 use PHPolygon\Rendering\TextureManager;
 use PHPolygon\Testing\NullTextureManager;
 use PHPolygon\Runtime\Clock;
@@ -64,10 +67,29 @@ use PHPolygon\Thread\RuntimePool;
 use PHPolygon\Thread\ThreadScheduler;
 use PHPolygon\Thread\ThreadSchedulerFactory;
 use PHPolygon\UI\PerfOverlay;
+use PHPolygon\Visibility\VisibilityService;
 
 class Engine
 {
     public readonly World $world;
+
+    /**
+     * The engine's own answer to "what is in the view this frame" for
+     * $world - see the class docblock on {@see VisibilityService}. The same
+     * instance Renderer3DSystem resolves via VisibilityService::forWorld()
+     * for this World, so a game can query it directly (sees(), testSphere(),
+     * tierAt()) without going through the renderer.
+     */
+    public readonly VisibilityService $visibility;
+
+    /**
+     * `$engine->activity` - Phase 4's activity-tier facade (tier-change
+     * observers, forced-awake regions; see {@see ActivityService}). Always
+     * present but entirely inert on its own: nothing happens unless a game
+     * also constructs an {@see \PHPolygon\Activity\ActivitySystem} with this
+     * instance and registers it - the engine never does that automatically.
+     */
+    public readonly ActivityService $activity;
 
     // Game-authoritative editor sync (opt-in via enableEditorSync()).
     private ?string $editorSyncPath = null;
@@ -156,6 +178,13 @@ class Engine
     private float $splashProgress = 0.0;
     private string $splashLabel = '';
 
+    /** The part of the splash bar the 3D shader compile fills; the game init goes on from its end. */
+    private const float SPLASH_SHADERS_FROM = 0.4;
+    private const float SPLASH_SHADERS_TO = 0.5;
+
+    /** Least time in seconds between two splash frames of the shader compile. */
+    private const float SPLASH_SHADER_FRAME_INTERVAL = 0.1;
+
     /**
      * Splash task checklist — each entry is rendered as a status row during
      * the splash screen, so the player sees granular init progress instead of
@@ -179,6 +208,8 @@ class Engine
         self::log('Extensions: vio=' . (extension_loaded('vio') ? 'yes' : 'no') . ', glfw=' . (extension_loaded('glfw') ? 'yes' : 'no') . ', opengl=' . (extension_loaded('opengl') ? 'yes' : 'no'));
 
         $this->world = new World();
+        $this->visibility = VisibilityService::forWorld($this->world);
+        $this->activity = new ActivityService();
         $this->input = $config->input ?? ($this->useVio ? new VioInput() : new Input());
         $this->events = new EventDispatcher();
         $this->clock = new Clock();
@@ -756,6 +787,7 @@ class Engine
         if (!$this->headless) {
             CrashGuard::install();
         }
+        $this->startLog();
 
         self::log('Window initializing...');
         $this->window->initialize($this->input);
@@ -1240,6 +1272,25 @@ class Engine
         PerfProfiler::end(); // closes the 'engine.render' section
     }
 
+    /**
+     * The game log for this run: writer (its own thread for a windowed game
+     * on a PHP with ext-parallel), the automatic hooks, trace mode. A
+     * windowed game also gets its PHP warnings into the log.
+     */
+    private function startLog(): void
+    {
+        Log::start(
+            thread: $this->config->logThread ?? !$this->headless,
+            trace: $this->config->logTrace ?? ($this->devLogger !== null || Log::traceRequested()),
+        );
+        if (!$this->headless) {
+            Log::installErrorHandler();
+            if ($this->config->logGamepads) {
+                Log::watchGamepads(\PHPolygon\Log\GamepadEdgeLog::vio());
+            }
+        }
+    }
+
     private function createFrameSpikeRecorder(): ?FrameSpikeRecorder
     {
         $configured = $this->config->frameSpikes;
@@ -1714,8 +1765,9 @@ class Engine
 
         $this->splashRendererInfo = $this->buildRendererInfo();
 
-        // Engine init phase: show "Init Engine" progress
-        $this->splashProgress = 0.5;
+        // Engine init phase: show "Init Engine" progress. Where the shader
+        // phase begins, so the bar never runs backwards into it.
+        $this->splashProgress = self::SPLASH_SHADERS_FROM;
         $this->splashLabel = 'Init Engine';
 
         $this->splashFadeAlpha = 1.0;
@@ -1759,10 +1811,24 @@ class Engine
             // $this->renderer3D property is still a VioRenderer3D.
             $renderer3D = $this->renderer3D;
             $this->splashFadeAlpha = 1.0;
-            $this->splashProgress = 0.4;
+            $this->splashProgress = self::SPLASH_SHADERS_FROM;
             $this->splashLabel = 'Compiling shaders';
             $this->renderSplashFrame();
-            $renderer3D->warmShaders();
+            // One splash frame per compiled program, but never more often than
+            // SPLASH_SHADER_FRAME_INTERVAL: from a warm shader cache the programs
+            // arrive within milliseconds, and a presented frame each would cost
+            // more than the compile. The last step is always shown.
+            $lastFrame = microtime(true);
+            $renderer3D->warmShaders(function (int $done, int $total) use (&$lastFrame): void {
+                $this->splashProgress = ShaderWarmProgress::fraction($done, $total, self::SPLASH_SHADERS_FROM, self::SPLASH_SHADERS_TO);
+                $this->splashLabel = ShaderWarmProgress::label('Compiling shaders', $done, $total);
+                $now = microtime(true);
+                if ($this->window->shouldClose() || ($done < $total && $now - $lastFrame < self::SPLASH_SHADER_FRAME_INTERVAL)) {
+                    return;
+                }
+                $lastFrame = $now;
+                $this->renderSplashFrame();
+            });
             // A selected upscaler that initialises for seconds does it here too,
             // not in the first game frame. Nothing runs for any other selection.
             if ($renderer3D->upscalerProbeDue()) {
@@ -2211,55 +2277,30 @@ class Engine
         $this->window->destroy();
         Facade::clearEngine();
         self::log('Shutdown complete');
+        Log::shutdown();
     }
 
-    private static ?string $logPath = null;
-
     /**
-     * Write a line to game.log. The log file is placed next to the binary
-     * (PHAR/micro-SAPI) or in the project root (development).
+     * Write a line to game.log, as an `[engine]` line of {@see Log}. The log
+     * file is placed next to the binary (PHAR/micro-SAPI) or in the project
+     * root (development).
      */
     public static function log(string $message): void
     {
-        if (self::$logPath === null) {
-            self::$logPath = self::resolveLogPath();
-        }
-
-        $line = '[' . date('Y-m-d H:i:s') . '] ' . $message . "\n";
-        @file_put_contents(self::$logPath, $line, FILE_APPEND);
+        Log::engine($message);
     }
 
     /**
-     * Write an error to game.log with ERROR prefix.
+     * Write an error to game.log, as an `[error]` line of {@see Log}.
      */
     public static function logError(string $message): void
     {
-        self::log('ERROR: ' . $message);
+        Log::error($message);
     }
 
     /** Where {@see log()} writes game.log - for bug reports and crash dialogs. */
     public static function logFilePath(): string
     {
-        return self::resolveLogPath();
-    }
-
-    private static function resolveLogPath(): string
-    {
-        // A built game's log directory: next to the executable, or ~/Library/Logs/<name>
-        // for a macOS .app, whose signed bundle is never written to (set by the PHAR stub).
-        if (defined('PHPOLYGON_PATH_LOGS')) {
-            /** @var string $logs */
-            $logs = PHPOLYGON_PATH_LOGS;
-            return $logs . DIRECTORY_SEPARATOR . 'game.log';
-        }
-        // Use PHPOLYGON_PATH_ROOT if available (set by PHAR stub and game bootstrap)
-        if (defined('PHPOLYGON_PATH_ROOT')) {
-            /** @var string $root */
-            $root = PHPOLYGON_PATH_ROOT;
-            return $root . DIRECTORY_SEPARATOR . 'game.log';
-        }
-
-        // Development: project root relative to src/
-        return dirname(__DIR__) . DIRECTORY_SEPARATOR . 'game.log';
+        return Log::resolvePath();
     }
 }

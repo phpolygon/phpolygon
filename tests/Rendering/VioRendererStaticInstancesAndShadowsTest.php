@@ -179,6 +179,57 @@ final class VioRendererStaticInstancesAndShadowsTest extends TestCase
         self::assertEqualsWithDelta($lum(self::px($noBox, $x, $y)), $lum(self::px($noCaster, $x, $y)), 6, 'castShadows: false leaves the ground lit');
     }
 
+    /**
+     * A static instanced batch the camera turns away from is not drawn (the
+     * renderer derives its bound, nobody passes one), keeps its cached buffer
+     * and is back the first frame it is in view - without a new upload or a
+     * new walk over its matrices.
+     */
+    public function testBatchOutOfViewIsCulledAndComesBackFromTheCache(): void
+    {
+        $renderer = $this->renderer(ShadowQuality::Off);
+        $flat = [...Mat4::translation(-2.0, 0.0, 0.0)->toArray(), ...Mat4::translation(2.0, 0.0, 0.0)->toArray()];
+        $send = static fn (): DrawMeshInstanced => DrawMeshInstanced::flat('box', 'orange', $flat, 2, isStatic: true, staticKey: 'f');
+
+        $image = $this->renderScene($renderer, [$send()]);
+        self::assertFalse(self::isClear(self::px($image, 24, 32)));
+        self::assertSame(['batches' => 1, 'culledView' => 0, 'culledShadow' => 0, 'derived' => 1], $renderer->instancedBatchCullStats());
+
+        // The camera looks the other way: the boxes are behind it.
+        $image = $this->renderScene($renderer, [$send()], lookAt: new Vec3(0.0, 0.0, 14.0));
+        self::assertTrue(self::isClear(self::px($image, 24, 32)));
+        self::assertTrue(self::isClear(self::px($image, 72, 32)));
+        self::assertSame(['batches' => 1, 'culledView' => 1, 'culledShadow' => 0, 'derived' => 0], $renderer->instancedBatchCullStats());
+        self::assertSame(1, $renderer->staticInstanceCacheSize(), 'a culled frame keeps the cached buffer');
+
+        $image = $this->renderScene($renderer, [$send()]);
+        self::assertFalse(self::isClear(self::px($image, 24, 32)), 'drawn again the first frame it is in view');
+        self::assertFalse(self::isClear(self::px($image, 72, 32)));
+        self::assertSame(['batches' => 1, 'culledView' => 0, 'culledShadow' => 0, 'derived' => 0], $renderer->instancedBatchCullStats());
+        self::assertSame(1, $renderer->staticInstanceCacheSize());
+    }
+
+    /**
+     * An instanced caster above the top edge of the view is dropped from the
+     * colour pass and still darkens the ground it stands over.
+     */
+    public function testInstancedCasterOutOfViewStillShadowsTheGround(): void
+    {
+        $ground = new DrawMesh('box', 'ground', Mat4::translation(0.0, -1.0, 0.0)->multiply(Mat4::scaling(12.0, 0.2, 12.0)));
+        // Above the view's top plane; the sun shines straight down onto (0, -0.9, 3).
+        $caster = new DrawMeshInstanced('box', 'orange', [Mat4::translation(0.0, 6.0, 3.0)], isStatic: true, staticKey: 'caster');
+
+        $renderer = $this->renderer(ShadowQuality::Medium);
+        $shadowed = $this->renderScene($renderer, [$ground, $caster], light: true);
+        $stats = $renderer->instancedBatchCullStats();
+        $noBox = $this->renderScene($this->renderer(ShadowQuality::Medium), [$ground], light: true);
+
+        self::assertSame(1, $stats['culledView'], 'the caster itself is out of view');
+        self::assertSame(0, $stats['culledShadow'], 'and stays in the shadow pass');
+        $lum = static fn (array $p): int => $p[0] + $p[1] + $p[2];
+        self::assertLessThan($lum(self::px($noBox, 48, 54)) - 30, $lum(self::px($shadowed, 48, 54)), 'its shadow is on the ground');
+    }
+
     /** @return array{0: int, 1: int} */
     private function groundProbe(): array
     {
@@ -199,12 +250,12 @@ final class VioRendererStaticInstancesAndShadowsTest extends TestCase
     }
 
     /** @param list<object> $draws */
-    private function renderScene(VioRenderer3D $renderer, array $draws, bool $light = false): string
+    private function renderScene(VioRenderer3D $renderer, array $draws, bool $light = false, ?Vec3 $lookAt = null): string
     {
         $list = new RenderCommandList();
         $eye = $light ? new Vec3(0.0, 4.0, 7.0) : new Vec3(0.0, 0.0, 7.0);
         $list->add(new SetCamera(
-            Mat4::lookAt($eye, new Vec3(0.0, $light ? -0.5 : 0.0, 0.0), new Vec3(0.0, 1.0, 0.0)),
+            Mat4::lookAt($eye, $lookAt ?? new Vec3(0.0, $light ? -0.5 : 0.0, 0.0), new Vec3(0.0, 1.0, 0.0)),
             Mat4::perspective(deg2rad(50.0), self::W / self::H, 0.1, 100.0),
         ));
         if ($light) {

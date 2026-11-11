@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace PHPolygon\Runtime;
 
+use PHPolygon\Log\Log;
 use VioContext;
 
 class VioMainWindow extends Window
@@ -210,6 +211,12 @@ class VioMainWindow extends Window
         if ($input instanceof VioInput) {
             $input->setContext($ctx);
         }
+
+        vio_on_focus($ctx, static function (bool $focused): void {
+            if (Log::$hooks) {
+                Log::window($focused ? 'focus gained' : 'focus lost');
+            }
+        });
     }
 
     /**
@@ -328,6 +335,9 @@ class VioMainWindow extends Window
         vio_set_fullscreen($this->ctx);
         $this->vioFullscreen = true;
         $this->vioBorderless = false;
+        if (Log::$hooks) {
+            Log::window('mode', ['mode' => 'fullscreen']);
+        }
     }
 
     public function setBorderless(): void
@@ -338,6 +348,9 @@ class VioMainWindow extends Window
         vio_set_borderless($this->ctx);
         $this->vioBorderless = true;
         $this->vioFullscreen = false;
+        if (Log::$hooks) {
+            Log::window('mode', ['mode' => 'borderless']);
+        }
     }
 
     public function setWindowed(): void
@@ -348,6 +361,9 @@ class VioMainWindow extends Window
         vio_set_windowed($this->ctx);
         $this->vioFullscreen = false;
         $this->vioBorderless = false;
+        if (Log::$hooks) {
+            Log::window('mode', ['mode' => 'windowed']);
+        }
     }
 
     public function setSize(int $width, int $height): void

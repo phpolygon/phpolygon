@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace PHPolygon\Runtime;
 
+use PHPolygon\Log\Log;
 use PHPolygon\Math\Vec2;
 use VioContext;
 
@@ -120,10 +121,18 @@ class VioInput implements InputInterface
     {
         if ($action === 1) {
             $this->keyJustPressed[$key] = $now;
+            if (Log::$hooks) {
+                Log::input('key down', ['key' => $key]);
+            }
         } elseif ($action === 0) {
             $this->keyJustReleased[$key] = $now;
+            if (Log::$hooks) {
+                Log::input('key up', ['key' => $key]);
+            }
         } elseif ($action === 2) {
             $this->keyRepeated[$key] = $now;
+            // Auto-repeat from a held key - not an edge, not logged (one
+            // entry per held frame is exactly what the hook must not write).
         }
     }
 
@@ -367,9 +376,15 @@ class VioInput implements InputInterface
                 $prev = $this->mousePrev[$i] ?? false;
                 if ($current && !$prev) {
                     $this->mouseJustPressed[$i] = true;
+                    if (Log::$hooks) {
+                        Log::input('mouse down', ['button' => $i]);
+                    }
                 }
                 if (!$current && $prev) {
                     $this->mouseJustReleased[$i] = true;
+                    if (Log::$hooks) {
+                        Log::input('mouse up', ['button' => $i]);
+                    }
                 }
                 $this->mousePrev[$i] = $current;
             }

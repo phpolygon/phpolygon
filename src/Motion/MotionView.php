@@ -9,6 +9,7 @@ use PHPolygon\Math\Vec3;
 use PHPolygon\Rendering\Command\SetCamera;
 use PHPolygon\Rendering\Frustum;
 use PHPolygon\Rendering\RenderCommandList;
+use PHPolygon\Rendering\ViewVolume;
 
 /**
  * The camera a motion system freezes against: the eye and the frustum planes of
@@ -17,13 +18,25 @@ use PHPolygon\Rendering\RenderCommandList;
  * {@see \PHPolygon\System\ParticleSystem} remembers its camera, so the answer is
  * one frame old. Without a camera everything counts as seen: nothing freezes
  * before the first frame, in tools or in tests that never set one.
+ *
+ * Phase 3 of the visibility plan listed this class as one of six systems
+ * computing its own frustum - it now builds the SAME {@see ViewVolume} value
+ * object {@see \PHPolygon\Visibility\VisibilityService::frame()} returns,
+ * instead of holding a raw planes array, so there is one shared frustum type
+ * (not one shared LIVE instance: see below). It deliberately does NOT read a
+ * live VisibilityService - that service's state reflects the CURRENT frame's
+ * camera (or none at all between beginFrame() calls), while MotionView's
+ * whole purpose is to stay frozen at the PREVIOUS frame's camera, including
+ * through a frame where capture() sees no SetCamera at all (see
+ * testCaptureWithoutASetCameraKeepsTheOldOneInstead in MotionViewTest) - a
+ * live VisibilityService::frame() would answer null then and unfreeze
+ * everything, which is exactly the bug this class exists to avoid.
  */
 final class MotionView
 {
     private ?Vec3 $eye = null;
 
-    /** @var list<array{0: float, 1: float, 2: float, 3: float}>|null */
-    private ?array $planes = null;
+    private ?ViewVolume $volume = null;
 
     /** Remember the last camera queued in $commands; keeps the old one when there is none. */
     public function capture(RenderCommandList $commands): void
@@ -37,20 +50,20 @@ final class MotionView
     public function set(Mat4 $view, Mat4 $projection): void
     {
         $this->eye = $view->inverse()->getTranslation();
-        $this->planes = Frustum::planes($projection, $view);
+        $this->volume = new ViewVolume($view, $projection, Frustum::planes($projection, $view), $this->eye);
     }
 
     /** A camera that only has a position (distance limits, no frustum test). */
     public function setEye(?Vec3 $eye): void
     {
         $this->eye = $eye;
-        $this->planes = null;
+        $this->volume = null;
     }
 
     public function clear(): void
     {
         $this->eye = null;
-        $this->planes = null;
+        $this->volume = null;
     }
 
     public function eye(): ?Vec3
@@ -77,9 +90,9 @@ final class MotionView
                 return false;
             }
         }
-        if ($this->planes === null) {
+        if ($this->volume === null) {
             return true;
         }
-        return !Frustum::sphereOutside($this->planes, $center->x, $center->y, $center->z, $radius);
+        return $this->volume->containsSphere($center->x, $center->y, $center->z, $radius);
     }
 }

@@ -14,6 +14,31 @@ use PHPolygon\ECS\World;
  *   2. Scheduler sends input to worker thread via Channel
  *   3. Worker thread runs computation (threadEntry) and sends deltas back
  *   4. Main thread calls applyDeltas() to write results back to World
+ *
+ * Failure contract — {@see ThreadScheduler} only (its worker threads are
+ * independent of the main thread; {@see NullThreadScheduler} has none, so a
+ * throwing compute() there behaves exactly as before this contract existed:
+ * the exception propagates out of the game loop): if threadEntry() throws or
+ * returns before a clean shutdown, {@see ThreadScheduler::pollAll()} detects
+ * it via the kept {@see \parallel\Future}, logs it once, and marks the
+ * subsystem dead for the rest of that boot() — skipped by sendAll()/pollAll()
+ * afterwards rather than hanging the game loop. There is no automatic
+ * restart; the scheduler carries on running every other subsystem.
+ *
+ * Side channel: the array returned by compute() (and sent back via
+ * threadEntry()'s out channel) may carry two reserved keys that never reach
+ * applyDeltas() — both schedulers strip them first:
+ *   - `__log`: a list of `['text' => string, 'context' => array (optional),
+ *     'level' => 'info'|'warn'|'error' (optional, default 'info')]` entries,
+ *     written through {@see \PHPolygon\Log\Log} as `LogCategory::System`,
+ *     with `subsystem` added to each entry's context.
+ *   - `__timings`: a map of section name to elapsed nanoseconds (int), each
+ *     recorded via {@see \PHPolygon\Runtime\PerfProfiler::record()} as
+ *     `thread.<name>.<section>` — the thread's own measured work, as opposed
+ *     to `thread.<name>.wait`, which the scheduler records itself and which
+ *     only measures how long the main thread blocked waiting for it.
+ * Both keys are optional; a subsystem that never sets them is unaffected, and
+ * existing subsystems (AISubsystem, PhysicsSubsystem, ...) need no change.
  */
 interface SubsystemInterface
 {
@@ -40,6 +65,18 @@ interface SubsystemInterface
      * Uses named Channels: Channel::open("{name}_in") and Channel::open("{name}_out").
      *
      * Loops on in->recv() until null (shutdown signal), sends deltas via out->send().
+     *
+     * Must reach its first `in->recv()` call without doing any blocking setup
+     * first (file I/O, waiting on another resource, …): {@see ThreadScheduler}'s
+     * `_in` channel is unbuffered, and `send()` on it has no timeout in
+     * ext-parallel — {@see ThreadScheduler::sendAll()}'s first call blocks on
+     * that `send()` until this method's `recv()` actually runs, with no bound
+     * at all, if it is delayed getting there. None of the engine's own
+     * shipped subsystems do any such setup today; a game's own subsystem
+     * that does should open its channels and call `recv()` immediately, doing
+     * any real setup work only after the first input arrives (as part of
+     * computing the first reply, where {@see ThreadScheduler}'s existing
+     * stall/dead-worker detection already covers a slow or hung reply).
      */
     public static function threadEntry(string $channelPrefix): void;
 

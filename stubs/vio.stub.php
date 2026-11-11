@@ -287,6 +287,13 @@ function vio_on_key(VioContext $ctx, callable $callback): void {}
 /** @param callable(int): void $callback */
 function vio_on_char(VioContext $ctx, callable $callback): void {}
 
+/**
+ * Called when the window gains (true) or loses (false) keyboard focus.
+ *
+ * @param callable(bool): void $callback
+ */
+function vio_on_focus(VioContext $ctx, callable $callback): void {}
+
 /** On-screen-keyboard backspaces since the last call (iOS; 0 on desktop). */
 function vio_ime_backspaces(VioContext $ctx): int {}
 
@@ -304,6 +311,24 @@ function vio_keyboard_show(VioContext $ctx): void {}
 
 /** Hide the on-screen keyboard (iOS; no-op on desktop). */
 function vio_keyboard_hide(VioContext $ctx): void {}
+
+/**
+ * IDs of all connected gamepads/joysticks. Process-wide, like the other
+ * vio_gamepad_* readers (no VioContext).
+ *
+ * @return int[]
+ */
+function vio_gamepads(): array {}
+
+/** The name of a connected gamepad, null when none is connected under that id. */
+function vio_gamepad_name(int $id): ?string {}
+
+/**
+ * Button states of a gamepad, indexed by VIO_GAMEPAD_* constants.
+ *
+ * @return array<int, bool>
+ */
+function vio_gamepad_buttons(int $id): array {}
 
 // ----------------------------------------------------------------
 // 3D: Shaders, pipelines, meshes

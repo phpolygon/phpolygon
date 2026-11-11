@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace PHPolygon\Runtime;
 
+use PHPolygon\Log\Log;
+
 class GameLoop
 {
     private int $timestepNs;
@@ -94,6 +96,7 @@ class GameLoop
             while (!$shouldStop()) {
                 $frameStart = Clock::now();
                 $this->spikes?->frame($frameStart);
+                Log::frame();
                 $elapsed = $frameStart - $previousTime;
                 $previousTime = $frameStart;
 
@@ -129,6 +132,7 @@ class GameLoop
         while (!$shouldStop()) {
             $frameStart = Clock::now();
             $this->spikes?->frame($frameStart);
+            Log::frame();
             $currentTime = $frameStart;
             $elapsed = $currentTime - $previousTime;
             $previousTime = $currentTime;
@@ -240,6 +244,7 @@ class GameLoop
         while (!$shouldStop()) {
             $frameStart = Clock::now();
             $this->spikes?->frame($frameStart);
+            Log::frame();
             $currentTime = $frameStart;
             $elapsed = $currentTime - $previousTime;
             $previousTime = $currentTime;

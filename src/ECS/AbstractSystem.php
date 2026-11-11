@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace PHPolygon\ECS;
 
+use PHPolygon\Activity\TierPolicy;
+
 abstract class AbstractSystem implements SystemInterface
 {
     public function register(World $world): void
@@ -32,5 +34,19 @@ abstract class AbstractSystem implements SystemInterface
      */
     public function onWorldClear(World $world): void
     {
+    }
+
+    /**
+     * This system's declared interest in Far-tier entities (Phase 4 of the
+     * visibility plan) - see {@see TierPolicy}. Default is "every tick, all
+     * tiers": overriding this does NOT by itself change what update()/render()
+     * iterate (they still read componentPool()/query(), which always
+     * includes Far-tier entities) - it only matters once a Phase 6 driver
+     * reads $hasFarCore to decide whether to hand this system's Far-tier
+     * entities to a far core instead.
+     */
+    public function tierPolicy(): TierPolicy
+    {
+        return TierPolicy::everyTick();
     }
 }

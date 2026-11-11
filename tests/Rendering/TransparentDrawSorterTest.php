@@ -17,6 +17,7 @@ use PHPolygon\Math\Vec3;
 use PHPolygon\Rendering\Color;
 use PHPolygon\Rendering\Command\ClearDepthBuffer;
 use PHPolygon\Rendering\Command\DrawMesh;
+use PHPolygon\Rendering\BatchBounds;
 use PHPolygon\Rendering\Command\DrawMeshInstanced;
 use PHPolygon\Rendering\Command\SetCamera;
 use PHPolygon\Rendering\Material;
@@ -187,6 +188,27 @@ final class TransparentDrawSorterTest extends TestCase
         $f = $batch->flatMatrices;
         self::assertSame([-6.0, -4.0, -2.0], [$f[14], $f[30], $f[46]]);
         self::assertSame(3, $batch->instanceCount);
+    }
+
+    public function testResortedBatchKeepsTheCallersBound(): void
+    {
+        $bounds = new BatchBounds(0.0, 0.0, -4.0, 3.0);
+        $flat = [];
+        foreach ([-2.0, -6.0] as $z) {
+            array_push($flat, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, $z, 1.0);
+        }
+        $list = new RenderCommandList();
+        $list->add(self::camera());
+        $list->add(DrawMeshInstanced::flat('box', 'glass', $flat, 2, bounds: $bounds));
+        $list->add(DrawMeshInstanced::packed('box', 'glass', pack('f*', ...$flat), 2, bounds: $bounds));
+        $list->add(new DrawMeshInstanced('box', 'glass', [Mat4::translation(0.0, 0.0, -2.0), Mat4::translation(0.0, 0.0, -6.0)], bounds: $bounds));
+
+        TransparentDrawSorter::sortList($list);
+
+        foreach (array_slice($list->getCommands(), 1) as $batch) {
+            self::assertInstanceOf(DrawMeshInstanced::class, $batch);
+            self::assertSame($bounds, $batch->bounds);
+        }
     }
 
     public function testLargeBatchKeepsItsInstanceOrder(): void

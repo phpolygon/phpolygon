@@ -14,7 +14,6 @@ use PHPolygon\Rendering\Color;
 use PHPolygon\Rendering\Command\DrawMeshInstanced;
 use PHPolygon\Rendering\Command\SetCamera;
 use PHPolygon\Rendering\Command\SetGrass;
-use PHPolygon\Rendering\Frustum;
 use PHPolygon\Rendering\GraphicsSettingsManager;
 use PHPolygon\Rendering\Material;
 use PHPolygon\Rendering\MaterialRegistry;
@@ -25,6 +24,7 @@ use PHPolygon\Runtime\PerfProfiler;
 use PHPolygon\Vegetation\GrassCellBuilder;
 use PHPolygon\Vegetation\GrassDetail;
 use PHPolygon\Vegetation\GrassTuftMesh;
+use PHPolygon\Visibility\VisibilityService;
 
 /**
  * Grass blades near the camera for every {@see GrassField}.
@@ -182,7 +182,10 @@ class GrassSystem extends AbstractSystem
         $this->prepare($detail);
         $eye = $camera->viewMatrix->inverse()->getTranslation();
         $view = array_merge($camera->viewMatrix->toArray(), $camera->projectionMatrix->toArray());
-        $planes = $this->frustumCulling ? Frustum::planes($camera->projectionMatrix, $camera->viewMatrix) : [];
+        // The one cull spot (Phase 3 of the visibility plan) - a cheap memo
+        // hit when another consumer already classified this frame's camera.
+        $visibility = VisibilityService::forWorld($world);
+        $visibility->beginFrameFrom($world, $this->commandList);
 
         $this->commandList->add(new SetGrass(
             fullRange: $detail->fullRange,
@@ -217,7 +220,7 @@ class GrassSystem extends AbstractSystem
         $pending = $this->generate($fields, $detail, $queue, $plans);
         foreach ($fields as $oid => $field) {
             if (isset($plans[$oid])) {
-                $this->emitField($oid, $field, $detail, $plans[$oid], !isset($pending[$oid]), $eye->x, $eye->y, $eye->z, $planes, $view);
+                $this->emitField($oid, $field, $detail, $plans[$oid], !isset($pending[$oid]), $eye->x, $eye->y, $eye->z, $visibility, $view);
             } else {
                 $this->send($this->state[$oid]);
             }
@@ -446,10 +449,9 @@ class GrassSystem extends AbstractSystem
 
     /**
      * @param array<string, float> $visible built cells within the fade range
-     * @param list<array{0: float, 1: float, 2: float, 3: float}> $planes
      * @param array<float> $view view and projection matrix of the frame
      */
-    private function emitField(int $oid, GrassField $field, GrassDetail $detail, array $visible, bool $complete, float $ex, float $ey, float $ez, array $planes, array $view): void
+    private function emitField(int $oid, GrassField $field, GrassDetail $detail, array $visible, bool $complete, float $ex, float $ey, float $ez, VisibilityService $visibility, array $view): void
     {
         $st = $this->state[$oid];
         $cs = max(1.0, $this->cellSize);
@@ -470,9 +472,9 @@ class GrassSystem extends AbstractSystem
             }
             $cy0 = $cell['y0'];
             $cy1 = $cell['y1'] + $tallest;
-            if ($planes !== []) {
+            if ($this->frustumCulling) {
                 $hy = ($cy1 - $cy0) * 0.5;
-                if (Frustum::sphereOutside($planes, $cell['ix'] * $cs + $half, $cy0 + $hy, $cell['iz'] * $cs + $half, sqrt(2.0 * $half * $half + $hy * $hy))) {
+                if (!$visibility->testSphere($cell['ix'] * $cs + $half, $cy0 + $hy, $cell['iz'] * $cs + $half, sqrt(2.0 * $half * $half + $hy * $hy))) {
                     continue;
                 }
             }

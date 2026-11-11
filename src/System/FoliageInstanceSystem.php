@@ -11,10 +11,10 @@ use PHPolygon\Math\Mat4;
 use PHPolygon\Rendering\Color;
 use PHPolygon\Rendering\Command\DrawMeshInstanced;
 use PHPolygon\Rendering\Command\SetCamera;
-use PHPolygon\Rendering\Frustum;
 use PHPolygon\Rendering\MaterialRegistry;
 use PHPolygon\Rendering\RenderCommandList;
 use PHPolygon\Runtime\PerfProfiler;
+use PHPolygon\Visibility\VisibilityService;
 use PHPolygon\Vegetation\GrowthStage;
 use PHPolygon\Vegetation\PlantLibrary;
 use PHPolygon\Vegetation\PlantLod;
@@ -97,7 +97,10 @@ class FoliageInstanceSystem extends AbstractSystem
         PerfProfiler::begin('ecs.system.foliage');
         $view = $camera->viewMatrix;
         $eye = $view->inverse()->getTranslation();
-        $planes = $this->frustumCulling ? Frustum::planes($camera->projectionMatrix, $view) : [];
+        // The one cull spot (Phase 3 of the visibility plan) - a cheap memo
+        // hit when another consumer already classified this frame's camera.
+        $visibility = VisibilityService::forWorld($world);
+        $visibility->beginFrameFrom($world, $this->commandList);
         $alive = [];
         foreach ($world->query(FoliageInstances::class) as $entity) {
             $foliage = $entity->get(FoliageInstances::class);
@@ -107,7 +110,7 @@ class FoliageInstanceSystem extends AbstractSystem
             }
             $oid = spl_object_id($foliage);
             $alive[$oid] = true;
-            $this->emit($oid, $foliage, $variant, $eye->x, $eye->y, $eye->z, $planes);
+            $this->emit($oid, $foliage, $variant, $eye->x, $eye->y, $eye->z, $visibility);
         }
         foreach (array_keys($this->state) as $oid) {
             if (!isset($alive[$oid])) {
@@ -117,10 +120,7 @@ class FoliageInstanceSystem extends AbstractSystem
         PerfProfiler::end();
     }
 
-    /**
-     * @param list<array{0: float, 1: float, 2: float, 3: float}> $planes
-     */
-    private function emit(int $oid, FoliageInstances $f, PlantVariant $variant, float $ex, float $ey, float $ez, array $planes): void
+    private function emit(int $oid, FoliageInstances $f, PlantVariant $variant, float $ex, float $ey, float $ez, VisibilityService $visibility): void
     {
         $st = $this->state[$oid] ?? null;
         if ($st === null || $st['version'] !== $f->version || $st['variant'] !== $variant->id || $st['count'] !== count($f->instances)) {
@@ -130,7 +130,7 @@ class FoliageInstanceSystem extends AbstractSystem
         // Which cells are on screen, and where (quantised) the camera is.
         $visible = [];
         foreach ($st['spheres'] as $key => [$cx, $cy, $cz, $r]) {
-            if ($planes !== [] && Frustum::sphereOutside($planes, $cx, $cy, $cz, $r + $this->cullMargin)) {
+            if ($this->frustumCulling && !$visibility->testSphere($cx, $cy, $cz, $r + $this->cullMargin)) {
                 continue;
             }
             $visible[] = $key;

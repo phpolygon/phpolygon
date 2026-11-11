@@ -520,6 +520,39 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
     private const SHADOW_ORTHO_SIZE = 60.0;
 
     /**
+     * Visibility of whole instanced batches: out-of-view batches leave the
+     * colour passes, batches that cannot reach a shadow map leave the shadow
+     * passes - one sphere test per batch and pass, before anything is resolved.
+     */
+    private InstancedBatchCuller $batchCuller;
+
+    /**
+     * Slack of the sun-shadow caster test in world units: every cascade snaps
+     * its centre to its own texel grid, so the smaller cascades do not sit
+     * exactly inside the largest one.
+     */
+    private const float SHADOW_CASTER_MARGIN = 1.0;
+
+    /**
+     * Side planes of the largest sun cascade's light volume this frame (a prism
+     * along the light direction; no near or far plane), null = casters are not
+     * tested. An instanced batch outside it rasterises into no cascade.
+     *
+     * @var list<array{0: float, 1: float, 2: float, 3: float}>|null
+     */
+    private ?array $sunCasterPlanes = null;
+
+    /**
+     * Range spheres (x, y, z, radius) of the local lights that may render a
+     * shadow map this frame; a caster outside all of them shadows nothing.
+     *
+     * @var list<array{0: float, 1: float, 2: float, 3: float}>
+     */
+    private array $localCasterSpheres = [];
+
+    private int $batchCullDebugFrame = 0;
+
+    /**
      * Deferred GPU-resource reallocation flags, set by applySettings() and
      * consumed at the next beginFrame() boundary.
      *
@@ -720,6 +753,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         $this->height = $height;
         $this->settings = $settings ?? new GraphicsSettings();
         $this->temporalCamera = new Quality\TemporalCamera();
+        $this->batchCuller = new InstancedBatchCuller();
         // Batch uniform uploads through one native call when the extension
         // provides vio_set_uniforms (new php-vio); otherwise fall back to
         // per-uniform vio_set_uniform so an older DLL still works.
@@ -4409,6 +4443,12 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
 
         $this->gpuMark('frame_start');
 
+        // Instanced batches are tested per pass from here on. A custom shader
+        // override may move vertices in ways the engine cannot see: then only
+        // batches with an explicit bound are culled.
+        $this->batchCuller->beginFrame(in_array($this->shaderOverride ?? 'default', ['default', 'unlit', 'normals', 'depth'], true));
+        $this->localCasterSpheres = self::localShadowLightSpheres($spotLights, $pointLights);
+
         // --- Shadow pass ---
         PerfProfiler::begin('render3d.submit.shadow');
         $hasShadowMap = $this->renderShadowPass($commandList, $dirLights);
@@ -4491,6 +4531,30 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         // know the scene target), before that target is bound.
         $this->froxelThisFrame = $this->renderFroxelVolume($dirLights, $pointLights, $fogFar);
 
+        // --- Instanced batches out of view leave the camera's passes (G-buffer,
+        // prepass, opaque, meshlets, transparent). Tested against the projection
+        // those passes draw with (jitter included), once per batch per frame. The
+        // passes above keep the full list: shadow maps test their own volumes,
+        // the mirrored view, the minimap and the ray-traced scene see elsewhere.
+        $cullView = $this->currentViewMatrix;
+        $cullProjection = $this->currentProjectionMatrix;
+        $viewCommands = $cullView !== null && $cullProjection !== null
+            ? $this->batchCuller->visible($commands, Frustum::planes($cullProjection, $cullView))
+            : $commands;
+        // DrawMesh::$shadowOnly (VisibilityService's shadow casters outside
+        // the camera's view, see Renderer3DSystem) must never reach the
+        // camera's own passes - only renderShadowPass()'s collectShadowDraws(),
+        // which reads $commands (the full, unfiltered list) directly, not
+        // $viewCommands. The passes that intentionally keep the full list
+        // anyway (minimap, planar reflection, ray-traced scene) are
+        // unaffected: they read $commands too.
+        $viewCommands = self::withoutShadowOnlyDraws($viewCommands);
+        if (getenv('PHPOLYGON_DRAW_DEBUG') === '1' && $this->batchCullDebugFrame++ % 60 === 0) {
+            $stats = $this->batchCuller->stats();
+            fprintf(STDERR, "[DRAWS] instanced batches=%d drawn=%d culled=%d shadow-culled=%d bounds-derived=%d\n",
+                $stats['batches'], $stats['batches'] - $stats['culledView'], $stats['culledView'], $stats['culledShadow'], $stats['derived']);
+        }
+
         if ($mrtTarget !== null) {
             // The AO passes run AFTER the geometry (renderAoFromMrt); until then
             // the mesh pass must not believe an AO map is bound.
@@ -4509,7 +4573,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             // target is bound below. Leaves ssaoActiveThisFrame set for the
             // opaque pass.
             PerfProfiler::begin('render3d.submit.ssao');
-            $this->renderSsaoPass($commands, $frameState);
+            $this->renderSsaoPass($viewCommands, $frameState);
             PerfProfiler::end();
             PerfProfiler::begin('render3d.submit.sdfao');
             $this->renderSdfAoPass($frameState);
@@ -4558,7 +4622,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         // draw). Opaque is depth-buffer order-independent (VIO_BLEND_NONE) up to
         // equal depth, see OpaqueDrawOrder. Sorted before the first pipeline bind:
         // a reactive opaque material opens the reactive attachment for the pass.
-        $opaque = OpaqueDrawOrder::sort($commands, $this->motionThisFrame, $this->reactiveOpaqueThisFrame);
+        $opaque = OpaqueDrawOrder::sort($viewCommands, $this->motionThisFrame, $this->reactiveOpaqueThisFrame);
         $this->prepassThisFrame = $this->settings->depthPrepass && !$this->variantsThisFrame;
         $this->collectRayTracedScene($commands);
         $this->bindPipeline('opaque');
@@ -4643,7 +4707,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             $this->captureSceneDepth($hdrTarget, $sceneViewportW, $sceneViewportH);
             $this->variantUniformsUploaded = [];
         }
-        if (self::sceneColorAvailable() && self::refractionIn($commands)) {
+        if (self::sceneColorAvailable() && self::refractionIn($viewCommands)) {
             $this->captureSceneColor($hdrTarget, $sceneViewportW, $sceneViewportH);
             $this->variantUniformsUploaded = [];
         }
@@ -4677,7 +4741,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         // unmasked). Every other transparent leaves the G-buffer untouched.
         $waterToGbuffer = $this->mrtThisFrame && $this->ssrEnabledThisFrame();
         $transparentPass = 'transparent';
-        foreach ($commands as $cmd) {
+        foreach ($viewCommands as $cmd) {
             if (!($cmd instanceof DrawMesh) && !($cmd instanceof DrawMeshInstanced)) {
                 continue;
             }
@@ -4840,17 +4904,57 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
      * runs behind the splash rather than blocking the first visible frame. The
      * engine calls this during the splash; {@see render()} also calls it as a
      * lazy fallback so a game that drives the renderer directly still works.
+     *
+     * $onProgress is called once per program of the {@see ShaderWarmPlan}, with
+     * $done running 1..$total and the total fixed before the first compile; a
+     * planned program that is skipped or fails still counts as a finished step
+     * ({@see ShaderWarmProgress}). Never called when the shaders are warm already.
+     * An exception of the callback is rethrown after the last program.
+     *
+     * @param (callable(int $done, int $total, string $program): void)|null $onProgress
      */
-    public function warmShaders(): void
+    public function warmShaders(?callable $onProgress = null): void
     {
         if ($this->shadersWarmed) {
             return;
         }
         $this->shadersWarmed = true;
-        $this->initShaders();
+        try {
+            $this->initShaders($onProgress === null ? null : $onProgress(...));
+            $failure = $this->warmProgress?->failure();
+        } finally {
+            $this->warmProgress = null;
+        }
+        if ($failure !== null) {
+            // The callback's own exception, kept out of the compile sequence.
+            throw $failure;
+        }
     }
 
-    private function initShaders(): void
+    /** Set while warmShaders() runs with a progress callback: compileShader() reports to it. */
+    private ?ShaderWarmProgress $warmProgress = null;
+
+    /**
+     * The programs initShaders() is about to compile, for the progress total.
+     *
+     * @return list<string>
+     */
+    private function warmPlan(): array
+    {
+        $variants = [];
+        foreach (ProcModeShaderRegistry::variants() as $variant) {
+            if (!ProcModeShaderRegistry::isLazyVariant($variant)) {
+                $variants[] = (string) $variant;
+            }
+        }
+        foreach (array_keys($this->usedVariants()) as $variant) {
+            $variants[] = (string) $variant;
+        }
+        return ShaderWarmPlan::programs($this->outlineSupported(), $this->mrtSupported(), $variants);
+    }
+
+    /** @param (\Closure(int, int, string): void)|null $onProgress */
+    private function initShaders(?\Closure $onProgress = null): void
     {
         // Fixed for the programs compiled from here on (a change rebuilds them).
         $this->bindlessBuilt = $this->settings->bindlessMaterials && $this->bindlessSupported();
@@ -4863,6 +4967,8 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         // After the unit count is known: the pyramid takes the highest unit.
         $this->hizUnitBuilt = $this->settings->occlusionCulling ? $this->hizUnit() : -1;
         $this->refreshAutoOmissions(false);
+        // The total of the progress display, fixed before the first compile.
+        $this->warmProgress = $onProgress !== null ? new ShaderWarmProgress($this->warmPlan(), $onProgress) : null;
         try {
             $this->compileShaderFromFiles('default',    'mesh3d.vert.glsl',     'mesh3d.frag.glsl');
         } catch (\RuntimeException $e) {
@@ -4872,7 +4978,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             $this->disableAutoOmissions($e);
             $this->compileShaderFromFiles('default',    'mesh3d.vert.glsl',     'mesh3d.frag.glsl');
         }
-        $this->compileShaderFromFiles('unlit',      'unlit.vert.glsl',      'unlit.frag.glsl');
+        $this->compileShaderFromFiles('unlit',     'unlit.vert.glsl',      'unlit.frag.glsl');
         $this->compileShaderFromFiles('shadow',     'shadow.vert.glsl',     'shadow.frag.glsl');
         $this->compileShaderFromFiles('depth',      'depth.vert.glsl',      'depth.frag.glsl');
         $this->compileShaderFromFiles('normals',    'normals.vert.glsl',    'normals.frag.glsl');
@@ -4965,6 +5071,8 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         }
         // The cut-out and profile programs the registered materials use, up front.
         $this->ensureUsedVariants();
+        // Planned programs that were skipped or failed count as finished steps.
+        $this->warmProgress?->finish();
     }
 
     private function initPostProcess(): void
@@ -5290,6 +5398,29 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
     /** @param array<string, Material>|null $materials defaults to every registered material */
     private function ensureUsedVariants(?array $materials = null): void
     {
+        foreach ($this->usedVariants($materials) as $variant => $tessellated) {
+            $variant = (string) $variant;
+            if (!$this->ensureVariantCompiled($variant) || !$tessellated || !$this->tessellationAvailable()) {
+                continue;
+            }
+            // The tessellation twins too, so no draw waits for a compile.
+            $suffix = $variant === ProcModeShaderRegistry::BASE_VARIANT ? '' : '@' . $variant;
+            foreach (['default', 'default_mrt', 'default_mrt_mv'] as $program) {
+                if (isset($this->shaderCache[$program . $suffix])) {
+                    $this->tessShader($program . $suffix);
+                }
+            }
+        }
+    }
+
+    /**
+     * The variants the materials draw with, and whether a tessellated material uses each.
+     *
+     * @param array<string, Material>|null $materials defaults to every registered material
+     * @return array<string, bool>
+     */
+    private function usedVariants(?array $materials = null): array
+    {
         $profiles = ShaderProfiles::names() !== [];
         $wanted = [];
         foreach ($materials ?? MaterialRegistry::all() as $id => $material) {
@@ -5310,19 +5441,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
                 $wanted[$variant] = true;
             }
         }
-        foreach ($wanted as $variant => $tessellated) {
-            $variant = (string) $variant;
-            if (!$this->ensureVariantCompiled($variant) || !$tessellated || !$this->tessellationAvailable()) {
-                continue;
-            }
-            // The tessellation twins too, so no draw waits for a compile.
-            $suffix = $variant === ProcModeShaderRegistry::BASE_VARIANT ? '' : '@' . $variant;
-            foreach (['default', 'default_mrt', 'default_mrt_mv'] as $program) {
-                if (isset($this->shaderCache[$program . $suffix])) {
-                    $this->tessShader($program . $suffix);
-                }
-            }
-        }
+        return $wanted;
     }
 
     /**
@@ -5489,6 +5608,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
 
         $this->shaderCache[$id] = $shader;
         $this->programSources[$id] = [$vertSrc, $fragSrc];
+        $this->warmProgress?->compiled($id);
     }
 
     /** @var array<string, array{0: string, 1: string}> vertex and fragment source of each compiled program */
@@ -6141,6 +6261,90 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
     }
 
     /**
+     * Range spheres of the local lights that may render a shadow map this frame:
+     * the spot light renderSpotShadowPass() picks and every point light
+     * renderPointShadowPass() chooses from (it takes the nearest; all of them is
+     * the safe superset). Light reaches nothing beyond its range, so a caster
+     * outside every sphere shadows nothing.
+     *
+     * @param list<AddSpotLight> $spotLights
+     * @param list<AddPointLight> $pointLights
+     * @return list<array{0: float, 1: float, 2: float, 3: float}> x, y, z, radius
+     */
+    public static function localShadowLightSpheres(array $spotLights, array $pointLights): array
+    {
+        $spheres = [];
+        foreach (array_slice($spotLights, 0, 4) as $sl) {
+            if ($sl->castsShadow && $sl->range > 0.1) {
+                $spheres[] = [$sl->position->x, $sl->position->y, $sl->position->z, $sl->range];
+                break;
+            }
+        }
+        foreach ($pointLights as $pl) {
+            if ($pl->castsShadow && $pl->radius > 0.2 && $pl->intensity > 0.001) {
+                $spheres[] = [$pl->position->x, $pl->position->y, $pl->position->z, $pl->radius];
+            }
+        }
+
+        return $spheres;
+    }
+
+    /**
+     * Drops every DrawMesh flagged {@see DrawMesh::$shadowOnly} from a list
+     * - see where $viewCommands is built in render(). Two-pass only when
+     * something is actually flagged (the common case: no directional light,
+     * or VisibilityService found no off-screen caster this frame), so the
+     * usual frame pays one extra scan, not one extra allocation.
+     *
+     * @param list<object> $commands
+     * @return list<object>
+     */
+    private static function withoutShadowOnlyDraws(array $commands): array
+    {
+        foreach ($commands as $cmd) {
+            if ($cmd instanceof DrawMesh && $cmd->shadowOnly) {
+                $out = [];
+                foreach ($commands as $c) {
+                    if (!($c instanceof DrawMesh && $c->shadowOnly)) {
+                        $out[] = $c;
+                    }
+                }
+                return $out;
+            }
+        }
+        return $commands;
+    }
+
+    /**
+     * The volume an instanced batch must touch to cast a sun shadow: the four
+     * side planes of the largest cascade's light volume, a prism along the
+     * light direction. Every cascade is centred on the same point (up to the
+     * texel snap, {@see SHADOW_CASTER_MARGIN}) and looks along the same axes, so
+     * what lies outside this prism rasterises into no cascade. Near and far are
+     * left out on purpose: a tall caster toward the sun stays in. Null when the
+     * light has no direction (nothing is tested then).
+     *
+     * @return list<array{0: float, 1: float, 2: float, 3: float}>|null
+     */
+    private function sunCasterVolume(Vec3 $lightDir, ?Vec3 $shadowCenter): ?array
+    {
+        return SunCasterVolume::planes($lightDir, $shadowCenter, max(self::CASCADE_ORTHO_SIZES), self::SHADOW_MAP_RESOLUTION);
+    }
+
+    /**
+     * What the instanced-batch visibility test did in the last render():
+     * batches in the list, batches dropped from the camera's passes, casters
+     * dropped from the shadow passes, bounding spheres derived from matrices
+     * (0 once every static batch is answered from the cache).
+     *
+     * @return array{batches: int, culledView: int, culledShadow: int, derived: int}
+     */
+    public function instancedBatchCullStats(): array
+    {
+        return $this->batchCuller->stats();
+    }
+
+    /**
      * The shadow casters of a frame, resolved to depth-only instanced draws (mesh,
      * packed matrices, count). Shared by the sun cascades and the spot shadow.
      *
@@ -6175,6 +6379,16 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
                 }
                 $mat = MaterialRegistry::get($cmd->materialId);
                 if ($mat === null || $mat->alpha < 0.9 || !$this->castsShadow($cmd->materialId) || ($local && self::emitsLight($mat))) {
+                    continue;
+                }
+                // A batch that cannot reach a shadow map of this caster set is
+                // dropped before its instance data is resolved. The test is the
+                // light's volume, never the camera's: a batch out of view still
+                // shadows what is in view.
+                if ($local
+                    ? !$this->batchCuller->reachesSpheres($cmd, $this->localCasterSpheres)
+                    : $this->sunCasterPlanes !== null && !$this->batchCuller->reachesPlanes($cmd, $this->sunCasterPlanes, self::SHADOW_CASTER_MARGIN)
+                ) {
                     continue;
                 }
                 $instancedCasters[] = [$cmd, $mat];
@@ -6279,6 +6493,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
     private function renderShadowPass(RenderCommandList $commandList, array $dirLights): bool
     {
         $this->frameLocalShadowDraws = null;
+        $this->sunCasterPlanes = null;
         if ($this->settings->shadowQuality === \PHPolygon\Rendering\Quality\ShadowQuality::Off) {
             return false;
         }
@@ -6317,6 +6532,11 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         // the draw count tiny, and drawing every caster into every cascade is free
         // on this CPU-bound path (off-box casters clip to the cascade ortho box;
         // the shadow result is identical to the old per-cascade-culled version).
+        //
+        // Instanced batches are tested once against the sun's caster volume: a
+        // batch outside it clips away in all cascades, so it is neither resolved
+        // nor drawn.
+        $this->sunCasterPlanes = $this->sunCasterVolume($lightDir, $shadowCenter);
         $shadowDraws = $this->collectShadowDraws($commandList);
 
         PerfProfiler::begin('render3d.shadow.draw');
@@ -9042,6 +9262,8 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
      */
     public function invalidateStaticInstances(?string $staticKey = null): void
     {
+        // The derived bounding spheres live and die with the cached buffers.
+        $this->batchCuller->forget($staticKey);
         if ($staticKey === null) {
             $this->staticMatrixCache = [];
             $this->staticInstanceCountCache = [];

@@ -4,8 +4,12 @@ declare(strict_types=1);
 
 namespace PHPolygon\ECS;
 
+use PHPolygon\Activity\ActivityTier;
 use PHPolygon\Component\Transform2D;
 use PHPolygon\Component\Transform3D;
+use PHPolygon\Log\Log;
+use PHPolygon\Log\LogCategory;
+use PHPolygon\Log\LogLevel;
 use PHPolygon\Runtime\PerfProfiler;
 use RuntimeException;
 
@@ -40,6 +44,25 @@ class World
     /** @var array<int, bool> Entities currently dormant (resident, iteration-excluded). */
     private array $dormant = [];
 
+    /**
+     * Entities marked Far (Phase 4 of the visibility plan, 2026-11-11).
+     * UNLIKE $dormant, this does NOT move components out of $components -
+     * componentPool()/query() still see a Far entity exactly as before, so a
+     * system that never calls {@see componentPoolFar()} or checks
+     * {@see isFar()} itself keeps processing it every tick without any
+     * change (see {@see ActivityTier}'s and {@see \PHPolygon\ECS\AbstractSystem::tierPolicy()}'s
+     * docblocks on why - a Far entity must not silently disappear from an
+     * unmodified system's loop). Only a system that explicitly opts in
+     * (reads {@see componentPoolFar()}, or skips ids this set contains) gets
+     * different behaviour for a Far entity.
+     *
+     * @var array<int, true>
+     */
+    private array $far = [];
+
+    /** @var array<class-string, true> see registerPassiveComponent() */
+    private array $passiveComponents = [];
+
     /** @var list<SystemInterface> */
     private array $systems = [];
 
@@ -59,6 +82,31 @@ class World
 
     /** Bumped on every structural change (create/destroy/attach/detach). */
     private int $structuralVersion = 0;
+
+    /**
+     * Attach/detach observers per component class, registered through
+     * {@see observe()}. Lets a system maintain an incremental index (a
+     * spatial grid, Transform3DSystem's active set, …) without walking the
+     * whole component pool to notice new or removed entities.
+     *
+     * @var array<class-string, list<array{
+     *     onAttach: callable(int, ComponentInterface): void,
+     *     onDetach: callable(int, ComponentInterface): void,
+     * }>>
+     */
+    private array $observers = [];
+
+    /** @var array<int, true> systems whose update or render has run at least once, by spl_object_id */
+    private array $systemHasRun = [];
+
+    /**
+     * Update and render time of the current frame, by system name then phase
+     * ('update'/'render'), nanoseconds - written only in trace mode and
+     * flushed as one line at the end of {@see render()}.
+     *
+     * @var array<string, array<string, int>>
+     */
+    private array $traceTimesNs = [];
 
     public function createEntity(): Entity
     {
@@ -118,10 +166,11 @@ class World
 
         foreach ($this->entityComponents[$id] as $class => $component) {
             $component->onDetach($this->entity($id));
+            $this->notifyDetach($class, $id, $component);
             unset($this->components[$class][$id], $this->dormantComponents[$class][$id]);
         }
 
-        unset($this->entityComponents[$id], $this->alive[$id], $this->entityCache[$id], $this->dormant[$id]);
+        unset($this->entityComponents[$id], $this->alive[$id], $this->entityCache[$id], $this->dormant[$id], $this->far[$id]);
         $this->freeList[] = $id;
         $this->structuralVersion++;
     }
@@ -191,6 +240,7 @@ class World
         $this->structuralVersion++;
 
         $component->onAttach($this->entity($entityId));
+        $this->notifyAttach($class, $entityId, $component);
     }
 
     public function detachComponent(int $entityId, string $componentClass): void
@@ -201,6 +251,7 @@ class World
 
         $component = $this->entityComponents[$entityId][$componentClass];
         $component->onDetach($this->entity($entityId));
+        $this->notifyDetach($componentClass, $entityId, $component);
 
         // The component lives in exactly one of the two pools depending on
         // dormancy — clear both to be safe.
@@ -208,6 +259,47 @@ class World
         unset($this->dormantComponents[$componentClass][$entityId]);
         unset($this->entityComponents[$entityId][$componentClass]);
         $this->structuralVersion++;
+    }
+
+    /**
+     * Register incremental attach/detach notifications for one component
+     * class. $onAttach fires after {@see ComponentInterface::onAttach()},
+     * $onDetach before the component is unindexed - both from
+     * attachComponent()/detachComponent() AND from destroyEntity()'s own
+     * per-component teardown (which does not call detachComponent()), so an
+     * observer sees every component of its class leave, including through
+     * World::clear().
+     *
+     * The per-class lookup is a single isset() on the hot attach/detach path
+     * when nobody observes that class - cheap enough to never need removal.
+     *
+     * @param class-string $componentClass
+     * @param callable(int, ComponentInterface): void $onAttach
+     * @param callable(int, ComponentInterface): void $onDetach
+     */
+    public function observe(string $componentClass, callable $onAttach, callable $onDetach): void
+    {
+        $this->observers[$componentClass][] = ['onAttach' => $onAttach, 'onDetach' => $onDetach];
+    }
+
+    private function notifyAttach(string $componentClass, int $entityId, ComponentInterface $component): void
+    {
+        if (!isset($this->observers[$componentClass])) {
+            return;
+        }
+        foreach ($this->observers[$componentClass] as $observer) {
+            ($observer['onAttach'])($entityId, $component);
+        }
+    }
+
+    private function notifyDetach(string $componentClass, int $entityId, ComponentInterface $component): void
+    {
+        if (!isset($this->observers[$componentClass])) {
+            return;
+        }
+        foreach ($this->observers[$componentClass] as $observer) {
+            ($observer['onDetach'])($entityId, $component);
+        }
     }
 
     /**
@@ -337,6 +429,130 @@ class World
         return isset($this->dormant[$entityId]);
     }
 
+    // --- Activity tiers (Phase 4 of the visibility plan) ---
+
+    /**
+     * Moves an entity between Visible/Near (collapsed - see below), Far and
+     * Dormant. Dormant goes through {@see setEntityDormant()} unchanged; Far
+     * only flips a membership flag ($far), components stay resident in the
+     * normal pool (see $far's own docblock). Visible and Near both mean
+     * "not Far, not Dormant" at the World level - there is no storage
+     * difference between them (nothing here ever treats a Near entity
+     * differently from a fully Visible one), so {@see entityTier()} can only
+     * ever answer Visible for either; a caller that needs the Near
+     * distinction itself (e.g. {@see \PHPolygon\Activity\ActivitySystem}'s
+     * hysteresis) must track it separately.
+     *
+     * Like {@see setEntityDormant()}, this does NOT walk a Transform
+     * hierarchy - the CALLER must apply the same tier to a whole subtree
+     * (see that method's docblock for why: a lone dormant/far child under an
+     * active parent, or vice versa, produces stale/mis-parented transforms).
+     */
+    public function setEntityTier(int $entityId, ActivityTier $tier): void
+    {
+        if (!isset($this->alive[$entityId])) {
+            return;
+        }
+        if ($tier === ActivityTier::Dormant) {
+            unset($this->far[$entityId]);
+            $this->setEntityDormant($entityId, true);
+            return;
+        }
+        if ($this->isDormant($entityId)) {
+            $this->setEntityDormant($entityId, false);
+        }
+        if ($tier === ActivityTier::Far) {
+            $this->far[$entityId] = true;
+        } else {
+            unset($this->far[$entityId]);
+        }
+    }
+
+    /**
+     * Bulk form of {@see setEntityTier()} - the entry point for an
+     * {@see \PHPolygon\Component\ActivityRegion}'s whole entity-id set.
+     *
+     * @param iterable<int> $entityIds
+     */
+    public function setEntitiesTier(iterable $entityIds, ActivityTier $tier): void
+    {
+        foreach ($entityIds as $entityId) {
+            $this->setEntityTier($entityId, $tier);
+        }
+    }
+
+    public function isFar(int $entityId): bool
+    {
+        return isset($this->far[$entityId]);
+    }
+
+    /**
+     * Visible/Near collapse to Visible here - see {@see setEntityTier()} on
+     * why the World level cannot distinguish them.
+     */
+    public function entityTier(int $entityId): ActivityTier
+    {
+        if ($this->isDormant($entityId)) {
+            return ActivityTier::Dormant;
+        }
+        if ($this->isFar($entityId)) {
+            return ActivityTier::Far;
+        }
+        return ActivityTier::Visible;
+    }
+
+    /**
+     * Direct read access to a component pool FILTERED to Far-tier entities
+     * only - the entry point for a system whose {@see \PHPolygon\ECS\AbstractSystem::tierPolicy()}
+     * declares a far core and therefore wants to skip these ids in its own
+     * componentPool()/query() loop (that loop still sees them - see $far's
+     * docblock) and hand them to {@see \PHPolygon\Simulation\FarSimulationRunner}
+     * instead. Empty when nothing is Far. O(count($far)), not O(pool size).
+     *
+     * @param class-string<ComponentInterface> $componentClass
+     * @return array<int, ComponentInterface>
+     */
+    public function componentPoolFar(string $componentClass): array
+    {
+        if ($this->far === []) {
+            return [];
+        }
+        $pool = $this->components[$componentClass] ?? [];
+        $out = [];
+        foreach ($this->far as $id => $_) {
+            if (isset($pool[$id])) {
+                $out[$id] = $pool[$id];
+            }
+        }
+        return $out;
+    }
+
+    /**
+     * Registers a component class as passive: purely visual/bookkeeping data
+     * with no live per-tick behaviour of its own (the plan's "Parken": rein
+     * visuelle unbewegte Teile dürfen je Tick nichts kosten"). This is
+     * currently a REGISTRY ONLY - {@see ComponentInterface::onUpdate()} is
+     * not actually invoked anywhere in the engine's own loop (every system
+     * reads components directly instead), so there is no per-tick callback
+     * for a passive class to skip yet. Flagged as a stub ahead of whatever
+     * future mechanism (serialization, replication, a generic per-component
+     * tick) needs this distinction - same treatment as
+     * {@see \PHPolygon\Visibility\VisibilityService::tierAt()}'s Phase-4 stub
+     * in Phase 2.
+     *
+     * @param class-string<ComponentInterface> $componentClass
+     */
+    public function registerPassiveComponent(string $componentClass): void
+    {
+        $this->passiveComponents[$componentClass] = true;
+    }
+
+    /** @param class-string<ComponentInterface> $componentClass */
+    public function isPassiveComponent(string $componentClass): bool
+    {
+        return isset($this->passiveComponents[$componentClass]);
+    }
+
     // --- Queries ---
 
     /**
@@ -355,6 +571,9 @@ class World
         $this->systemPhases[count($this->systems) - 1] = $phase;
         $shortName = (new \ReflectionClass($system))->getShortName();
         $this->systemPerfNames[\spl_object_id($system)] = 'ecs.system.' . $shortName;
+        if (Log::$hooks) {
+            Log::system('added', [$system::class, 'phase' => $phase->name]);
+        }
         $system->register($this);
     }
 
@@ -362,12 +581,52 @@ class World
     {
         $index = array_search($system, $this->systems, true);
         if ($index !== false) {
+            if (Log::$hooks) {
+                Log::system('removed', [$system::class]);
+            }
             $system->unregister($this);
             array_splice($this->systems, $index, 1);
             unset($this->systemPhases[$index]);
             unset($this->systemPerfNames[\spl_object_id($system)]);
+            unset($this->systemHasRun[\spl_object_id($system)]);
             // Re-index phases
             $this->systemPhases = array_values($this->systemPhases);
+        }
+    }
+
+    /**
+     * Run one system's update or render, with the automatic hooks when
+     * {@see Log::$hooks} is on: first-run line, a caught-and-rethrown
+     * exception logged first, a slow call (over {@see Log::$slowSystemNs})
+     * reported, and - in trace mode - the time added to this frame's line
+     * (flushed by {@see render()}). Off, this is exactly $invoke().
+     */
+    private function runSystemHooked(SystemInterface $system, string $name, string $phase, \Closure $invoke): void
+    {
+        if (!Log::$hooks) {
+            $invoke();
+
+            return;
+        }
+        $id = \spl_object_id($system);
+        $firstRun = !isset($this->systemHasRun[$id]);
+        $start = hrtime(true);
+        try {
+            $invoke();
+        } catch (\Throwable $e) {
+            Log::write(LogCategory::System, 'exception', [$name, 'phase' => $phase, 'error' => $e->getMessage()], LogLevel::Error);
+            throw $e;
+        }
+        $elapsedNs = hrtime(true) - $start;
+        if ($firstRun) {
+            $this->systemHasRun[$id] = true;
+            Log::system('first run', [$name, 'phase' => $phase]);
+        }
+        if ($elapsedNs > Log::$slowSystemNs) {
+            Log::write(LogCategory::System, 'slow', [$name, 'phase' => $phase, 'ms' => round($elapsedNs / 1_000_000, 2)], LogLevel::Warn);
+        }
+        if (Log::$trace) {
+            $this->traceTimesNs[$name][$phase] = ($this->traceTimesNs[$name][$phase] ?? 0) + $elapsedNs;
         }
     }
 
@@ -378,8 +637,9 @@ class World
     {
         PerfProfiler::begin('ecs.update');
         foreach ($this->systems as $system) {
-            PerfProfiler::begin($this->systemPerfNames[\spl_object_id($system)] ?? 'ecs.system.unknown');
-            $system->update($this, $dt);
+            $name = $this->systemPerfNames[\spl_object_id($system)] ?? 'ecs.system.unknown';
+            PerfProfiler::begin($name);
+            $this->runSystemHooked($system, $name, 'update', fn () => $system->update($this, $dt));
             PerfProfiler::end();
         }
         PerfProfiler::end();
@@ -393,8 +653,9 @@ class World
         PerfProfiler::begin('ecs.update');
         foreach ($this->systems as $i => $system) {
             if (($this->systemPhases[$i] ?? SystemPhase::MainThread) === SystemPhase::MainThread) {
-                PerfProfiler::begin($this->systemPerfNames[\spl_object_id($system)] ?? 'ecs.system.unknown');
-                $system->update($this, $dt);
+                $name = $this->systemPerfNames[\spl_object_id($system)] ?? 'ecs.system.unknown';
+                PerfProfiler::begin($name);
+                $this->runSystemHooked($system, $name, 'update', fn () => $system->update($this, $dt));
                 PerfProfiler::end();
             }
         }
@@ -409,8 +670,9 @@ class World
         PerfProfiler::begin('ecs.update.post');
         foreach ($this->systems as $i => $system) {
             if (($this->systemPhases[$i] ?? SystemPhase::MainThread) === SystemPhase::PostThread) {
-                PerfProfiler::begin($this->systemPerfNames[\spl_object_id($system)] ?? 'ecs.system.unknown');
-                $system->update($this, $dt);
+                $name = $this->systemPerfNames[\spl_object_id($system)] ?? 'ecs.system.unknown';
+                PerfProfiler::begin($name);
+                $this->runSystemHooked($system, $name, 'update', fn () => $system->update($this, $dt));
                 PerfProfiler::end();
             }
         }
@@ -421,11 +683,30 @@ class World
     {
         PerfProfiler::begin('ecs.render');
         foreach ($this->systems as $system) {
-            PerfProfiler::begin(($this->systemPerfNames[\spl_object_id($system)] ?? 'ecs.system.unknown') . '.render');
-            $system->render($this);
+            $name = $this->systemPerfNames[\spl_object_id($system)] ?? 'ecs.system.unknown';
+            PerfProfiler::begin($name . '.render');
+            $this->runSystemHooked($system, $name, 'render', fn () => $system->render($this));
             PerfProfiler::end();
         }
         PerfProfiler::end();
+        $this->flushTrace();
+    }
+
+    /** Trace mode: one `[system]` line per frame with every system's accumulated time. */
+    private function flushTrace(): void
+    {
+        if (!Log::$trace || $this->traceTimesNs === []) {
+            return;
+        }
+        $systems = [];
+        foreach ($this->traceTimesNs as $name => $parts) {
+            $systems[$name] = [
+                'update_ms' => round(($parts['update'] ?? 0) / 1_000_000, 3),
+                'render_ms' => round(($parts['render'] ?? 0) / 1_000_000, 3),
+            ];
+        }
+        $this->traceTimesNs = [];
+        Log::write(LogCategory::System, 'frame times', ['systems' => $systems], LogLevel::Trace);
     }
 
     /** @return list<SystemInterface> */
@@ -446,6 +727,7 @@ class World
         $this->entityCache = [];
         $this->dormantComponents = [];
         $this->dormant = [];
+        $this->far = [];
 
         // Give every system a chance to drop per-entity-id caches. Without this
         // hook, caches keyed on int ids associate stale state with whichever

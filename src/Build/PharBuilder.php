@@ -447,6 +447,9 @@ set_error_handler(function($severity, $message, $file, $line) use ($__engineLog)
     if (!(error_reporting() & $severity)) {
         return false; // silenced with @: a probe that may fail, not a problem worth logging
     }
+    if (class_exists('PHPolygon\\Log\\Log', false) && \PHPolygon\Log\Log::handlesPhpErrors()) {
+        return false; // the engine's log has taken over and wrote the line
+    }
     $type = match($severity) {
         E_WARNING, E_USER_WARNING => 'WARNING',
         E_NOTICE, E_USER_NOTICE => 'NOTICE',

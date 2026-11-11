@@ -17,6 +17,7 @@ use PHPolygon\Rendering\CameraCutDetector;
 use PHPolygon\Rendering\Command\SetCamera;
 use PHPolygon\Rendering\RenderCommandList;
 use PHPolygon\Runtime\Window;
+use PHPolygon\Visibility\VisibilityService;
 
 class Camera3DSystem extends AbstractSystem
 {
@@ -178,6 +179,15 @@ class Camera3DSystem extends AbstractSystem
             // frames, interpolated or not; it is reported on the first frame only.
             $cut = $this->cuts->observe($entity->id, $worldPos);
             $this->commandList->add(new SetCamera($viewMatrix, $projectionMatrix, $cut));
+
+            // Camera3DSystem is the conventional first render-phase system
+            // (registered before GrassSystem, FoliageInstanceSystem,
+            // LightConeSystem, ParticleSystem and Renderer3DSystem), so
+            // classifying here guarantees every one of those has this
+            // frame's visibility ready when IT renders - registration order
+            // then stops mattering (each of them calls beginFrameFrom() too,
+            // which is a cheap memo hit when nothing changed since).
+            VisibilityService::forWorld($world)->beginFrameFrom($world, $this->commandList);
             break; // Only one active camera per frame
         }
     }

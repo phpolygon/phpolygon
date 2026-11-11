@@ -193,5 +193,40 @@ class EngineConfig
          * development) or a prepared set ({@see \PHPolygon\Runtime\WindowIcon}).
          */
         public readonly ?string $windowIcon = null,
+        /**
+         * Write game.log on a thread of its own ({@see \PHPolygon\Log\ThreadedLogWriter}).
+         * null = yes for a windowed or offscreen game, no in headless runs.
+         * Without ext-parallel (a non-ZTS PHP) the log is written on the main
+         * thread either way, once per frame.
+         */
+        public readonly ?bool $logThread = null,
+        /**
+         * Trace mode of the game log: one line per frame with the update and
+         * render time of every system. null = on in dev mode, with `--trace`
+         * on the command line or `PHPOLYGON_LOG_TRACE=1`.
+         */
+        public readonly ?bool $logTrace = null,
+        /**
+         * Log gamepad button edges by polling php-vio's gamepad state every
+         * frame ({@see \PHPolygon\Log\GamepadEdgeLog}). Off by default: the
+         * engine reads no gamepads itself, so this polling is extra work.
+         */
+        public readonly bool $logGamepads = false,
+        /**
+         * Overrides for Phase 4 activity-tier radii (the plan's decision 4):
+         * null keeps {@see \PHPolygon\Activity\ActivitySystem}'s own defaults
+         * ({@see \PHPolygon\Activity\ActivitySystem::DEFAULT_NEAR_RADIUS} = 64 m).
+         * The engine never constructs an ActivitySystem itself (opt-in, like
+         * every other render-phase system) - a game that wants the override
+         * passes it through explicitly, e.g.
+         * `new ActivitySystem($engine->activity, nearRadius: $config->activityNearRadius ?? ActivitySystem::DEFAULT_NEAR_RADIUS)`.
+         */
+        public readonly ?float $activityNearRadius = null,
+        /**
+         * Far radius = GraphicsSettings::$viewDistance x this multiplier
+         * (the plan's decision 4); null keeps
+         * {@see \PHPolygon\Activity\ActivitySystem::DEFAULT_FAR_RADIUS_MULTIPLIER} (2.0).
+         */
+        public readonly ?float $activityFarRadiusMultiplier = null,
     ) {}
 }

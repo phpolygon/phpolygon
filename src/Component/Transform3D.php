@@ -17,17 +17,51 @@ use PHPolygon\Math\Vec3;
 #[Category('Core')]
 class Transform3D extends AbstractComponent
 {
+    /**
+     * Change notification for {@see \PHPolygon\System\Transform3DSystem}: set
+     * on bind (World::observe's attach callback, see bindDirtyQueue()) so the
+     * hooks below can mark this entity dirty without the system walking the
+     * whole Transform3D pool every tick. Null while unattached (construction,
+     * hydration, a cloned-but-not-yet-attached prefab component) - the hooks
+     * just no-op then, since the system reprocesses every newly attached
+     * Transform3D once anyway.
+     */
+    private ?TransformDirtyQueue $dirtyQueue = null;
+
+    /** Entity id this instance is bound to; meaningless while $dirtyQueue is null. */
+    private int $boundEntityId = 0;
+
     #[Property(editorHint: 'vec3')]
-    public Vec3 $position;
+    public Vec3 $position {
+        set {
+            $this->position = $value;
+            $this->notifyDirty();
+        }
+    }
 
     #[Property(editorHint: 'quaternion')]
-    public Quaternion $rotation;
+    public Quaternion $rotation {
+        set {
+            $this->rotation = $value;
+            $this->notifyDirty();
+        }
+    }
 
     #[Property(editorHint: 'vec3')]
-    public Vec3 $scale;
+    public Vec3 $scale {
+        set {
+            $this->scale = $value;
+            $this->notifyDirty();
+        }
+    }
 
     #[Property]
-    public ?int $parentEntityId = null;
+    public ?int $parentEntityId = null {
+        set {
+            $this->parentEntityId = $value;
+            $this->notifyDirty();
+        }
+    }
 
     /** @var list<int> */
     #[Property]
@@ -47,6 +81,54 @@ class Transform3D extends AbstractComponent
         $this->scale = $scale ?? Vec3::one();
         $this->parentEntityId = $parentEntityId;
         $this->worldMatrix = $this->getLocalMatrix();
+    }
+
+    /**
+     * Rebinding after a clone (prefab instancing clones authored components
+     * before attaching them, see SceneBuilder::materializeDeclaration()):
+     * the clone is not attached to anything yet, so it must start unbound -
+     * otherwise it would mark the ORIGINAL's entity id dirty on its first
+     * write, and World::observe's attach callback would never get a chance
+     * to bind it to its own id.
+     */
+    public function __clone(): void
+    {
+        $this->dirtyQueue = null;
+        $this->boundEntityId = 0;
+    }
+
+    /**
+     * Bind this instance to its entity id and the owning Transform3DSystem's
+     * dirty queue. Called from the attach callback registered through
+     * {@see \PHPolygon\ECS\World::observe()} - never call this directly.
+     */
+    public function bindDirtyQueue(int $entityId, TransformDirtyQueue $queue): void
+    {
+        $this->boundEntityId = $entityId;
+        $this->dirtyQueue = $queue;
+    }
+
+    /** Called from the matching detach callback - never call this directly. */
+    public function unbindDirtyQueue(): void
+    {
+        $this->dirtyQueue = null;
+    }
+
+    /**
+     * Marks this transform dirty without assigning any property. Game code
+     * that mutates position/rotation/scale IN PLACE (`$t->position->x = …`
+     * - Vec3/Quaternion are mutable, so that write never runs the hooks
+     * above) must call this afterwards, or rely on Transform3DSystem's
+     * safety net to catch it within a handful of ticks.
+     */
+    public function touch(): void
+    {
+        $this->notifyDirty();
+    }
+
+    private function notifyDirty(): void
+    {
+        $this->dirtyQueue?->mark($this->boundEntityId);
     }
 
     public function getLocalMatrix(): Mat4

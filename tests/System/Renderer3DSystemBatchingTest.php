@@ -105,6 +105,7 @@ final class Renderer3DSystemBatchingTest extends TestCase
         self::assertSame('a', $instanced[0]->materialId);
         self::assertCount(2, $instanced[0]->matrices);
         self::assertFalse($instanced[0]->castShadows);
+        self::assertTrue($instanced[0]->bounds?->isUnbounded(), 'its instances are already culled: the renderer derives and tests nothing');
         self::assertCount(1, $single);
         self::assertSame('b', $single[0]->materialId, 'a batch of one stays a plain draw');
     }
