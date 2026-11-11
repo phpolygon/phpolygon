@@ -37,6 +37,36 @@ readonly class MeshData
     }
 
     /**
+     * Axis-aligned bounding box of the positions. An empty mesh yields a zero
+     * box at the origin.
+     *
+     * @return array{min: \PHPolygon\Math\Vec3, max: \PHPolygon\Math\Vec3}
+     */
+    public function bounds(): array
+    {
+        $v = $this->vertices;
+        $n = count($v);
+        if ($n < 3) {
+            return ['min' => \PHPolygon\Math\Vec3::zero(), 'max' => \PHPolygon\Math\Vec3::zero()];
+        }
+        $minX = $maxX = (float) $v[0];
+        $minY = $maxY = (float) $v[1];
+        $minZ = $maxZ = (float) $v[2];
+        for ($i = 3; $i + 2 < $n; $i += 3) {
+            $x = (float) $v[$i];
+            $y = (float) $v[$i + 1];
+            $z = (float) $v[$i + 2];
+            if ($x < $minX) { $minX = $x; } elseif ($x > $maxX) { $maxX = $x; }
+            if ($y < $minY) { $minY = $y; } elseif ($y > $maxY) { $maxY = $y; }
+            if ($z < $minZ) { $minZ = $z; } elseif ($z > $maxZ) { $maxZ = $z; }
+        }
+        return [
+            'min' => new \PHPolygon\Math\Vec3($minX, $minY, $minZ),
+            'max' => new \PHPolygon\Math\Vec3($maxX, $maxY, $maxZ),
+        ];
+    }
+
+    /**
      * Whether every triangle faces the same way (by winding): a flat, one-sided
      * pane, quad or particle. Such a mesh cannot overlap itself on screen, so
      * a renderer that draws a closed transparent mesh far faces first can draw

@@ -2006,6 +2006,43 @@ bulge), shoes, bottles, handles; turn it with a transform to loft along X/Z.
 `MeshData::mirrored(axis)` reflects a mesh and reverses the winding — a left part from
 a right one without the mesh turning inside out.
 
+**Procedural geometry kit (pure, thread-safe, no static state, no GPU).** For hard-surface
+prefabs (facades, balustrades, ribs, trims); all return `MeshData` with tangents, all UVs
+are world metres. Run them inside a worker freely (they skip `PerfProfiler::section`,
+unlike older generators, to stay free of shared state).
+- `MeshData::bounds()` -> `['min' => Vec3, 'max' => Vec3]`.
+- `PolygonExtrude::generate(list<Vec2> $outline, float $depth, list<list<Vec2>> $holes = [], capFront, capBack, uvScale)`:
+  prism along +Z (z 0..depth), any input winding, hole walls = inner faces; caps by
+  ear clipping with hole bridging. Input must be simple; holes inside, not touching.
+- `WallWithOpenings::parts()/generate(w, h, thickness, list<WallOpening>, uvScale)`: slab
+  x 0..w, y 0..h, z 0..thickness (front = +Z), openings cut through (real reveals,
+  optional arch via `archRise`), optional sill/lintel ledges as separate parts
+  (`['wall','sills','lintels']`). Openings must lie strictly inside and not overlap.
+- `Profile::rect/chamferedRect/roundedRect/circle/archedRect` + `Profile::chamfer()/round()`
+  (corner softening of any ring): cross-sections for `PolygonExtrude` and `SweepMesh`.
+- `BevelBoxMesh::generate(w, h, d, bevel, segments, uvScale)`: rounded-edge box (smooth
+  normals over the bevel); `MetricMesh::box/boxBetween/plane`: boxes/planes whose UV unit is
+  one metre on every face (BoxMesh maps every face to 0..1).
+- `ArrayRun::line/alongPath/placements/build`: instance a mesh by count, spacing,
+  spacing+`fit` (hit both ends) or `centered`; local +X is yawed onto the path tangent;
+  optional per-instance `callable(int, placement): ?Mat4` for alternation/variation.
+- `MeshCleanup::weld()` (position tolerance, keeps hard edges/UV seams unless told
+  otherwise), `removeDegenerate()`, `compact()`, `topology()` (open / non-manifold /
+  flipped edges - use it as a validity check in tests).
+- `Math\Rng` (xoshiro128**, 32-bit only; `derive($key)` child streams from (seed, key),
+  independent of draws) and `Math\Noise` (`value2/3`, `gradient2/3`, `fbm2/3`, lattice hash).
+  Both document their exact algorithms in the class docblock and are frozen: sequences are
+  byte-stable across platforms with 64-bit ints and across versions, never use
+  `mt_rand`/`rand`/libm. Geometry generators use `sin/cos` (identical per platform/PHP
+  build, not guaranteed across libms).
+- Not done: per-vertex colour/attribute in `MeshData` (design note: the mesh upload is a
+  fixed 8-float interleave of position/normal/uv, stride 32 bytes: `OpenGLRenderer3D.php:949`,
+  `VulkanRenderer3D.php:1124`, vio layouts in `VioRenderer3D.php` (`interleaveMeshData`, layout
+  location 0/1/2); there is no colour slot, so a baked-dirt channel needs a vertex layout and
+  shader change on every backend, i.e. a separate backend feature gated per capability);
+  single-facet hard chamfer on a full box (chamfer a `Profile` and extrude instead); bevel
+  on extrusion cap edges.
+
 **Ground-following surfaces — `ConformingSurfaceSet` / `ConformingRegionMesh`.** Paths,
 plazas, yards, borders and inlays that lie ON a terrain (no floating slab, no slab edge seen
 from the side, no gap at joints). `RegionShape` gives outlines as signed distance fields
