@@ -11,6 +11,7 @@
   <a href="#architecture">Architecture</a> ·
   <a href="#getting-started">Getting Started</a> ·
   <a href="#examples">Examples</a> ·
+  <a href="#documentation">Documentation</a> ·
   <a href="#roadmap">Roadmap</a> ·
   <a href="https://github.com/sponsors/phpolygon">Sponsor</a>
 </p>
@@ -18,12 +19,14 @@
 ---
 
 PHPolygon is a standalone game engine written entirely in PHP. It uses
-[php-vio](https://github.com/hmennen90/php-vio) as its primary unified backend
-for window management, input, audio, and 2D/3D rendering. When php-vio is not
-available, it falls back to [php-glfw](https://github.com/mario-deluna/php-glfw)
-(OpenGL 4.1 / NanoVG) and [php-vulkan](https://github.com/hmennen90/php-vulkan)
-for 3D graphics. The primary authoring tool is Claude Code — scenes, components,
-and game logic are generated and iterated on through AI-assisted workflows.
+[php-vio](https://github.com/phpolygon/php-vio) as its unified backend for
+window management, input, audio, and 2D/3D rendering; php-vio in turn renders
+through Direct3D 11/12, Vulkan, Metal or OpenGL, whichever fits the machine.
+Standalone renderers on [php-glfw](https://github.com/mario-deluna/php-glfw)
+(OpenGL / NanoVG) and [php-vulkan](https://github.com/hmennen90/php-vulkan)
+remain in the tree as legacy backends. The primary authoring tool is Claude
+Code — scenes, components, geometry and game logic are generated and iterated
+on through AI-assisted workflows.
 
 ## Features
 
@@ -33,61 +36,94 @@ and game logic are generated and iterated on through AI-assisted workflows.
   `#[Serializable]` on component fields, zero manual `toJson()`/`fromJson()`
 - **Scene system** — PHP-canonical scene definitions, SceneManager with
   single/additive loading, parent-child entity hierarchy, persistent entities
-- **Prefabs** — Reusable entity templates as PHP classes
+- **Prefabs** — Reusable entity templates as PHP classes, plus layout sockets
+  (`Opening`, `MountPoint`, `MountLine`, `Zone`) so independently built level
+  parts fit together
 - **PHP ↔ JSON transpiler** — Bidirectional conversion for the editor pipeline;
   PHP is always the source of truth, JSON is the intermediate format
-- **Physics** — RigidBody2D, BoxCollider2D, AABB collision detection + response,
-  raycasting, trigger/collision events
+- **3D rendering** — `RenderCommandList`-driven `VioRenderer3D`: PBR materials,
+  cascaded shadows, instancing, skybox and fog, procedural normal and surface
+  patterns, particles, outlines, post-processing (bloom, tone mapping, colour
+  grading, FXAA / MSAA / TAA, SSAO, SSR) and upscaling (FSR 1, TAAU, FSR 3.1,
+  DLSS)
+- **Graphics settings** — Immutable `GraphicsSettings`, persisted per player,
+  first-launch calibration, adaptive quality, hardware capabilities and a
+  drop-in `GraphicsOptionsPanel` (see [docs/graphics-settings.md](docs/graphics-settings.md))
+- **Procedural geometry** — Meshes are generated in PHP (`BoxMesh`,
+  `SphereMesh`, `CylinderMesh`, `LatheMesh`, `SweepMesh`, …); no model files
+  at runtime. Vegetation, grass, terrain and character generators build on it
+- **Physics** — 2D: RigidBody2D, BoxCollider2D, AABB collision detection +
+  response, raycasting, trigger/collision events. 3D: `Physics3DSystem` with
+  `CharacterController3D`, box, mesh and heightmap colliders, `Raycaster3D` queries
+- **Navigation** — NavMesh generation, A* pathfinding and `NavMeshAgent`s
 - **Input mapping** — Action-based system with named bindings (`jump`, `shoot`)
-  instead of raw key codes, axis support for movement
-- **Audio** — AudioManager with channel-based mixing (SFX, Music, UI, Ambient,
-  Voice), per-channel volume/mute, pluggable backend interface
+  instead of raw key codes, axis support for movement, rebinding at run time
+- **Audio** — AudioManager with channel-based mixing (Master, Music, SFX, UI,
+  Voice), per-channel volume/mute, spatial 3D sources, a stem player for
+  layered music, offline DSP and codecs, pluggable backend interface
 - **Localization** — LocaleManager with JSON translation files, dot-notation keys,
-  placeholder replacement (`:param`), fallback locale
+  placeholder replacement (`:param`), fallback locale, start language resolved
+  from Steam or the system
 - **Save system** — Slot-based SaveManager with metadata, play time tracking,
   JSON persistence
 - **UI system** — Dual-paradigm: immediate-mode (UIContext) for debug overlays,
   retained-mode (Widget tree) for complex UIs with measure/layout/draw pipeline
-- **Editor infrastructure** — Inspector metadata extraction via Reflection,
-  component registry with category grouping, SceneDocument with undo/redo,
-  command bus for editor operations, NativePHP desktop app with Vue 3 SPA
+- **Multiplayer primitives** — Transports (Steam relay, TCP, in-process
+  loopback), wire protocol, host/client sessions and a serializable command bus
+  in `PHPolygon\Net` and `PHPolygon\Command`
 - **Build system** — 7-phase pipeline producing standalone executables: PHAR
   creation, static PHP binary (micro.sfx), platform packaging (macOS .app,
   Linux, Windows), plus a native iOS/iPadOS `.app` via embed libphp.a + Xcode
 - **Headless mode** — Full engine without GPU: `EngineConfig(headless: true)`
-  swaps in NullWindow, NullRenderer2D, NullTextureManager for CI/testing
-- **Visual regression testing** — Playwright-style VRT with GD software renderer,
-  YIQ pixel comparison, automatic snapshot management, diff image generation
-- **Math primitives** — Vec2, Vec3, Mat3, Rect as immutable value objects
-- **Rendering** — Vio unified backend (primary), NanoVG 2D fallback, Vulkan/Metal/OpenGL 3D,
-  Camera2D, TextureManager, SpriteSheet
+  swaps in NullWindow, NullRenderer2D/3D, NullTextureManager for CI/testing
+- **Testing** — `GameTestCase` for headless game tests against the emitted
+  render commands, Playwright-style VRT with a GD software renderer, YIQ pixel
+  comparison, automatic snapshot management, diff image generation
+- **Profiling** — `PerfProfiler` sections, SPX / Excimer integration, a frame
+  spike recorder and benchmark scenarios (see [docs/profiling.md](docs/profiling.md))
+- **Math primitives** — Vec2, Vec3, Vec4, Mat3, Mat4, Quaternion, Rect, Ray
 - **Splash screen** — Engine-branded "Developed with PHPolygon" splash at startup
-  with fade animation, renderer info display, configurable duration, skippable
+  with fade animation, renderer info display, configurable duration, skippable;
+  an optional studio splash in front of it
 
 ## Architecture
 
 ```
 PHPolygon\
 ├── ECS\              Entity, World, Component/System interfaces, Attributes
-├── Scene\            Scene, SceneManager, SceneBuilder, Prefabs, Transpiler
-├── Component\        Transform2D, SpriteRenderer, RigidBody2D, BoxCollider2D, ...
-├── System\           Physics2DSystem, Renderer2DSystem, AudioSystem, InputMapSystem
-├── Rendering\        VioRenderer2D, Renderer2D (NanoVG), VioRenderer3D, OpenGLRenderer3D,
-│                     VulkanRenderer3D, VioEnvironmentCubemap, NullRenderer2D/3D, Camera2D,
-│                     VioTextureManager, TextureManager, Color
-├── Runtime\          VioMainWindow, Window (GLFW), NullWindow, GameLoop, VioInput, Input, Clock
-├── Physics\          Collision2D, RaycastHit2D
+├── Scene\            Scene, SceneManager, SceneBuilder, Prefabs, Layout sockets, Transpiler
+├── Component\        Transform2D/3D, SpriteRenderer, MeshRenderer, RigidBody2D, lights, ...
+├── System\           Physics2DSystem/Physics3DSystem, Renderer2DSystem/Renderer3DSystem, ...
+├── Rendering\        VioRenderer2D, VioRenderer3D, RenderCommandList, Material, Quality\,
+│                     PostProcess\, NullRenderer2D/3D, Camera2D, VioTextureManager, Color;
+│                     legacy: Renderer2D (NanoVG), OpenGLRenderer3D, VulkanRenderer3D
+├── Runtime\          VioMainWindow, VioInput, GameLoop, Clock, NullWindow, PerfProfiler;
+│                     legacy: Window / Input (GLFW)
+├── Geometry\         BoxMesh, SphereMesh, CylinderMesh, MeshRegistry, MeshData, ...
+├── Vegetation\       Plant generator (trees, palms, bushes, hedges)
+├── Terrain\          Heightmaps, terrain chunks, scatter
+├── Character\        Character DNA, CharacterMeshBuilder
+├── Animation\        Pose clips for part-built figures
+├── Physics\          Collision2D/3D, Raycaster3D, RaycastHit2D/3D
+├── Navigation\       NavMesh, NavMeshGenerator, AStarPathfinder
 ├── Input\            InputMap, InputAction, InputBinding
-├── Audio\            AudioManager, AudioChannel, AudioBackendInterface
+├── Audio\            AudioManager, AudioChannel, StemPlayer, Dsp\, Codec\, Speech\
+├── Net\ + Command\   Transports, sessions, wire protocol, command bus
 ├── Locale\           LocaleManager (i18n with JSON files, fallback locale)
+├── Platform\         Start-language resolution (Steam, system)
 ├── SaveGame\         SaveManager, SaveSlotInfo (slot-based persistence)
 ├── UI\               UIContext (immediate), Widget tree (retained), UIStyle
-├── Math\             Vec2, Vec3, Mat3, Rect
+├── Math\             Vec2, Vec3, Vec4, Mat3, Mat4, Quaternion, Rect, Ray
+├── Thread\           ThreadScheduler, subsystems (ext-parallel, optional)
+├── Fieldtracing\     SDF primitives, volume bakers
 ├── Build\            GameBuilder, PharBuilder, StaticPhpResolver, PlatformPackager
-├── Testing\          GdRenderer2D, ScreenshotComparer, VisualTestCase
-├── Editor\           Inspector, Registry, Commands, SceneDocument, ProjectManifest
+├── Testing\          GameTestCase, GdRenderer2D, ScreenshotComparer, VisualTestCase
+├── Support\Facades\  Static proxies (Shader, Audio, Scenes, ...)
 └── Event\            EventDispatcher, scene/collision/trigger events
 ```
+
+The editor (a NativePHP desktop app with a Vue SPA) lives in its own
+repository, [phpolygon/editor](https://github.com/phpolygon/editor).
 
 ### Design Principles
 
@@ -98,18 +134,23 @@ PHPolygon\
 - **No cross-boundary logic** — Components own per-entity behavior, Systems
   own cross-entity logic. Never mix the two.
 - **Layered rendering** — `RenderContextInterface` base, `Renderer2DInterface`
-  (Vio or NanoVG), `Renderer3DInterface` (Vio, Vulkan, Metal, OpenGL) with
-  `RenderCommandList` command buffers. Backend auto-detected at startup.
+  and `Renderer3DInterface` with `RenderCommandList` command buffers. Game code
+  builds the command list; the backend executes it.
+- **Game-agnostic** — The engine names no game and carries no game-specific
+  values; games pass their content, presets and constants in.
 
 ## Getting Started
 
 ### Requirements
 
 - PHP 8.5+
-- [php-vio](https://github.com/hmennen90/php-vio) extension (primary: unified window, input, audio, 2D/3D rendering)
-- **Or** [php-glfw](https://github.com/mario-deluna/php-glfw) extension (fallback: OpenGL 4.1 + NanoVG)
-- [php-vulkan](https://github.com/hmennen90/php-vulkan) extension (optional: native Vulkan 3D backend)
+- [php-vio](https://github.com/phpolygon/php-vio) extension (window, input,
+  audio, 2D/3D rendering) — `pie install phpolygon/php-vio` or a release binary
 - Composer
+
+Optional extensions (see `suggest` in `composer.json`): `ext-gd` for visual
+regression tests, `ext-parallel` (ZTS) for multithreading, `ext-glfw` and
+`ext-vulkan` for the legacy standalone renderers.
 
 ### Installation
 
@@ -143,6 +184,9 @@ $engine->onInit(function ($engine) {
 $engine->run();
 ```
 
+A 3D game sets `is3D: true`; php-vio picks the GPU backend
+(`vioBackend: 'auto'`, or `'d3d12'`, `'vulkan'`, `'metal'`, …).
+
 ### Scenes
 
 ```php
@@ -173,7 +217,26 @@ class MainMenu extends Scene
 ## Examples
 
 Games are built in separate repositories and require `phpolygon/phpolygon` via
-Composer. See the [Getting Started](#getting-started) section for a minimal example.
+Composer. The `examples/` directory of this repository holds runnable demos
+(`php examples/<name>.php` after `composer install`):
+
+| Example | What it shows |
+|---|---|
+| `vio_2d_demo.php` | Every `Renderer2DInterface` primitive: rects, circles, lines, text, transforms, scissor |
+| `vio_platformer.php`, `vio_space_attack.php`, `vio_tower_defense.php`, `vio_boids.php` | Small 2D games and a flocking simulation |
+| `vio_3d_shapes.php`, `vio_3d_scene.php` | Built-in geometry generators; skybox, shadows, instancing and point lights |
+| `vio_prefab_cars.php`, `svg_cars.php` | Prefab modifier API; meshes converted from SVG with `bin/svg2mesh` |
+| `quality_showcase.php` | The visual-quality features with live toggles |
+| `dna_basics.php`, `dna_genetics.php`, `dna_characters.php` | Character DNA: decode, crossover and mutation, figures built from a strand |
+| `fieldtracing_bake.php`, `fieldtracing_sdf.php`, `fieldtracing_volume.php` | SDF authoring and baking on the CPU, sphere-traced on the GPU |
+| `vegetation_catalog.php`, `grass_catalog.php`, `conforming_surfaces.php` | Headless catalogues rendered to PNG: plants, grass, paths and plazas on terrain |
+| `opengl_*.php`, `vulkan_*.php` | Shapes, materials, lighting, instancing and a spinning box for the legacy renderers |
+
+The DNA basics/genetics and `fieldtracing_bake.php` examples print to the
+console and need no GPU. The catalogues and `--screenshot=out.png` on the
+fieldtracing demos render without showing a window. The `opengl_*` and
+`vulkan_*` examples select `renderBackend3D`; with php-vio loaded the engine
+still renders through `VioRenderer3D` unless `useNative3D: true` is set.
 
 ## Build System
 
@@ -203,8 +266,17 @@ for the target platform (macOS `.app` bundle, Linux directory, Windows `.exe`).
 iOS is the exception: it links an embed `libphp.a` into a UIKit/Metal wrapper
 and builds with Xcode - see [docs/ios-build.md](docs/ios-build.md).
 
+Desktop targets are `macos-arm64`, `macos-x86_64`, `linux-x86_64`,
+`linux-arm64` and `windows-x86_64`. `--phar PATH` builds the PHAR once and
+reuses it for every later target, `--type NAME` selects a build type from
+`build.json`, and `verify-build` checks a finished build against it.
+`php vendor/bin/phpolygon help` lists every command.
+
 Configure via `build.json` in your game project root. See CLAUDE.md for
-full configuration reference.
+full configuration reference, [docs/docker-build.md](docs/docker-build.md) for
+building every platform in a container and
+[docs/build-native-upscalers.md](docs/build-native-upscalers.md) for bundling
+the FSR 3.1 / DLSS runtimes.
 
 ## Headless Mode
 
@@ -217,6 +289,9 @@ $engine = new Engine(new EngineConfig(headless: true));
 // Window → NullWindow, Renderer → NullRenderer2D/3D, Textures → NullTextureManager
 // Splash screen is automatically skipped in headless mode
 ```
+
+`EngineConfig(offscreen: true)` is the other option for tests: a real GPU
+context whose window is never shown.
 
 ## Visual Regression Testing
 
@@ -245,6 +320,24 @@ vendor/bin/phpunit tests/
 PHPOLYGON_UPDATE_SNAPSHOTS=1 vendor/bin/phpunit
 ```
 
+See [docs/testing.md](docs/testing.md) for the test layers, `GameTestCase` and
+the GPU-backed image tests.
+
+## Documentation
+
+- Guides and API reference: <https://phpolygon.github.io>
+- [docs/graphics-settings.md](docs/graphics-settings.md) — graphics quality
+  settings, calibration, upscalers, visual-quality features
+- [docs/testing.md](docs/testing.md) — unit, headless and visual regression tests
+- [docs/profiling.md](docs/profiling.md) — profilers, benchmarks, baselines
+- [docs/dna-system.md](docs/dna-system.md) — character DNA
+- [docs/docker-build.md](docs/docker-build.md), [docs/ios-build.md](docs/ios-build.md),
+  [docs/build-native-upscalers.md](docs/build-native-upscalers.md) — builds
+- [docs/gameplay-architecture.md](docs/gameplay-architecture.md) — combat core
+  and genre hulls
+- [docs/rfcs/](docs/rfcs/) — design records (MRT G-buffer, compute pipeline)
+- `CLAUDE.md` — the full engine reference used for AI-assisted authoring
+
 ## Roadmap
 
 | Phase | Description | Status |
@@ -252,11 +345,11 @@ PHPOLYGON_UPDATE_SNAPSHOTS=1 vendor/bin/phpunit
 | 1 | Engine foundation — ECS, runtime, rendering, math | Done |
 | 2 | Scene system — SceneManager, hierarchy, prefabs, transpiler | Done |
 | 3 | Game systems — physics, collision, input mapping, audio | Done |
-| 4 | Editor infrastructure — inspector, registry, commands, NativePHP desktop app | Done |
+| 4 | Editor infrastructure — inspector, registry, commands, NativePHP desktop app (now [phpolygon/editor](https://github.com/phpolygon/editor)) | Done |
 | 5 | Engine services — localization, save system, audio manager, UI system | Done |
 | 6 | Build & test — build pipeline, headless mode, visual regression testing | Done |
-| 7 | 3D pipeline — OpenGL, Vulkan, Metal backends, RenderCommandList, shadows, instancing | Done |
-| 8 | php-vio — unified backend for window, input, audio, 2D/3D rendering | Done |
+| 7 | 3D pipeline — OpenGL and Vulkan backends, RenderCommandList, shadows, instancing | Done |
+| 8 | php-vio — unified backend for window, input, audio, 2D/3D rendering (Direct3D 11/12, Vulkan, Metal, OpenGL) | Done |
 | 9 | First game — engine validation through real-world usage | Done (shipped on Steam) |
 
 ## Testing
@@ -264,11 +357,14 @@ PHPOLYGON_UPDATE_SNAPSHOTS=1 vendor/bin/phpunit
 ```bash
 composer install
 vendor/bin/phpunit
+vendor/bin/phpstan analyse
 ```
 
-363 tests, 789 assertions across ECS, math, serialization, scene system,
-physics, input, audio, localization, save system, UI, build pipeline,
-headless engine, and visual regression testing.
+The suite covers ECS, math, serialization, the scene system, physics,
+navigation, input, audio, localization, the save system, UI, rendering, the
+build pipeline, the headless engine and visual regression testing. Tests that
+need a GPU skip when no php-vio context can be opened; CI excludes the
+font-dependent snapshots with `--exclude-group font-vrt`.
 
 ## License
 
