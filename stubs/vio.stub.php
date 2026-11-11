@@ -287,6 +287,13 @@ function vio_on_key(VioContext $ctx, callable $callback): void {}
 /** @param callable(int): void $callback */
 function vio_on_char(VioContext $ctx, callable $callback): void {}
 
+/**
+ * Called when the window gains (true) or loses (false) keyboard focus.
+ *
+ * @param callable(bool): void $callback
+ */
+function vio_on_focus(VioContext $ctx, callable $callback): void {}
+
 /** On-screen-keyboard backspaces since the last call (iOS; 0 on desktop). */
 function vio_ime_backspaces(VioContext $ctx): int {}
 

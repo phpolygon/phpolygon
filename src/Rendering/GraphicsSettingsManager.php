@@ -13,6 +13,8 @@ use PHPolygon\Rendering\Effects\EffectRegistry;
 use PHPolygon\Rendering\Quality\BenchmarkResult;
 use PHPolygon\Rendering\Quality\GraphicsAutoTuner;
 use PHPolygon\Rendering\Quality\QualityMode;
+use PHPolygon\Rendering\Quality\TourBenchmark;
+use PHPolygon\Log\Log;
 use PHPolygon\Runtime\ThermalProfile;
 use PHPolygon\Scene\Scene;
 
@@ -112,6 +114,9 @@ class GraphicsSettingsManager
         $this->settings = $next;
         $this->applyToRenderer();
         $this->events?->dispatch(new GraphicsSettingsChanged(previous: $previous, current: $next));
+        if (Log::$hooks) {
+            Log::settings(TourBenchmark::describe($previous, $next));
+        }
         $this->events?->dispatch(new TargetFpsChanged(
             previous: $previous->targetFps,
             current: $next->targetFps,
@@ -175,6 +180,9 @@ class GraphicsSettingsManager
         $this->applyToRenderer();
         $this->save();
         $this->events?->dispatch(new GraphicsSettingsChanged(previous: $previous, current: $next));
+        if (Log::$hooks) {
+            Log::settings(TourBenchmark::describe($previous, $next));
+        }
     }
 
     /**

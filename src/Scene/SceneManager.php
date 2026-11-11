@@ -13,6 +13,7 @@ use PHPolygon\Event\SceneLoaded;
 use PHPolygon\Event\SceneLoading;
 use PHPolygon\Event\SceneUnloaded;
 use PHPolygon\Event\SceneUnloading;
+use PHPolygon\Log\Log;
 use RuntimeException;
 
 class SceneManager implements SceneManagerInterface
@@ -52,6 +53,7 @@ class SceneManager implements SceneManagerInterface
             throw new RuntimeException("Scene '{$name}' is not registered");
         }
 
+        $started = hrtime(true);
         $events = $this->engine->events;
         $world = $this->engine->world;
 
@@ -105,6 +107,9 @@ class SceneManager implements SceneManagerInterface
         }
 
         $events->dispatch(new SceneLoaded($name, $scene));
+        if (Log::$hooks) {
+            Log::scene('loaded', [$name, 'ms' => round((hrtime(true) - $started) / 1_000_000, 2)]);
+        }
     }
 
     /**
@@ -124,6 +129,7 @@ class SceneManager implements SceneManagerInterface
             throw new RuntimeException("Scene '{$name}' is not registered");
         }
 
+        $started = hrtime(true);
         $events = $this->engine->events;
         $world = $this->engine->world;
 
@@ -180,6 +186,9 @@ class SceneManager implements SceneManagerInterface
         }
 
         $events->dispatch(new SceneLoaded($name, $scene));
+        if (Log::$hooks) {
+            Log::scene('loaded', [$name, 'ms' => round((hrtime(true) - $started) / 1_000_000, 2)]);
+        }
     }
 
     public function unloadScene(string $name): void
@@ -188,6 +197,7 @@ class SceneManager implements SceneManagerInterface
             return;
         }
 
+        $started = hrtime(true);
         $scene = $this->loaded[$name];
         $events = $this->engine->events;
         $world = $this->engine->world;
@@ -219,6 +229,9 @@ class SceneManager implements SceneManagerInterface
         unset($this->loaded[$name]);
 
         $events->dispatch(new SceneUnloaded($name));
+        if (Log::$hooks) {
+            Log::scene('unloaded', [$name, 'ms' => round((hrtime(true) - $started) / 1_000_000, 2)]);
+        }
 
         // Activate next loaded scene if we had the active one
         if ($this->activeScene === null && !empty($this->loaded)) {
