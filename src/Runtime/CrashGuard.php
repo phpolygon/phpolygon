@@ -166,7 +166,7 @@ final class CrashGuard
     private static function log(string $message): void
     {
         try {
-            Engine::log($message);
+            Engine::logError($message);
         } catch (\Throwable) {
             // Nowhere left to say it.
         }

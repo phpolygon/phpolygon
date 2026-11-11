@@ -6,6 +6,9 @@ namespace PHPolygon\ECS;
 
 use PHPolygon\Component\Transform2D;
 use PHPolygon\Component\Transform3D;
+use PHPolygon\Log\Log;
+use PHPolygon\Log\LogCategory;
+use PHPolygon\Log\LogLevel;
 use PHPolygon\Runtime\PerfProfiler;
 use RuntimeException;
 
@@ -72,6 +75,18 @@ class World
      * }>>
      */
     private array $observers = [];
+
+    /** @var array<int, true> systems whose update or render has run at least once, by spl_object_id */
+    private array $systemHasRun = [];
+
+    /**
+     * Update and render time of the current frame, by system name then phase
+     * ('update'/'render'), nanoseconds - written only in trace mode and
+     * flushed as one line at the end of {@see render()}.
+     *
+     * @var array<string, array<string, int>>
+     */
+    private array $traceTimesNs = [];
 
     public function createEntity(): Entity
     {
@@ -412,6 +427,9 @@ class World
         $this->systemPhases[count($this->systems) - 1] = $phase;
         $shortName = (new \ReflectionClass($system))->getShortName();
         $this->systemPerfNames[\spl_object_id($system)] = 'ecs.system.' . $shortName;
+        if (Log::$hooks) {
+            Log::system('added', [$system::class, 'phase' => $phase->name]);
+        }
         $system->register($this);
     }
 
@@ -419,12 +437,52 @@ class World
     {
         $index = array_search($system, $this->systems, true);
         if ($index !== false) {
+            if (Log::$hooks) {
+                Log::system('removed', [$system::class]);
+            }
             $system->unregister($this);
             array_splice($this->systems, $index, 1);
             unset($this->systemPhases[$index]);
             unset($this->systemPerfNames[\spl_object_id($system)]);
+            unset($this->systemHasRun[\spl_object_id($system)]);
             // Re-index phases
             $this->systemPhases = array_values($this->systemPhases);
+        }
+    }
+
+    /**
+     * Run one system's update or render, with the automatic hooks when
+     * {@see Log::$hooks} is on: first-run line, a caught-and-rethrown
+     * exception logged first, a slow call (over {@see Log::$slowSystemNs})
+     * reported, and - in trace mode - the time added to this frame's line
+     * (flushed by {@see render()}). Off, this is exactly $invoke().
+     */
+    private function runSystemHooked(SystemInterface $system, string $name, string $phase, \Closure $invoke): void
+    {
+        if (!Log::$hooks) {
+            $invoke();
+
+            return;
+        }
+        $id = \spl_object_id($system);
+        $firstRun = !isset($this->systemHasRun[$id]);
+        $start = hrtime(true);
+        try {
+            $invoke();
+        } catch (\Throwable $e) {
+            Log::write(LogCategory::System, 'exception', [$name, 'phase' => $phase, 'error' => $e->getMessage()], LogLevel::Error);
+            throw $e;
+        }
+        $elapsedNs = hrtime(true) - $start;
+        if ($firstRun) {
+            $this->systemHasRun[$id] = true;
+            Log::system('first run', [$name, 'phase' => $phase]);
+        }
+        if ($elapsedNs > Log::$slowSystemNs) {
+            Log::write(LogCategory::System, 'slow', [$name, 'phase' => $phase, 'ms' => round($elapsedNs / 1_000_000, 2)], LogLevel::Warn);
+        }
+        if (Log::$trace) {
+            $this->traceTimesNs[$name][$phase] = ($this->traceTimesNs[$name][$phase] ?? 0) + $elapsedNs;
         }
     }
 
@@ -435,8 +493,9 @@ class World
     {
         PerfProfiler::begin('ecs.update');
         foreach ($this->systems as $system) {
-            PerfProfiler::begin($this->systemPerfNames[\spl_object_id($system)] ?? 'ecs.system.unknown');
-            $system->update($this, $dt);
+            $name = $this->systemPerfNames[\spl_object_id($system)] ?? 'ecs.system.unknown';
+            PerfProfiler::begin($name);
+            $this->runSystemHooked($system, $name, 'update', fn () => $system->update($this, $dt));
             PerfProfiler::end();
         }
         PerfProfiler::end();
@@ -450,8 +509,9 @@ class World
         PerfProfiler::begin('ecs.update');
         foreach ($this->systems as $i => $system) {
             if (($this->systemPhases[$i] ?? SystemPhase::MainThread) === SystemPhase::MainThread) {
-                PerfProfiler::begin($this->systemPerfNames[\spl_object_id($system)] ?? 'ecs.system.unknown');
-                $system->update($this, $dt);
+                $name = $this->systemPerfNames[\spl_object_id($system)] ?? 'ecs.system.unknown';
+                PerfProfiler::begin($name);
+                $this->runSystemHooked($system, $name, 'update', fn () => $system->update($this, $dt));
                 PerfProfiler::end();
             }
         }
@@ -466,8 +526,9 @@ class World
         PerfProfiler::begin('ecs.update.post');
         foreach ($this->systems as $i => $system) {
             if (($this->systemPhases[$i] ?? SystemPhase::MainThread) === SystemPhase::PostThread) {
-                PerfProfiler::begin($this->systemPerfNames[\spl_object_id($system)] ?? 'ecs.system.unknown');
-                $system->update($this, $dt);
+                $name = $this->systemPerfNames[\spl_object_id($system)] ?? 'ecs.system.unknown';
+                PerfProfiler::begin($name);
+                $this->runSystemHooked($system, $name, 'update', fn () => $system->update($this, $dt));
                 PerfProfiler::end();
             }
         }
@@ -478,11 +539,30 @@ class World
     {
         PerfProfiler::begin('ecs.render');
         foreach ($this->systems as $system) {
-            PerfProfiler::begin(($this->systemPerfNames[\spl_object_id($system)] ?? 'ecs.system.unknown') . '.render');
-            $system->render($this);
+            $name = $this->systemPerfNames[\spl_object_id($system)] ?? 'ecs.system.unknown';
+            PerfProfiler::begin($name . '.render');
+            $this->runSystemHooked($system, $name, 'render', fn () => $system->render($this));
             PerfProfiler::end();
         }
         PerfProfiler::end();
+        $this->flushTrace();
+    }
+
+    /** Trace mode: one `[system]` line per frame with every system's accumulated time. */
+    private function flushTrace(): void
+    {
+        if (!Log::$trace || $this->traceTimesNs === []) {
+            return;
+        }
+        $systems = [];
+        foreach ($this->traceTimesNs as $name => $parts) {
+            $systems[$name] = [
+                'update_ms' => round(($parts['update'] ?? 0) / 1_000_000, 3),
+                'render_ms' => round(($parts['render'] ?? 0) / 1_000_000, 3),
+            ];
+        }
+        $this->traceTimesNs = [];
+        Log::write(LogCategory::System, 'frame times', ['systems' => $systems], LogLevel::Trace);
     }
 
     /** @return list<SystemInterface> */

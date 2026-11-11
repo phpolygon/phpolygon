@@ -10,6 +10,7 @@ use PHPolygon\Rendering\Color;
 use PHPolygon\Rendering\Renderer2DInterface;
 use PHPolygon\Rendering\TextAlign;
 use PHPolygon\Rendering\TextWrap;
+use PHPolygon\Log\Log;
 use PHPolygon\Runtime\ClipboardInterface;
 use PHPolygon\Runtime\InputInterface;
 use PHPolygon\Runtime\KeyboardLayoutInterface;
@@ -69,6 +70,9 @@ class UIContext
     private string $focusedTextField = '';
     private string $textFieldBuffer = '';
     private int $textFieldCursor = 0;
+
+    /** @var array<string, float> unix time {@see logTyping()} last wrote a `[ui]` line for a field, by its id */
+    private array $textLogAt = [];
 
     /** ID of the currently open dropdown (empty = none open) */
     private string $openDropdown = '';
@@ -520,6 +524,10 @@ class UIContext
         [$clicked, $textColor] = $this->buttonBody($id, $rect, $disabled);
         $this->renderer->drawTextCentered($label, $rect->x + $w * 0.5, $rect->y + $h * 0.5, $s->fontSize, $textColor);
 
+        if ($clicked && Log::$hooks) {
+            Log::ui('click', [$id, $label]);
+        }
+
         $this->advance($this->flow === 'horizontal' ? $w : $h);
         return $clicked;
     }
@@ -575,6 +583,9 @@ class UIContext
         [$clicked, $color] = $this->buttonBody($id, $rect, $disabled);
         if ($textColor !== null) {
             $color = $textColor;
+        }
+        if ($clicked && Log::$hooks) {
+            Log::ui('click', [$id, is_array($label) ? implode(' ', $label) : $label]);
         }
 
         $this->renderer->setFont($s->fontName);
@@ -1039,6 +1050,9 @@ class UIContext
             $this->anyHovered = true; $this->hoveredWidget = $id;
             if ($this->input->isMouseButtonReleased(0)) {
                 $value = !$value;
+                if (Log::$hooks) {
+                    Log::ui('checkbox', [$id, $label, 'value' => $value]);
+                }
             }
         }
 
@@ -1115,6 +1129,9 @@ class UIContext
                 // Released — deactivate and allow next real press
                 $this->activeWidget = '';
                 $this->mouseReleasedSinceLastSlider = true;
+                if (Log::$hooks) {
+                    Log::ui('slider release', [$id, $label, 'value' => $value]);
+                }
             } elseif ($hovered) {
                 // Only track value while cursor is over the bar.
                 // If cursor leaves (e.g. phantom stuck press), slider deactivates next branch.
@@ -1236,6 +1253,7 @@ class UIContext
             }
 
             $value = $this->textFieldBuffer;
+            $this->logTyping($id, $value);
         }
 
         // Sideways scroll: text wider than the field follows the caret and is
@@ -1404,6 +1422,7 @@ class UIContext
             $this->textFieldBuffer = $edit->text();
             $this->textFieldCursor = $edit->caret();
             $value = $edit->text();
+            $this->logTyping($id, $value);
         }
 
         $lines = explode("\n", $value);
@@ -1834,12 +1853,39 @@ class UIContext
         if ($id === $this->focusedTextField) {
             return;
         }
+        // The field losing focus, with whatever it held: textField()/textArea()
+        // still call this with $this->textFieldBuffer at its last value, before
+        // overwriting it for the field gaining focus - full text, not throttled,
+        // the owner's explicit decision for bug reports and replays.
+        if ($this->focusedTextField !== '' && Log::$hooks) {
+            Log::ui('text commit', [$this->focusedTextField, 'text' => $this->textFieldBuffer]);
+            unset($this->textLogAt[$this->focusedTextField]);
+        }
         $this->focusedTextField = $id;
         if ($id !== '') {
             $this->input->showSoftKeyboard();
         } else {
             $this->input->hideSoftKeyboard();
         }
+    }
+
+    /**
+     * While a field is focused and being typed in: at most one `[ui]` line per
+     * second per field, so a crash before the next blur still has recent text
+     * in the log.
+     */
+    private function logTyping(string $id, string $value): void
+    {
+        if (!Log::$hooks) {
+            return;
+        }
+        $now = microtime(true);
+        $last = $this->textLogAt[$id] ?? 0.0;
+        if ($last + 1.0 > $now) {
+            return;
+        }
+        $this->textLogAt[$id] = $now;
+        Log::ui('text typing', [$id, 'text' => $value]);
     }
 
     /**
@@ -1964,6 +2010,9 @@ class UIContext
                         $selectedIndex = $i;
                         $this->openDropdown = '';
                         $isOpen = false;
+                        if (Log::$hooks) {
+                            Log::ui('dropdown select', [$id, $options[$i] ?? '', 'index' => $i]);
+                        }
                     }
                 }
             }

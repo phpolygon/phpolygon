@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace PHPolygon\SaveGame;
 
+use PHPolygon\Log\Log;
+
 class SaveManager
 {
     private string $savePath;
@@ -55,6 +57,9 @@ class SaveManager
 
         $this->slots[$slotIndex] = $slot;
         $this->writeToDisk($slot);
+        if (Log::$hooks) {
+            Log::save('written', ['slot' => $slotIndex, 'name' => $name]);
+        }
 
         return $slot;
     }
@@ -65,26 +70,45 @@ class SaveManager
     public function load(int $slotIndex): ?SaveSlot
     {
         if (isset($this->slots[$slotIndex])) {
+            if (Log::$hooks) {
+                Log::save('read', ['slot' => $slotIndex, 'cached' => true]);
+            }
+
             return $this->slots[$slotIndex];
         }
 
         $path = $this->slotPath($slotIndex);
         if (!file_exists($path)) {
+            if (Log::$hooks) {
+                Log::save('read', ['slot' => $slotIndex, 'found' => false]);
+            }
+
             return null;
         }
 
         $content = file_get_contents($path);
         if ($content === false) {
+            if (Log::$hooks) {
+                Log::save('read failed', ['slot' => $slotIndex], \PHPolygon\Log\LogLevel::Error);
+            }
+
             return SaveSlot::createEmpty($slotIndex);
         }
         $decoded = json_decode($content, true, 512, JSON_THROW_ON_ERROR);
         if (!is_array($decoded)) {
+            if (Log::$hooks) {
+                Log::save('read failed', ['slot' => $slotIndex, 'reason' => 'not an object'], \PHPolygon\Log\LogLevel::Error);
+            }
+
             return SaveSlot::createEmpty($slotIndex);
         }
         /** @var array<string, mixed> $raw */
         $raw = $decoded;
         $slot = SaveSlot::fromArray($raw);
         $this->slots[$slotIndex] = $slot;
+        if (Log::$hooks) {
+            Log::save('read', ['slot' => $slotIndex, 'name' => $slot->name]);
+        }
 
         return $slot;
     }
@@ -99,6 +123,9 @@ class SaveManager
         $path = $this->slotPath($slotIndex);
         if (file_exists($path)) {
             unlink($path);
+        }
+        if (Log::$hooks) {
+            Log::save('deleted', ['slot' => $slotIndex]);
         }
     }
 

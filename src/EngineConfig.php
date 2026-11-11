@@ -193,5 +193,24 @@ class EngineConfig
          * development) or a prepared set ({@see \PHPolygon\Runtime\WindowIcon}).
          */
         public readonly ?string $windowIcon = null,
+        /**
+         * Write game.log on a thread of its own ({@see \PHPolygon\Log\ThreadedLogWriter}).
+         * null = yes for a windowed or offscreen game, no in headless runs.
+         * Without ext-parallel (a non-ZTS PHP) the log is written on the main
+         * thread either way, once per frame.
+         */
+        public readonly ?bool $logThread = null,
+        /**
+         * Trace mode of the game log: one line per frame with the update and
+         * render time of every system. null = on in dev mode, with `--trace`
+         * on the command line or `PHPOLYGON_LOG_TRACE=1`.
+         */
+        public readonly ?bool $logTrace = null,
+        /**
+         * Log gamepad button edges by polling php-vio's gamepad state every
+         * frame ({@see \PHPolygon\Log\GamepadEdgeLog}). Off by default: the
+         * engine reads no gamepads itself, so this polling is extra work.
+         */
+        public readonly bool $logGamepads = false,
     ) {}
 }

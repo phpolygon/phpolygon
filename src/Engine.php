@@ -12,6 +12,7 @@ use PHPolygon\ECS\World;
 use PHPolygon\Event\EventDispatcher;
 use PHPolygon\Geometry\MeshCache;
 use PHPolygon\Locale\LocaleManager;
+use PHPolygon\Log\Log;
 use PHPolygon\Rendering\Accessibility\AccessibilityEffects;
 use PHPolygon\Rendering\AnimationClockInterface;
 use PHPolygon\Rendering\Camera2D;
@@ -764,6 +765,7 @@ class Engine
         if (!$this->headless) {
             CrashGuard::install();
         }
+        $this->startLog();
 
         self::log('Window initializing...');
         $this->window->initialize($this->input);
@@ -1246,6 +1248,25 @@ class Engine
         $this->window->pollEvents();
         $this->endFrameStats();
         PerfProfiler::end(); // closes the 'engine.render' section
+    }
+
+    /**
+     * The game log for this run: writer (its own thread for a windowed game
+     * on a PHP with ext-parallel), the automatic hooks, trace mode. A
+     * windowed game also gets its PHP warnings into the log.
+     */
+    private function startLog(): void
+    {
+        Log::start(
+            thread: $this->config->logThread ?? !$this->headless,
+            trace: $this->config->logTrace ?? ($this->devLogger !== null || Log::traceRequested()),
+        );
+        if (!$this->headless) {
+            Log::installErrorHandler();
+            if ($this->config->logGamepads) {
+                Log::watchGamepads(\PHPolygon\Log\GamepadEdgeLog::vio());
+            }
+        }
     }
 
     private function createFrameSpikeRecorder(): ?FrameSpikeRecorder
@@ -2234,55 +2255,30 @@ class Engine
         $this->window->destroy();
         Facade::clearEngine();
         self::log('Shutdown complete');
+        Log::shutdown();
     }
 
-    private static ?string $logPath = null;
-
     /**
-     * Write a line to game.log. The log file is placed next to the binary
-     * (PHAR/micro-SAPI) or in the project root (development).
+     * Write a line to game.log, as an `[engine]` line of {@see Log}. The log
+     * file is placed next to the binary (PHAR/micro-SAPI) or in the project
+     * root (development).
      */
     public static function log(string $message): void
     {
-        if (self::$logPath === null) {
-            self::$logPath = self::resolveLogPath();
-        }
-
-        $line = '[' . date('Y-m-d H:i:s') . '] ' . $message . "\n";
-        @file_put_contents(self::$logPath, $line, FILE_APPEND);
+        Log::engine($message);
     }
 
     /**
-     * Write an error to game.log with ERROR prefix.
+     * Write an error to game.log, as an `[error]` line of {@see Log}.
      */
     public static function logError(string $message): void
     {
-        self::log('ERROR: ' . $message);
+        Log::error($message);
     }
 
     /** Where {@see log()} writes game.log - for bug reports and crash dialogs. */
     public static function logFilePath(): string
     {
-        return self::resolveLogPath();
-    }
-
-    private static function resolveLogPath(): string
-    {
-        // A built game's log directory: next to the executable, or ~/Library/Logs/<name>
-        // for a macOS .app, whose signed bundle is never written to (set by the PHAR stub).
-        if (defined('PHPOLYGON_PATH_LOGS')) {
-            /** @var string $logs */
-            $logs = PHPOLYGON_PATH_LOGS;
-            return $logs . DIRECTORY_SEPARATOR . 'game.log';
-        }
-        // Use PHPOLYGON_PATH_ROOT if available (set by PHAR stub and game bootstrap)
-        if (defined('PHPOLYGON_PATH_ROOT')) {
-            /** @var string $root */
-            $root = PHPOLYGON_PATH_ROOT;
-            return $root . DIRECTORY_SEPARATOR . 'game.log';
-        }
-
-        // Development: project root relative to src/
-        return dirname(__DIR__) . DIRECTORY_SEPARATOR . 'game.log';
+        return Log::resolvePath();
     }
 }
