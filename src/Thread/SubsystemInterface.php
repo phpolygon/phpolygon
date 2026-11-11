@@ -65,6 +65,18 @@ interface SubsystemInterface
      * Uses named Channels: Channel::open("{name}_in") and Channel::open("{name}_out").
      *
      * Loops on in->recv() until null (shutdown signal), sends deltas via out->send().
+     *
+     * Must reach its first `in->recv()` call without doing any blocking setup
+     * first (file I/O, waiting on another resource, …): {@see ThreadScheduler}'s
+     * `_in` channel is unbuffered, and `send()` on it has no timeout in
+     * ext-parallel — {@see ThreadScheduler::sendAll()}'s first call blocks on
+     * that `send()` until this method's `recv()` actually runs, with no bound
+     * at all, if it is delayed getting there. None of the engine's own
+     * shipped subsystems do any such setup today; a game's own subsystem
+     * that does should open its channels and call `recv()` immediately, doing
+     * any real setup work only after the first input arrives (as part of
+     * computing the first reply, where {@see ThreadScheduler}'s existing
+     * stall/dead-worker detection already covers a slow or hung reply).
      */
     public static function threadEntry(string $channelPrefix): void;
 

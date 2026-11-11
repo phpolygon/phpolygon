@@ -220,12 +220,25 @@ class ThreadSchedulerHardeningTest extends TestCase
         $scheduler->boot();
 
         $world = new World();
+        $sendStart = hrtime(true);
         $scheduler->sendAll($world, 0.5); // worker busy ~0.5s
 
         // Force it behind via an explicit, short bound — same mechanism as
-        // the scenario above.
+        // the scenario above. Known to be rarely flaky on this Windows
+        // machine (observed ~1 of 80 runs while writing fix/unbuffered-
+        // scheduler-channels, both before and after that change - cause not
+        // isolated, see the commit report) - a dead/not-outstanding 'stall'
+        // would make pollAll() return true vacuously without ever actually
+        // polling, which the diagnostics below would show directly instead
+        // of leaving the next investigator to re-derive this from scratch.
+        $pollStart = hrtime(true);
         $ready = $scheduler->pollAll($world, timeoutMicros: 20_000);
-        $this->assertFalse($ready);
+        $elapsedSinceSendMs = ($pollStart - $sendStart) / 1_000_000.0;
+        $this->assertFalse($ready, sprintf(
+            'dead=%s elapsedSinceSend=%.3fms (bound 20ms)',
+            json_encode($scheduler->getDeadSubsystems()),
+            $elapsedSinceSendMs,
+        ));
 
         // The worker is still busy; recvAll() must notice it is "behind" and
         // poll it non-blocking, returning almost instantly rather than

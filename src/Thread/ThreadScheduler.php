@@ -16,11 +16,13 @@ use PHPolygon\Runtime\PerfProfiler;
  * Uses named Channels (Channel::make/Channel::open) to avoid passing Channel objects
  * as closure parameters, which crashes on macOS ARM.
  *
- * Hardening (dead workers, bounded waits, no lockstep hang): the sentence "a
- * tick is a round trip" used to mean sendAll() always queued a fresh input and
- * recvAll() always blocked on Channel::recv() until an answer arrived — no
- * matter how long that took, or whether anything was ever going to answer.
- * Now:
+ * Hardening (dead workers, bounded waits, no lockstep hang on the OUTPUT
+ * side — see the "Unbuffered `_in`" section below for a hang this hardening
+ * does NOT cover, reopened on the INPUT side by that later change): the
+ * sentence "a tick is a round trip" used to mean sendAll() always queued a
+ * fresh input and recvAll() always blocked on Channel::recv() until an
+ * answer arrived — no matter how long that took, or whether anything was
+ * ever going to answer. Now:
  *   - {@see boot()} keeps the {@see \parallel\Future} from `Runtime::run()`
  *     instead of discarding it — a worker that throws or returns makes its
  *     Future `done()`, which is the only way to tell it apart from one still
@@ -94,8 +96,12 @@ use PHPolygon\Runtime\PerfProfiler;
  * around `addFuture()`) for the common case, not change channel capacities —
  * that is NOT done here; this change is kept only for the real, if narrow,
  * win it measurably delivers (an idle/near-idle subsystem, and the first
- * reply after a tick with nothing to do), with no regression found anywhere
- * else. (Confound avoided in the above: `usleep()` for 1-5ms on this Windows
+ * reply after a tick with nothing to do). This is NOT free of cost or risk —
+ * see {@see waitOutEarlyFailures()} (a measured, unconditional ~10ms added to
+ * every {@see boot()} call) and {@see sendAll()}/{@see shutdown()}'s own doc
+ * (an unbounded main-thread block is now reachable where it was not before,
+ * even if narrowed) before assuming this is a strict improvement with no
+ * downside. (Confound avoided in the above: `usleep()` for 1-5ms on this Windows
  * build is itself bound by roughly the same ~15ms default timer granularity,
  * so simulating "compute time" with it would have hidden the real result
  * behind an unrelated Windows timer-resolution artefact; a CPU-bound spin via

@@ -42,13 +42,17 @@ final class DiesAfterOneAnswerSubsystem implements SubsystemInterface
         // watches the `_out` channel AND the kept Future together (see
         // ThreadScheduler::pollOne()) - a worker whose Future resolves in
         // the SAME instant it also delivers its last answer races the two
-        // events against each other (found while writing this fixture, not
-        // assumed; a pre-existing property of combining addChannel() and
-        // addFuture(), unrelated to this change's channel capacities - out
-        // of scope here, left for whoever owns pollOne() next). This delay
-        // gives the channel delivery an unambiguous head start, so THIS
-        // fixture tests what it is meant to (a worker dying BETWEEN ticks),
-        // not that unrelated race.
+        // events against each other. CONFIRMED, not assumed: removing this
+        // line made the FIRST round trip's own delivery fail 9 of 15 runs
+        // (this Windows machine, PHP 8.5.5 ZTS, 2026-11-11) - pollOne()
+        // sometimes reports the Future-done event instead of the channel's
+        // Read event and marks a worker that just answered correctly as
+        // dead. This is a pre-existing property of combining addChannel()
+        // and addFuture(), unrelated to this change's channel capacities -
+        // a real bug, out of scope here, left for whoever owns pollOne()
+        // next. This delay gives the channel delivery an unambiguous head
+        // start, so THIS fixture tests what it is meant to (a worker dying
+        // BETWEEN ticks), not that unrelated race.
         usleep(20_000);
         // Returns here on purpose — never calls recv() again, simulating a
         // worker that crashes/exits cleanly right after answering its first

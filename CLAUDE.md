@@ -1350,11 +1350,16 @@ hides the real result behind an unrelated Windows timer-resolution artefact; a C
 does not have this problem. **Net effect**: this phase's attribution ("the buffered-channel effect alone
 already accounts for the full measured ~15ms") was INCOMPLETE - true for a worker with nothing to do, not
 representative of one with real compute time, which is the case the phase's own "lohnt erst mit
-nennenswerter Fern-Simulation" framing is actually about. The channel-capacity change is kept anyway (real,
-if narrow, win; no regression found) - the real fix (replacing `Events::poll()`'s blocking wait or routing
-around `addFuture()` for the common case) is NOT done and stays open, now with a correctly isolated target
-instead of channel capacities. See the commit for the full benchmark scripts and numbers
-(`E:\ClaudeTemp\phpolygon\unbuffered-channels-bench\`, this machine, not guaranteed to persist).
+nennenswerter Fern-Simulation" framing is actually about. The channel-capacity change is kept anyway for
+the real, if narrow, win it measurably delivers - NOT a free win: `boot()` now pays a measured, unconditional
+~10ms per call (see `ThreadScheduler::waitOutEarlyFailures()`), and the main thread can now block with NO
+bound at all on a worker that dies in the instant between a check and a `send()`, or whose own setup hangs
+before its first `recv()` - narrowed, not closed, by that same grace period and by `done()` checks in
+`sendAll()`/`shutdown()` (see `ThreadScheduler`'s own class doc for exactly what is and is not covered). The
+real fix (replacing `Events::poll()`'s blocking wait or routing around `addFuture()` for the common case) is
+NOT done and stays open, now with a correctly isolated target instead of channel capacities. See the commit
+for the full benchmark scripts and numbers (`E:\ClaudeTemp\phpolygon\unbuffered-channels-bench\`, this
+machine, not guaranteed to persist, and not committed - see that commit's own report for why).
 
 **Async submit()/collect() (2)**: `SimulationTransport` gained `submit(kernel, records, steps, dt): mixed`
 / `collect(token, wait: false): ?array` alongside the existing `step()` (kept, not replaced - still the
