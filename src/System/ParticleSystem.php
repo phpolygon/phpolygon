@@ -15,9 +15,9 @@ use PHPolygon\Rendering\Color;
 use PHPolygon\Rendering\Command\AddPointLight;
 use PHPolygon\Rendering\Command\DrawMeshInstanced;
 use PHPolygon\Rendering\Command\SetCamera;
-use PHPolygon\Rendering\Frustum;
 use PHPolygon\Rendering\MaterialRegistry;
 use PHPolygon\Rendering\RenderCommandList;
+use PHPolygon\Visibility\VisibilityService;
 
 /**
  * Drives every {@see ParticleEmitter} in the world, on the best of three tiers
@@ -159,17 +159,22 @@ class ParticleSystem extends AbstractSystem
             $this->lastCamera = $cameraPos;
         }
 
+        // The one cull spot (Phase 3 of the visibility plan) - a cheap memo
+        // hit if Camera3DSystem (or another consumer) already called this
+        // for the same camera this frame. testSphere() already returns true
+        // (never offscreen) without a camera or with PHPOLYGON_NO_CULL=1,
+        // so offscreen() needs no outer guard for either case any more.
+        $visibility = VisibilityService::forWorld($world);
+        $visibility->beginFrameFrom($world, $this->commandList);
+
         // Off-screen emitters (see offscreen()): GPU simulations pause, CPU
         // emitters whose particles cast no shadow skip building their draw.
         /** @var \WeakMap<ParticleEmitter, true> $offscreen */
         $offscreen = new \WeakMap();
-        if ($camera !== null && getenv('PHPOLYGON_NO_CULL') !== '1') {
-            $planes = Frustum::planes($camera->projectionMatrix, $camera->viewMatrix);
-            foreach ($world->query(ParticleEmitter::class, Transform3D::class) as $entity) {
-                $emitter = $entity->get(ParticleEmitter::class);
-                if ($this->offscreen($emitter, $entity->get(Transform3D::class)->getWorldPosition(), $planes)) {
-                    $offscreen[$emitter] = true;
-                }
+        foreach ($world->query(ParticleEmitter::class, Transform3D::class) as $entity) {
+            $emitter = $entity->get(ParticleEmitter::class);
+            if ($this->offscreen($emitter, $entity->get(Transform3D::class)->getWorldPosition(), $visibility)) {
+                $offscreen[$emitter] = true;
             }
         }
 
@@ -481,17 +486,16 @@ class ParticleSystem extends AbstractSystem
 
     /**
      * True when nothing the emitter has emitted can be on screen: the sphere
-     * every one of its particles stays inside ({@see reach()}) lies outside the
-     * view frustum of the frame's camera (the last SetCamera; ParticleSystem
-     * MUST render after the camera system that publishes it).
+     * every one of its particles stays inside ({@see reach()}) is outside
+     * the current frame's view - via VisibilityService::testSphere() (the
+     * one cull spot, Phase 3 of the visibility plan), which already returns
+     * true (never offscreen) without a camera or with PHPOLYGON_NO_CULL=1.
      *
      * The sphere is centred on the emitter, so it only covers particles spawned
      * where the emitter stands now: an emitter counts as off screen only after
      * it has stood still for a full particle lifetime (simulated time).
-     *
-     * @param list<array{0: float, 1: float, 2: float, 3: float}> $planes
      */
-    private function offscreen(ParticleEmitter $emitter, Vec3 $origin, array $planes): bool
+    private function offscreen(ParticleEmitter $emitter, Vec3 $origin, VisibilityService $visibility): bool
     {
         $still = $this->stillSince[$emitter] ?? null;
         if ($still === null || $still[0] !== $origin->x || $still[1] !== $origin->y || $still[2] !== $origin->z) {
@@ -501,7 +505,7 @@ class ParticleSystem extends AbstractSystem
         if ($this->clock - $still[3] < $emitter->lifetime) {
             return false;
         }
-        return Frustum::sphereOutside($planes, $origin->x, $origin->y, $origin->z, $this->reach($emitter));
+        return !$visibility->testSphere($origin->x, $origin->y, $origin->z, $this->reach($emitter));
     }
 
     /**

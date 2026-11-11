@@ -32,7 +32,6 @@ use PHPolygon\Rendering\Command\SetSnowCover;
 use PHPolygon\Rendering\Command\SetWaveAnimation;
 use PHPolygon\Rendering\Command\SetWind;
 use PHPolygon\Rendering\BatchBounds;
-use PHPolygon\Rendering\Frustum;
 use PHPolygon\Rendering\Quality\FieldtracingMode;
 use PHPolygon\Rendering\InstanceParams;
 use PHPolygon\Rendering\MaterialRegistry;
@@ -49,16 +48,22 @@ use PHPolygon\Visibility\VisibilityService;
  * Collects lights, wave / snow / wetness state and emits {@see DrawMesh}
  * commands for every visible {@see MeshRenderer}. Which entities are
  * visible this frame comes from {@see \PHPolygon\Visibility\VisibilityService}
- * (resolved for $world via its forWorld() factory): beginFrame() there
- * classifies its SpatialIndex against the current camera, and
- * visibleEntities() replaces what used to be a full MeshRenderer pool scan
- * with a coarse spatial bin pre-cull (removed together with that scan -
- * see the visibility plan, Phase 2). Only the screen-size LOD drop and
- * exact bounding-sphere lookup for it stay local to this system.
+ * (resolved for $world via its forWorld() factory): beginFrameFrom() there
+ * classifies its SpatialIndex against the current camera (deriving it, the
+ * active fog and the primary directional light from this system's own
+ * RenderCommandList and $world), and visibleEntities() replaces what used to
+ * be a full MeshRenderer pool scan with a coarse spatial bin pre-cull
+ * (removed together with that scan - see the visibility plan, Phase 2).
+ * Only the screen-size LOD drop and exact bounding-sphere lookup for it stay
+ * local to this system.
  *
- * Light culling (point/spot/rect) is unrelated to the SpatialIndex and still
- * derives its own frustum planes from the most recent {@see SetCamera} - see
- * extractFrustumPlanes().
+ * Point/spot/rect light culling (Phase 3) and the per-entity shadow-only
+ * casters this system adds beyond its own visible draws (see the
+ * DrawMesh::$shadowOnly loop in renderCommands()) go through the SAME
+ * VisibilityService instance - one cull spot, not six (see the visibility
+ * plan's "Ist-Zustand": Renderer3DSystem, ParticleSystem, LightConeSystem,
+ * FoliageInstanceSystem, GrassSystem and MotionView each used to compute
+ * their own frustum).
  */
 class Renderer3DSystem extends AbstractSystem
 {
@@ -238,23 +243,17 @@ class Renderer3DSystem extends AbstractSystem
         // Falls back to the active camera entity when no SetCamera is queued.
         $cameraPos = $this->cameraPosition($world);
 
-        // Camera3DSystem already pushed a SetCamera with the active view +
-        // projection matrices. Pull the most recent one and derive 6 planes
-        // for light culling below. PHPOLYGON_NO_CULL=1 disables frustum/LOD/
-        // light culling entirely (diagnostic: a constant draw count isolates
-        // backend buffer-growth glitches from cull-driven draw-count swings) -
-        // VisibilityService::beginFrame() honours the same env var for the
-        // entity visibility set computed just below.
-        $noCull = getenv('PHPOLYGON_NO_CULL') === '1';
-        $camera = $this->activeSetCamera();
-        $planes = $noCull ? null : ($camera !== null ? Frustum::planes($camera->projectionMatrix, $camera->viewMatrix) : null);
-
-        // The single answer to "what is visible this frame" for every
-        // MeshRenderer+Transform3D pair in $world - see the class docblock.
+        // The single answer to "what is visible this frame" - see the class
+        // docblock. Derives the camera (and fog/directional light for the
+        // shadow-caster set below) from $this->commandList itself, so it no
+        // longer matters whether Camera3DSystem, another Phase-3 consumer
+        // (GrassSystem, FoliageInstanceSystem, LightConeSystem, ParticleSystem)
+        // or this system calls it first this frame - repeating the same
+        // inputs is a cheap memo hit, not a second classification.
         PerfProfiler::begin('render3d.visibility');
         $visibility = VisibilityService::forWorld($world);
         try {
-            $visibility->beginFrame($camera?->viewMatrix, $camera?->projectionMatrix);
+            $visibility->beginFrameFrom($world, $this->commandList);
         } finally {
             PerfProfiler::end();
         }
@@ -266,7 +265,10 @@ class Renderer3DSystem extends AbstractSystem
         // by the distance to its centre, and the first MAX_POINT_LIGHTS are
         // emitted (the shaders honour only a few). A lamp lighting the wall the
         // camera looks at keeps its slot even when the camera stands outside its
-        // radius - the reason the former camera-radius cull was dropped.
+        // radius - the reason the former camera-radius cull was dropped. The
+        // frustum test itself now goes through VisibilityService::testSphere()
+        // instead of this system's own Frustum::planes() - one cull spot, and
+        // it already honours PHPOLYGON_NO_CULL.
         $candidates = [];
         foreach ($world->query(PointLight::class, Transform3D::class) as $entity) {
             $light = $entity->get(PointLight::class);
@@ -278,7 +280,7 @@ class Renderer3DSystem extends AbstractSystem
                 continue;
             }
             $pos = $entity->get(Transform3D::class)->getWorldPosition();
-            $rank = self::rankLight($pos, $light->radius, $cameraPos, $planes);
+            $rank = self::rankLight($pos, $light->radius, $cameraPos, $visibility);
             if ($rank === null) {
                 continue;
             }
@@ -326,7 +328,7 @@ class Renderer3DSystem extends AbstractSystem
                 continue;
             }
             $pos = $entity->get(Transform3D::class)->getWorldPosition();
-            $rank = self::rankLight($pos, $light->range, $cameraPos, $planes);
+            $rank = self::rankLight($pos, $light->range, $cameraPos, $visibility);
             if ($rank === null) {
                 continue;
             }
@@ -361,7 +363,7 @@ class Renderer3DSystem extends AbstractSystem
             }
             $m = $entity->get(Transform3D::class)->getWorldMatrix();
             $pos = $m->getTranslation();
-            $rank = self::rankLight($pos, $light->range, $cameraPos, $planes);
+            $rank = self::rankLight($pos, $light->range, $cameraPos, $visibility);
             if ($rank === null) {
                 continue;
             }
@@ -488,7 +490,10 @@ class Renderer3DSystem extends AbstractSystem
             // VisibilityService already decided frustum membership. Screen-size
             // LOD is a separate concern it does not apply: a tiny distant
             // detail can still be inside the frustum and need dropping here.
-            if ($planes !== null && $cameraPos !== null) {
+            // frame() is null exactly when there is no camera this frame or
+            // PHPOLYGON_NO_CULL=1 is set - the same two cases the former
+            // local $planes variable was null for.
+            if ($visibility->frame() !== null && $cameraPos !== null) {
                 $sphere = self::getMeshSphere($mesh->meshId);
                 if ($sphere !== null) {
                     // Fast path: most procedural meshes (Box/Sphere/Cylinder)
@@ -565,6 +570,33 @@ class Renderer3DSystem extends AbstractSystem
 
         $this->lastDrawnMatrix = $drawnNow;
 
+        // Shadow casters outside the view but inside the sun's caster volume
+        // (VisibilityService::shadowOnlyEntities() - Phase 3's shadow-
+        // correctness fix: these entities never got a draw command at all
+        // before, so VioRenderer3D's collectShadowDraws() - which reads the
+        // full, unfiltered command list, not the camera-culled one - could
+        // never find them). Always single, unbatched draws: this set is
+        // usually small, and never merging it with $batches means a
+        // shadow-only instance can never end up inside a visible batch's
+        // DrawMeshInstanced (which has no shadowOnly flag of its own). Not
+        // tracked in $drawnNow/$lastDrawnMatrix: the shadow pass reads only
+        // modelMatrix, never prevModelMatrix, so there is nothing for the
+        // next frame's motion-vector bookkeeping to reuse here.
+        foreach ($visibility->shadowOnlyEntities() as $entityId) {
+            $mesh = $meshes[$entityId] ?? null;
+            $transform = $transforms[$entityId] ?? null;
+            if ($mesh === null || $transform === null) {
+                continue;
+            }
+            $this->commandList->add(new DrawMesh(
+                $mesh->meshId,
+                $mesh->materialId,
+                $transform->worldMatrix,
+                castShadows: true,
+                shadowOnly: true,
+            ));
+        }
+
         foreach ($batches as $batch) {
             [$mesh, $matrices] = $batch;
             $params = $batch[2] ?? [];
@@ -624,22 +656,20 @@ class Renderer3DSystem extends AbstractSystem
 
     /**
      * Rank of a light with influence radius $radius at $pos, or null when its
-     * influence sphere lies completely outside the frustum (it lights nothing
-     * visible). Rank = [distance from the camera to the sphere (0 inside),
-     * distance to the centre]; smaller ranks first.
+     * influence sphere lies completely outside the view (it lights nothing
+     * visible) - via VisibilityService::testSphere(), the same cull spot
+     * Renderer3DSystem's own entity draws use, instead of a locally held
+     * plane array (also honours PHPOLYGON_NO_CULL for free). Rank = [distance
+     * from the camera to the sphere (0 inside), distance to the centre];
+     * smaller ranks first.
      *
-     * @param array<int, array{0:float,1:float,2:float,3:float}>|null $planes
      * @return array{0: float, 1: float}|null
      */
-    private static function rankLight(Vec3 $pos, float $radius, ?Vec3 $cameraPos, ?array $planes): ?array
+    private static function rankLight(Vec3 $pos, float $radius, ?Vec3 $cameraPos, VisibilityService $visibility): ?array
     {
         $r = max(0.0, $radius);
-        if ($planes !== null) {
-            foreach ($planes as $p) {
-                if ($p[0] * $pos->x + $p[1] * $pos->y + $p[2] * $pos->z + $p[3] < -$r) {
-                    return null;
-                }
-            }
+        if (!$visibility->testSphere($pos->x, $pos->y, $pos->z, $r)) {
+            return null;
         }
         if ($cameraPos === null) {
             return [0.0, 0.0];
@@ -663,21 +693,6 @@ class Renderer3DSystem extends AbstractSystem
         $sy = $m[4] * $m[4] + $m[5] * $m[5] + $m[6] * $m[6];
         $sz = $m[8] * $m[8] + $m[9] * $m[9] + $m[10] * $m[10];
         return sqrt($sx > $sy ? ($sx > $sz ? $sx : $sz) : ($sy > $sz ? $sy : $sz));
-    }
-
-    /**
-     * The most recently queued {@see SetCamera}, or null if none this frame.
-     * Both the light-culling planes and VisibilityService::beginFrame() in
-     * renderCommands() derive from this one lookup.
-     */
-    private function activeSetCamera(): ?SetCamera
-    {
-        $cameras = $this->commandList->ofType(SetCamera::class);
-        if ($cameras === []) {
-            return null;
-        }
-        /** @var SetCamera */
-        return end($cameras);
     }
 
     /**

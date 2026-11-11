@@ -32,5 +32,17 @@ readonly class DrawMesh
          * @var list<float>|null
          */
         public ?array $params = null,
+        /**
+         * True for a VisibilityService shadow caster outside the camera's
+         * view (see VisibilityService::shadowOnlyEntities()): the renderer's
+         * camera passes (prepass, opaque, meshlets, transparent) must skip
+         * this draw entirely, but the shadow pass - which reads the full,
+         * unfiltered command list - still finds and casts it. Minimap,
+         * planar reflection and the ray-traced scene collector read the full
+         * list too and are unaffected: a shadow-only draw may legitimately
+         * be visible from THEIR viewpoint even though it is not from the
+         * main camera's.
+         */
+        public bool $shadowOnly = false,
     ) {}
 }

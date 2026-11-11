@@ -4541,6 +4541,14 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         $viewCommands = $cullView !== null && $cullProjection !== null
             ? $this->batchCuller->visible($commands, Frustum::planes($cullProjection, $cullView))
             : $commands;
+        // DrawMesh::$shadowOnly (VisibilityService's shadow casters outside
+        // the camera's view, see Renderer3DSystem) must never reach the
+        // camera's own passes - only renderShadowPass()'s collectShadowDraws(),
+        // which reads $commands (the full, unfiltered list) directly, not
+        // $viewCommands. The passes that intentionally keep the full list
+        // anyway (minimap, planar reflection, ray-traced scene) are
+        // unaffected: they read $commands too.
+        $viewCommands = self::withoutShadowOnlyDraws($viewCommands);
         if (getenv('PHPOLYGON_DRAW_DEBUG') === '1' && $this->batchCullDebugFrame++ % 60 === 0) {
             $stats = $this->batchCuller->stats();
             fprintf(STDERR, "[DRAWS] instanced batches=%d drawn=%d culled=%d shadow-culled=%d bounds-derived=%d\n",
@@ -6282,6 +6290,32 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
     }
 
     /**
+     * Drops every DrawMesh flagged {@see DrawMesh::$shadowOnly} from a list
+     * - see where $viewCommands is built in render(). Two-pass only when
+     * something is actually flagged (the common case: no directional light,
+     * or VisibilityService found no off-screen caster this frame), so the
+     * usual frame pays one extra scan, not one extra allocation.
+     *
+     * @param list<object> $commands
+     * @return list<object>
+     */
+    private static function withoutShadowOnlyDraws(array $commands): array
+    {
+        foreach ($commands as $cmd) {
+            if ($cmd instanceof DrawMesh && $cmd->shadowOnly) {
+                $out = [];
+                foreach ($commands as $c) {
+                    if (!($c instanceof DrawMesh && $c->shadowOnly)) {
+                        $out[] = $c;
+                    }
+                }
+                return $out;
+            }
+        }
+        return $commands;
+    }
+
+    /**
      * The volume an instanced batch must touch to cast a sun shadow: the four
      * side planes of the largest cascade's light volume, a prism along the
      * light direction. Every cascade is centred on the same point (up to the
@@ -6294,12 +6328,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
      */
     private function sunCasterVolume(Vec3 $lightDir, ?Vec3 $shadowCenter): ?array
     {
-        if ($lightDir->x ** 2 + $lightDir->y ** 2 + $lightDir->z ** 2 < 1.0e-6) {
-            return null;
-        }
-        [$proj, $view] = $this->computeLightProjView($lightDir, $shadowCenter, max(self::CASCADE_ORTHO_SIZES));
-
-        return array_slice(Frustum::planes($proj, $view), 0, 4);
+        return SunCasterVolume::planes($lightDir, $shadowCenter, max(self::CASCADE_ORTHO_SIZES), self::SHADOW_MAP_RESOLUTION);
     }
 
     /**

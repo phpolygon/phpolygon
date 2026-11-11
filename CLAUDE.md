@@ -1035,9 +1035,87 @@ and direct `register()`/`update()`/`remove()` on `index()` for a producer that i
 (reserved for Phase 3's batches/emitters/lights - entries already carry `kind`/`owner`/`castsShadow`/
 `alwaysVisible` so that phase does not reshape them again).
 
-Not in Phase 2 (left for Phase 3, see the visibility plan): particles, light cones, foliage, grass,
-`MotionView` and point/spot/rect lights still run their own frustum test; shadow casters outside the
-camera frustum are not yet queried through VisibilityService.
+### Phase 3 of the visibility plan (2026-11-11): one cull spot, shadow casters, fog cap
+
+`VisibilityService::beginFrameFrom(World $world, RenderCommandList $commands)` derives `beginFrame()`'s
+inputs itself - the most recent `SetCamera`/`SetFog` and the first lit `DirectionalLight` (one sun drives
+shadows, the same assumption `VioRenderer3D`'s own shadow pass makes) - and is the entry point every
+render-phase system now calls first: `Camera3DSystem` (right after it pushes `SetCamera`, since it is the
+conventional first render-phase system), `GrassSystem`, `FoliageInstanceSystem`, `ParticleSystem` and
+`Renderer3DSystem`. `LightConeSystem::cones(World, SetCamera)` stays a public static entry point several
+tests and a benchmark call directly with their own camera, so it calls `beginFrame()` with that camera's
+matrices itself rather than deriving from a command list. Registration order no longer matters:
+`beginFrame()` memoizes on its own inputs (camera matrices BY INSTANCE IDENTITY - the engine's existing
+convention, see `Transform3DSystem`'s worldMatrix identity trick - plus fog-far, light direction and
+`SpatialIndex::version()`, a counter bumped on every `register()`/`remove()`), so the FIRST caller each
+frame does the real classification and every later caller with the same inputs is a no-op
+(`VisibilityService::memoStats()`: `viewHits`/`viewMisses`/`casterHits`/`casterMisses`). The six systems
+the plan's "Ist-Zustand" named as each computing its own frustum (`Renderer3DSystem`, `ParticleSystem`,
+`LightConeSystem`, `FoliageInstanceSystem`, `GrassSystem`, `Motion/MotionView.php`) now all go through
+`VisibilityService::testSphere()`/`sees()` instead - `MotionView` holds a `PHPolygon\Rendering\ViewVolume`
+(the same value object `frame()` returns) rather than a raw planes array, but deliberately does NOT read a
+live `VisibilityService`: its whole purpose is staying frozen at the PREVIOUS frame's camera, including
+through a frame where `capture()` sees no `SetCamera` at all - a live service would answer null then and
+wrongly unfreeze everything (see `MotionViewTest`).
+
+Shadow casters: `shadowOnlyEntities()` - entities outside `visibleEntities()` (dormant excluded, same as
+the visible set) that still cast a shadow. Classified the same way as the camera - `SpatialIndex::classify()`
+against four side planes of a prism along the sun's direction, no near/far ("a tall caster toward the sun
+always stays in"), from `PHPolygon\Rendering\SunCasterVolume::planes()` (an extraction of
+`VioRenderer3D`'s private `computeLightProjView()`/`sunCasterVolume()` - texel-snapped centre, headroom
+backoff, the `abs(dy) > 0.999` up-vector switch near the poles - `VioRenderer3D::sunCasterVolume()` now
+delegates here with its own `CASCADE_ORTHO_SIZES`/`SHADOW_MAP_RESOLUTION`; `SunCasterVolumeTest` hand-
+derives the expected planes independently to guard the extraction). `setMinShadowCasterRadius()` sieves
+casters below a world-metre threshold - an absolute-size approximation of the plan's "Texel-Schwelle für
+kleine Werfer" (a true projected-texel measure needs the renderer's actual cascade size/resolution, which
+this engine-level service does not own); 0.0 (default) never sieves - a game with its own sourced
+threshold (code-rescue's `InstancedSendPolicy::SHADOW_MIN_HEIGHT`) sets it, the engine guesses nothing.
+`Renderer3DSystem` emits every `shadowOnlyEntities()` id as an extra `DrawMesh(shadowOnly: true)` - always
+single, unbatched draws (never merged into `$batches`, so a shadow-only instance can never end up inside a
+visible batch's `DrawMeshInstanced`, which has no flag of its own), not tracked in `$lastDrawnMatrix` (the
+shadow pass reads only `modelMatrix`, never `prevModelMatrix`). `VioRenderer3D::withoutShadowOnlyDraws()`
+drops them from `$viewCommands` (the list "the camera's passes" - G-buffer, prepass, opaque, meshlets,
+transparent - draw) right after the existing `InstancedBatchCuller::visible()` filter; `collectShadowDraws()`
+(the shadow pass) needs no change at all - it already reads the full, unfiltered `$commands`, which is
+why an off-screen caster never got a shadow before: it simply never got any `DrawMesh` command at all, not
+because the shadow pass filtered it out. Minimap, planar reflection and the ray-traced scene collector
+read the full list too and are correctly unaffected: a shadow-only draw may legitimately be visible from
+THEIR viewpoint even though it is not from the main camera's (`Renderer3DSystemShadowOnlyTest`).
+
+Fog cap: `beginFrame()`'s `$fogFar` (from the active `SetFog::$far`, no cap when there is none - the
+engine applies no game-specific far-plane/view-distance logic of its own, unlike code-rescue's own
+`RenderDistanceSystem`) excludes an entry from `visibleEntities()`/`isVisible()` once its surface distance
+from the camera exceeds it - never applied to `shadowOnlyEntities()` (a caster beyond the fog still
+shadows what is in front of it).
+
+`OcclusionSource` (`setOcclusionSource()`): an optional occluder test wired into the classification's
+INTERSECTED-cell path, same place as the fog cap. No concrete implementation ships with the engine - like
+`tierAt()`'s Phase-4 stub, this only wires the call site in.
+
+`InstancedBatchCuller` is UNCHANGED (the plan's "Nicht tun" forbids redesigning the batch bounds, and
+`VioRenderer3D` - which owns it - has no ECS `World` to resolve `VisibilityService::forWorld()` with, and
+culls views the service does not classify at all: the mirrored reflection, the jittered projection, the
+minimap, the shadow prisms). `InstancedBatchCullerTest::testAgreesWithVisibilityServiceTestSphereForTheSameCameraAndSpheres()`
+confirms the two independent cull paths agree for the same camera and sphere, which is what the plan
+actually asks for ("ihr Test ruft später testSphere()/frame()").
+
+Measured 2026-11-11 (PHP 8.5.5 CLI, this sandbox, `NullRenderer3D`, `Renderer3DSystem` in isolation - no
+other Phase-3 consumer present, so the benchmark cannot show the memo's actual target - six systems
+sharing ONE real classification instead of each computing their own): with a FRESH `SetCamera`/`Mat4`
+instance every frame (a moving camera, forcing a memo miss every single frame - the realistic case; an
+earlier run that reused one `SetCamera` object for 300 frames understated this by making every frame but
+the first a near-zero-cost memo hit, the "a cache can make a measurement meaningless" trap), 6,150 mixed
+hidden/off-screen/on-screen entities, 300 frames, 3 runs each: `render3d.build_commands` went from
+~3.3-3.4 ms (Phase 2) to ~3.7-4.3 ms (Phase 3) - a measured ~10-25% REGRESSION in this system alone, from
+`beginFrameFrom()`'s own command-list/World derivation plus the new per-candidate fog/occlusion branch in
+`classifyView()`'s INTERSECTED path. With a directional light active, `shadowOnlyEntities()` added 111
+(sun straight down) to 553 (grazing sun) draws in this scenario - the count swings with sun elevation
+because the caster prism has no near/far plane, as expected; with `SetFog` active (80 m far),
+`render3d.build_commands` dropped sharply (fewer entities survive the cap) - a real win tied to that
+scenario, not a general Phase 3 effect. The multi-system benefit the plan actually targets (five fewer
+redundant `Frustum::planes()` computations when `GrassSystem`/`FoliageInstanceSystem`/`LightConeSystem`/
+`ParticleSystem` are also present) is NOT measured here - building that scenario was out of scope for this
+benchmark; reported as open, not claimed.
 
 Measured 2026-11-11 (PHP 8.5.5 CLI, this repo's dev machine,
 `benchmarks/micro/System/Transform3DSystemBench.php`, `benchTenThousandStaticTick`/

@@ -24,6 +24,25 @@ final class SpatialIndex
     public const float CELL_SIZE = 32.0;
 
     /**
+     * Bumped on every register()/remove() (register() calls remove() first,
+     * so one call can bump it twice - the magnitude never matters, only
+     * whether it changed). Lets VisibilityService memoize a frame's
+     * classification: if the camera/light and this version are both
+     * unchanged since the last beginFrame() call, nothing in the index could
+     * have moved either, so reclassifying would just repeat the same work -
+     * see VisibilityService::beginFrame()'s "Phase 3 traffic" is Camera3DSystem
+     * AND Renderer3DSystem (and others) all calling beginFrameFrom() every
+     * frame, by design, so order-independence doesn't cost a second
+     * classification pass each time.
+     */
+    private int $version = 0;
+
+    public function version(): int
+    {
+        return $this->version;
+    }
+
+    /**
      * One entry per registered handle. "Eintrag = Handle, Art, Kugel, Flags,
      * Besitzer" per the visibility plan: kind and owner are carried from
      * registration but unused by Phase 2's own queries - they let a later
@@ -113,6 +132,7 @@ final class SpatialIndex
         ?int $owner = null,
     ): void {
         $this->remove($handle);
+        $this->version++;
 
         $cellKey = self::cellKeyFor($x, $z);
         $this->entries[$handle] = [
@@ -177,6 +197,7 @@ final class SpatialIndex
         if ($entry === null) {
             return;
         }
+        $this->version++;
         unset($this->entries[$handle], $this->unboundedHandles[$handle], $this->alwaysVisibleHandles[$handle]);
 
         $cellKey = $entry['cellKey'];

@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace PHPolygon\Tests\Rendering;
 
+use PHPolygon\ECS\World;
 use PHPolygon\Geometry\BoxMesh;
 use PHPolygon\Geometry\MeshRegistry;
 use PHPolygon\Math\Mat4;
@@ -21,6 +22,7 @@ use PHPolygon\Rendering\Material;
 use PHPolygon\Rendering\MaterialRegistry;
 use PHPolygon\Rendering\ProcModeRegistry;
 use PHPolygon\Rendering\VioRenderer3D;
+use PHPolygon\Visibility\VisibilityService;
 use PHPUnit\Framework\TestCase;
 
 /**
@@ -440,5 +442,43 @@ final class InstancedBatchCullerTest extends TestCase
         self::assertTrue($this->culler->reachesSpheres($lit, $spheres));
         self::assertFalse($this->culler->reachesSpheres($dark, $spheres));
         self::assertTrue($this->culler->reachesSpheres($dark, []), 'no light volume known: nothing is dropped');
+    }
+
+    /**
+     * InstancedBatchCuller stays as it is - the plan says "Batch-Grenzen
+     * bleiben; ihr Test ruft später testSphere()/frame()", and its "Nicht
+     * tun" list forbids redesigning the batch bounds; VioRenderer3D (which
+     * owns this culler) has no ECS World to resolve
+     * VisibilityService::forWorld() with, and tests views the service does
+     * not classify at all (the mirrored reflection, the jittered
+     * projection, the minimap, the shadow prisms - see VioRenderer3D's own
+     * comment on $viewCommands). What IS confirmed here, as the plan asks:
+     * for the SAME camera and the SAME sphere, the culler's own frustum
+     * test and VisibilityService::testSphere() agree.
+     */
+    public function testAgreesWithVisibilityServiceTestSphereForTheSameCameraAndSpheres(): void
+    {
+        $world = new World();
+        $service = VisibilityService::forWorld($world);
+        $camera = new SetCamera(
+            Mat4::lookAt(new Vec3(0.0, 0.0, 0.0), new Vec3(0.0, 0.0, -1.0), new Vec3(0.0, 1.0, 0.0)),
+            Mat4::perspective(deg2rad(60.0), 1.0, 0.1, 500.0),
+        );
+        $service->beginFrame($camera->viewMatrix, $camera->projectionMatrix);
+        $planes = self::view();
+
+        /** @var list<array{0: string, 1: float, 2: float, 3: float, 4: float}> $probes */
+        $probes = [
+            ['ahead', 0.0, 0.0, -20.0, 2.0],
+            ['behind', 0.0, 0.0, 20.0, 2.0],
+            ['aside', 200.0, 0.0, -20.0, 2.0],
+            ['edge', 11.0, 0.0, -10.0, 1.0],
+            ['tiny-far', 0.0, 0.0, -400.0, 0.1],
+        ];
+        foreach ($probes as [$label, $x, $y, $z, $r]) {
+            $viaCuller = !Frustum::sphereOutside($planes, $x, $y, $z, $r);
+            $viaService = $service->testSphere($x, $y, $z, $r);
+            self::assertSame($viaCuller, $viaService, "probe {$label}");
+        }
     }
 }

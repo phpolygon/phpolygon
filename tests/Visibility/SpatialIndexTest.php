@@ -22,6 +22,35 @@ final class SpatialIndexTest extends TestCase
         );
     }
 
+    public function testVersionChangesOnRegisterUpdateAndRemoveOnly(): void
+    {
+        $index = new SpatialIndex();
+        $v0 = $index->version();
+
+        $index->register(1, 0.0, 0.0, 0.0, 1.0);
+        $v1 = $index->version();
+        self::assertNotSame($v0, $v1);
+
+        // A read-only query must never bump it.
+        $index->handlesInCell('0,0');
+        $index->entry(1);
+        self::assertSame($v1, $index->version());
+
+        $index->update(1, 5.0, 0.0, 5.0);
+        $v2 = $index->version();
+        self::assertNotSame($v1, $v2);
+
+        $index->remove(1);
+        self::assertNotSame($v2, $index->version());
+
+        // Removing an already-removed (or never registered) handle is a
+        // true no-op, including for the version counter.
+        $v3 = $index->version();
+        $index->remove(1);
+        $index->remove(999);
+        self::assertSame($v3, $index->version());
+    }
+
     public function testRegisterPlacesHandleInItsCell(): void
     {
         $index = new SpatialIndex();
