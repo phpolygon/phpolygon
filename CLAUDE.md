@@ -2670,6 +2670,99 @@ one that does takes `phpolygon/multiplayer`.
 
 ---
 
+## Thread scheduler — subsystems in worker threads (`PHPolygon\Thread`)
+
+`ThreadScheduler` runs registered `SubsystemInterface` implementations each in
+their own `parallel\Runtime` thread (ZTS + ext-parallel only); `NullThreadScheduler`
+is the single-threaded fallback used everywhere else, picked by
+`ThreadSchedulerFactory::create()`. `Engine` holds either behind the
+`ThreadScheduler|NullThreadScheduler` union (`$engine->scheduler`) and only
+pipelines through `sendAll()`/`recvAll()` each tick when it is a real
+`ThreadScheduler` with at least one subsystem registered. **The engine itself
+registers none** (`AISubsystem` is empty, `PhysicsSubsystem`/`AudioSubsystem`/...
+exist but are not wired in) — a game reaches the scheduler through
+`$engine->scheduler` or the `Scheduler` facade (`$engine->scheduler->register(...)`)
+to use one.
+
+Engine's own tick is still the original lockstep: `sendAll()` then main-thread
+systems then `recvAll()`, every tick, no overlap into the next one. A healthy
+worker still blocks the main thread for up to `DEFAULT_POLL_TIMEOUT_US` (an
+unmeasured, deliberately generous constant, not a benchmarked value) on a
+tick where it is in sync; the asynchronous, non-blocking path described below
+only starts once a subsystem has missed one deadline. `pollAll(..., 0)` (the
+genuinely non-blocking call) has no caller inside the engine yet — it exists
+for a caller that wants to check a specific subsystem itself.
+
+Per subsystem, three states instead of a single blocking round trip:
+**in sync** (answered within the last poll's bound), **behind** (missed one —
+`sendAll()` stops queueing new input onto its `_in` channel while an answer is
+still outstanding, and `recvAll()` switches to a non-blocking check for it
+every later tick instead of paying the bound again — ticks spent this way
+drop their `dt`, nothing accumulates it; a future "far simulation" phase may
+need to), **dead** (its worker's kept `parallel\Future` resolved — with or
+without an exception, and a clean `return` from `threadEntry()` outside
+`shutdown()` counts too — detected by `source`, not `type`: a Future's own
+event is also `Read`-typed, measured directly against the installed
+extension). A dead subsystem is logged once and skipped by
+`sendAll()`/`pollAll()`/`recvAll()` from then on — no restart. None of this
+touches `AISubsystem`/`PhysicsSubsystem` themselves; only the scheduler
+around them got harder to kill.
+
+```php
+$scheduler->register('physics', PhysicsSubsystem::class);
+$scheduler->boot();
+$scheduler->sendAll($world, $dt);      // skips a dead or still-outstanding subsystem
+$scheduler->recvAll($world);           // the game loop's own entry point: bound if in sync, non-blocking if behind
+$scheduler->pollAll($world, $timeoutMicros); // explicit: always honours the given bound, even for a behind subsystem (0 = non-blocking)
+$scheduler->isSubsystemAlive('physics');
+$scheduler->getDeadSubsystems();
+```
+
+`parallel\Events::setTimeout()` takes microseconds, not milliseconds,
+confirmed by measurement against the installed extension (5 000 µs against a
+50 ms worker timed out; 1 000 000 µs against the same worker delivered) — not
+documented clearly upstream. `NullThreadScheduler` has no worker to go behind
+or die independently of the main thread: a throwing `compute()` there
+propagates exactly as before this hardening (deliberately NOT caught — see
+its class doc), and `isSubsystemAlive()`/`getDeadSubsystems()` exist only so
+code written against the union can call either scheduler without an
+`instanceof` check.
+
+**Side channel.** `compute()`'s returned deltas may carry `__log` (a list of
+`['text' => string, 'context' => array?, 'level' => 'info'|'warn'|'error'?]`)
+and `__timings` (section name → elapsed nanoseconds). Both schedulers strip
+them before `applyDeltas()` and forward them — `__log` to `Log` as
+`LogCategory::System` with `subsystem` added to the context, `__timings` via
+`PerfProfiler::record()` as `thread.<name>.<section>`. Both are optional;
+existing subsystems need no change. `thread.<name>.wait` (recorded by the
+scheduler itself) is how long the main thread blocked waiting, not how long
+the worker worked — use a `__timings` entry for the latter. The scheduler's
+own lines in `game.log` (see "Engine log" above): `[error] thread worker
+died` (dead-worker detection), `[error] WARN thread worker stalled` (first
+missed deadline of a stall episode), both with `subsystem=<name>`; a
+subsystem's own `__log` entries go out as `[system]` with the same
+`subsystem=<name>` added.
+
+**macOS ARM.** `parallel\Events` itself is not new: `ThreadedLogWriter::flush()`
+already waits on it — blocking, with a timeout — and checks the same thread's
+Future (`write()`/`close()`/`readResult()`); that pairing has been live on
+every ZTS platform, including macOS ARM, since the engine log's own thread
+shipped. What IS new, and not exercised by that code, is the non-blocking
+variant (`setBlocking(false)`, no timeout) this scheduler uses whenever a
+subsystem is "behind" under `recvAll()`, or a caller passes `timeoutMicros: 0`
+to `pollAll()`. Since the engine registers no subsystem, this specific path
+is not reached by a running game yet. If non-blocking `Events` turns out to
+be unsafe on macOS ARM where the blocking variant is not, the fallback is
+`NullThreadScheduler`, unaffected either way.
+
+**Known gaps, not fixed by this hardening**: `shutdown()` still calls
+`Runtime::close()`, which joins its thread — a worker that is hung rather
+than dead (no exception, Future never `done()`, never checking its input
+channel) still makes `shutdown()` block. Whether `Engine` shuts the scheduler
+down at all on an uncaught exception from the main loop is unchecked.
+
+---
+
 ## Start language — Steam, then the system
 
 A game's first start should speak the player's language without asking. The
@@ -3400,7 +3493,10 @@ PerfProfiler::end();
 Standard section names (use the same when adding new markers):
 `engine.update`, `engine.render`, `ecs.update`, `ecs.system.<class>`,
 `render3d.build_commands`, `render3d.flush`, `render2d.frame`,
-`mesh.generate.<id>`, `texture.upload`, `physics.tick`.
+`mesh.generate.<id>`, `texture.upload`, `physics.tick`,
+`thread.scheduler.send`, `thread.scheduler.poll`, `thread.<name>.wait` (main
+thread's own book-keeping — see "Thread scheduler" below for the `thread.*`
+family, including the `thread.<name>.<custom>` a subsystem can add itself).
 
 `EngineConfig::$devMode` enables the F3 performance overlay
 (`src/UI/PerfOverlay.php`). Independent from SPX/Excimer.

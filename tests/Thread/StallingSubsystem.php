@@ -19,6 +19,9 @@ use PHPolygon\Thread\SubsystemInterface;
  */
 class StallingSubsystem implements SubsystemInterface
 {
+    /** How often applyDeltas() actually ran — set by the main thread, read back by tests. */
+    public static int $applyCount = 0;
+
     public function prepareInput(World $world, float $dt): array
     {
         return ['sleepSeconds' => $dt];
@@ -26,7 +29,7 @@ class StallingSubsystem implements SubsystemInterface
 
     public function applyDeltas(World $world, array $deltas): void
     {
-        // No-op for test — just verify the delayed delta is eventually received.
+        self::$applyCount++;
     }
 
     public static function threadEntry(string $channelPrefix): void

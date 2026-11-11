@@ -15,14 +15,30 @@ use PHPolygon\ECS\World;
  *   3. Worker thread runs computation (threadEntry) and sends deltas back
  *   4. Main thread calls applyDeltas() to write results back to World
  *
- * Failure contract: if threadEntry() (under {@see ThreadScheduler}) or
- * compute() (under {@see NullThreadScheduler}) throws or returns before a
- * clean shutdown, the scheduler detects it — via the kept
- * {@see \parallel\Future} on the threaded path, via a caught exception on the
- * synchronous one — logs it once, and marks the subsystem dead for the rest
- * of that boot(): it is skipped by sendAll()/pollAll() afterwards rather than
- * hanging the game loop. There is no automatic restart; both schedulers carry
- * on running every other subsystem.
+ * Failure contract — {@see ThreadScheduler} only (its worker threads are
+ * independent of the main thread; {@see NullThreadScheduler} has none, so a
+ * throwing compute() there behaves exactly as before this contract existed:
+ * the exception propagates out of the game loop): if threadEntry() throws or
+ * returns before a clean shutdown, {@see ThreadScheduler::pollAll()} detects
+ * it via the kept {@see \parallel\Future}, logs it once, and marks the
+ * subsystem dead for the rest of that boot() — skipped by sendAll()/pollAll()
+ * afterwards rather than hanging the game loop. There is no automatic
+ * restart; the scheduler carries on running every other subsystem.
+ *
+ * Side channel: the array returned by compute() (and sent back via
+ * threadEntry()'s out channel) may carry two reserved keys that never reach
+ * applyDeltas() — both schedulers strip them first:
+ *   - `__log`: a list of `['text' => string, 'context' => array (optional),
+ *     'level' => 'info'|'warn'|'error' (optional, default 'info')]` entries,
+ *     written through {@see \PHPolygon\Log\Log} as `LogCategory::System`,
+ *     with `subsystem` added to each entry's context.
+ *   - `__timings`: a map of section name to elapsed nanoseconds (int), each
+ *     recorded via {@see \PHPolygon\Runtime\PerfProfiler::record()} as
+ *     `thread.<name>.<section>` — the thread's own measured work, as opposed
+ *     to `thread.<name>.wait`, which the scheduler records itself and which
+ *     only measures how long the main thread blocked waiting for it.
+ * Both keys are optional; a subsystem that never sets them is unaffected, and
+ * existing subsystems (AISubsystem, PhysicsSubsystem, ...) need no change.
  */
 interface SubsystemInterface
 {
