@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace PHPolygon;
 
+use PHPolygon\Activity\ActivityService;
 use PHPolygon\Audio\AudioManager;
 use PHPolygon\Audio\GLFWAudioBackend;
 use PHPolygon\Audio\VioAudioBackend;
@@ -80,6 +81,15 @@ class Engine
      * tierAt()) without going through the renderer.
      */
     public readonly VisibilityService $visibility;
+
+    /**
+     * `$engine->activity` - Phase 4's activity-tier facade (tier-change
+     * observers, forced-awake regions; see {@see ActivityService}). Always
+     * present but entirely inert on its own: nothing happens unless a game
+     * also constructs an {@see \PHPolygon\Activity\ActivitySystem} with this
+     * instance and registers it - the engine never does that automatically.
+     */
+    public readonly ActivityService $activity;
 
     // Game-authoritative editor sync (opt-in via enableEditorSync()).
     private ?string $editorSyncPath = null;
@@ -199,6 +209,7 @@ class Engine
 
         $this->world = new World();
         $this->visibility = VisibilityService::forWorld($this->world);
+        $this->activity = new ActivityService();
         $this->input = $config->input ?? ($this->useVio ? new VioInput() : new Input());
         $this->events = new EventDispatcher();
         $this->clock = new Clock();

@@ -305,7 +305,24 @@ final class VisibilityService
      */
     public function shadowOnlyEntities(): array
     {
-        return array_keys($this->shadowOnlySet);
+        // Dormancy is filtered fresh here, not baked into $shadowOnlySet at
+        // classification time - World::setEntityDormant() fires no event and
+        // does not bump SpatialIndex::version(), so a dormancy change alone
+        // would not invalidate the memo (see invalidate() and the Phase 4
+        // report for why this bug would otherwise surface once something
+        // starts toggling dormancy during live play - visibleEntities()
+        // already does this fresh filter, this method did not).
+        $world = $this->boundWorld;
+        if ($world === null) {
+            return array_keys($this->shadowOnlySet);
+        }
+        $out = [];
+        foreach ($this->shadowOnlySet as $handle => $_) {
+            if (!$world->isDormant($handle)) {
+                $out[] = $handle;
+            }
+        }
+        return $out;
     }
 
     public function isVisible(int $handle): bool
@@ -378,6 +395,29 @@ final class VisibilityService
     public function index(): SpatialIndex
     {
         return $this->index;
+    }
+
+    /**
+     * Forces the next beginFrame()/beginFrameFrom() call to reclassify from
+     * scratch, even if its camera/fog/light inputs and SpatialIndex::version()
+     * are unchanged from the last call. World::setEntityDormant() (and
+     * Phase 4's setEntityTier() moving an entity to/from Dormant) fires no
+     * event and does not bump the index version - only the shadow-caster set
+     * reads dormancy fresh every call ({@see shadowOnlyEntities()});
+     * $visibleSet/$shadowOnlySet's own MEMBERSHIP (which entries were even
+     * considered) would otherwise stay stale: a camera held still means the
+     * memo would never re-run classifyCasters(), so a caster that just woke
+     * from Dormant (never classified while asleep) would never appear.
+     * Whoever changes an entity's dormancy/tier should call this if the
+     * immediate frame needs to reflect it - {@see \PHPolygon\Activity\ActivitySystem}
+     * does. A stale memo self-heals within roughly one SpatialIndex change
+     * anyway (any move/attach/detach bumps the version), so this is a
+     * correctness fix for a held-still camera, not a general requirement.
+     */
+    public function invalidate(): void
+    {
+        $this->hasViewMemo = false;
+        $this->hasCasterMemo = false;
     }
 
     /**

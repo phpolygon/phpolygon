@@ -1117,6 +1117,119 @@ redundant `Frustum::planes()` computations when `GrassSystem`/`FoliageInstanceSy
 `ParticleSystem` are also present) is NOT measured here - building that scenario was out of scope for this
 benchmark; reported as open, not claimed.
 
+### Phase 4 of the visibility plan (2026-11-11): activity tiers, regions, the far-simulation substrate
+
+`PHPolygon\Activity\ActivityTier` (`Visible`/`Near`/`Far`/`Dormant`). An entity never acquires any tier
+beyond Visible unless a game attaches `PHPolygon\Component\Relevance` (`mode: Always|Near|Auto`,
+`radius`) to it AND registers `PHPolygon\Activity\ActivitySystem` - the engine never does either on its
+own, satisfying the plan's explicit "Standard bleibt jeder Tick, alle": an unmodified system must not
+silently start skipping an entity just because tiers exist in the codebase now.
+
+`World`'s part is deliberately thin - Far does NOT remove an entity from `componentPool()`/`query()` the
+way Dormant does (that was the design this phase almost got wrong before review caught it): `$far` is a
+membership flag only, `componentPoolFar(class)` is a FILTERED VIEW for a system that wants to skip these
+ids itself, never the only way to reach them. `setEntityTier()`/`entityTier()`/`isFar()` mirror
+`setEntityDormant()`/`isDormant()`'s existing shape and do NOT walk a Transform hierarchy either - same
+"the CALLER toggles whole subtrees" contract. `entityTier()` can only ever answer Visible, Far or
+Dormant - Near has no World-level storage distinction from Visible (nothing there ever treats them
+differently); `ActivitySystem` tracks the Near/Visible split itself for its own hysteresis.
+`World::registerPassiveComponent()`/`isPassiveComponent()` is a pure REGISTRY stub -
+`ComponentInterface::onUpdate()` is not actually invoked anywhere in the engine's own loop (checked before
+building this), so there is no per-tick callback for a passive class to skip yet; flagged, not guessed.
+
+`AbstractSystem::tierPolicy(): PHPolygon\Activity\TierPolicy` defaults to `everyTick()` and is NOT read by
+`World::update()`/any system's own loop - only by (not yet built) Phase 6 tooling deciding whether to hand
+a system's Far entities to a far core instead of ticking them per frame. Overriding it today changes
+nothing by itself; flagged the same way `VisibilityService::tierAt()` was flagged ahead of need in Phase 2.
+`VisibilityService::tierAt()` itself is UNCHANGED (still the Phase 2 `bool` stub, "is this cell's
+classification outside or not") - upgrading its return type to `ActivityTier` was suggested during review
+but would require either duplicating `ActivitySystem`'s distance logic inside `VisibilityService` or an
+inverted dependency (Visibility depending on Activity, which already depends on Visibility); left as a
+known gap rather than guessed at.
+
+`ActivitySystem` (opt-in, constructed with `PHPolygon\Activity\ActivityService` + an optional live
+view-distance closure + near-radius/far-multiplier overrides - NOT new required `EngineConfig` fields;
+`EngineConfig::$activityNearRadius`/`$activityFarRadiusMultiplier` exist as `?float` overrides a game
+reads and passes through itself, since the engine never constructs an `ActivitySystem` automatically) is
+the only thing that ever calls `setEntityTier()` by distance. Its `update()`:
+- reads the eye from `VisibilityService::forWorld($world)->frame()?->cameraPosition`, keeping the LAST
+  known one when there is no camera this tick (the same convention `MotionView` already uses) - with no
+  eye ever seen, nothing is touched;
+- NEVER assigns Dormant to an entity `VisibilityService::isVisible()` currently considers visible (capped
+  at Far instead) - the plan's own "Nicht tun: Dormanz nicht gegen Renderkosten", enforced here rather
+  than left to the caller; the one-frame lag between "was visible last frame" and "is visible now" mirrors
+  `MotionView`'s own lag for the opposite reason;
+- applies a hysteresis band (10% of each radius, a DESIGN VALUE) at both the near and far boundaries,
+  directionally aware (which threshold variant applies depends on the entity's PREVIOUS tier), so
+  something sitting right on a boundary does not flip every tick;
+- applies the computed tier to the WHOLE `Transform3D` subtree of the `Relevance`-carrying root, mirroring
+  `setEntityDormant()`'s own documented whole-subtree requirement;
+- calls `ActivityService::notify()` once per REAL change only (idempotent re-application is silent), and
+  `VisibilityService::invalidate()` whenever Dormant is entered or left (see the dormancy/memo fix below).
+
+`RelevanceMode::Always` is never touched; `::Near` never goes below Far (capped, like the visible-entity
+guard); `::Auto` is the full range. `PHPolygon\Component\ActivityRegion` (`tag`, `wakeRadius`, reserved
+`boundsMin`/`boundsMax`) groups entities `ActivityService::requestAwake(tag, reason)`/`release(tag, reason)`
+can force to Near regardless of distance, reference-counted by `$reason` (two independent callers both
+holding a region awake don't fight over when to release it) - the plan's "Vorab-Wecken" is `$wakeRadius`,
+a margin ActivitySystem treats the entity as that much closer than it really is. Phase 4 ships TAG-based
+grouping only; `$boundsMin`/`$boundsMax` are stored but NOT read by `ActivitySystem` - spatial region
+membership is an open gap, flagged rather than guessed (code-rescue's own `RegionDormancySystem`, read
+for reference, also only needs tag/id-list grouping, not spatial bounds, for its current use).
+
+A latent Phase 3 bug the Phase 4 work surfaced in review before it shipped: `World::setEntityDormant()`
+fires no event and does not bump `SpatialIndex::version()`, so with a camera held still across
+`beginFrame()` calls, `shadowOnlyEntities()` used to bake its dormancy check into `$shadowOnlySet` at
+CLASSIFICATION time (only re-run on a memo miss) instead of filtering fresh at read time the way
+`visibleEntities()` already did - a dormant entity could keep getting shadow-only draws, and a woken
+off-screen caster could never cast again. Fixed: `shadowOnlyEntities()` now filters dormancy fresh on
+every call (mirroring `visibleEntities()`), and `VisibilityService::invalidate()` forces the next
+`beginFrame()` to reclassify from scratch - `ActivitySystem` calls it on every Dormant transition
+(`VisibilityServiceDormancyMemoTest`, written to fail against the old behaviour first).
+
+`PHPolygon\Simulation\{SimulationKernel,SimulationTransport,InlineTransport,FarSimulationRunner}` - the
+substrate Phase 6 will put a threaded transport behind, built here running everything inline on the main
+thread (the plan's "wird zuerst gebaut"). A kernel operates on PER-ENTITY scalar records, not whole-system
+state (the plan's merge-order wording - "Tick, Entity-Id, Folgenummer" - literally names entity ids):
+`export(World, id)`/`import(World, id, record)` touch the World once each, on a Near->Far handover and a
+Far->Near takeback; `step(records, dt)` is PURE (no World, no global RNG - "Zufall aus dem Datensatz" means
+any randomness lives in the record itself, e.g. a carried seed the kernel advances) and must treat every
+record independently (the result for one id must not depend on which others are present in the same
+call - `FarSimulationRunner::takeback()` relies on this to flush one record alone). `InlineTransport`
+sorts records into ascending id order before calling `step()` - the plan's determinism requirement, with
+nothing concurrent to merge yet. `FarSimulationRunner` fixes the far clock at 10 Hz (`FIXED_HZ`/`FIXED_DT`,
+the plan's decision 7) via a `GameLoop`-style accumulator per kernel name, capped at `MAX_STEPS_PER_TICK`
+(4, a design value) whole steps per `tick()` call so a stall defers rather than bursts - the DEFERRED
+remainder is never dropped, only delayed to a later `tick()` call. `takeback()` flushes every step still
+owed (via the SAME epsilon-tolerant boundary check `tick()`'s own loop uses - repeated float subtraction of
+0.1 s left the accumulator a hair below an exact multiple often enough that the first version of this
+class's OWN determinism test caught a real missing-step bug from it) before `import()`, WITHOUT
+decrementing the shared accumulator (the same owed time still reaches the record's batch siblings on a
+later `tick()` call). Result: the same handover/takeback id sequence and the same TOTAL elapsed simulated
+time import an identical record regardless of how `tick()` calls were chunked or budget-paced
+(`FarSimulationRunnerTest::testSameTotalElapsedTimeImportsAnIdenticalRecordRegardlessOfChunking`) - the
+plan's decision 6 ("gleiche Übergabefolge ergibt gleichen Zustand", not required to be bit-identical with
+real time, which this never claims either). NOT wired to `ActivitySystem` automatically - Fern-Simulation
+is voluntary per system (decision 5): a system registers its own kernel and listens to
+`ActivityService::addObserver()` itself to call `handover()`/`takeback()` for its own entities. No system
+in this engine registers one yet.
+
+`$engine->activity` (`PHPolygon\Activity\ActivityService`) is always present but fully inert until a game
+constructs an `ActivitySystem` with it - mirrors `$engine->visibility`'s always-present-but-inert-until-used
+shape from Phase 2.
+
+Measured 2026-11-11 (same sandbox and caveats as Phase 3's own numbers above - absolute figures vary
+session to session on this shared machine, only the relative comparison is load-bearing): the default
+path (no `ActivitySystem` registered) is unchanged from Phase 3's own moving-camera benchmark - nothing in
+`VisibilityService`'s or `Renderer3DSystem`'s hot path was touched beyond the dormancy-memo fix, which is
+a no-op scan when `$shadowOnlySet` is empty (no directional light). `ActivitySystem` itself, OPTED IN,
+5,000 `Relevance` entities spread over a 1 km square, 300 ticks, 3 runs: ~4.7-4.9 ms per tick - a real,
+non-trivial cost for a system that opted in (the same class of "naive full scan" cost `Transform3DSystem`
+started with before Phase 1's own optimisation - not addressed here, flagged as a future target). The
+plan's actual multi-system savings this phase enables (an opted-in system skipping its Far entities in
+favour of a 10 Hz far core) are NOT measured - no system in this engine has registered a
+`SimulationKernel` yet to show savings from.
+
 Measured 2026-11-11 (PHP 8.5.5 CLI, this repo's dev machine,
 `benchmarks/micro/System/Transform3DSystemBench.php`, `benchTenThousandStaticTick`/
 `benchStaticWorldTick` before vs after): 10,000 untouched entities per tick went from 4.78 ms to
