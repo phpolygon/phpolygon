@@ -14,6 +14,15 @@ use PHPolygon\ECS\World;
  *   2. Scheduler sends input to worker thread via Channel
  *   3. Worker thread runs computation (threadEntry) and sends deltas back
  *   4. Main thread calls applyDeltas() to write results back to World
+ *
+ * Failure contract: if threadEntry() (under {@see ThreadScheduler}) or
+ * compute() (under {@see NullThreadScheduler}) throws or returns before a
+ * clean shutdown, the scheduler detects it — via the kept
+ * {@see \parallel\Future} on the threaded path, via a caught exception on the
+ * synchronous one — logs it once, and marks the subsystem dead for the rest
+ * of that boot(): it is skipped by sendAll()/pollAll() afterwards rather than
+ * hanging the game loop. There is no automatic restart; both schedulers carry
+ * on running every other subsystem.
  */
 interface SubsystemInterface
 {
