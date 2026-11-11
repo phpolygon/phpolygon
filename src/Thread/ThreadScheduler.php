@@ -58,6 +58,78 @@ use PHPolygon\Runtime\PerfProfiler;
  * {@see ThreadSchedulerFactory} chose). If non-blocking Events turns out to be
  * unsafe on macOS ARM where the blocking variant is not, the fallback is
  * {@see NullThreadScheduler}, which this class never touches.
+ *
+ * Unbuffered `_in`, buffered `_out` (fix/unbuffered-scheduler-channels) —
+ * read this before assuming it fixes the Phase 6b ~15ms floor in general, it
+ * does NOT:
+ *
+ * {@see boot()}'s `_in` channel is created UNBUFFERED (`Channel::make($name)`,
+ * no capacity — capacity `0` throws `TypeError` on this build, "may be -1 for
+ * unlimited, or a positive integer"; capacity `1` is still buffered, same as
+ * `Infinite`, measured 0.00ms; omitting the argument is the only way to get a
+ * true rendezvous `send()`). This DOES remove one specific, narrow cost:
+ * measured through the real `sendAll()`/`pollAll()` path, worker always
+ * ready, zero compute time, this Windows dev machine, PHP 8.5.5 ZTS,
+ * ext-parallel 1.2.13, 2026-11-11, 50-call runs — both channels buffered
+ * (the old behaviour) averages ~14.9ms/call; `_in` unbuffered (`_out` left
+ * buffered) averages ~7.6ms/call. That is a real, roughly 2x improvement,
+ * but for a worker that does ANY real work at all it DISAPPEARS: the same
+ * benchmark with the worker spending 1ms or 5ms (CPU-bound, not `usleep()` —
+ * see below) before replying measures ~15.1ms/call both before AND after
+ * this change — no improvement whatsoever. A standalone probe isolating why
+ * (same Windows machine, same date) found the actual floor: a plain blocking
+ * `\parallel\Channel::recv()` waiting on a worker busy for 1ms costs ~1.0ms
+ * total (no added latency at all, regardless of `_in`'s buffering), while
+ * `\parallel\Events::poll()` — what {@see pollOne()} actually uses, for its
+ * dead-worker detection — costs ~15ms for the SAME wait, again regardless of
+ * buffering. The ~15ms floor lives inside `Events::poll()`'s own blocking
+ * wait, not in channel buffering; {@see pollOne()}'s `addFuture()` call adds
+ * a further, independent ~15ms chance roughly half the time even when
+ * nothing is being waited for (this matches Phase 6b's own secondary,
+ * unchased finding, and explains the ~7.6ms *average* above: an even split
+ * between calls that pay this and calls that don't). Phase 6b's own report
+ * attributed the whole ~15ms to channel buffering; this measurement found
+ * that attribution incomplete for anything but a zero-compute worker. The
+ * real fix would have to replace `Events::poll()`'s blocking wait (or route
+ * around `addFuture()`) for the common case, not change channel capacities —
+ * that is NOT done here; this change is kept only for the real, if narrow,
+ * win it measurably delivers (an idle/near-idle subsystem, and the first
+ * reply after a tick with nothing to do), with no regression found anywhere
+ * else. (Confound avoided in the above: `usleep()` for 1-5ms on this Windows
+ * build is itself bound by roughly the same ~15ms default timer granularity,
+ * so simulating "compute time" with it would have hidden the real result
+ * behind an unrelated Windows timer-resolution artefact; a CPU-bound spin via
+ * `hrtime()` does not have this problem and is what both benchmarks above
+ * use.)
+ *
+ * `_out` is deliberately left buffered (`Channel::Infinite`, unchanged) —
+ * the measurements above found no latency reason to touch it, and making it
+ * unbuffered too introduces a real deadlock with no matching benefit: a
+ * worker's `$out->send($result)` would then block until something calls
+ * `Events::poll()` for it, and {@see shutdown()} calling `Runtime::close()`
+ * while a request is still outstanding (worker mid-compute, nobody left
+ * polling — see {@see \PHPolygon\Tests\Thread\ThreadSchedulerHardeningTest::testZeroTimeoutPollIsNonBlockingAndDoesNotMarkAliveWorkerDead()})
+ * would then join a thread permanently stuck in that send(), hanging
+ * shutdown() forever. With `_out` buffered, the same worker's send() returns
+ * immediately, it loops back to its own `recv()`, sees the shutdown sentinel,
+ * and exits cleanly — exactly like before this change. This is a deliberate
+ * deviation from the original brief ("both channels unbuffered").
+ *
+ * `send()` on the now-unbuffered `_in` channel has no timeout of its own —
+ * ext-parallel does not offer a bounded/cancellable send ({@see
+ * \parallel\Events::setInput()} was tried as a candidate and rejected: on
+ * this build it either ignored its configured `setTimeout()` and returned as
+ * a timeout almost instantly even with a worker already parked in `recv()`,
+ * or — combined with `addChannel()` for the same channel — ignored the
+ * timeout the other way and never returned at all). {@see sendAll()} and
+ * {@see shutdown()} each check the target's {@see \parallel\Future::done()}
+ * immediately before sending, plus a short one-time grace period in
+ * {@see boot()} ({@see waitOutEarlyFailures()}), to avoid blocking forever on
+ * a worker that will never `recv()` again; see their own doc for exactly what
+ * that does and does not cover — it does NOT cover a worker that hangs (not
+ * crashes) doing its own setup before its first `recv()`, which now blocks
+ * the first `sendAll()` with no bound at all, a new gap this change opens
+ * (see the commit report for the full discussion).
  */
 class ThreadScheduler
 {
@@ -72,6 +144,14 @@ class ThreadScheduler
      * bug this hardening fixes).
      */
     public const int DEFAULT_POLL_TIMEOUT_US = 5_000_000;
+
+    /**
+     * Upper bound for {@see waitOutEarlyFailures()}'s one-time grace period
+     * in {@see boot()}, in microseconds. See that method's own doc for the
+     * measurement behind this number and exactly what it narrows (and does
+     * not close).
+     */
+    private const int BOOT_GRACE_PERIOD_US = 10_000;
 
     /** @var array<string, SubsystemInterface> */
     private array $subsystems = [];
@@ -130,7 +210,14 @@ class ThreadScheduler
         }
 
         foreach ($this->subsystems as $name => $subsystem) {
-            \parallel\Channel::make("{$name}_in", \parallel\Channel::Infinite);
+            // `_in` is UNBUFFERED on purpose (no capacity argument — confirmed by
+            // measurement to be the only way to get a true rendezvous: capacity 0
+            // throws TypeError on this build, "may be -1 for unlimited, or a
+            // positive integer"; capacity 1 is still buffered, send() returning
+            // before the worker's recv() - measured 0.00ms, same as Infinite).
+            // See class doc, "Unbuffered `_in`, buffered `_out`" for the full
+            // reasoning and the measurements behind this specific pairing.
+            \parallel\Channel::make("{$name}_in");
             \parallel\Channel::make("{$name}_out", \parallel\Channel::Infinite);
 
             $className = get_class($subsystem);
@@ -153,6 +240,63 @@ class ThreadScheduler
         }
 
         $this->booted = true;
+        $this->waitOutEarlyFailures();
+    }
+
+    /**
+     * A short, bounded, one-time grace period right after spawning every
+     * worker, narrowing (not closing — see {@see sendAll()}'s own doc on why
+     * it cannot be closed) the race where a worker that will NEVER reach its
+     * own `recv()` — crashed, or returned cleanly without ever opening a
+     * channel, like the `CrashingSubsystem`/`ReturningSubsystem` test
+     * fixtures — has not resolved its {@see \parallel\Future} yet by the time
+     * the very first {@see sendAll()} call checks it, which would otherwise
+     * send into the unbuffered `_in` channel — a rendezvous nobody will ever
+     * complete.
+     *
+     * Measured (this Windows dev machine, PHP 8.5.5 ZTS, ext-parallel 1.2.13,
+     * 2026-11-11): a worker dispatched exactly like {@see boot()} does
+     * (Composer autoload bootstrap + `$class::threadEntry($prefix)`) that
+     * returns immediately, 30 trials: min 0.566ms, p90 0.645ms, max 0.677ms
+     * from `run()` returning to `done()` becoming true. Without any grace
+     * period at all, the real `ThreadSchedulerHardeningTest` — a fresh PHP
+     * process, PHPUnit's own overhead already paid, not the isolated loop
+     * above — still hit this race in roughly 1 of 10 runs of
+     * `testWorkerThatReturnsWithoutThrowingIsDetectedAsDead`, hanging on
+     * `sendAll()`'s `send()` (see the commit).
+     *
+     * Deliberately a tight busy-poll on {@see \parallel\Future::done()}, NOT
+     * `usleep()` between checks: measured directly (same machine/date),
+     * `usleep()` for even a tiny duration is itself bound by Windows' own
+     * ~15ms default timer granularity — a single `usleep(200)` between
+     * checks measured this method's own cost at ~30ms for a single HEALTHY
+     * subsystem (two tick-rounded sleeps stacking past the intended ~10ms
+     * bound before the loop's own deadline check could catch it), not
+     * "exits on the first iteration" as an earlier version of this comment
+     * claimed. Busy-polling instead measures at exactly the intended
+     * {@see self::BOOT_GRACE_PERIOD_US} (~10.0-10.02ms over 15 trials) for a
+     * healthy subsystem, and well under 1ms for the actual crash fixtures
+     * this method exists for. The cost is CPU time on one core, once per
+     * {@see boot()} call (not per tick) — accepted as a flat, one-time tax,
+     * paid in full whenever nothing crashes (the common case), not an
+     * early-exit optimisation. `boot()` as a whole costs more than this
+     * (Runtime/thread spawning has its own, pre-existing, unmeasured-by-this-
+     * change cost) — this grace period is the part this change adds.
+     */
+    private function waitOutEarlyFailures(): void
+    {
+        $pending = array_keys($this->futures);
+        $deadlineNs = hrtime(true) + self::BOOT_GRACE_PERIOD_US * 1_000;
+
+        while ($pending !== [] && hrtime(true) < $deadlineNs) {
+            foreach ($pending as $index => $name) {
+                $future = $this->futures[$name];
+                if ($future !== null && $future->done()) {
+                    $this->markDead($name, null);
+                    unset($pending[$index]);
+                }
+            }
+        }
     }
 
     /**
@@ -162,6 +306,32 @@ class ThreadScheduler
      * worker that is not even done with the last tick's work has no use for
      * another one queued behind it on its `_in` channel.
      *
+     * `_in` being unbuffered (see {@see boot()}) makes `$channel->send($input)`
+     * below a rendezvous: it blocks until the worker's own `recv()` takes it,
+     * and {@see \parallel\Channel}'s `send()` takes no timeout — ext-parallel
+     * has no API for a bounded/cancellable send (confirmed: capacity 0 is
+     * rejected, and `\parallel\Events::setInput()` — the only other candidate
+     * — ignored its own `setTimeout()` and returned instantly as if nothing
+     * were listening even when a worker WAS already blocked in `recv()`, on
+     * this build; not used here). A worker that will NEVER call `recv()`
+     * again — crashed or returned, whether before its very first `recv()` or
+     * between two ticks — would therefore block this call forever. The
+     * `done()` check right before `send()` closes the common case (a worker
+     * that already crashed by the time this runs); it is a plain boolean read,
+     * not a wait, so it adds no new round trip. It does NOT close the race
+     * where a worker dies in the instant between this check and the `send()`
+     * call themselves — ext-parallel offers nothing to close that window from
+     * here. This IS reachable in practice, not just in theory: the very
+     * first version of this check, with no grace period in {@see boot()} at
+     * all, hung `testWorkerThatReturnsWithoutThrowingIsDetectedAsDead()`
+     * (ReturningSubsystem — returns as its very first statement, no sleep
+     * before the test's own `sendAll()`) in roughly 1 of 10 runs — measured,
+     * not assumed; see the commit. {@see boot()}'s {@see waitOutEarlyFailures()}
+     * exists specifically to narrow that window before it ever reaches this
+     * check; even with it, a worker whose own setup hangs (not crashes)
+     * before its first `recv()` is not caught by either and blocks this call
+     * with no bound — an open risk, not fixed here (see the commit report).
+     *
      * @return array<string, array<string, mixed>> Prepared inputs keyed by name (for testing/debugging)
      */
     public function sendAll(World $world, float $dt): array
@@ -170,6 +340,13 @@ class ThreadScheduler
             $inputs = [];
             foreach ($this->subsystems as $name => $subsystem) {
                 if (isset($this->deadSubsystems[$name]) || isset($this->outstanding[$name])) {
+                    continue;
+                }
+                if (isset($this->futures[$name]) && $this->futures[$name]->done()) {
+                    // Found dead before ever sending to it — see this method's
+                    // own doc. Skips the rendezvous send() entirely instead of
+                    // blocking on a channel nobody will ever recv() from.
+                    $this->markDead($name, null);
                     continue;
                 }
                 $input = $subsystem->prepareInput($world, $dt);
@@ -411,12 +588,23 @@ class ThreadScheduler
      *   2. Close the Runtimes (joins the underlying threads).
      *   3. Close the named Channels.
      *
-     * Step 3 is required on Windows: `Channel::make(..., Infinite)` registers
-     * the channel in `parallel`'s process-global channel table, where it holds
-     * a synchronization monitor. Channels that are never closed are torn down
+     * Step 3 is required on Windows: `Channel::make()` registers the channel —
+     * by name, regardless of its capacity (Infinite, unbuffered, or anything
+     * else) — in `parallel`'s process-global channel table, where it holds a
+     * synchronization monitor. Channels that are never closed are torn down
      * in the extension's MSHUTDOWN instead — and on Windows that teardown can
      * block the process from exiting even after all PHP-level shutdown has run
      * to completion. Closing them here empties the table before MSHUTDOWN.
+     *
+     * Step 1's `send(null)` has the same rendezvous risk on `_in` that
+     * {@see sendAll()} documents on its own `send()` call, for the same reason
+     * (unbuffered, no send timeout in ext-parallel) — a subsystem already
+     * known dead, or found dead right here via the same `done()` check, is
+     * skipped instead of sent to, so shutdown() never blocks on a channel
+     * nobody is listening on anymore. A subsystem that is merely busy (still
+     * running its last compute(), not back at `recv()` yet) is NOT skipped:
+     * send(null) simply waits out its remaining work, same as the open risk
+     * below already accepts for `Runtime::close()`.
      *
      * Open risk, not fixed here: `Runtime::close()` joins its thread, so a
      * worker that is hung rather than dead (no exception, Future not done,
@@ -427,6 +615,14 @@ class ThreadScheduler
     public function shutdown(): void
     {
         foreach (array_keys($this->subsystems) as $name) {
+            if (isset($this->deadSubsystems[$name])) {
+                continue;
+            }
+            if (isset($this->futures[$name]) && $this->futures[$name]->done()) {
+                // Found dead only now (never polled before shutdown was
+                // called) — see this method's own doc.
+                continue;
+            }
             try {
                 $channel = \parallel\Channel::open("{$name}_in");
                 $channel->send(null);

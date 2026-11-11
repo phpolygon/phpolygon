@@ -1330,6 +1330,32 @@ per the discriminators above - the buffering itself is the cause) would be using
 channel for `_in`, which has its own tradeoffs (a slow worker could then block `sendAll()`) not evaluated
 here - left for whoever owns that file next.
 
+**Correction (fix/unbuffered-scheduler-channels, 2026-11-11), channel buffering was NOT the full cause**:
+the plausible fix above was tried - `ThreadScheduler::boot()`'s `_in` channel is now unbuffered, `_out`
+deliberately left buffered (own tradeoffs, see `ThreadScheduler`'s class doc). Measured through the real
+`sendAll()`/`pollAll()` path, this DOES remove the ~15ms cost for a worker with ZERO compute time (down
+to ~7.6ms average, not ~0.01ms - see below for why), but a worker doing ANY real work at all (measured
+with a 1ms or 5ms CPU-bound spin, not `usleep()` - see below) still costs ~15ms/call, unchanged. A
+follow-up discriminator (plain blocking `\parallel\Channel::recv()` vs. `\parallel\Events::poll()`, same
+worker, same wait) isolated the REAL floor: `recv()` costs ~1.0ms total for a worker busy 1ms (no added
+latency, regardless of `_in`'s buffering); `Events::poll()` - what `pollOne()` actually uses, for its
+dead-worker detection - costs ~15ms for the SAME wait, regardless of buffering. The ~15ms lives inside
+`Events::poll()`'s own blocking wait, not in channel buffering. `pollOne()`'s `addFuture()` call (this
+phase's own "not chased down further" ~7.4ms finding above) is an independent, roughly 50%-of-the-time
+~15ms cost on top, present even when `Events::poll()` would otherwise return instantly - this explains the
+~7.6ms *average* for the zero-compute case (an even split between calls that pay it and calls that don't).
+`usleep()` for a few ms on this Windows build is itself bound by roughly the same ~15ms default timer
+granularity as the thread wake-up problem - using it to simulate "worker compute time" in a benchmark
+hides the real result behind an unrelated Windows timer-resolution artefact; a CPU-bound `hrtime()` spin
+does not have this problem. **Net effect**: this phase's attribution ("the buffered-channel effect alone
+already accounts for the full measured ~15ms") was INCOMPLETE - true for a worker with nothing to do, not
+representative of one with real compute time, which is the case the phase's own "lohnt erst mit
+nennenswerter Fern-Simulation" framing is actually about. The channel-capacity change is kept anyway (real,
+if narrow, win; no regression found) - the real fix (replacing `Events::poll()`'s blocking wait or routing
+around `addFuture()` for the common case) is NOT done and stays open, now with a correctly isolated target
+instead of channel capacities. See the commit for the full benchmark scripts and numbers
+(`E:\ClaudeTemp\phpolygon\unbuffered-channels-bench\`, this machine, not guaranteed to persist).
+
 **Async submit()/collect() (2)**: `SimulationTransport` gained `submit(kernel, records, steps, dt): mixed`
 / `collect(token, wait: false): ?array` alongside the existing `step()` (kept, not replaced - still the
 default, see below). `FarSimulationRunner::register(..., async: true)` is the opt-in per kernel;

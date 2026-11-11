@@ -92,21 +92,34 @@ class ThreadSchedulerHardeningTest extends TestCase
         $world = new World();
         $world->createEntity();
 
-        $this->assertTrue($scheduler->isSubsystemAlive('crasher'));
+        // Not asserted here: whether 'crasher' is already dead at this exact
+        // point. CrashingSubsystem throws as its first statement, so
+        // boot()'s own grace period (see waitOutEarlyFailures()) usually
+        // catches it before boot() even returns — but that race is an
+        // internal detail (see sendAll()'s doc), not a guarantee this test
+        // should hard-code. 'ping' is unambiguous: never crashes, so it must
+        // stay alive regardless of 'crasher''s timing.
         $this->assertTrue($scheduler->isSubsystemAlive('ping'));
 
+        // Must return (not hang) even though 'crasher' throws before ever
+        // reaching its own recv() — this is the bug being fixed, now one
+        // layer earlier than it used to be: `_in` is unbuffered (see
+        // ThreadScheduler::boot()'s doc), so sendAll()'s own send() would
+        // block forever on a channel nobody will ever recv() from if it did
+        // not check the Future first. Whichever of boot()'s grace period or
+        // this check catches it, 'crasher' is detected and marked dead
+        // before ever being sent to, not lazily later via pollAll().
         $scheduler->sendAll($world, 0.016);
 
-        // Must return (not hang) even though 'crasher' will never send
-        // anything on its out channel — this is the bug being fixed: before
-        // this change, recvAll() called a plain blocking Channel::recv() per
-        // subsystem and a dead worker meant that call never returned.
-        $ready = $scheduler->pollAll($world);
-
-        $this->assertFalse($ready, 'not every subsystem delivered — the crashed one cannot');
-        $this->assertFalse($scheduler->isSubsystemAlive('crasher'), 'crashed worker detected as dead');
+        $this->assertFalse($scheduler->isSubsystemAlive('crasher'), 'crashed worker detected as dead during sendAll(), before the rendezvous send()');
         $this->assertSame(['crasher'], $scheduler->getDeadSubsystems());
         $this->assertTrue($scheduler->isSubsystemAlive('ping'), 'healthy subsystem unaffected by the other one dying');
+
+        // 'crasher' was never marked outstanding (sendAll() skipped sending
+        // to it), so pollAll() has nothing left to wait for on it — only
+        // 'ping' is outstanding, and it delivers normally.
+        $ready = $scheduler->pollAll($world);
+        $this->assertTrue($ready, 'only the live subsystem is outstanding, and it delivers');
 
         // A later tick must not try to wait on the dead subsystem again
         // (sendAll()/pollAll() skip it) — prove it completes and stays dead.
@@ -137,12 +150,21 @@ class ThreadSchedulerHardeningTest extends TestCase
         $scheduler->boot();
 
         $world = new World();
+        // ReturningSubsystem returns from threadEntry() as its very first
+        // action, never opening a channel — same as CrashingSubsystem, this
+        // is caught by sendAll()'s own done() check before the rendezvous
+        // send() on the now-unbuffered `_in` (see ThreadScheduler::sendAll()'s
+        // doc), so 'returner' is dead already by the time sendAll() returns,
+        // never outstanding.
         $scheduler->sendAll($world, 0.016);
-        $ready = $scheduler->pollAll($world, timeoutMicros: 2_000_000);
 
-        $this->assertFalse($ready, 'a worker that returned without sending anything cannot have delivered');
         $this->assertFalse($scheduler->isSubsystemAlive('returner'), 'a clean return outside shutdown is still a dead worker');
         $this->assertSame(['returner'], $scheduler->getDeadSubsystems());
+
+        // Nothing is outstanding ('returner' was never sent to) — pollAll()
+        // must still return (not hang) and vacuously succeeds.
+        $ready = $scheduler->pollAll($world, timeoutMicros: 2_000_000);
+        $this->assertTrue($ready, 'nothing left outstanding to wait for');
 
         $scheduler->shutdown();
     }
@@ -516,7 +538,12 @@ class ThreadSchedulerHardeningTest extends TestCase
     /**
      * Future kept, not discarded (see class doc on {@see ThreadScheduler}):
      * a crash is detectable even without polling right away, because the
-     * Future itself (not a channel read) is what reports it.
+     * Future itself (not a channel read) is what reports it. With `_in`
+     * unbuffered, this now matters one step earlier than it used to:
+     * sendAll() itself checks the kept Future before ever attempting the
+     * rendezvous send() (see its own doc) — the 200ms head start below makes
+     * the crash unmistakably already resolved by the time sendAll() checks,
+     * so 'crasher' never becomes outstanding at all.
      */
     public function testFuturesAreKeptSoCrashIsVisibleEvenWithoutPollingSoonAfter(): void
     {
@@ -535,10 +562,13 @@ class ThreadSchedulerHardeningTest extends TestCase
 
         $world = new World();
         $scheduler->sendAll($world, 0.016);
-        $ready = $scheduler->pollAll($world, timeoutMicros: 2_000_000);
 
-        $this->assertFalse($ready);
-        $this->assertFalse($scheduler->isSubsystemAlive('crasher'));
+        $this->assertFalse($scheduler->isSubsystemAlive('crasher'), 'detected via the kept Future during sendAll(), before any send()');
+
+        // Nothing outstanding ('crasher' was never sent to) — pollAll() must
+        // still return (not hang) and vacuously succeeds.
+        $ready = $scheduler->pollAll($world, timeoutMicros: 2_000_000);
+        $this->assertTrue($ready, 'nothing left outstanding to wait for');
 
         $scheduler->shutdown();
     }
@@ -569,5 +599,91 @@ class ThreadSchedulerHardeningTest extends TestCase
         $this->assertStringContainsString('subsystem=crasher', $writer->all());
 
         Log::shutdown();
+    }
+
+    /**
+     * {@see DiesAfterOneAnswerSubsystem} dies BETWEEN ticks — healthy for its
+     * first request, then returns without ever calling `recv()` again. This
+     * is the case {@see ThreadScheduler::sendAll()}'s own `done()` check must
+     * also cover (not just {@see ThreadScheduler::boot()}'s grace period,
+     * which only ever runs once, right after boot(), long before this
+     * worker dies): a SECOND `sendAll()` call must not hang on the now-
+     * unbuffered `_in` channel's rendezvous `send()`, even though the
+     * subsystem was perfectly alive and answered correctly just one tick
+     * earlier.
+     */
+    public function testWorkerThatDiesBetweenTicksDoesNotHangTheNextSendAll(): void
+    {
+        if (!\PHP_ZTS || !extension_loaded('parallel')) {
+            $this->markTestSkipped('Requires ZTS PHP with ext-parallel for a real ThreadScheduler.');
+        }
+
+        $scheduler = $this->makeThreadScheduler();
+        $scheduler->register('dies', DiesAfterOneAnswerSubsystem::class);
+        $scheduler->boot();
+
+        $world = new World();
+
+        // First tick: the worker is genuinely healthy and answers normally.
+        $scheduler->sendAll($world, 0.016);
+        $ready = $scheduler->pollAll($world, timeoutMicros: 2_000_000);
+        $this->assertTrue($ready, 'first request delivered normally');
+        $this->assertTrue($scheduler->isSubsystemAlive('dies'), 'answered once - not dead yet');
+
+        // Give the worker's thread body a moment to actually return after
+        // its one send() (its own remaining work is just "return", nothing
+        // else - this is not racing a real compute step).
+        usleep(50_000);
+
+        // Second tick must not hang: sendAll()'s own done() check (see its
+        // doc) must catch the now-resolved Future before attempting the
+        // rendezvous send() on a channel nobody will ever recv() from again.
+        $scheduler->sendAll($world, 0.016);
+        $this->assertFalse($scheduler->isSubsystemAlive('dies'), 'detected dead during the second sendAll(), before its rendezvous send()');
+        $this->assertSame(['dies'], $scheduler->getDeadSubsystems());
+
+        // Nothing outstanding ('dies' was never sent to on this tick) -
+        // pollAll() must still return (not hang) and vacuously succeeds.
+        $ready2 = $scheduler->pollAll($world, timeoutMicros: 2_000_000);
+        $this->assertTrue($ready2, 'nothing left outstanding to wait for');
+
+        $scheduler->shutdown();
+    }
+
+    /**
+     * {@see StallingSubsystem} is still mid-compute (not back at its own
+     * `recv()`) when shutdown() runs — the scenario {@see ThreadScheduler::shutdown()}'s
+     * own doc describes: `send(null)` on the now-unbuffered `_in` simply
+     * waits out the worker's remaining real work rather than hanging
+     * forever, since the worker IS alive and WILL eventually call `recv()`
+     * again. Bounded by the worker's own remaining sleep plus a generous
+     * margin for scheduling jitter — not by the old, buffered-channel
+     * near-zero return, which this assertion deliberately does NOT expect
+     * anymore.
+     */
+    public function testShutdownWithAStillOutstandingRequestFinishesWithinTheWorkersRemainingTime(): void
+    {
+        if (!\PHP_ZTS || !extension_loaded('parallel')) {
+            $this->markTestSkipped('Requires ZTS PHP with ext-parallel for a real ThreadScheduler.');
+        }
+
+        $scheduler = $this->makeThreadScheduler();
+        $scheduler->register('stall', StallingSubsystem::class);
+        $scheduler->boot();
+
+        $world = new World();
+        // Worker busy ~0.3s - sendAll()'s own rendezvous send() returns as
+        // soon as the worker's recv() takes it (near-instant: the worker is
+        // sitting in recv() already), well before the 0.3s compute starts.
+        $scheduler->sendAll($world, 0.3);
+
+        $start = hrtime(true);
+        $scheduler->shutdown();
+        $elapsedMs = (hrtime(true) - $start) / 1_000_000.0;
+
+        // Must finish once the worker's own ~0.3s compute is done (plus
+        // scheduling margin), not hang forever, and not take dramatically
+        // longer than that remaining work.
+        $this->assertLessThan(1_000.0, $elapsedMs, 'shutdown() must not hang far beyond the worker\'s own remaining compute time');
     }
 }
