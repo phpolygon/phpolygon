@@ -3384,6 +3384,66 @@ $engine->frameSpikes?->suspend(); /* load */ $engine->frameSpikes?->resume();   
 - Test: `tests/Runtime/FrameSpikeRecorderTest.php` (real GC and `usleep` spikes, FPS cap, headless
   `Engine::run()`). Bench: `benchmarks/micro/Runtime/`.
 
+### Engine log — every system, every interaction
+
+`PHPolygon\Log\Log` is the game log (`game.log`): one line per thing that happened, written by
+every game automatically. `Engine::log()`/`logError()` redirect here (`[engine]`/`[error]` lines);
+existing callers are unaffected. A game adds its own lines with `Log::game($text, $context)`.
+
+```
+2026-11-09 14:03:12.481 f=18233 [ui] click opt_benchmark_start "Benchmark starten"
+```
+
+Time with milliseconds, the frame number (`Log::$frame`, counted by `GameLoop` calling
+`Log::frame()`), the category (`engine|system|event|input|ui|scene|settings|window|save|error|game`),
+the text, then the context: values under integer keys follow bare, values under string keys as
+`key=value`. A level other than info is named after the category (`WARN`, `ERROR`, `TRACE`); a
+multi-line text (a stack trace) is indented so every line that starts with a date starts an entry.
+
+- **Writer**: `Engine::startLog()` (private, called from `run()`) starts `Log` with a writer of its
+  own thread (`ThreadedLogWriter`, a bootstrap-less `parallel\Runtime`, channel `phpolygon_log`) for
+  a windowed or offscreen game on a ZTS PHP with `ext-parallel`; otherwise (headless, non-ZTS, or
+  `EngineConfig::$logThread = false`) `FrameBatchedLogWriter` writes synchronously on the main
+  thread. Outside a running game loop (start-up, tools, tests) every line is appended at once; once
+  `Log::frame()` is ticking, a frame's lines are collected and handed to the writer as ONE string at
+  the frame boundary (a frame that takes over 0.25 s hands over early). A thread that dies falls
+  back to the main-thread writer with whatever it had not written yet; `Log::isThreaded()` says
+  which is active. Rotation at 10 MB, 5 files (`game.log`, `game.1.log`, ...; `Log::setLimits()`).
+- **Crash safety**: the last 500 lines stay in memory (`Log::recent()`, for a crash dialog or a bug
+  report); a shutdown function writes whatever is still pending plus the last fatal error
+  (`error_get_last()`); `Log::installErrorHandler()` (on for a windowed game) chains to whatever
+  handler was there and logs PHP warnings/notices/deprecations as `[error]` (3 times, then every
+  10th occurrence with a count; a message silenced with `@` is not logged).
+- **Automatic hooks** (`Log::$hooks`, on once `Log::start()`/`startWithWriter()` ran): `World` logs a
+  system added/removed (class + `SystemPhase`), its first run (update and render share one "seen"
+  flag - not logged twice), an exception (logged as `[system] exception`, then rethrown), a call
+  over `Log::$slowSystemNs` (4 ms default) as `[system] WARN slow`. Trace mode (`--trace`,
+  `PHPOLYGON_LOG_TRACE=1`, or dev mode; `Log::$trace`) adds one `[system] TRACE frame times` line per
+  `render()` with every system's accumulated update/render time, as JSON. `EventDispatcher::dispatch`
+  logs the event's class and its public scalar/enum fields (reflected once per class; a non-scalar
+  field or an uninitialized typed property is skipped, never a crash). `UIContext` logs a
+  button/wrapButton click, a checkbox toggle, a slider only on release (not every dragged frame), a
+  dropdown selection, and a text field/area's full content on commit/blur plus at most one
+  throttled "typing" line per second per field while it is focused (full text is the owner's
+  explicit decision, for bug reports and replays). `SceneManager` logs scene load/unload with
+  duration. `GraphicsSettingsManager` logs changed fields via `TourBenchmark::describe()`.
+  `VioInput` logs key and mouse button edges (not the auto-repeat of a held key).
+  `VioMainWindow` logs fullscreen/borderless/windowed and focus gained/lost (`vio_on_focus`).
+  `SaveManager` logs save/load/delete per slot. Not yet hooked: window resize, audio device (no
+  existing single choke point without new plumbing).
+- **Cost**: hooks add roughly 36 µs/frame on the main thread for 100 no-op systems (update+render),
+  measured 2026-11-11 on a Windows dev box, PHP 8.5.5 ZTS, `WorldLoggingCostTest` (hooks-on vs
+  hooks-off median, writer kept in memory - no disk/thread involved in the measurement), against the
+  plan's 0.1 ms cap.
+- `EngineConfig::$logThread` (null = thread for windowed/offscreen, off in headless),
+  `$logTrace` (null = `Log::traceRequested()` or dev mode), `$logGamepads` (off by default;
+  `GamepadEdgeLog` polls `vio_gamepad_*` once per frame when on - the engine has no gamepad edge
+  layer of its own to hook instead).
+- Tests: `tests/Log/` (format, batching, rotation, the real thread incl. fault injection and
+  rotation parity with the main-thread writer, the dead-writer fallback, the crash/shutdown path,
+  PHP-error throttling), `tests/ECS/WorldLoggingTest.php` + `WorldLoggingCostTest.php`,
+  `tests/Event/EventDispatcherLoggingTest.php`, `tests/UI/UIContextLoggingTest.php`.
+
 ### Performance contract for pull requests
 
 Every PR that touches a hot-path (`src/Math`, `src/Rendering`,
