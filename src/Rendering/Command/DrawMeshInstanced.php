@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace PHPolygon\Rendering\Command;
 
 use PHPolygon\Math\Mat4;
+use PHPolygon\Rendering\BatchBounds;
 
 /**
  * Instanced draw command with three equally-valid storage modes:
@@ -33,6 +34,12 @@ use PHPolygon\Math\Mat4;
  * All three modes feed the same GPU pipeline. Backends inspect
  * {@see hasFlatMatrices()} / {@see hasPackedMatrices()} once per draw to
  * decide which buffer to read.
+ *
+ * **Visibility** is the renderer's job: a batch whose bounding sphere lies
+ * outside the view is not drawn, and one that cannot reach a shadow map stays
+ * out of the shadow pass ({@see \PHPolygon\Rendering\InstancedBatchCuller}).
+ * The sphere is derived from the matrices and the mesh; {@see $bounds} only
+ * overrides it.
  */
 readonly class DrawMeshInstanced
 {
@@ -87,6 +94,16 @@ readonly class DrawMeshInstanced
      *                                VioRenderer3D::invalidateStaticInstances().
      * @param bool    $castShadows    False keeps the batch out of the shadow
      *                                pass (like DrawMesh::$castShadows).
+     * @param BatchBounds|null $bounds World-space sphere around the whole batch.
+     *                                Null (default): the renderer derives it from
+     *                                the matrices and the mesh - nothing to pass.
+     *                                Give one for a storage-buffer batch (its
+     *                                matrices never reach PHP, so without a bound
+     *                                it is never culled), for a bound the caller
+     *                                already knows, or BatchBounds::unbounded()
+     *                                to keep the batch drawn from every viewpoint.
+     *                                It must enclose every instance including
+     *                                vertex animation.
      */
     public function __construct(
         public string $meshId,
@@ -110,6 +127,7 @@ readonly class DrawMeshInstanced
          * @var list<?string>
          */
         public array $albedoTextures = [],
+        public ?BatchBounds $bounds = null,
     ) {}
 
     /**
@@ -129,6 +147,7 @@ readonly class DrawMeshInstanced
         bool $isStatic = false,
         ?string $staticKey = null,
         bool $castShadows = true,
+        ?BatchBounds $bounds = null,
     ): self {
         return new self(
             meshId: $meshId,
@@ -139,6 +158,7 @@ readonly class DrawMeshInstanced
             flatMatrices: $flatMatrices,
             staticKey: $staticKey,
             castShadows: $castShadows,
+            bounds: $bounds,
         );
     }
 
@@ -156,6 +176,7 @@ readonly class DrawMeshInstanced
         string $packedMatrices,
         int $instanceCount,
         bool $isStatic = false,
+        ?BatchBounds $bounds = null,
     ): self {
         return new self(
             meshId: $meshId,
@@ -165,6 +186,7 @@ readonly class DrawMeshInstanced
             instanceCount: $instanceCount,
             flatMatrices: [],
             packedMatrices: $packedMatrices,
+            bounds: $bounds,
         );
     }
 
@@ -195,6 +217,7 @@ readonly class DrawMeshInstanced
         bool $isStatic = false,
         ?object $indirectArgs = null,
         int $indirectMaxDraws = 1,
+        ?BatchBounds $bounds = null,
     ): self {
         return new self(
             meshId: $meshId,
@@ -207,6 +230,7 @@ readonly class DrawMeshInstanced
             storageBuffer: $storageBuffer,
             indirectArgs: $indirectArgs,
             indirectMaxDraws: max(1, $indirectMaxDraws),
+            bounds: $bounds,
         );
     }
 

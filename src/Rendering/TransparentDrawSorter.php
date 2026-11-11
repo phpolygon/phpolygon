@@ -210,9 +210,10 @@ final class TransparentDrawSorter
                 }
             }
             if ($cmd->packedMatrices !== '') {
-                return [$nearest, DrawMeshInstanced::packed($cmd->meshId, $cmd->materialId, pack('f*', ...$sorted), $count)];
+                return [$nearest, DrawMeshInstanced::packed($cmd->meshId, $cmd->materialId, pack('f*', ...$sorted), $count, bounds: $cmd->bounds)];
             }
-            return [$nearest, DrawMeshInstanced::flat($cmd->meshId, $cmd->materialId, $sorted, $count)];
+            // The same instances in another order: a caller's bound still holds.
+            return [$nearest, DrawMeshInstanced::flat($cmd->meshId, $cmd->materialId, $sorted, $count, bounds: $cmd->bounds)];
         }
 
         $matrices = array_values($cmd->matrices);
@@ -246,6 +247,7 @@ final class TransparentDrawSorter
             matrices: $sorted,
             instanceCount: $cmd->instanceCount,
             castShadows: $cmd->castShadows,
+            bounds: $cmd->bounds,
         )];
     }
 

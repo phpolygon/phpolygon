@@ -32,6 +32,7 @@ use PHPolygon\Rendering\Command\SetGroundWetness;
 use PHPolygon\Rendering\Command\SetSnowCover;
 use PHPolygon\Rendering\Command\SetWaveAnimation;
 use PHPolygon\Rendering\Command\SetWind;
+use PHPolygon\Rendering\BatchBounds;
 use PHPolygon\Rendering\Frustum;
 use PHPolygon\Rendering\Quality\FieldtracingMode;
 use PHPolygon\Rendering\InstanceParams;
@@ -635,7 +636,9 @@ class Renderer3DSystem extends AbstractSystem
             }
             $this->commandList->add(count($matrices) === 1
                 ? new DrawMesh($mesh->meshId, $mesh->materialId, $matrices[0], castShadows: $mesh->castShadows, params: $params[0] ?? null)
-                : new DrawMeshInstanced($mesh->meshId, $mesh->materialId, $matrices, castShadows: $mesh->castShadows));
+                // Every instance just passed the per-entity test above: the
+                // renderer has nothing to derive or cull for this batch.
+                : new DrawMeshInstanced($mesh->meshId, $mesh->materialId, $matrices, castShadows: $mesh->castShadows, bounds: BatchBounds::unbounded()));
             $drawnOpaque += count($matrices);
         }
 

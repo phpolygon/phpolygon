@@ -920,6 +920,42 @@ into one `DrawMeshInstanced` (`Renderer3DSystemBatchingTest`); a batch of one st
 repeating static meshes: an entity that moved keeps its own draw (its motion vector), transparent
 materials stay single (sorting) and so does `excludeFromGbuffer`.
 
+Instanced batches are culled automatically, not only per-entity: `InstancedBatchCuller` (owned by
+`VioRenderer3D`) derives a world-space bounding sphere for every batch whose matrices live on the CPU
+- largest instance-matrix axis scale x the mesh's own radius around its origin (`BatchBounds`, the
+same conservative measure `GpuInstanceCuller`'s compute shader uses, hardened for sheared matrices) -
+and drops a batch whose sphere lies fully outside the camera frustum before `resolveInstanceData*()`,
+any buffer upload or pipeline/state binding runs for it. Nobody has to pass a bound: a caller only
+does so for a storage-buffer/indirect batch (its matrices never reach PHP, so without one it is never
+culled), for a cheaper bound it already knows, or `BatchBounds::unbounded()` to pin a batch that must
+never drop (`Renderer3DSystem`'s per-entity-culled auto-batches use this - every instance already
+passed the frustum test that built them). Static batches (`$isStatic`/`$staticKey`) cache their
+derived sphere alongside the cached instance buffer - one test per frame once it exists, re-derived
+only when the batch's fingerprint changes. Non-static batches are derived per frame up to
+`InstancedBatchCuller::DYNAMIC_DERIVE_MAX` instances; larger ones without an explicit bound are never
+culled (walking their matrices every frame would cost what the cull saves). A material whose vertex
+stage can move a vertex out of the mesh's own extent (cloth, foliage wind, grass, body wave, breathing,
+fur, tessellation, VAT, ocean/water animation, a custom shader) is never culled from a derived bound -
+only an explicit one is trusted then.
+
+The shadow pass tests a batch against the caster volume it could reach instead of the camera: the
+sun's largest-cascade light prism (`sunCasterVolume()`, no near/far plane - a tall caster toward the
+sun always stays in) for the directional casters, the union of the local lights' range spheres
+(`localShadowLightSpheres()`) for spot/point casters - never the camera frustum, so an off-screen
+caster still shadows what is in view. `PHPOLYGON_NO_CULL=1` disables every batch test (the same switch
+`Renderer3DSystem`'s per-entity cull, `ParticleSystem`'s off-screen pause and `LightConeSystem`'s own
+frustum test already use); `PHPOLYGON_DRAW_DEBUG=1` logs batches/drawn/culled/shadow-culled/
+bounds-derived to STDERR every 60 frames. `VioRenderer3D::instancedBatchCullStats()` returns the same
+counters for tests and tooling.
+
+Not covered by this pass (left for a later plan, not built here): the planar-reflection pass draws
+every batch into its mirrored view regardless of position (`renderPlanarReflectionPass()`), the
+minimap redraws the whole command list against its own ortho view every refresh
+(`renderMinimapIfDue()`), and the ray-traced-scene collector rebuilds its instance list from every
+static caster every frame regardless of range (`collectRayTracedScene()`). Light cones are already
+culled one layer up, before they reach the renderer (`LightConeSystem::cones()` tests each cone's own
+bounding sphere against the camera frustum and caps at `MAX_CONES` nearest).
+
 `Renderer3DSystem` reads the `MeshRenderer` and `Transform3D` component pools directly (same order as
 `query(MeshRenderer, Transform3D)`): thousands of hidden renderers (parts drawn through an instanced
 batch) cost a pool lookup each, not a query step. `Transform3DSystem` skips dormant entities -
