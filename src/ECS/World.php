@@ -60,6 +60,19 @@ class World
     /** Bumped on every structural change (create/destroy/attach/detach). */
     private int $structuralVersion = 0;
 
+    /**
+     * Attach/detach observers per component class, registered through
+     * {@see observe()}. Lets a system maintain an incremental index (a
+     * spatial grid, Transform3DSystem's active set, …) without walking the
+     * whole component pool to notice new or removed entities.
+     *
+     * @var array<class-string, list<array{
+     *     onAttach: callable(int, ComponentInterface): void,
+     *     onDetach: callable(int, ComponentInterface): void,
+     * }>>
+     */
+    private array $observers = [];
+
     public function createEntity(): Entity
     {
         if (!empty($this->freeList)) {
@@ -118,6 +131,7 @@ class World
 
         foreach ($this->entityComponents[$id] as $class => $component) {
             $component->onDetach($this->entity($id));
+            $this->notifyDetach($class, $id, $component);
             unset($this->components[$class][$id], $this->dormantComponents[$class][$id]);
         }
 
@@ -191,6 +205,7 @@ class World
         $this->structuralVersion++;
 
         $component->onAttach($this->entity($entityId));
+        $this->notifyAttach($class, $entityId, $component);
     }
 
     public function detachComponent(int $entityId, string $componentClass): void
@@ -201,6 +216,7 @@ class World
 
         $component = $this->entityComponents[$entityId][$componentClass];
         $component->onDetach($this->entity($entityId));
+        $this->notifyDetach($componentClass, $entityId, $component);
 
         // The component lives in exactly one of the two pools depending on
         // dormancy — clear both to be safe.
@@ -208,6 +224,47 @@ class World
         unset($this->dormantComponents[$componentClass][$entityId]);
         unset($this->entityComponents[$entityId][$componentClass]);
         $this->structuralVersion++;
+    }
+
+    /**
+     * Register incremental attach/detach notifications for one component
+     * class. $onAttach fires after {@see ComponentInterface::onAttach()},
+     * $onDetach before the component is unindexed - both from
+     * attachComponent()/detachComponent() AND from destroyEntity()'s own
+     * per-component teardown (which does not call detachComponent()), so an
+     * observer sees every component of its class leave, including through
+     * World::clear().
+     *
+     * The per-class lookup is a single isset() on the hot attach/detach path
+     * when nobody observes that class - cheap enough to never need removal.
+     *
+     * @param class-string $componentClass
+     * @param callable(int, ComponentInterface): void $onAttach
+     * @param callable(int, ComponentInterface): void $onDetach
+     */
+    public function observe(string $componentClass, callable $onAttach, callable $onDetach): void
+    {
+        $this->observers[$componentClass][] = ['onAttach' => $onAttach, 'onDetach' => $onDetach];
+    }
+
+    private function notifyAttach(string $componentClass, int $entityId, ComponentInterface $component): void
+    {
+        if (!isset($this->observers[$componentClass])) {
+            return;
+        }
+        foreach ($this->observers[$componentClass] as $observer) {
+            ($observer['onAttach'])($entityId, $component);
+        }
+    }
+
+    private function notifyDetach(string $componentClass, int $entityId, ComponentInterface $component): void
+    {
+        if (!isset($this->observers[$componentClass])) {
+            return;
+        }
+        foreach ($this->observers[$componentClass] as $observer) {
+            ($observer['onDetach'])($entityId, $component);
+        }
     }
 
     /**
