@@ -64,6 +64,14 @@ final class RngNoiseTest extends TestCase
         self::assertEqualsWithDelta(-0.0066718273631126, Noise::fbm2(0.3, 1.7, 4, 2.0, 0.5, 7), 1e-15);
     }
 
+    public function testNoise3DReferenceVectors(): void
+    {
+        // Cross-checked against the independent Python port.
+        self::assertEqualsWithDelta(-0.17473378401599682, Noise::value3(0.25, 0.5, 0.75, 1), 1e-15);
+        self::assertEqualsWithDelta(0.4049904978284197, Noise::gradient3(1.37, -2.9, 0.5, 5), 1e-15);
+        self::assertEqualsWithDelta(0.22314080856774812, Noise::fbm3(0.3, 1.7, -4.2, 4, 2.0, 0.5, 7), 1e-15);
+    }
+
     public function testNoise3DStableAndBounded(): void
     {
         self::assertSame(Noise::value3(0.25, 0.5, 0.75, 1), Noise::value3(0.25, 0.5, 0.75, 1));
