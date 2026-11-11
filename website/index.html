@@ -510,7 +510,7 @@
       <li><a href="#examples">Examples</a></li>
       <li><a href="#games">Games</a></li>
     </ul>
-    <a href="https://github.com/hmennen90/phpolygon" class="nav-cta">GitHub →</a>
+    <a href="https://github.com/phpolygon/phpolygon" class="nav-cta">GitHub →</a>
   </div>
 </nav>
 
@@ -549,7 +549,7 @@
         <span class="sub">PHP-native game engine.<br>Built for humans and AI.</span>
       </h1>
       <p class="hero-desc fade-in">
-        A fully text-based, <strong>LLM-readable game stack</strong> built on PHP 8.3+ with OpenGL 4.1 and Vulkan. Write game logic, scenes, and UI in plain code — let Claude Code build the rest.
+        A fully text-based, <strong>LLM-readable game stack</strong> built on PHP 8.5+ and php-vio, rendering through Direct3D, Vulkan, Metal or OpenGL. Write game logic, scenes, and UI in plain code — let Claude Code build the rest.
       </p>
       <div class="hero-actions fade-in">
         <a href="#quickstart" class="btn-primary">Get Started</a>
@@ -557,16 +557,16 @@
       </div>
       <div class="hero-stats fade-in">
         <div class="hero-stat">
-          <div class="hero-stat-val">PHP<span> 8.3+</span></div>
+          <div class="hero-stat-val">PHP<span> 8.5+</span></div>
           <div class="hero-stat-label">Requirement</div>
         </div>
         <div class="hero-stat">
-          <div class="hero-stat-val">132<span> tests</span></div>
-          <div class="hero-stat-label">311 assertions</div>
+          <div class="hero-stat-val">5<span> GPU APIs</span></div>
+          <div class="hero-stat-label">D3D11 · D3D12 · Vulkan · Metal · OpenGL</div>
         </div>
         <div class="hero-stat">
           <div class="hero-stat-val">2<span>D+3D</span></div>
-          <div class="hero-stat-label">NanoVG + Vulkan</div>
+          <div class="hero-stat-label">One backend: php-vio</div>
         </div>
         <div class="hero-stat">
           <div class="hero-stat-val">0<span>dep</span></div>
@@ -620,13 +620,13 @@
       </div>
       <div class="feature-item">
         <div class="feature-icon">🎨</div>
-        <h4>NanoVG renderer</h4>
-        <p>Camera2D, TextureManager, SpriteSheet — 2D rendering via NanoVG over OpenGL 4.1. Hardware-accelerated vector shapes, text, and sprites at native speed.</p>
+        <h4>php-vio renderer</h4>
+        <p>Camera2D, TextureManager, SpriteSheet — 2D shapes, text and sprites and a command-list driven 3D renderer on php-vio, which picks Direct3D, Vulkan, Metal or OpenGL for the machine.</p>
       </div>
       <div class="feature-item">
         <div class="feature-icon">🔧</div>
-        <h4>Editor infrastructure</h4>
-        <p>Inspector metadata via Reflection, component registry with category grouping, SceneDocument with full undo/redo, command bus for all editor operations.</p>
+        <h4>Editor</h4>
+        <p>A NativePHP desktop editor in its own repository (phpolygon/editor). The engine supplies the PHP ↔ JSON transpiler and attribute metadata it works on.</p>
       </div>
       <div class="feature-item">
         <div class="feature-icon">🔊</div>
@@ -646,7 +646,7 @@
     <h2 class="section-heading">Up and running<br>in five minutes.</h2>
     <div class="quickstart-grid">
       <div>
-        <p class="section-sub" style="margin-bottom:2rem;">Requires PHP 8.3+, <strong>php-glfw</strong> (OpenGL 4.1 + NanoVG), and Composer. Install once, build games forever.</p>
+        <p class="section-sub" style="margin-bottom:2rem;">Requires PHP 8.5+, the <strong>php-vio</strong> extension, and Composer. Install once, build games forever.</p>
         <div class="code-card" style="margin-bottom:1.5rem;">
           <div class="code-header">
             <span class="code-dot" style="background:#ef4444"></span>
@@ -658,9 +658,9 @@
 <pre><span class="cm"># Install</span>
 composer require phpolygon/phpolygon
 
-<span class="cm"># Run a demo</span>
-php examples/hello_world.php
-php examples/vulkan_triangle.php</pre>
+<span class="cm"># Run a demo (from a checkout of the engine)</span>
+php examples/vio_2d_demo.php
+php examples/vio_3d_scene.php</pre>
           </div>
         </div>
         <div class="code-card">
@@ -781,7 +781,6 @@ php examples/vulkan_triangle.php</pre>
           <span class="arch-tag active">Physics</span>
           <span class="arch-tag active">Input</span>
           <span class="arch-tag active">Audio</span>
-          <span class="arch-tag active">Editor</span>
           <span class="arch-tag active">Math</span>
         </div>
       </div>
@@ -791,8 +790,9 @@ php examples/vulkan_triangle.php</pre>
         <div class="arch-layer-name">Render Abstraction</div>
         <div class="arch-layer-items">
           <span class="arch-tag active">RenderContextInterface</span>
-          <span class="arch-tag active">Renderer2D — NanoVG</span>
-          <span class="arch-tag future">Renderer3D — Vulkan (Phase 6)</span>
+          <span class="arch-tag active">Renderer2DInterface — VioRenderer2D</span>
+          <span class="arch-tag active">Renderer3DInterface — VioRenderer3D</span>
+          <span class="arch-tag active">RenderCommandList</span>
         </div>
       </div>
       <div class="arch-arrow">↓</div>
@@ -800,11 +800,10 @@ php examples/vulkan_triangle.php</pre>
         <div class="arch-layer-num">05</div>
         <div class="arch-layer-name">C Extensions</div>
         <div class="arch-layer-items">
-          <span class="arch-tag active">php-glfw ✓</span>
-          <span class="arch-tag active">php-vulkan ✓</span>
+          <span class="arch-tag active">php-vio ✓</span>
           <span class="arch-tag active">php-steamworks ✓</span>
-          <span class="arch-tag future">php-jolt (Phase 6)</span>
-          <span class="arch-tag future">php-assimp (Phase 6)</span>
+          <span class="arch-tag">php-glfw (legacy)</span>
+          <span class="arch-tag">php-vulkan (legacy)</span>
         </div>
       </div>
     </div>
@@ -886,7 +885,7 @@ php examples/vulkan_triangle.php</pre>
   <div class="container">
     <div class="section-label">// Examples</div>
     <h2 class="section-heading">Five runnable demos.<br>One <code style="font-size:0.7em;color:var(--purple-light)">php</code> command each.</h2>
-    <p class="section-sub">All examples live in <code style="font-family:'IBM Plex Mono',monospace;font-size:13px;color:var(--purple-light);background:var(--purple-faint);padding:2px 8px;border-radius:4px;">examples/</code> and cover the full rendering stack — from NanoVG 2D to Vulkan compute shaders.</p>
+    <p class="section-sub">All examples live in <code style="font-family:'IBM Plex Mono',monospace;font-size:13px;color:var(--purple-light);background:var(--purple-faint);padding:2px 8px;border-radius:4px;">examples/</code> of the engine repository — 2D games, 3D scenes, character DNA, SDF fieldtracing and headless catalogues.</p>
     <div class="examples-grid">
       <div class="example-card">
         <div class="example-thumb" style="background:#0d1a12;">
@@ -898,14 +897,13 @@ php examples/vulkan_triangle.php</pre>
             <line x1="100" y1="40" x2="100" y2="130" stroke="#22c984" stroke-width="0.3" opacity="0.2"/>
             <line x1="140" y1="40" x2="140" y2="130" stroke="#22c984" stroke-width="0.3" opacity="0.2"/>
             <rect x="88" y="78" width="14" height="14" fill="#22c984" opacity="0.85" rx="2"/>
-            <text x="25" y="55" font-family="monospace" font-size="8" fill="#22c984" opacity="0.7">FPS: 60</text>
-            <text x="25" y="118" font-family="monospace" font-size="7" fill="#22c984" opacity="0.4">WASD to move</text>
+                        <text x="25" y="118" font-family="monospace" font-size="7" fill="#22c984" opacity="0.4">A/D to move · Space to jump</text>
           </svg>
         </div>
         <div class="example-body">
-          <div class="example-title">Hello World</div>
-          <div class="example-desc">Movable entity with Camera2D, grid background, HUD overlay. WASD controls, delta time.</div>
-          <span class="example-tag">NanoVG · 2D</span>
+          <div class="example-title">Platformer</div>
+          <div class="example-desc">Player movement, gravity and platform collision, coins to collect, parallax background, camera follow. <code>vio_platformer.php</code></div>
+          <span class="example-tag">php-vio · 2D</span>
         </div>
       </div>
       <div class="example-card">
@@ -921,13 +919,13 @@ php examples/vulkan_triangle.php</pre>
             </defs>
             <polygon points="100,20 148,105 52,105" fill="url(#rgb1)" opacity="0.35"/>
             <polygon points="100,20 148,105 52,105" fill="none" stroke="url(#rgb1)" stroke-width="1.5"/>
-            <text x="62" y="122" font-family="monospace" font-size="7" fill="#9992c8" opacity="0.6">vertex shader · rotating</text>
+            <text x="62" y="122" font-family="monospace" font-size="7" fill="#9992c8" opacity="0.6">fragment pass · sphere trace</text>
           </svg>
         </div>
         <div class="example-body">
-          <div class="example-title">OpenGL Triangle</div>
-          <div class="example-desc">Rotating RGB triangle with custom vertex and fragment shaders, pulsing brightness animation.</div>
-          <span class="example-tag">OpenGL 4.1 · GLSL</span>
+          <div class="example-title">Fieldtracing</div>
+          <div class="example-desc">An analytic signed distance field sphere-traced on the GPU for soft shadows and ambient occlusion. <code>fieldtracing_sdf.php</code></div>
+          <span class="example-tag">php-vio · GLSL</span>
         </div>
       </div>
       <div class="example-card">
@@ -939,13 +937,13 @@ php examples/vulkan_triangle.php</pre>
             <polygon points="100,18 52,48 100,68" fill="#9f67f5" opacity="0.25"/>
             <polygon points="52,48 100,68 100,118 52,88" fill="#5b21b6" opacity="0.5"/>
             <polygon points="148,48 100,68 100,118 148,88" fill="#7c3aed" opacity="0.35"/>
-            <text x="55" y="122" font-family="monospace" font-size="7" fill="#9992c8" opacity="0.6">phong · orbit cam · depth</text>
+            <text x="55" y="122" font-family="monospace" font-size="7" fill="#9992c8" opacity="0.6">box · sphere · cylinder · wedge</text>
           </svg>
         </div>
         <div class="example-body">
-          <div class="example-title">OpenGL 3D Cube</div>
-          <div class="example-desc">Phong-lit spinning cube. WASD camera orbit, scroll wheel zoom, depth testing enabled.</div>
-          <span class="example-tag">OpenGL 4.1 · 3D · Phong</span>
+          <div class="example-title">3D Shapes</div>
+          <div class="example-desc">The built-in procedural geometry generators in one scene: box, sphere, cylinder, wedge and a ground plane. <code>vio_3d_shapes.php</code></div>
+          <span class="example-tag">php-vio · 3D</span>
         </div>
       </div>
       <div class="example-card">
@@ -958,13 +956,13 @@ php examples/vulkan_triangle.php</pre>
             <circle cx="140" cy="80" r="15" fill="#c084fc" opacity="0.12"/>
             <circle cx="100" cy="55" r="40" fill="none" stroke="#9f67f5" stroke-width="0.5" opacity="0.4"/>
             <circle cx="100" cy="55" r="22" fill="#9f67f5" opacity="0.1"/>
-            <text x="42" y="122" font-family="monospace" font-size="7" fill="#9992c8" opacity="0.6">compute shader · swapchain</text>
+            <text x="42" y="122" font-family="monospace" font-size="7" fill="#9992c8" opacity="0.6">flocking · spatial grid</text>
           </svg>
         </div>
         <div class="example-body">
-          <div class="example-title">Vulkan Compute</div>
-          <div class="example-desc">Compute shader generates animated plasma pattern, presented via Vulkan swapchain.</div>
-          <span class="example-tag">Vulkan · Compute Shader</span>
+          <div class="example-title">Boids</div>
+          <div class="example-desc">Three flocking species and a predator, with a spatial grid for neighbour lookups and a trail afterglow. <code>vio_boids.php</code></div>
+          <span class="example-tag">php-vio · 2D</span>
         </div>
       </div>
       <div class="example-card">
@@ -978,13 +976,13 @@ php examples/vulkan_triangle.php</pre>
             <line x1="58" y1="98" x2="142" y2="98" stroke="#7c3aed" stroke-width="0.8" opacity="0.7"/>
             <line x1="78" y1="108" x2="122" y2="108" stroke="#7c3aed" stroke-width="0.6" opacity="0.5"/>
             <polygon points="100,22 58,98 142,98" fill="#7c3aed" opacity="0.12"/>
-            <text x="30" y="122" font-family="monospace" font-size="7" fill="#9992c8" opacity="0.6">push constants · perspective proj</text>
+            <text x="30" y="122" font-family="monospace" font-size="7" fill="#9992c8" opacity="0.6">shadows · instancing · point lights</text>
           </svg>
         </div>
         <div class="example-body">
-          <div class="example-title">Vulkan Triangle</div>
-          <div class="example-desc">Rotating 3D pyramid with perspective projection, push constants, full swapchain pipeline.</div>
-          <span class="example-tag">Vulkan · 3D Pipeline</span>
+          <div class="example-title">3D Scene</div>
+          <div class="example-desc">Procedural skybox, a directional light with shadow mapping, instanced columns, orbiting point lights and fog. <code>vio_3d_scene.php</code></div>
+          <span class="example-tag">php-vio · 3D</span>
         </div>
       </div>
       <div class="example-card" style="display:flex;flex-direction:column;justify-content:center;align-items:center;min-height:196px;border:1px dashed var(--border);border-radius:12px;cursor:default;">
@@ -1198,19 +1196,19 @@ php examples/vulkan_triangle.php</pre>
   <div class="container" style="position:relative;z-index:1;">
     <div class="section-label" style="text-align:center;">// Open Source</div>
     <h2 class="section-heading">The limits between<br>"PHP is for X"<br>dissolve when AI builds the bridge.</h2>
-    <p class="section-sub" style="margin:0 auto;text-align:center;">PHPolygon is MIT-licensed. 132 tests passing. First game (Code Tycoon) shipped on Steam, a second in development. Follow the build, contribute, or fork it for your own project.</p>
+    <p class="section-sub" style="margin:0 auto;text-align:center;">PHPolygon is MIT-licensed. First game (Code Tycoon) shipped on Steam, a second in development. Follow the build, contribute, or fork it for your own project.</p>
     <div class="cta-actions">
-      <a href="https://github.com/hmennen90/phpolygon" class="btn-primary">View on GitHub</a>
-      <a href="https://github.com/hmennen90/phpolygon/tree/main/examples" class="btn-outline">Browse Examples</a>
-      <a href="https://github.com/hmennen90/phpolygon/blob/main/README.md" class="btn-outline">Documentation</a>
+      <a href="https://github.com/phpolygon/phpolygon" class="btn-primary">View on GitHub</a>
+      <a href="https://github.com/phpolygon/phpolygon/tree/main/examples" class="btn-outline">Browse Examples</a>
+      <a href="https://github.com/phpolygon/phpolygon/blob/main/README.md" class="btn-outline">Documentation</a>
     </div>
   </div>
 </section>
 
 <!-- FOOTER -->
 <footer>
-  <div>PHPolygon &nbsp;·&nbsp; PHP 8.3+ · OpenGL 4.1 · Vulkan &nbsp;·&nbsp; MIT License &nbsp;·&nbsp; Built by <a href="https://github.com/hmennen90">Hendrik Mennen</a></div>
-  <div style="margin-top:8px;opacity:0.5;">php-glfw by <a href="https://github.com/mario-deluna">Mario Döring</a> &nbsp;·&nbsp; php-vulkan &amp; php-steamworks by PHPolygon &nbsp;·&nbsp; 132 tests · 311 assertions</div>
+  <div>PHPolygon &nbsp;·&nbsp; PHP 8.5+ · php-vio &nbsp;·&nbsp; MIT License &nbsp;·&nbsp; Built by <a href="https://github.com/hmennen90">Hendrik Mennen</a></div>
+  <div style="margin-top:8px;opacity:0.5;">php-glfw by <a href="https://github.com/mario-deluna">Mario Döring</a> &nbsp;·&nbsp; php-vio, php-vulkan &amp; php-steamworks by PHPolygon</div>
 </footer>
 
 </body>
