@@ -4896,17 +4896,57 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
      * runs behind the splash rather than blocking the first visible frame. The
      * engine calls this during the splash; {@see render()} also calls it as a
      * lazy fallback so a game that drives the renderer directly still works.
+     *
+     * $onProgress is called once per program of the {@see ShaderWarmPlan}, with
+     * $done running 1..$total and the total fixed before the first compile; a
+     * planned program that is skipped or fails still counts as a finished step
+     * ({@see ShaderWarmProgress}). Never called when the shaders are warm already.
+     * An exception of the callback is rethrown after the last program.
+     *
+     * @param (callable(int $done, int $total, string $program): void)|null $onProgress
      */
-    public function warmShaders(): void
+    public function warmShaders(?callable $onProgress = null): void
     {
         if ($this->shadersWarmed) {
             return;
         }
         $this->shadersWarmed = true;
-        $this->initShaders();
+        try {
+            $this->initShaders($onProgress === null ? null : $onProgress(...));
+            $failure = $this->warmProgress?->failure();
+        } finally {
+            $this->warmProgress = null;
+        }
+        if ($failure !== null) {
+            // The callback's own exception, kept out of the compile sequence.
+            throw $failure;
+        }
     }
 
-    private function initShaders(): void
+    /** Set while warmShaders() runs with a progress callback: compileShader() reports to it. */
+    private ?ShaderWarmProgress $warmProgress = null;
+
+    /**
+     * The programs initShaders() is about to compile, for the progress total.
+     *
+     * @return list<string>
+     */
+    private function warmPlan(): array
+    {
+        $variants = [];
+        foreach (ProcModeShaderRegistry::variants() as $variant) {
+            if (!ProcModeShaderRegistry::isLazyVariant($variant)) {
+                $variants[] = (string) $variant;
+            }
+        }
+        foreach (array_keys($this->usedVariants()) as $variant) {
+            $variants[] = (string) $variant;
+        }
+        return ShaderWarmPlan::programs($this->outlineSupported(), $this->mrtSupported(), $variants);
+    }
+
+    /** @param (\Closure(int, int, string): void)|null $onProgress */
+    private function initShaders(?\Closure $onProgress = null): void
     {
         // Fixed for the programs compiled from here on (a change rebuilds them).
         $this->bindlessBuilt = $this->settings->bindlessMaterials && $this->bindlessSupported();
@@ -4919,6 +4959,8 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         // After the unit count is known: the pyramid takes the highest unit.
         $this->hizUnitBuilt = $this->settings->occlusionCulling ? $this->hizUnit() : -1;
         $this->refreshAutoOmissions(false);
+        // The total of the progress display, fixed before the first compile.
+        $this->warmProgress = $onProgress !== null ? new ShaderWarmProgress($this->warmPlan(), $onProgress) : null;
         try {
             $this->compileShaderFromFiles('default',    'mesh3d.vert.glsl',     'mesh3d.frag.glsl');
         } catch (\RuntimeException $e) {
@@ -4928,7 +4970,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             $this->disableAutoOmissions($e);
             $this->compileShaderFromFiles('default',    'mesh3d.vert.glsl',     'mesh3d.frag.glsl');
         }
-        $this->compileShaderFromFiles('unlit',      'unlit.vert.glsl',      'unlit.frag.glsl');
+        $this->compileShaderFromFiles('unlit',     'unlit.vert.glsl',      'unlit.frag.glsl');
         $this->compileShaderFromFiles('shadow',     'shadow.vert.glsl',     'shadow.frag.glsl');
         $this->compileShaderFromFiles('depth',      'depth.vert.glsl',      'depth.frag.glsl');
         $this->compileShaderFromFiles('normals',    'normals.vert.glsl',    'normals.frag.glsl');
@@ -5021,6 +5063,8 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         }
         // The cut-out and profile programs the registered materials use, up front.
         $this->ensureUsedVariants();
+        // Planned programs that were skipped or failed count as finished steps.
+        $this->warmProgress?->finish();
     }
 
     private function initPostProcess(): void
@@ -5346,6 +5390,29 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
     /** @param array<string, Material>|null $materials defaults to every registered material */
     private function ensureUsedVariants(?array $materials = null): void
     {
+        foreach ($this->usedVariants($materials) as $variant => $tessellated) {
+            $variant = (string) $variant;
+            if (!$this->ensureVariantCompiled($variant) || !$tessellated || !$this->tessellationAvailable()) {
+                continue;
+            }
+            // The tessellation twins too, so no draw waits for a compile.
+            $suffix = $variant === ProcModeShaderRegistry::BASE_VARIANT ? '' : '@' . $variant;
+            foreach (['default', 'default_mrt', 'default_mrt_mv'] as $program) {
+                if (isset($this->shaderCache[$program . $suffix])) {
+                    $this->tessShader($program . $suffix);
+                }
+            }
+        }
+    }
+
+    /**
+     * The variants the materials draw with, and whether a tessellated material uses each.
+     *
+     * @param array<string, Material>|null $materials defaults to every registered material
+     * @return array<string, bool>
+     */
+    private function usedVariants(?array $materials = null): array
+    {
         $profiles = ShaderProfiles::names() !== [];
         $wanted = [];
         foreach ($materials ?? MaterialRegistry::all() as $id => $material) {
@@ -5366,19 +5433,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
                 $wanted[$variant] = true;
             }
         }
-        foreach ($wanted as $variant => $tessellated) {
-            $variant = (string) $variant;
-            if (!$this->ensureVariantCompiled($variant) || !$tessellated || !$this->tessellationAvailable()) {
-                continue;
-            }
-            // The tessellation twins too, so no draw waits for a compile.
-            $suffix = $variant === ProcModeShaderRegistry::BASE_VARIANT ? '' : '@' . $variant;
-            foreach (['default', 'default_mrt', 'default_mrt_mv'] as $program) {
-                if (isset($this->shaderCache[$program . $suffix])) {
-                    $this->tessShader($program . $suffix);
-                }
-            }
-        }
+        return $wanted;
     }
 
     /**
@@ -5545,6 +5600,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
 
         $this->shaderCache[$id] = $shader;
         $this->programSources[$id] = [$vertSrc, $fragSrc];
+        $this->warmProgress?->compiled($id);
     }
 
     /** @var array<string, array{0: string, 1: string}> vertex and fragment source of each compiled program */

@@ -3117,6 +3117,29 @@ $engine = new Engine(new EngineConfig(splashDuration: 1.5));
 - Closing the window during splash exits cleanly
 - `buildRendererInfo()` returns the active backends as a human-readable string
 
+### Shader compile progress
+
+While `VioRenderer3D::warmShaders()` compiles the built-in programs behind the splash, the label counts them:
+`Compiling shaders 17 / 52 (33 %)`, and the bar runs from 0.4 to 0.5 (`Engine::SPLASH_SHADERS_FROM/TO`; "Init Engine"
+stands at 0.4 before it, "Init Game" goes on from 0.5). The label is plain English like the other engine splash
+labels: there is no translation for them.
+
+- `warmShaders(?callable $onProgress = null)`: `$onProgress(int $done, int $total, string $program)` once per
+  program, `$done` 1..`$total`, the total fixed before the first compile. Without a callback, and on a renderer that
+  is warm already (lazy call from `render()`, rebuild after a settings change), nothing is counted or reported.
+- The total comes from `ShaderWarmPlan::programs($outline, $mrt, $variants)`, a list next to the compile sequence
+  of `initShaders()`, which stays as it is. `ShaderWarmProgress` counts the plan off from `compileShader()`: a
+  planned program that is skipped or fails (optional program, a group that gives up, MRT lost on the way) is reported
+  as finished with the next one or at the end, a retry counts once, a program outside the plan (tessellation twins
+  `#tess`) is not counted. So calls = total on every backend. A callback that throws is not called again and its
+  exception is rethrown after the last program, not read as a compile failure of an optional program.
+- **A new program in `initShaders()` goes into `ShaderWarmPlan` too.** `ShaderWarmPlanTest` reads the sequence
+  from the source and fails when the two differ.
+- The engine presents a splash frame per step, at most one per `SPLASH_SHADER_FRAME_INTERVAL` (0.1 s, a chosen
+  value, not measured) and always the last: from a warm shader cache the programs arrive faster than frames can be
+  presented. No frames once the window is closing.
+- Tests: `ShaderWarmProgressTest`, `ShaderWarmPlanTest` (no GPU), `VioShaderWarmProgressTest` (`native-gpu`).
+
 ### Studio splash (optional)
 
 Pass a `StudioSplashInterface` implementation via `EngineConfig::$studioSplash`
