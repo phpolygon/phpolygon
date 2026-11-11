@@ -218,4 +218,95 @@ class WorldTest extends TestCase
         $this->assertSame(0, $world->entityCount());
         $this->assertFalse($world->isDormant($id));
     }
+
+    public function testObserveFiresOnAttachAndDetach(): void
+    {
+        $world = new World();
+        /** @var list<string> $events */
+        $events = [];
+        $world->observe(
+            NameTag::class,
+            function (int $id, NameTag $tag) use (&$events): void {
+                $events[] = "attach:{$id}:{$tag->name}";
+            },
+            function (int $id, NameTag $tag) use (&$events): void {
+                $events[] = "detach:{$id}:{$tag->name}";
+            },
+        );
+
+        $entity = $world->createEntity();
+        $entity->attach(new NameTag('R'));
+        $this->assertSame(["attach:{$entity->id}:R"], $events);
+
+        $entity->detach(NameTag::class);
+        $this->assertSame(["attach:{$entity->id}:R", "detach:{$entity->id}:R"], $events);
+    }
+
+    public function testObserveFiresOnDestroyEntityWithoutDetachComponent(): void
+    {
+        // destroyEntity() tears down components directly, never calling
+        // detachComponent() - the observer must still see it leave.
+        $world = new World();
+        $detached = [];
+        $world->observe(
+            NameTag::class,
+            function (int $id, NameTag $tag): void {},
+            function (int $id, NameTag $tag) use (&$detached): void {
+                $detached[] = $id;
+            },
+        );
+
+        $id = $world->createEntity()->attach(new NameTag('R'))->id;
+        $world->destroyEntity($id);
+
+        $this->assertSame([$id], $detached);
+    }
+
+    public function testObserveFiresOnWorldClear(): void
+    {
+        $world = new World();
+        $detached = [];
+        $world->observe(
+            NameTag::class,
+            function (int $id, NameTag $tag): void {},
+            function (int $id, NameTag $tag) use (&$detached): void {
+                $detached[] = $id;
+            },
+        );
+
+        $a = $world->createEntity()->attach(new NameTag('A'))->id;
+        $b = $world->createEntity()->attach(new NameTag('B'))->id;
+        $world->clear();
+
+        $this->assertEqualsCanonicalizing([$a, $b], $detached);
+    }
+
+    public function testObserveOnlyFiresForItsOwnComponentClass(): void
+    {
+        $world = new World();
+        $fired = false;
+        $world->observe(
+            Transform2D::class,
+            function () use (&$fired): void { $fired = true; },
+            function () use (&$fired): void { $fired = true; },
+        );
+
+        $world->createEntity()->attach(new NameTag('R'));
+
+        $this->assertFalse($fired, 'an observer must not fire for a component class it never registered for');
+    }
+
+    public function testMultipleObserversOnTheSameClassAllFire(): void
+    {
+        $world = new World();
+        $firstCount = 0;
+        $secondCount = 0;
+        $world->observe(NameTag::class, function () use (&$firstCount): void { $firstCount++; }, function (): void {});
+        $world->observe(NameTag::class, function () use (&$secondCount): void { $secondCount++; }, function (): void {});
+
+        $world->createEntity()->attach(new NameTag('R'));
+
+        $this->assertSame(1, $firstCount);
+        $this->assertSame(1, $secondCount);
+    }
 }

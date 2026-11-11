@@ -925,6 +925,34 @@ materials stay single (sorting) and so does `excludeFromGbuffer`.
 batch) cost a pool lookup each, not a query step. `Transform3DSystem` skips dormant entities -
 dormant roots and dormant children with their subtrees; a dormant child whose ancestor moved while it
 slept is recomputed on its first awake tick (its world matrix may be stale while it sleeps).
+
+`Transform3DSystem` does NOT walk the whole `Transform3D` pool every tick (Phase 1 of the
+visibility/activity-tier plan, `feat/transform-active-set` branch off v0.103.0, 2026-11-11):
+`position`/`rotation`/`scale`/`parentEntityId` are
+PHP 8.4+ hooked properties that mark their entity dirty in a small `TransformDirtyQueue` instead of
+the system discovering changes by comparing floats on every entity every tick. Each tick processes
+only the drained dirty queue, entities woken from dormancy, and a 1/32 round-robin sample of the
+"resting" (untouched) set - the safety net that catches in-place `Vec3`/`Quaternion` writes, which
+never run a hook (`$t->position->x = …` - call `Transform3D::touch()` right after one, or accept up to
+~32 ticks of detection latency before the safety net catches it and the entity is reprocessed every
+tick from then on; one dev-log line per entity, `PHPOLYGON_DEV_WARNINGS=0` silences it). A resting
+entity's `worldMatrix` instance never changes - the identity trick other code relies on (see
+`Renderer3DSystem`'s `$entityBinMatrix`/`prevModelMatrix` above) still holds.
+
+New API: `World::observe(class, onAttach, onDetach)` for incremental per-component-class indexes
+(fires from `attachComponent()`/`detachComponent()` AND from `destroyEntity()`'s/`clear()`'s own
+teardown, so an observer never misses a component leaving); `Transform3DSystem::movedThisTick():
+list<int>` - entity ids whose world matrix was rebuilt this tick, for a future spatial index to
+update incrementally instead of re-deriving visibility from scratch every frame (Phase 2, not built
+yet).
+
+Measured 2026-11-11 (PHP 8.5.5 CLI, this repo's dev machine,
+`benchmarks/micro/System/Transform3DSystemBench.php`, `benchTenThousandStaticTick`/
+`benchStaticWorldTick` before vs after): 10,000 untouched entities per tick went from 4.78 ms to
+0.27 ms, ~2,660 (with a small hierarchy) from 1.32 ms to 0.07 ms - both ~18x, consistent with the
+1/32 sample. The hooked write itself costs more than the old plain property (`benchPositionAssignment`:
+~0.23 µs -> ~0.32 µs per assignment on the same machine) - negligible next to the per-tick saving
+once a scene holds more than a handful of entities.
 | `Camera3DSystem` | Updates view/projection matrices, pushes `SetCamera` command |
 | `Physics3DSystem` | Capsule vs AABB collision, gravity integration (Phase 7+) |
 | `OutlineSystem` | Emits `DrawOutline` for every enabled `Outline`; register BEFORE `Renderer3DSystem` |
