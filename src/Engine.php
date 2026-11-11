@@ -66,10 +66,20 @@ use PHPolygon\Thread\RuntimePool;
 use PHPolygon\Thread\ThreadScheduler;
 use PHPolygon\Thread\ThreadSchedulerFactory;
 use PHPolygon\UI\PerfOverlay;
+use PHPolygon\Visibility\VisibilityService;
 
 class Engine
 {
     public readonly World $world;
+
+    /**
+     * The engine's own answer to "what is in the view this frame" for
+     * $world - see the class docblock on {@see VisibilityService}. The same
+     * instance Renderer3DSystem resolves via VisibilityService::forWorld()
+     * for this World, so a game can query it directly (sees(), testSphere(),
+     * tierAt()) without going through the renderer.
+     */
+    public readonly VisibilityService $visibility;
 
     // Game-authoritative editor sync (opt-in via enableEditorSync()).
     private ?string $editorSyncPath = null;
@@ -188,6 +198,7 @@ class Engine
         self::log('Extensions: vio=' . (extension_loaded('vio') ? 'yes' : 'no') . ', glfw=' . (extension_loaded('glfw') ? 'yes' : 'no') . ', opengl=' . (extension_loaded('opengl') ? 'yes' : 'no'));
 
         $this->world = new World();
+        $this->visibility = VisibilityService::forWorld($this->world);
         $this->input = $config->input ?? ($this->useVio ? new VioInput() : new Input());
         $this->events = new EventDispatcher();
         $this->clock = new Clock();

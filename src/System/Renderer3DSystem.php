@@ -16,7 +16,6 @@ use PHPolygon\Component\Wind;
 use PHPolygon\Component\Weather;
 use PHPolygon\ECS\AbstractSystem;
 use PHPolygon\ECS\World;
-use PHPolygon\Geometry\MeshRegistry;
 use PHPolygon\Math\Mat4;
 use PHPolygon\Math\Vec3;
 use PHPolygon\Rendering\Command\AddPointLight;
@@ -37,25 +36,29 @@ use PHPolygon\Rendering\Frustum;
 use PHPolygon\Rendering\Quality\FieldtracingMode;
 use PHPolygon\Rendering\InstanceParams;
 use PHPolygon\Rendering\MaterialRegistry;
+use PHPolygon\Rendering\MeshBounds;
 use PHPolygon\Rendering\RenderCommandList;
 use PHPolygon\Rendering\Renderer3DInterface;
 use PHPolygon\Rendering\TransparentDrawSorter;
 use PHPolygon\Runtime\PerfProfiler;
+use PHPolygon\Visibility\VisibilityService;
 
 /**
  * Default 3D renderer system.
  *
  * Collects lights, wave / snow / wetness state and emits {@see DrawMesh}
- * commands for every visible {@see MeshRenderer}. Performs CPU-side
- * frustum culling using the most recent {@see SetCamera} pushed by
- * {@see Camera3DSystem}: a sphere-vs-frustum test rejects entities
- * entirely outside the view volume so the GPU never sees them.
+ * commands for every visible {@see MeshRenderer}. Which entities are
+ * visible this frame comes from {@see \PHPolygon\Visibility\VisibilityService}
+ * (resolved for $world via its forWorld() factory): beginFrame() there
+ * classifies its SpatialIndex against the current camera, and
+ * visibleEntities() replaces what used to be a full MeshRenderer pool scan
+ * with a coarse spatial bin pre-cull (removed together with that scan -
+ * see the visibility plan, Phase 2). Only the screen-size LOD drop and
+ * exact bounding-sphere lookup for it stay local to this system.
  *
- * Bounding spheres are computed once per mesh id from the raw vertex
- * array and cached in {@see $sphereCache}. The radius is multiplied by
- * the largest absolute scale axis so any rotation of a non-uniformly
- * scaled mesh remains inside the sphere — slight over-rendering, but no
- * false negatives.
+ * Light culling (point/spot/rect) is unrelated to the SpatialIndex and still
+ * derives its own frustum planes from the most recent {@see SetCamera} - see
+ * extractFrustumPlanes().
  */
 class Renderer3DSystem extends AbstractSystem
 {
@@ -102,41 +105,6 @@ class Renderer3DSystem extends AbstractSystem
     private readonly float $lodNearDistance;
     private readonly float $minScreenRatio;
 
-    /** @var array<string, array{cx:float, cy:float, cz:float, radius:float}> */
-    private static array $sphereCache = [];
-
-    /**
-     * Spatial bins keyed by "x,z" cell index in BIN_SIZE units. Each bin
-     * holds the AABB of all entities whose translation falls inside it.
-     * Rebuilt every BIN_REBUILD_INTERVAL frames so animated entities and
-     * newly-spawned ones get picked up; cheap (one extra full iteration).
-     *
-     * @var array<string, array{0:float, 1:float, 2:float, 3:float, 4:float, 5:float}>
-     */
-    private array $binAabbs = [];
-
-    /** @var array<int, string> */
-    private array $entityBin = [];
-
-    /**
-     * The world matrix each entity had when it was binned. Bins (with tight
-     * per-entity AABBs) are rebuilt only every BIN_REBUILD_INTERVAL frames, so
-     * the coarse pre-cull trusts a "bin culled" verdict only while the entity
-     * still has this very matrix. Transform3DSystem replaces worldMatrix only
-     * when the transform changed, so an identity check is an allocation-free
-     * "has it moved (or turned, or scaled)?" test: a mover falls through to the
-     * always-correct per-entity sphere test instead of strobing with its stale,
-     * now-behind bin.
-     *
-     * @var array<int, Mat4>
-     */
-    private array $entityBinMatrix = [];
-
-    private const BIN_SIZE = 256.0;
-    private const BIN_REBUILD_INTERVAL = 30;
-
-    private int $frameCount = 0;
-
     /**
      * World matrix each entity was DRAWN with last frame (entity id => matrix),
      * rebuilt every frame from the draws that survived culling. A draw whose
@@ -182,20 +150,16 @@ class Renderer3DSystem extends AbstractSystem
     }
 
     /**
-     * Drop the spatial-bin caches on World::clear(). After clear() the entity
-     * ids restart from 0, so the next createEntity() reuses the same ids;
-     * without resetting $entityBin / $binAabbs the coarse pre-cull associates
-     * fresh meshes with the bin of the previous occupant of that id, producing
-     * ~30 frames of wrong cull decisions until the next rebuildBins() boundary.
+     * Drop the per-entity draw-matrix cache on World::clear(). After clear()
+     * the entity id counter restarts from 0, so the next createEntity()
+     * reuses the same ids; without resetting $lastDrawnMatrix a fresh entity
+     * would inherit the previous occupant's matrix as fake motion. The
+     * VisibilityService's own SpatialIndex is cleaned up independently, via
+     * the Transform3D/MeshRenderer detach notifications World::clear()
+     * fires for every entity it destroys - see VisibilityService::bindToWorld().
      */
     public function onWorldClear(World $world): void
     {
-        $this->binAabbs = [];
-        $this->entityBin = [];
-        $this->entityBinMatrix = [];
-        $this->frameCount = 0;
-        // Ids restart after clear(): a fresh entity must not inherit the
-        // previous occupant's matrix as fake motion.
         $this->lastDrawnMatrix = [];
     }
 
@@ -275,11 +239,25 @@ class Renderer3DSystem extends AbstractSystem
         $cameraPos = $this->cameraPosition($world);
 
         // Camera3DSystem already pushed a SetCamera with the active view +
-        // projection matrices. Pull the most recent one and derive 6 planes.
-        // PHPOLYGON_NO_CULL=1 disables frustum/bin/LOD/light culling entirely
-        // (diagnostic: a constant draw count isolates backend buffer-growth
-        // glitches from cull-driven draw-count swings).
-        $planes = getenv('PHPOLYGON_NO_CULL') === '1' ? null : $this->extractFrustumPlanes();
+        // projection matrices. Pull the most recent one and derive 6 planes
+        // for light culling below. PHPOLYGON_NO_CULL=1 disables frustum/LOD/
+        // light culling entirely (diagnostic: a constant draw count isolates
+        // backend buffer-growth glitches from cull-driven draw-count swings) -
+        // VisibilityService::beginFrame() honours the same env var for the
+        // entity visibility set computed just below.
+        $noCull = getenv('PHPOLYGON_NO_CULL') === '1';
+        $camera = $this->activeSetCamera();
+        $planes = $noCull ? null : ($camera !== null ? Frustum::planes($camera->projectionMatrix, $camera->viewMatrix) : null);
+
+        // The single answer to "what is visible this frame" for every
+        // MeshRenderer+Transform3D pair in $world - see the class docblock.
+        PerfProfiler::begin('render3d.visibility');
+        $visibility = VisibilityService::forWorld($world);
+        try {
+            $visibility->beginFrame($camera?->viewMatrix, $camera?->projectionMatrix);
+        } finally {
+            PerfProfiler::end();
+        }
 
         // Point lights by effect, not by camera distance alone: a light whose
         // influence sphere (position, radius) lies completely outside the view
@@ -476,21 +454,6 @@ class Renderer3DSystem extends AbstractSystem
             $this->commandList->add(new SetFieldtracing($this->fieldtracingMode));
         }
 
-        // Coarse spatial bin culling. We bin entities into a 2D X-Z grid and
-        // test each bin's AABB against the frustum once per frame; entities
-        // in a rejected bin skip the per-entity sphere test entirely. Bins
-        // are rebuilt every BIN_REBUILD_INTERVAL frames so animation /
-        // spawning still gets picked up.
-        if ($planes !== null) {
-            $this->frameCount++;
-            if ($this->binAabbs === [] || $this->frameCount % self::BIN_REBUILD_INTERVAL === 0) {
-                $this->rebuildBins($world);
-            }
-            $visibleBins = $this->cullBins($planes);
-        } else {
-            $visibleBins = null;
-        }
-
         // Transparent draws are buffered and emitted after the opaque set; the
         // back-to-front order of ALL transparent draws of the frame (these and
         // other systems' particles / instanced batches) is set afterwards by
@@ -505,11 +468,16 @@ class Renderer3DSystem extends AbstractSystem
 
         /** @var array<int, Transform3D> $transforms */
         $transforms = $world->componentPool(Transform3D::class);
-        foreach (self::renderables($world, $transforms) as $entityId => $mesh) {
-            if (!$mesh->visible) {
+        /** @var array<int, MeshRenderer> $meshes */
+        $meshes = $world->componentPool(MeshRenderer::class);
+        foreach ($visibility->visibleEntities() as $entityId) {
+            $mesh = $meshes[$entityId] ?? null;
+            $transform = $transforms[$entityId] ?? null;
+            if ($mesh === null || $transform === null) {
+                // Detached between beginFrame() and here - shouldn't happen
+                // within one synchronous render() call, guarded anyway.
                 continue;
             }
-            $transform = $transforms[$entityId];
 
             // Transform3DSystem refreshed worldMatrix earlier in the frame;
             // reusing it here saves two redundant Mat4::trs() rebuilds per
@@ -517,23 +485,10 @@ class Renderer3DSystem extends AbstractSystem
             // thousands of static entities.
             $matrix = $transform->worldMatrix;
 
-            // Coarse pre-cull: if the entity's bin lies fully outside the
-            // frustum, skip it without ever doing the per-entity sphere
-            // test. Falls through when no bin is known yet (first frame
-            // after a new entity is spawned).
-            if ($visibleBins !== null) {
-                $binKey = $this->entityBin[$entityId] ?? null;
-                if ($binKey !== null && !isset($visibleBins[$binKey])
-                    && ($this->entityBinMatrix[$entityId] ?? null) === $matrix
-                ) {
-                    // Culled bin, and the entity has not moved since binning.
-                    // A mover (different worldMatrix instance) falls through to
-                    // the per-entity sphere test - see $entityBinMatrix.
-                    continue;
-                }
-            }
-
-            if ($planes !== null) {
+            // VisibilityService already decided frustum membership. Screen-size
+            // LOD is a separate concern it does not apply: a tiny distant
+            // detail can still be inside the frustum and need dropping here.
+            if ($planes !== null && $cameraPos !== null) {
                 $sphere = self::getMeshSphere($mesh->meshId);
                 if ($sphere !== null) {
                     // Fast path: most procedural meshes (Box/Sphere/Cylinder)
@@ -558,32 +513,16 @@ class Renderer3DSystem extends AbstractSystem
                     // its unscaled radius.
                     $worldRadius = $sphere['radius'] * self::maxAxisScale($matrix);
 
-                    // Inlined sphere-vs-frustum test. Saves a function call
-                    // per entity, which adds up at 1k+ entities × 60 fps.
-                    $cull = false;
-                    foreach ($planes as $p) {
-                        if ($p[0] * $tx + $p[1] * $ty + $p[2] * $tz + $p[3] < -$worldRadius) {
-                            $cull = true;
-                            break;
-                        }
-                    }
-                    if ($cull) {
-                        continue;
-                    }
-
                     // Screen-size LOD: drop far entities that project to a
-                    // sub-pixel sliver. Reuses the world centre + radius the
-                    // frustum test already computed.
-                    if ($cameraPos !== null) {
-                        $cdx = $tx - $cameraPos->x;
-                        $cdy = $ty - $cameraPos->y;
-                        $cdz = $tz - $cameraPos->z;
-                        $camDistSq = $cdx * $cdx + $cdy * $cdy + $cdz * $cdz;
-                        if ($camDistSq > $this->lodNearDistance * $this->lodNearDistance
-                            && $worldRadius * $worldRadius
-                                < $this->minScreenRatio * $this->minScreenRatio * $camDistSq) {
-                            continue;
-                        }
+                    // sub-pixel sliver.
+                    $cdx = $tx - $cameraPos->x;
+                    $cdy = $ty - $cameraPos->y;
+                    $cdz = $tz - $cameraPos->z;
+                    $camDistSq = $cdx * $cdx + $cdy * $cdy + $cdz * $cdz;
+                    if ($camDistSq > $this->lodNearDistance * $this->lodNearDistance
+                        && $worldRadius * $worldRadius
+                            < $this->minScreenRatio * $this->minScreenRatio * $camDistSq) {
+                        continue;
                     }
                 }
             }
@@ -727,202 +666,29 @@ class Renderer3DSystem extends AbstractSystem
     }
 
     /**
-     * Every active MeshRenderer that also has a Transform3D, keyed by entity
-     * id, in the order `query(MeshRenderer, Transform3D)` yields them (the
-     * smaller pool's order) - read straight from the component pools. The
-     * query's generator, Entity wrapper and get() calls per entity cost more
-     * than the draw loop's own work once a scene holds thousands of hidden
-     * renderers (parts drawn through an instanced batch keep their hidden
-     * MeshRenderer).
-     *
-     * @param array<int, Transform3D> $transforms the active Transform3D pool
-     * @return array<int, MeshRenderer>
+     * The most recently queued {@see SetCamera}, or null if none this frame.
+     * Both the light-culling planes and VisibilityService::beginFrame() in
+     * renderCommands() derive from this one lookup.
      */
-    private static function renderables(World $world, array $transforms): array
-    {
-        /** @var array<int, MeshRenderer> $meshes */
-        $meshes = $world->componentPool(MeshRenderer::class);
-        if (count($transforms) < count($meshes)) {
-            $ordered = [];
-            foreach ($transforms as $id => $_) {
-                if (isset($meshes[$id])) {
-                    $ordered[$id] = $meshes[$id];
-                }
-            }
-            return $ordered;
-        }
-        foreach ($meshes as $id => $_) {
-            if (!isset($transforms[$id])) {
-                unset($meshes[$id]);
-            }
-        }
-        return $meshes;
-    }
-
-    /**
-     * Re-bin every renderable entity into a 2D X-Z spatial grid and refresh
-     * the per-bin AABBs. Called periodically rather than every frame because
-     * almost all renderables in a typical scene are static.
-     */
-    private function rebuildBins(World $world): void
-    {
-        $this->binAabbs = [];
-        $this->entityBin = [];
-        $this->entityBinMatrix = [];
-
-        /** @var array<int, Transform3D> $transforms */
-        $transforms = $world->componentPool(Transform3D::class);
-        foreach (self::renderables($world, $transforms) as $entityId => $mesh) {
-            if (!$mesh->visible) {
-                continue; // hidden meshes must not inflate a bin AABB
-            }
-            $transform = $transforms[$entityId];
-            $tr = $transform->worldMatrix->getTranslation();
-            $bx = (int) floor($tr->x / self::BIN_SIZE);
-            $bz = (int) floor($tr->z / self::BIN_SIZE);
-            $key = $bx . ',' . $bz;
-            $this->entityBin[$entityId] = $key;
-            $this->entityBinMatrix[$entityId] = $transform->worldMatrix;
-
-            // Expand the bin AABB by the entity's actual world-space extent.
-            // A 3 km water plane sitting at one bin centre would otherwise
-            // make the whole bin look ~256 m wide, and the bin would get
-            // culled the moment the camera looked at the far end of the
-            // plane — making the water "pop out" mid-screen.
-            $sphere = self::getMeshSphere($mesh->meshId);
-            if ($sphere !== null) {
-                $r = $sphere['radius'] * self::maxAxisScale($transform->worldMatrix);
-            } else {
-                // Unknown mesh size — fall back to a half-bin pad so we
-                // never under-estimate the extent.
-                $r = self::BIN_SIZE * 0.5;
-            }
-
-            $loX = $tr->x - $r; $hiX = $tr->x + $r;
-            $loY = $tr->y - $r; $hiY = $tr->y + $r;
-            $loZ = $tr->z - $r; $hiZ = $tr->z + $r;
-
-            if (!isset($this->binAabbs[$key])) {
-                $this->binAabbs[$key] = [$loX, $loY, $loZ, $hiX, $hiY, $hiZ];
-            } else {
-                $a = &$this->binAabbs[$key];
-                if ($loX < $a[0]) { $a[0] = $loX; }
-                if ($loY < $a[1]) { $a[1] = $loY; }
-                if ($loZ < $a[2]) { $a[2] = $loZ; }
-                if ($hiX > $a[3]) { $a[3] = $hiX; }
-                if ($hiY > $a[4]) { $a[4] = $hiY; }
-                if ($hiZ > $a[5]) { $a[5] = $hiZ; }
-                unset($a);
-            }
-        }
-    }
-
-    /**
-     * @param array<int, array{0:float,1:float,2:float,3:float}> $planes
-     * @return array<string, true> Set of bin keys that intersect the frustum.
-     */
-    private function cullBins(array $planes): array
-    {
-        $visible = [];
-        foreach ($this->binAabbs as $key => $a) {
-            $outside = false;
-            foreach ($planes as $p) {
-                // For an AABB, the corner most-positive against the plane
-                // normal gives the maximum distance from the plane. If that
-                // corner is still on the negative side, the entire box is
-                // outside — standard AABB-vs-plane Lengyel test.
-                $px = $p[0] >= 0.0 ? $a[3] : $a[0];
-                $py = $p[1] >= 0.0 ? $a[4] : $a[1];
-                $pz = $p[2] >= 0.0 ? $a[5] : $a[2];
-                if ($p[0] * $px + $p[1] * $py + $p[2] * $pz + $p[3] < 0.0) {
-                    $outside = true;
-                    break;
-                }
-            }
-            if (!$outside) {
-                $visible[$key] = true;
-            }
-        }
-        return $visible;
-    }
-
-    /**
-     * @return array<int, array{0:float,1:float,2:float,3:float}>|null
-     *         Six normalised planes [nx, ny, nz, d] pointing inward, or null
-     *         if no active camera was found this frame.
-     */
-    private function extractFrustumPlanes(): ?array
+    private function activeSetCamera(): ?SetCamera
     {
         $cameras = $this->commandList->ofType(SetCamera::class);
         if ($cameras === []) {
             return null;
         }
-        /** @var SetCamera $cam */
-        $cam = end($cameras);
-
-        return Frustum::planes($cam->projectionMatrix, $cam->viewMatrix);
+        /** @var SetCamera */
+        return end($cameras);
     }
 
     /**
-     * Compute (and cache) the local-space bounding sphere of a mesh from its
-     * raw vertex array. Returns null if the mesh isn't registered yet.
+     * Local-space bounding sphere of a mesh, or null if it isn't registered
+     * yet. Delegates to {@see MeshBounds}, shared with VisibilityService's
+     * SpatialIndex entries so both derive the same sphere from one place.
      *
      * @return array{cx:float, cy:float, cz:float, radius:float}|null
      */
     private static function getMeshSphere(string $meshId): ?array
     {
-        if (isset(self::$sphereCache[$meshId])) {
-            return self::$sphereCache[$meshId];
-        }
-
-        if (!MeshRegistry::has($meshId)) {
-            return null;
-        }
-        $mesh = MeshRegistry::get($meshId);
-        if ($mesh === null) {
-            return null;
-        }
-
-        $verts = $mesh->vertices;
-        $count = count($verts);
-        if ($count < 3) {
-            return self::$sphereCache[$meshId] = ['cx' => 0.0, 'cy' => 0.0, 'cz' => 0.0, 'radius' => 0.0];
-        }
-
-        // First pass: AABB.
-        $minX = $maxX = $verts[0];
-        $minY = $maxY = $verts[1];
-        $minZ = $maxZ = $verts[2];
-        for ($i = 3; $i < $count; $i += 3) {
-            $x = $verts[$i];
-            $y = $verts[$i + 1];
-            $z = $verts[$i + 2];
-            if ($x < $minX) { $minX = $x; } elseif ($x > $maxX) { $maxX = $x; }
-            if ($y < $minY) { $minY = $y; } elseif ($y > $maxY) { $maxY = $y; }
-            if ($z < $minZ) { $minZ = $z; } elseif ($z > $maxZ) { $maxZ = $z; }
-        }
-
-        $cx = ($minX + $maxX) * 0.5;
-        $cy = ($minY + $maxY) * 0.5;
-        $cz = ($minZ + $maxZ) * 0.5;
-
-        // Second pass: tightest sphere around AABB centre.
-        $rSq = 0.0;
-        for ($i = 0; $i < $count; $i += 3) {
-            $dx = $verts[$i]     - $cx;
-            $dy = $verts[$i + 1] - $cy;
-            $dz = $verts[$i + 2] - $cz;
-            $d = $dx * $dx + $dy * $dy + $dz * $dz;
-            if ($d > $rSq) {
-                $rSq = $d;
-            }
-        }
-
-        return self::$sphereCache[$meshId] = [
-            'cx' => $cx,
-            'cy' => $cy,
-            'cz' => $cz,
-            'radius' => sqrt($rSq),
-        ];
+        return MeshBounds::localSphere($meshId);
     }
 }

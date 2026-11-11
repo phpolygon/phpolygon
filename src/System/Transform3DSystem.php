@@ -40,7 +40,7 @@ use PHPolygon\ECS\World;
  * the call a static root used to get from the old full-pool loop. Whether
  * the matrix is actually rebuilt (and the matrix INSTANCE therefore
  * changes - Renderer3DSystem keys motion vectors off that identity, see its
- * $entityBinMatrix/prevModelMatrix comments) is still decided by isDirty()
+ * $lastDrawnMatrix/prevModelMatrix comments) is still decided by isDirty()
  * or an ancestor's genuine move, same as before; being IN this tick's set
  * does not by itself force a rebuild, so a permanently-active entity that
  * happens not to have changed this tick still keeps its matrix instance.
@@ -133,6 +133,19 @@ class Transform3DSystem extends AbstractSystem
      */
     private array $movedThisTick = [];
 
+    /**
+     * Same ids as $movedThisTick, but ACCUMULATED across update() calls
+     * instead of reset every tick - drained only by {@see
+     * drainMovedSinceLastDrain()}. GameLoop::runPipelined() can run more than
+     * one fixed-timestep update() before the next render(); a consumer that
+     * reads movedThisTick() once per rendered frame would lose every mover
+     * from an earlier tick in that same frame. VisibilityService drains this
+     * one instead, once per beginFrame().
+     *
+     * @var array<int, true>
+     */
+    private array $movedSinceDrain = [];
+
     public function __construct()
     {
         $this->dirtyQueue = new TransformDirtyQueue();
@@ -214,6 +227,20 @@ class Transform3DSystem extends AbstractSystem
     }
 
     /**
+     * Entity ids moved since the last call to this method - see
+     * $movedSinceDrain for why this differs from movedThisTick() when more
+     * than one update() runs before the next drain.
+     *
+     * @return list<int>
+     */
+    public function drainMovedSinceLastDrain(): array
+    {
+        $ids = array_keys($this->movedSinceDrain);
+        $this->movedSinceDrain = [];
+        return $ids;
+    }
+
+    /**
      * Drop the per-entity snapshot and every bookkeeping set when
      * World::clear() runs. After clear() the id counter restarts from 0, so
      * the next createEntity() hands out the same ids; without resetting
@@ -234,6 +261,7 @@ class Transform3DSystem extends AbstractSystem
         $this->restingCursor = 0;
         $this->permanentlyActive = [];
         $this->movedThisTick = [];
+        $this->movedSinceDrain = [];
         $this->dirtyQueue->clear();
     }
 
@@ -285,7 +313,12 @@ class Transform3DSystem extends AbstractSystem
     private function forget(int $id): void
     {
         $this->removeResting($id);
-        unset($this->permanentlyActive[$id], $this->staleDormant[$id], $this->cache[$id]);
+        unset(
+            $this->permanentlyActive[$id],
+            $this->staleDormant[$id],
+            $this->cache[$id],
+            $this->movedSinceDrain[$id],
+        );
     }
 
     private function makeResting(int $id): void
@@ -430,6 +463,7 @@ class Transform3DSystem extends AbstractSystem
             }
             $this->snapshot($entityId, $transform);
             $this->movedThisTick[$entityId] = true;
+            $this->movedSinceDrain[$entityId] = true;
             $this->makeResting($entityId);
         }
 

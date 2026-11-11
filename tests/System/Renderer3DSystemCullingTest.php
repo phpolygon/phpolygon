@@ -21,12 +21,13 @@ use PHPolygon\Rendering\MaterialRegistry;
 use PHPolygon\Rendering\NullRenderer3D;
 use PHPolygon\Rendering\RenderCommandList;
 use PHPolygon\System\Renderer3DSystem;
+use PHPolygon\System\Transform3DSystem;
 
 /**
  * Culling and selection in Renderer3DSystem: castShadows reaches the draw,
- * moving entities are not culled by their stale spatial bin, the frustum test
- * uses the world scale, and point lights are chosen by their effect on the
- * view rather than by the camera's distance alone.
+ * moving entities are reclassified the same frame they move (not stale), the
+ * frustum test uses the world scale, and point lights are chosen by their
+ * effect on the view rather than by the camera's distance alone.
  */
 final class Renderer3DSystemCullingTest extends TestCase
 {
@@ -101,24 +102,35 @@ final class Renderer3DSystemCullingTest extends TestCase
         self::assertTrue($draws[1]->castShadows);
     }
 
-    public function testMovingEntityIsNotCulledByItsStaleBin(): void
+    /**
+     * VisibilityService's SpatialIndex (Phase 2 of the visibility plan) has
+     * no periodic rebuild - it is kept current by Transform3DSystem's moved
+     * list, drained once per beginFrame(). This exercises the real event
+     * path (Transform3DSystem registered, position assigned through its
+     * hooked setter) rather than the superseded bin mechanism's own
+     * matrix-identity escape hatch, which this test used to poke directly.
+     */
+    public function testMoverIsReclassifiedTheSameFrameItMoves(): void
     {
         $world = new World();
+        $world->addSystem(new Transform3DSystem());
         $transform = new Transform3D(new Vec3(600.0, 0.0, -10.0));
         $world->createEntity()->attach($transform)->attach(new MeshRenderer('box', 'm'));
+        $world->update(1.0 / 60.0);
         $list = new RenderCommandList();
         $system = new Renderer3DSystem($this->spy, $list);
 
-        // Frame 1: far off to the side - binned there, outside the frustum.
+        // Frame 1: far off to the side - outside the frustum.
         self::assertSame([], $this->frame($system, $list, $world));
 
-        // It drives into view; the bins are rebuilt only every 30 frames, so
-        // its bin still says "out of view".
-        $transform->worldMatrix = Mat4::translation(0.0, 0.0, -10.0);
+        // Drives into view; Transform3DSystem's moved list carries the
+        // change into the SpatialIndex the same tick, not after a rebuild delay.
+        $transform->position = new Vec3(0.0, 0.0, -10.0);
+        $world->update(1.0 / 60.0);
         self::assertCount(1, $this->frame($system, $list, $world), 'the mover is drawn the frame it enters the view');
     }
 
-    public function testStaticEntityInCulledBinStaysCulled(): void
+    public function testStaticEntityOutsideTheFrustumStaysCulledAcrossFrames(): void
     {
         $world = new World();
         $world->createEntity()

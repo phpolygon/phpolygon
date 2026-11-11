@@ -893,12 +893,15 @@ components on the same entity.
 | `Renderer3DSystem` | Collects `MeshRenderer` + `Transform3D`, builds `RenderCommandList`, flushes |
 
 `Renderer3DSystem` culling and selection (`Renderer3DSystemCullingTest`): the camera position is the
-inverse view of the queued `SetCamera`; frustum radii use the world-matrix scale (parents included);
-the coarse 256 m bin cull is trusted only while an entity still has the `worldMatrix` instance it was
-binned with (movers fall through to the sphere test); `MeshRenderer::$castShadows` travels as
-`DrawMesh::$castShadows` into the shadow pass. Point and spot lights whose influence sphere misses the
-frustum take no slot; the rest rank by the camera's distance to the sphere (0 inside), then to the
-centre, capped at `MAX_POINT_LIGHTS` / `MAX_SPOT_LIGHTS`.
+inverse view of the queued `SetCamera`; frustum radii use the world-matrix scale (parents included).
+Frustum membership for every `MeshRenderer`+`Transform3D` entity comes from
+`VisibilityService::visibleEntities()` (see "VisibilityService / SpatialIndex" below), not a local bin
+cull - a separate screen-size LOD drop still runs locally in the draw loop (`$lodNearDistance`/
+`$minScreenRatio`, the mesh's own bounding sphere via `MeshBounds`). `MeshRenderer::$castShadows`
+travels as `DrawMesh::$castShadows` into the shadow pass. Point and spot lights whose influence sphere
+misses the frustum take no slot; the rest rank by the camera's distance to the sphere (0 inside), then
+to the centre, capped at `MAX_POINT_LIGHTS` / `MAX_SPOT_LIGHTS` - their own frustum planes
+(`Renderer3DSystem::activeSetCamera()`), independent of VisibilityService.
 
 Static instanced batches (`DrawMeshInstanced::$isStatic`) are cached by `VioRenderer3D` under
 `$staticKey` (or mesh + shader + material). A Mat4 batch is re-uploaded when its count or first/last
@@ -956,11 +959,16 @@ static caster every frame regardless of range (`collectRayTracedScene()`). Light
 culled one layer up, before they reach the renderer (`LightConeSystem::cones()` tests each cone's own
 bounding sphere against the camera frustum and caps at `MAX_CONES` nearest).
 
-`Renderer3DSystem` reads the `MeshRenderer` and `Transform3D` component pools directly (same order as
-`query(MeshRenderer, Transform3D)`): thousands of hidden renderers (parts drawn through an instanced
-batch) cost a pool lookup each, not a query step. `Transform3DSystem` skips dormant entities -
-dormant roots and dormant children with their subtrees; a dormant child whose ancestor moved while it
-slept is recomputed on its first awake tick (its world matrix may be stale while it sleeps).
+`Renderer3DSystem` iterates `VisibilityService::visibleEntities()` - grid-cell order, not the
+`query(MeshRenderer, Transform3D)` pool order it used before Phase 2 of the visibility plan - and reads
+the `MeshRenderer`/`Transform3D` component pools directly by id for each: cheaper than the query's
+generator/Entity-wrapper overhead once a scene holds thousands of hidden renderers (parts drawn through
+an instanced batch). `Transform3DSystem` skips dormant entities - dormant roots and dormant children
+with their subtrees; a dormant child whose ancestor moved while it slept is recomputed on its first
+awake tick (its world matrix may be stale while it sleeps). `World::setEntityDormant()` fires no
+attach/detach event, so `VisibilityService` cannot exclude a dormant entity from its SpatialIndex
+incrementally - `visibleEntities()`/`isVisible()` filter it at READ time via `World::isDormant()`
+instead.
 
 `Transform3DSystem` does NOT walk the whole `Transform3D` pool every tick (Phase 1 of the
 visibility/activity-tier plan, `feat/transform-active-set` branch off v0.103.0, 2026-11-11):
@@ -978,9 +986,58 @@ entity's `worldMatrix` instance never changes - the identity trick other code re
 New API: `World::observe(class, onAttach, onDetach)` for incremental per-component-class indexes
 (fires from `attachComponent()`/`detachComponent()` AND from `destroyEntity()`'s/`clear()`'s own
 teardown, so an observer never misses a component leaving); `Transform3DSystem::movedThisTick():
-list<int>` - entity ids whose world matrix was rebuilt this tick, for a future spatial index to
-update incrementally instead of re-deriving visibility from scratch every frame (Phase 2, not built
-yet).
+list<int>` - entity ids whose world matrix was rebuilt the LAST `update()` call only (reset every tick,
+`Transform3DSystemTest::testMovedThisTickContent`); `Transform3DSystem::drainMovedSinceLastDrain():
+list<int>` - the same ids ACCUMULATED across possibly several fixed-timestep `update()` calls per
+rendered frame (`GameLoop::runPipelined()` can run more than one before the next render) and cleared
+only by its own call - what `VisibilityService` actually drains, once per `beginFrame()`
+(`testDrainMovedSinceLastDrainAccumulatesAcrossTicks`).
+
+### VisibilityService / SpatialIndex (Phase 2 of the visibility/activity-tier plan, 2026-11-11)
+
+`PHPolygon\Visibility\VisibilityService`, resolved per `World` via `VisibilityService::forWorld($world)`
+(one instance per `World` - a static `WeakMap<World, VisibilityService>`, so both `$engine->visibility`
+and `Renderer3DSystem` - which many tests construct standalone, without an Engine - resolve the SAME
+instance for a given World with no required constructor wiring on either side) replaces
+`Renderer3DSystem`'s former 256 m bin cull (rebuilt every 30 frames) and its full `MeshRenderer` pool
+scan.
+
+Holds a `PHPolygon\Visibility\SpatialIndex`: an XZ grid, 32 m cells (`SpatialIndex::CELL_SIZE`), flat
+per-cell handle sets - no periodic rebuild, maintained only by `register()`/`update()`/`remove()` calls
+driven from events:
+- `World::observe()` on `Transform3D` and `MeshRenderer` attach/detach (either order) registers/removes
+  the entry for a MeshRenderer+Transform3D pair;
+- `MeshRenderer`'s `$visible`/`$meshId` PHP 8.4 hooked properties mark a `MeshRendererChangeQueue`
+  (mirrors `Transform3D`'s `TransformDirtyQueue`/hooks exactly) - `$visible = false` removes the entry,
+  back to `true` re-adds it, a `$meshId` change re-derives the bounding sphere;
+- `Transform3DSystem::drainMovedSinceLastDrain()`, if a `Transform3DSystem` is registered on the World
+  (found via `World::getSystems()`, no required wiring) - a moved entry gets a fresh sphere the same
+  frame it moves, not after a rebuild delay.
+
+`beginFrame($view, $projection)` (called from `Renderer3DSystem::renderCommands()`, inside the
+`render3d.build_commands` profiler span, under its own nested `render3d.visibility`) classifies every
+occupied cell against the frustum into OUTSIDE / INSIDE / INTERSECTED (`SpatialIndex::classify()`, the
+Lengyel AABB-vs-plane test per cell, inflated by the cell's largest member radius and real Y range so a
+large object - e.g. a kilometre-wide water plane - registered near one cell's centre does not make the
+whole cell look only 32 m wide): INSIDE cells contribute every member without a further test,
+INTERSECTED cells run the exact sphere test per member. A mesh id not yet in `MeshRegistry`
+(`MeshBounds::worldSphere()` returns null) registers as `unbounded` - excluded from every cell's bounds
+and never culled, upgraded once its `meshId` changes to a known one. `null` for $view/$projection (no
+active camera) or `PHPOLYGON_NO_CULL=1` disables classification - every registered, non-dormant entry is
+visible, the same diagnostic switch `Renderer3DSystem`'s own light culling already honoured.
+
+API: `visibleEntities()` (what `Renderer3DSystem` iterates - dormant entities excluded at read time, see
+above), `isVisible(handle)`, `sees(center, radius, ?maxDistance)` and `testSphere(x, y, z, radius)` (ad
+hoc queries against the current frame's camera, independent of the index), `frame(): ?ViewVolume` (the
+raw view/projection/planes/eye, for a future consumer that needs them directly), `tierAt(x, z): bool` (a
+stub ahead of Phase 4's real `ActivityTier` enum - just "is this cell's classification OUTSIDE or not"),
+and direct `register()`/`update()`/`remove()` on `index()` for a producer that isn't `World`-driven
+(reserved for Phase 3's batches/emitters/lights - entries already carry `kind`/`owner`/`castsShadow`/
+`alwaysVisible` so that phase does not reshape them again).
+
+Not in Phase 2 (left for Phase 3, see the visibility plan): particles, light cones, foliage, grass,
+`MotionView` and point/spot/rect lights still run their own frustum test; shadow casters outside the
+camera frustum are not yet queried through VisibilityService.
 
 Measured 2026-11-11 (PHP 8.5.5 CLI, this repo's dev machine,
 `benchmarks/micro/System/Transform3DSystemBench.php`, `benchTenThousandStaticTick`/
