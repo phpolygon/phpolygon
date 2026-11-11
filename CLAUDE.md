@@ -943,15 +943,18 @@ sun's largest-cascade light prism (`sunCasterVolume()`, no near/far plane - a ta
 sun always stays in) for the directional casters, the union of the local lights' range spheres
 (`localShadowLightSpheres()`) for spot/point casters - never the camera frustum, so an off-screen
 caster still shadows what is in view. `PHPOLYGON_NO_CULL=1` disables every batch test (the same switch
-the particle and vegetation off-screen culls already use); `PHPOLYGON_DRAW_DEBUG=1` logs
-batches/drawn/culled/shadow-culled/bounds-derived to STDERR once a second.
-`VioRenderer3D::instancedBatchCullStats()` returns the same counters for tests and tooling.
+`Renderer3DSystem`'s per-entity cull, `ParticleSystem`'s off-screen pause and `LightConeSystem`'s own
+frustum test already use); `PHPOLYGON_DRAW_DEBUG=1` logs batches/drawn/culled/shadow-culled/
+bounds-derived to STDERR every 60 frames. `VioRenderer3D::instancedBatchCullStats()` returns the same
+counters for tests and tooling.
 
 Not covered by this pass (left for a later plan, not built here): the planar-reflection pass draws
-every batch into its mirrored view regardless of position (`renderPlanarReflectionPass()`), light
-cones draw unconditionally (`renderLightCones()`), the minimap redraws the whole command list against
-its own ortho view every refresh (`renderMinimapIfDue()`), and the ray-traced-scene collector rebuilds
-its instance list from every static caster every frame regardless of range (`collectRayTracedScene()`).
+every batch into its mirrored view regardless of position (`renderPlanarReflectionPass()`), the
+minimap redraws the whole command list against its own ortho view every refresh
+(`renderMinimapIfDue()`), and the ray-traced-scene collector rebuilds its instance list from every
+static caster every frame regardless of range (`collectRayTracedScene()`). Light cones are already
+culled one layer up, before they reach the renderer (`LightConeSystem::cones()` tests each cone's own
+bounding sphere against the camera frustum and caps at `MAX_CONES` nearest).
 
 `Renderer3DSystem` reads the `MeshRenderer` and `Transform3D` component pools directly (same order as
 `query(MeshRenderer, Transform3D)`): thousands of hidden renderers (parts drawn through an instanced
