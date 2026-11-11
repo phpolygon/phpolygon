@@ -171,14 +171,18 @@ final class ChannelTransportTest extends TestCase
 
         $token = $transport->submit(new GrowthTestKernel(), [1 => ['height' => 0.0, 'rate' => 2.0]], 3, 0.1);
 
-        // Real wall time between submit and collect - see profile-channel-transport.php's
-        // and discriminators.php's finding: a non-blocking poll called too
-        // soon after a BUFFERED channel's send() just misses the worker, and
-        // retrying that poll (not blocking) is the normal non-blocking usage
-        // pattern (see FarSimulationRunner::tickAsync() - a miss just tries
-        // again on a LATER tick() call). Poll in a bounded retry loop rather
-        // than a single fixed sleep, to not make this test flaky against
-        // worker start-up jitter on a loaded CI machine.
+        // Real wall time between submit and collect - a non-blocking poll
+        // called too soon just misses the worker (its 3 chained steps take
+        // real time to compute), and retrying that poll (not blocking) is
+        // the normal non-blocking usage pattern (see FarSimulationRunner::tickAsync() -
+        // a miss just tries again on a LATER tick() call). Poll in a bounded
+        // retry loop rather than a single fixed sleep, to not make this test
+        // flaky against worker start-up jitter on a loaded CI machine. (Note,
+        // fix/unbuffered-scheduler-channels: ThreadScheduler's `_in` channel
+        // is no longer buffered, but that does not materially change this -
+        // see ThreadScheduler's own class doc for why the buffering of `_in`
+        // specifically turned out not to be the dominant cost here once a
+        // worker does any real, non-zero-duration compute.)
         $result = null;
         for ($i = 0; $i < 50 && $result === null; $i++) {
             usleep(10_000);
