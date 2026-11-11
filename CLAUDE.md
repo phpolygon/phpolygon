@@ -1230,6 +1230,71 @@ plan's actual multi-system savings this phase enables (an opted-in system skippi
 favour of a 10 Hz far core) are NOT measured - no system in this engine has registered a
 `SimulationKernel` yet to show savings from.
 
+### Phase 6 of the visibility plan (2026-11-11): FarSimulationSubsystem in a thread
+
+Built directly on the hardened `ThreadScheduler` (Phase 5 of this plan, a separate branch merged in before
+this phase started: kept `parallel\Future`s instead of discarding them, `pollAll()`/`recvAll()` split and
+bounded instead of an unconditional blocking `Channel::recv()`, dead-worker detection, the `__log`/
+`__timings` side channel). `PHPolygon\Simulation\ChannelTransport implements SimulationTransport` is the
+threaded counterpart of Phase 4's `InlineTransport`; `PHPolygon\Simulation\FarSimulationSubsystem
+implements \PHPolygon\Thread\SubsystemInterface` is the bridge between the two unrelated abstractions -
+`SimulationKernel`'s per-entity-record contract (Phase 4) and `ThreadScheduler`'s whole-subsystem
+send/poll cycle (pre-existing). Carries only the kernel's class NAME (a string) and scalar records across
+the channel, never an object - "keine ECS-Objekte und kein voller Weltzustand über Kanäle", the same
+constraint Phase 4's per-entity records already satisfied for the inline case. A kernel used with
+`ChannelTransport` needs a no-argument constructor: the worker thread reconstructs a fresh instance per
+job from the class name alone (`new $kernelClass()`), the same way `ThreadScheduler::boot()` already
+instantiates every registered `SubsystemInterface`.
+
+`ThreadScheduler::register()`/`boot()` construct the `SubsystemInterface` themselves (`new
+$subsystemClass()`, no constructor arguments) - `ChannelTransport` cannot inject its own
+`FarSimulationSubsystem` instance, so its constructor resolves the ACTUAL registered one back out via
+`ThreadScheduler::getSubsystems()[$name]` instead (throws `InvalidArgumentException` if that name is not
+a booted `FarSimulationSubsystem`). `ChannelTransport::step()` stays SYNCHRONOUS from
+`FarSimulationRunner`'s point of view - `queueJob()`, then `sendAll()`+`pollAll($timeoutMicros)` (blocking,
+`ThreadScheduler::DEFAULT_POLL_TIMEOUT_US` by default - the SAME `parallel\Events` code path the engine
+log's own worker thread already runs in production on every ZTS platform including macOS ARM), then reads
+the result back and throws `RuntimeException` if the worker never answered. Passing `timeoutMicros: 0`
+switches to the OTHER `Events` path (non-blocking) the Phase 5 scheduler-hardening work itself flagged as
+the real open risk there, unexercised by any shipped code - `ChannelTransportTest::testChannelTransportThrowsWhenTheWorkerDoesNotAnswerInTime()`
+deliberately uses it to trigger the error path, but production code should not pass 0 here without
+separately verifying that platform. REQUIRES a `ThreadScheduler` with ONLY a `FarSimulationSubsystem`
+registered - `sendAll()`/`pollAll()` act on every registered subsystem, not one by name, so sharing the
+scheduler with an unrelated subsystem (AI, physics, audio) would send/poll that one too on every
+`step()` call here; a game wanting both gets a dedicated scheduler for far-simulation.
+
+`FarSimulationRunner::takebackAll(World $world)` (new) flushes and imports EVERY currently handed-over
+record across every registered kernel - the plan's "Snapshot beim Speichern": far-simulation state must
+reach a save file even while a record sits mid-flight in a worker thread. Needed no transport-specific
+code at all - `takeback()`'s existing flush already calls the kernel's TRANSPORT, not the kernel directly,
+and `ChannelTransport::step()` already blocks until the worker answers, exactly like `InlineTransport` has
+always done synchronously.
+
+The required parity (Phase 4's determinism contract, extended to the threaded transport): for the same
+records and dt, `InlineTransport` and `ChannelTransport` import an IDENTICAL state
+(`ChannelTransportTest::testInlineAndChannelTransportProduceAnIdenticalResultForTheSameInput()`,
+`testFarSimulationRunnerWithChannelTransportMatchesInlineOverSeveralTicks()` - the same `FarSimulationRunner`
+driving both transports for 7 ticks lands on the same record). All real-threading tests (this test class,
+mirroring `ThreadSchedulerHardeningTest`'s own pattern) require ZTS PHP with ext-parallel and keep the
+same orphaned-worker safety net in `tearDown()` - an unshut-down worker blocked on its `_in` channel's
+`recv()` can hang the whole PHPUnit process, not just the one test.
+
+Not wired to anything automatically: the plan's own wording ("Lohnt erst mit nennenswerter
+Fern-Simulation") is why this ships as scaffolding, not a default. No game system registers a
+`SimulationKernel` with either transport yet, so the real benefit (actual overlap with the main thread,
+once a kernel exists heavy enough to be worth it) stays unproven - not claimed here, exactly like Phase
+3's multi-system cull-sharing benefit and Phase 4's far-core savings were left unmeasured for the same
+reason (nothing to measure yet).
+
+Measured 2026-11-11 (same sandbox/caveats as the numbers already in this file): `InlineTransport::step()`
+vs `ChannelTransport::step()` for the SAME trivial kernel (50 records, `height += rate * dt`), 500 calls,
+2 runs - Inline ~0.006 ms/call, Channel ~15.1 ms/call, a measured ~2,400-2,500x overhead. This is the
+direct, quantified cost of one `parallel\Events`-bounded poll round trip per call, dwarfing anything a
+cheap kernel's own step() could possibly do - confirming the plan's "lohnt erst mit nennenswerter
+Fern-Simulation" is not a hedge but an accurate description of where this transport actually pays off
+(a kernel whose own step() cost approaches or exceeds this overhead, stepped rarely enough - 10 Hz, not
+the main loop's 60 - that the per-step cost still nets out ahead of running it inline on the main thread).
+
 Measured 2026-11-11 (PHP 8.5.5 CLI, this repo's dev machine,
 `benchmarks/micro/System/Transform3DSystemBench.php`, `benchTenThousandStaticTick`/
 `benchStaticWorldTick` before vs after): 10,000 untouched entities per tick went from 4.78 ms to

@@ -111,6 +111,25 @@ final class FarSimulationRunner
     }
 
     /**
+     * Flushes and imports EVERY currently handed-over record, across every
+     * registered kernel - the entry point for a save (Phase 6's "Snapshot
+     * beim Speichern"): far-simulation state must reach the save file even
+     * while a record sits mid-flight in a worker thread. Works unchanged
+     * with {@see ChannelTransport} because {@see takeback()}'s flush already
+     * calls the kernel's TRANSPORT (not the kernel directly) and
+     * ChannelTransport::step() itself blocks until the worker answers - the
+     * same synchronous contract {@see InlineTransport} has always had.
+     */
+    public function takebackAll(World $world): void
+    {
+        foreach (array_keys($this->records) as $name) {
+            foreach (array_keys($this->records[$name]) as $entityId) {
+                $this->takeback($name, $world, $entityId);
+            }
+        }
+    }
+
+    /**
      * Accumulates $dt (SIMULATED time - pass the same dt your own update()
      * tick ran with, not a wall-clock reading) for every registered kernel
      * and applies as many FIXED_DT steps to its current record batch as
