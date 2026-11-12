@@ -222,8 +222,11 @@ uniform vec4 u_age_params;
 uniform float u_weathering;
 // Glass look (shader plan 5.3): x = Fresnel edges, y = dirt.
 uniform vec2 u_glass;
-// Emissive looks (shader plan 5.4): x = lit window fraction, y = neon tube.
-uniform vec2 u_emissive_look;
+// Emissive looks (shader plan 5.4): x = lit window fraction, y = neon tube,
+// z = window grid follows the mesh UV instead of the world position.
+uniform vec3 u_emissive_look;
+// Window grid: xy = cell size, zw = origin (metres, or UV units when z of the look is set).
+uniform vec4 u_window_grid;
 // Material looks (shader plan 5.5): x = cloth sheen, y = brushed metal, z = glitter.
 uniform vec3 u_material_look;
 // Dithered distance fade (shader plan 6.1): (start, end) metres, end <= 0 = off.
@@ -2889,12 +2892,13 @@ void main() {
     }
 #ifndef PHPOLYGON_OMIT_EMISSIVE_LOOK
     if (u_emissive_look.x > 0.0 && dot(emission, vec3(1.0)) > 0.0) {
-        // Windows: a grid on the wall plane (2.2 m x 2.8 m), a share of them lit
+        // Windows: a grid on the wall plane (u_window_grid, 2.2 m x 2.8 m by default), a share of them lit
         // in a warm or cool tone; behind each a room - back wall bright, side
         // walls, floor and ceiling darker - seen through the glass at the view
         // angle (interior mapping); a dark frame round each pane.
         vec3 wt = normalize(cross(vec3(0.0, 1.0, 0.0), N) + vec3(1e-5, 0.0, 0.0));
-        vec2 cuv = vec2(dot(v_worldPos, wt) / 2.2, v_worldPos.y / 2.8);
+        vec2 wpos = u_emissive_look.z > 0.5 ? v_uv : vec2(dot(v_worldPos, wt), v_worldPos.y);
+        vec2 cuv = (wpos - u_window_grid.zw) / u_window_grid.xy;
         vec2 cell = floor(cuv);
         vec2 f = fract(cuv);
         float h = hash21(cell + 31.7);
@@ -2902,7 +2906,7 @@ void main() {
         vec3 tone = mix(vec3(1.0, 0.82, 0.6), vec3(0.75, 0.86, 1.0), step(0.7, hash21(cell + 5.1)));
         vec3 vt = vec3(dot(-V, wt), -V.y, dot(-V, -N));
         float depth = 0.8;
-        vec2 back = f + vt.xy / max(vt.z, 0.05) * depth * vec2(1.0 / 2.2, 1.0 / 2.8) * 2.0;
+        vec2 back = f + vt.xy / max(vt.z, 0.05) * depth / u_window_grid.xy * 2.0;
         float room = (back.x > 0.0 && back.x < 1.0 && back.y > 0.0 && back.y < 1.0) ? 1.0 : (back.y < 0.0 ? 0.35 : 0.55);
         float frame = smoothstep(0.0, 0.06, f.x) * smoothstep(1.0, 0.94, f.x) * smoothstep(0.0, 0.08, f.y) * smoothstep(1.0, 0.92, f.y);
         emission *= mix(0.03, (0.6 + 0.6 * hash21(cell + 2.3)) * room, lit) * frame * tone;

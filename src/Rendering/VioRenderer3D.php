@@ -9564,7 +9564,11 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             'u_triplanar'           => $material->triplanar,
             'u_weathering'          => $material->weathering,
             'u_glass'               => [$material->glass, $material->glassDirt],
-            'u_emissive_look'       => [$material->windowLights, $material->neonTube ? 1.0 : 0.0],
+            'u_emissive_look'       => [$material->windowLights, $material->neonTube ? 1.0 : 0.0, $material->windowUv ? 1.0 : 0.0],
+            'u_window_grid'         => [
+                max(1.0e-3, $material->windowCell[0]), max(1.0e-3, $material->windowCell[1]),
+                $material->windowOffset[0], $material->windowOffset[1],
+            ],
             'u_material_look'       => [$material->sheen, $material->brushed, $material->glitter],
             'u_fade_range'          => [$material->fadeDistance[0], $material->fadeDistance[1]],
             'u_figure_look'         => [$material->rimLight, $material->hairShine],

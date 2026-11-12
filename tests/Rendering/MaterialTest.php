@@ -192,4 +192,26 @@ class MaterialTest extends TestCase
         $this->assertTrue($m->withWetness(0.5)->emissionByTextureAlpha);
         $this->assertFalse($m->withEmissionByTextureAlpha(false)->emissionByTextureAlpha);
     }
+
+    public function testWindowGridDefaultsMatchTheOriginalFixedGrid(): void
+    {
+        $m = new Material(emission: new Color(1.0, 1.0, 1.0), windowLights: 0.5);
+        $this->assertSame([2.2, 2.8], $m->windowCell);
+        $this->assertSame([0.0, 0.0], $m->windowOffset);
+        $this->assertFalse($m->windowUv);
+    }
+
+    public function testWindowGridSurvivesDerivedCopies(): void
+    {
+        $m = (new Material(emission: new Color(1.0, 1.0, 1.0), windowLights: 0.5, windowCell: [1.2, 1.4]))
+            ->withWindowGrid(1.2, 1.4, 0.3, 0.1, true);
+        $this->assertSame([1.2, 1.4], $m->windowCell);
+        $this->assertSame([0.3, 0.1], $m->windowOffset);
+        $this->assertTrue($m->windowUv);
+        $d = $m->withWetness(0.5)->withEmission(new Color(2.0, 2.0, 2.0))->withAlbedoTexture('t');
+        $this->assertSame([1.2, 1.4], $d->windowCell);
+        $this->assertSame([0.3, 0.1], $d->windowOffset);
+        $this->assertTrue($d->windowUv);
+        $this->assertSame(0.5, $d->windowLights);
+    }
 }

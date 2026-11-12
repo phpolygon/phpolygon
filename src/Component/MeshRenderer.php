@@ -76,10 +76,23 @@ class MeshRenderer extends AbstractComponent
      * When true, Renderer3DSystem merges this draw with every other visible
      * batchable draw of the same mesh and material into one instanced draw after
      * culling. For meshes that repeat with the same material and do not move;
-     * an entity that moved this frame and transparent materials stay single.
+     * an entity that moved this frame stays single, and so does a transparent one
+     * unless {@see $batchTransparent} is set.
      */
     #[Property]
     public bool $batchable = false;
+
+    /**
+     * With $batchable: a transparent material may batch too (a facade of identical
+     * panes becomes one instanced draw instead of one draw per pane). The batch is
+     * depth-sorted as a unit by {@see \PHPolygon\Rendering\TransparentDrawSorter} and,
+     * up to its PER_INSTANCE_SORT_MAX instances, per instance back to front; bigger
+     * batches keep submission order. Opt-in because a batch cannot interleave with other
+     * transparent draws that lie between its instances: use it for panes that do not
+     * overlap other transparent geometry in depth.
+     */
+    #[Property]
+    public bool $batchTransparent = false;
 
     /**
      * Three floats for `v_instance_params` of this entity's draw, whether it draws
@@ -96,6 +109,7 @@ class MeshRenderer extends AbstractComponent
         bool $visible = true,
         bool $excludeFromGbuffer = false,
         bool $batchable = false,
+        bool $batchTransparent = false,
     ) {
         $this->meshId = $meshId;
         $this->materialId = $materialId;
@@ -103,6 +117,7 @@ class MeshRenderer extends AbstractComponent
         $this->visible = $visible;
         $this->excludeFromGbuffer = $excludeFromGbuffer;
         $this->batchable = $batchable;
+        $this->batchTransparent = $batchTransparent;
     }
 
     /**

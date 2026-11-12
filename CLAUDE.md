@@ -947,7 +947,9 @@ cascade.
 `MeshRenderer::$batchable` merges, after culling, what is left of one mesh + material + shadow flag
 into one `DrawMeshInstanced` (`Renderer3DSystemBatchingTest`); a batch of one stays a `DrawMesh`. For
 repeating static meshes: an entity that moved keeps its own draw (its motion vector), transparent
-materials stay single (sorting) and so does `excludeFromGbuffer`.
+materials stay single (sorting) unless `MeshRenderer::$batchTransparent` opts in (the batch joins the
+transparent group, `TransparentDrawSorter` orders it as one unit and, up to 256 instances, per instance;
+meant for non-overlapping panes of one facade), and so does `excludeFromGbuffer`.
 
 Instanced batches are culled automatically, not only per-entity: `InstancedBatchCuller` (owned by
 `VioRenderer3D`) derives a world-space bounding sphere for every batch whose matrices live on the CPU
@@ -2066,6 +2068,19 @@ unlike older generators, to stay free of shared state).
   wedge shape and needs none: a rotated `BoxCollider3D` becomes a solid `OrientedBox`
   (capsule push-out, StepAssist/slope limit walk it); `fromEdges` puts the box's top surface
   through the two edge midpoints (unrolled). Arc kerbs: approximate with several slabs.
+- Lit-window grid (`Material::$windowLights > 0`): `windowCell: [w, h]` (default `[2.2, 2.8]`, the
+  old fixed grid, rendered image byte-identical on D3D12/WARP), `windowOffset: [x, y]` (border of
+  the cells at offset + n * cell) and `windowUv: true` (grid follows the mesh UV, metric UVs make a
+  cell metres: sticks to each placed wall instead of the world position; needs u along the wall's
+  right direction, true for MetricMesh/WallWithOpenings fronts); `Material::withWindowGrid(w, h, ox,
+  oy, uv)`. Shader uniforms `u_window_grid` (vec4) and `u_emissive_look.z`
+  (`VioWindowGridRenderTest`).
+- Transparent panes: `MeshRenderer::$batchTransparent` (with `$batchable`) batches identical panes
+  into one sorted instanced draw. Limit that stays: a batch is one sort unit against other
+  transparent draws (it cannot interleave with a transparent mesh lying between its instances), and
+  per-instance sorting stops at `PER_INSTANCE_SORT_MAX` = 256 instances per batch (split bigger
+  facades into groups of at most 256 per material/mesh). Per-triangle sorting inside one mesh stays out
+  of scope (the transparent pass draws far faces then near faces, see Transparency).
 - Not done: per-vertex colour/attribute in `MeshData` (design note: the mesh upload is a
   fixed 8-float interleave of position/normal/uv, stride 32 bytes: `OpenGLRenderer3D.php:949`,
   `VulkanRenderer3D.php:1124`, vio layouts in `VioRenderer3D.php` (`interleaveMeshData`, layout

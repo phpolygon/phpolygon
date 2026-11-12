@@ -486,6 +486,30 @@ class Material
          * emit nothing for such a material.
          */
         public readonly bool $emissionByTextureAlpha = false,
+        /**
+         * Window grid of the lit-window look ($windowLights > 0): [width, height] of one
+         * window cell in metres (or UV units with $windowUv). The default 2.2 x 2.8 m is the
+         * original fixed grid. Set it to the facade's bay so a pane never straddles two
+         * cells (half lit room, half dark).
+         *
+         * @var array{0: float, 1: float}
+         */
+        public readonly array $windowCell = [2.2, 2.8],
+        /**
+         * Origin of the window grid [x, y] (same units as $windowCell): cell borders lie at
+         * offset + n * cell. World mode: along the wall plane (horizontal) and world Y.
+         *
+         * @var array{0: float, 1: float}
+         */
+        public readonly array $windowOffset = [0.0, 0.0],
+        /**
+         * The window grid follows the mesh UV instead of world position (u = horizontal,
+         * v = vertical; the kit's metric UVs make one UV unit one metre). The grid then
+         * sticks to each mesh, so one shared material fits every placed wall regardless
+         * of where it stands. Needs UVs whose u runs along the wall's right direction
+         * (MetricMesh / WallWithOpenings front faces do).
+         */
+        public readonly bool $windowUv = false,
     ) {}
 
     /**
@@ -643,6 +667,15 @@ class Material
         return $this->copy(emission: $emission);
     }
 
+    /**
+     * This material with a different window grid for the lit-window look (see
+     * {@see $windowCell}, {@see $windowOffset}, {@see $windowUv}).
+     */
+    public function withWindowGrid(float $cellWidth, float $cellHeight, float $offsetX = 0.0, float $offsetY = 0.0, bool $uv = false): self
+    {
+        return $this->copy(windowCell: [$cellWidth, $cellHeight], windowOffset: [$offsetX, $offsetY], windowUv: $uv);
+    }
+
     /** This material with its emission scaled by the albedo texture's alpha (see {@see $emissionByTextureAlpha}). */
     public function withEmissionByTextureAlpha(bool $on = true): self
     {
@@ -756,6 +789,9 @@ class Material
         ?string $normalTexture = null,
         bool $clearNormalTexture = false,
         ?bool $emissionByTextureAlpha = null,
+        ?array $windowCell = null,
+        ?array $windowOffset = null,
+        ?bool $windowUv = null,
     ): self {
         return new self(
             albedo: $albedo ?? $this->albedo,
@@ -845,6 +881,9 @@ class Material
             shadowDapple: $this->shadowDapple,
             shaderProfile: $this->shaderProfile,
             emissionByTextureAlpha: $emissionByTextureAlpha ?? $this->emissionByTextureAlpha,
+            windowCell: $windowCell ?? $this->windowCell,
+            windowOffset: $windowOffset ?? $this->windowOffset,
+            windowUv: $windowUv ?? $this->windowUv,
         );
     }
 

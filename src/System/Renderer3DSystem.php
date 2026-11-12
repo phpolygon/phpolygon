@@ -540,7 +540,7 @@ class Renderer3DSystem extends AbstractSystem
             // Batchable draws wait until culling is through: what survived of
             // one mesh + material becomes one draw below. A mover needs its own
             // draw for the motion vector.
-            if ($mesh->batchable && !$isTransparent && !$mesh->excludeFromGbuffer && ($prev === null || $prev === $matrix)) {
+            if ($mesh->batchable && (!$isTransparent || $mesh->batchTransparent) && !$mesh->excludeFromGbuffer && ($prev === null || $prev === $matrix)) {
                 $key = $mesh->meshId . '|' . $mesh->materialId . '|' . ($mesh->castShadows ? '1' : '0');
                 $batches[$key][0] = $mesh;
                 $batches[$key][1][] = $matrix;
@@ -605,11 +605,19 @@ class Renderer3DSystem extends AbstractSystem
                     $matrices[$i] = InstanceParams::matrix($matrices[$i], $p[0], $p[1], $p[2]);
                 }
             }
-            $this->commandList->add(count($matrices) === 1
+            $draw = count($matrices) === 1
                 ? new DrawMesh($mesh->meshId, $mesh->materialId, $matrices[0], castShadows: $mesh->castShadows, params: $params[0] ?? null)
                 // Every instance just passed the per-entity test above: the
                 // renderer has nothing to derive or cull for this batch.
-                : new DrawMeshInstanced($mesh->meshId, $mesh->materialId, $matrices, castShadows: $mesh->castShadows, bounds: BatchBounds::unbounded()));
+                : new DrawMeshInstanced($mesh->meshId, $mesh->materialId, $matrices, castShadows: $mesh->castShadows, bounds: BatchBounds::unbounded());
+            $batchMaterial = MaterialRegistry::get($mesh->materialId);
+            if ($batchMaterial !== null && $batchMaterial->alpha < 1.0) {
+                // Transparent batches ($batchTransparent) go in the transparent group;
+                // TransparentDrawSorter orders them with the rest.
+                $transparentDraws[] = $draw;
+                continue;
+            }
+            $this->commandList->add($draw);
             $drawnOpaque += count($matrices);
         }
 

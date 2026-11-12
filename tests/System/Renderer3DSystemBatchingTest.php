@@ -60,13 +60,13 @@ final class Renderer3DSystemBatchingTest extends TestCase
         MaterialRegistry::clear();
     }
 
-    private static function add(World $world, Vec3 $position, string $material, bool $batchable = true): Transform3D
+    private static function add(World $world, Vec3 $position, string $material, bool $batchable = true, bool $batchTransparent = false): Transform3D
     {
         $entity = $world->createEntity();
         $transform = new Transform3D(position: $position);
         $transform->worldMatrix = Mat4::translation($position->x, $position->y, $position->z);
         $world->attachComponent($entity->id, $transform);
-        $world->attachComponent($entity->id, new MeshRenderer('box', $material, castShadows: false, batchable: $batchable));
+        $world->attachComponent($entity->id, new MeshRenderer('box', $material, castShadows: false, batchable: $batchable, batchTransparent: $batchTransparent));
 
         return $transform;
     }
@@ -152,5 +152,24 @@ final class Renderer3DSystemBatchingTest extends TestCase
 
         self::assertSame([], $instanced);
         self::assertCount(4, $single);
+    }
+
+    public function testTransparentBatchOnlyWhenOptedIn(): void
+    {
+        $world = new World();
+        // Panes at different depths so the per-instance sort has something to order.
+        foreach ([-10.0, -30.0, -20.0] as $z) {
+            self::add($world, new Vec3(0.0, 0.0, $z), 'glass', batchTransparent: true);
+        }
+        self::add($world, new Vec3(3.0, 0.0, -10.0), 'glass');
+
+        [$single, $instanced] = $this->frame($world);
+
+        self::assertCount(1, $instanced, 'the three opted-in panes become one instanced draw');
+        self::assertCount(3, $instanced[0]->matrices);
+        self::assertCount(1, $single, 'the pane that did not opt in stays single');
+        // Sorted back to front per instance (farthest first).
+        $zs = array_map(static fn(Mat4 $m): float => $m->toArray()[14], $instanced[0]->matrices);
+        self::assertSame([-30.0, -20.0, -10.0], $zs);
     }
 }
