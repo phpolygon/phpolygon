@@ -38,13 +38,16 @@ final class HairMesh
             $total += 0.5 * self::len(self::cross(self::sub($b, $a), self::sub($c, $a)));
             $cum[$t] = $total;
         }
-        mt_srand($seed);
+        // Local engine instead of the global mt_srand: deterministic per seed and thread-safe.
+        // nextInt() on Mt19937 yields the same sequence as mt_rand(), so existing seeds are unchanged.
+        $rng = new \Random\Randomizer(new \Random\Engine\Mt19937($seed));
+        $max = (float) mt_getrandmax();
         $vertices = [];
         $normals = [];
         $uvs = [];
         $indices = [];
         for ($s = 0; $s < $strands; $s++) {
-            $r = mt_rand() / mt_getrandmax() * $total;
+            $r = $rng->nextInt() / $max * $total;
             $lo = 0;
             $hi = $tris - 1;
             while ($lo < $hi) {
@@ -56,8 +59,8 @@ final class HairMesh
                 }
             }
             [$a, $b, $c, $na, $nb, $nc] = self::corners($scalp, $lo, true);
-            $u = mt_rand() / mt_getrandmax();
-            $v = mt_rand() / mt_getrandmax();
+            $u = $rng->nextInt() / $max;
+            $v = $rng->nextInt() / $max;
             if ($u + $v > 1.0) {
                 $u = 1.0 - $u;
                 $v = 1.0 - $v;
@@ -65,8 +68,8 @@ final class HairMesh
             $w = 1.0 - $u - $v;
             $p = [$a[0] * $w + $b[0] * $u + $c[0] * $v, $a[1] * $w + $b[1] * $u + $c[1] * $v, $a[2] * $w + $b[2] * $u + $c[2] * $v];
             $n = self::norm([$na[0] * $w + $nb[0] * $u + $nc[0] * $v, $na[1] * $w + $nb[1] * $u + $nc[1] * $v, $na[2] * $w + $nb[2] * $u + $nc[2] * $v]);
-            $phase = mt_rand() / mt_getrandmax() * 2.0 * M_PI;
-            $strandLen = $length * (0.8 + 0.4 * mt_rand() / mt_getrandmax());
+            $phase = $rng->nextInt() / $max * 2.0 * M_PI;
+            $strandLen = $length * (0.8 + 0.4 * $rng->nextInt() / $max);
             // A side axis for the curl, perpendicular to the root normal.
             $side = self::norm(self::cross($n, abs($n[1]) < 0.9 ? [0.0, 1.0, 0.0] : [1.0, 0.0, 0.0]));
             $side2 = self::cross($n, $side);
