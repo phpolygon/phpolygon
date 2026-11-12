@@ -2066,13 +2066,16 @@ unlike older generators, to stay free of shared state).
 - `Physics\RampPose::fromEdges(lowEdge, highEdge, width, thickness)` -> `{position, rotation,
   size}`: entity pose + `BoxCollider3D::$size` for a walkable ramp/kerb. The engine has no
   wedge shape and needs none: a rotated `BoxCollider3D` becomes a solid `OrientedBox`
-  (capsule push-out, StepAssist/slope limit walk it); `fromEdges` puts the box's top surface
+  (capsule push-out; a tilted box is walked per the controller's slope limit, see
+  `Physics3DWalkabilityTest::testATiltedBoardIsWalkedWithoutJumpingToItsHighestCorner`; `RampPoseTest` itself
+  only checks the pose maths); `fromEdges` puts the box's top surface
   through the two edge midpoints (unrolled). Arc kerbs: approximate with several slabs.
 - Lit-window grid (`Material::$windowLights > 0`): `windowCell: [w, h]` (default `[2.2, 2.8]`, the
   old fixed grid, rendered image byte-identical on D3D12/WARP), `windowOffset: [x, y]` (border of
   the cells at offset + n * cell) and `windowUv: true` (grid follows the mesh UV, metric UVs make a
   cell metres: sticks to each placed wall instead of the world position; needs u along the wall's
-  right direction, true for MetricMesh/WallWithOpenings fronts); `Material::withWindowGrid(w, h, ox,
+  right direction, true for MetricMesh/WallWithOpenings fronts; on the back cap of a `PolygonExtrude`
+  the cells line up but the interior parallax mirrors); `Material::withWindowGrid(w, h, ox,
   oy, uv)`. Shader uniforms `u_window_grid` (vec4) and `u_emissive_look.z`
   (`VioWindowGridRenderTest`).
 - Transparent panes: `MeshRenderer::$batchTransparent` (with `$batchable`) batches identical panes

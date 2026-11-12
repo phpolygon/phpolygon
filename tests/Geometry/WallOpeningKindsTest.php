@@ -159,4 +159,76 @@ final class WallOpeningKindsTest extends TestCase
             }
         }
     }
+
+    /** Random layouts with notches (plain, arched, corner) and windows/portholes above them. */
+    public function testRandomNotchedWallsStayClosedAndExactVolume(): void
+    {
+        $rng = new \PHPolygon\Math\Rng(77);
+        $notches = $holes = $corners = 0;
+        for ($round = 0; $round < 300; $round++) {
+            $width = $rng->floatRange(4.0, 12.0);
+            $height = $rng->floatRange(3.0, 6.0);
+            $thickness = $rng->floatRange(0.1, 0.5);
+            $openings = [];
+            $area = 0.0;
+            // Notches: slots of the bottom edge, left to right, separated by wall.
+            $x = $rng->bool(0.3) ? 0.0 : $rng->floatRange(0.3, 1.0);
+            $notchTop = 0.0;
+            while ($x < $width - 0.8) {
+                $w = $rng->floatRange(0.6, 1.6);
+                $last = $x + $w >= $width - 0.4;
+                $touchRight = $last && $rng->bool(0.4);
+                if ($touchRight) {
+                    $w = $width - $x;
+                } elseif ($last) {
+                    break;
+                }
+                $h = $rng->floatRange(1.8, min(2.6, $height - 0.6));
+                $rise = $w > 0.8 && $rng->bool(0.4) ? $rng->floatRange(0.1, min($w / 2.0, 0.5)) : 0.0;
+                $openings[] = new WallOpening($x, 0.0, $w, $h, $rise, $rng->int(3, 10));
+                $area += $this->area($this->archRing($w, $h, $rise, $openings[count($openings) - 1]->archSegments));
+                $notchTop = max($notchTop, $h);
+                $x += $w + $rng->floatRange(0.3, 1.2);
+            }
+            // Windows / portholes above the notch band, inside the wall.
+            $wx = 0.4;
+            while ($wx < $width - 1.2 && $notchTop + 0.9 < $height - 0.4) {
+                $y = $notchTop + 0.3;
+                if ($rng->bool(0.5)) {
+                    $ww = $rng->floatRange(0.4, 0.8);
+                    $hh = min($rng->floatRange(0.4, 0.8), $height - 0.3 - $y);
+                    if ($hh > 0.2) {
+                        $openings[] = new WallOpening($wx, $y, $ww, $hh);
+                        $area += $ww * $hh;
+                    }
+                } else {
+                    $r = $rng->floatRange(0.15, 0.3);
+                    if ($y + 2 * $r < $height - 0.2) {
+                        $o = WallOpening::circle($wx + $r, $y + $r, $r, $rng->int(6, 16));
+                        $openings[] = $o;
+                        $area += $this->area($o->ring ?? []);
+                    }
+                }
+                $wx += $rng->floatRange(0.9, 1.6);
+            }
+            foreach ($openings as $o) {
+                $notches += $o->isFloorLevel() ? 1 : 0;
+                $holes += $o->isFloorLevel() ? 0 : 1;
+                $corners += $o->isFloorLevel() && ($o->x <= 1e-9 || $o->x + $o->width >= $width - 1e-9) ? 1 : 0;
+            }
+            $wall = WallWithOpenings::parts($width, $height, $thickness, $openings)['wall'];
+            $this->assertClosed($wall);
+            self::assertEqualsWithDelta(($width * $height - $area) * $thickness, $this->volume($wall), 1e-6, "round $round");
+        }
+        // The loop must really exercise notches, corner notches and holes above them.
+        self::assertGreaterThan(300, $notches);
+        self::assertGreaterThan(50, $corners);
+        self::assertGreaterThan(100, $holes);
+    }
+
+    /** @return list<Vec2> */
+    private function archRing(float $w, float $h, float $rise, int $segments): array
+    {
+        return \PHPolygon\Geometry\Profile::archedRect($w, $h, $rise, $segments);
+    }
 }

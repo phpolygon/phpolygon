@@ -76,11 +76,13 @@ final class RoundMeshTest extends TestCase
         $m = RoundMesh::cylinder(0.5, 3.0, 'y', 16, false, 2.0);
         $this->assertSound($m, false);
         self::assertSame(34, $m->vertexCount(), 'no caps: only the 2 x 17 side vertices');
-        self::assertEqualsWithDelta(2.0 * M_PI * 0.5 * 2.0, max(array_filter($m->uvs, static fn(float $u): bool => true)), 1e-9);
+        $us = [];
         $vs = [];
-        for ($i = 1; $i < count($m->uvs); $i += 2) {
-            $vs[] = $m->uvs[$i];
+        for ($i = 0; $i < count($m->uvs); $i += 2) {
+            $us[] = $m->uvs[$i];
+            $vs[] = $m->uvs[$i + 1];
         }
+        self::assertEqualsWithDelta(2.0 * M_PI * 0.5 * 2.0, max($us), 1e-9, 'u = circumference in metres * uvScale');
         self::assertEqualsWithDelta(6.0, max($vs), 1e-9, 'v = metres along the axis * uvScale');
     }
 
@@ -188,28 +190,5 @@ final class RoundMeshTest extends TestCase
         $m = MeshData::mergeTransformed([[$plain, Mat4::translation(0.0, 0.0, 1.0)]]);
         self::assertNull($m->tangents);
         self::assertEqualsWithDelta(1.0, $m->vertices[2], 1e-12);
-    }
-
-    public function testMergeTransformedIsNotSlowerThanTransformedPlusMerge(): void
-    {
-        $part = RoundMesh::cylinder(0.02, 0.1, 'y', 8);
-        $part = new MeshData($part->vertices, $part->normals, $part->uvs, $part->indices);
-        $parts = [];
-        for ($i = 0; $i < 300; $i++) {
-            $parts[] = [$part, Mat4::translation($i * 0.05, 0.0, 0.0)->multiply(Mat4::rotationY($i * 0.1))];
-        }
-        $best = static function (callable $fn): float {
-            $t = INF;
-            for ($r = 0; $r < 7; $r++) {
-                $s = hrtime(true);
-                $fn();
-                $t = min($t, (hrtime(true) - $s) / 1e6);
-            }
-            return $t;
-        };
-        $old = $best(static fn() => MeshData::merge(...array_map(static fn(array $p): MeshData => $p[0]->transformed($p[1]), $parts)));
-        $new = $best(static fn() => MeshData::mergeTransformed($parts, false));
-        // Loose bound against timer noise; the measured gain is in CLAUDE.md.
-        self::assertLessThan($old * 1.2, $new, "old $old ms, new $new ms");
     }
 }

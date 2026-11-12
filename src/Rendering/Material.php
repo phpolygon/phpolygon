@@ -768,6 +768,8 @@ class Material
 
     /**
      * @param array<string, float|int|list<float>>|null $params
+     * @param array{0: float, 1: float}|null $windowCell
+     * @param array{0: float, 1: float}|null $windowOffset
      */
     private function copy(
         ?Color $emission = null,

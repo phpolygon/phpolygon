@@ -64,7 +64,6 @@ final readonly class WallOpening
         if (count($ring) < 3) {
             throw new \InvalidArgumentException('A ring opening needs at least 3 points');
         }
-        $ring = array_values($ring);
         $minX = $maxX = $ring[0]->x;
         $minY = $maxY = $ring[0]->y;
         foreach ($ring as $p) {
