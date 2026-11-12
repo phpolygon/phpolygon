@@ -2079,7 +2079,8 @@ unlike older generators, to stay free of shared state).
   into one sorted instanced draw. Limit that stays: a batch is one sort unit against other
   transparent draws (it cannot interleave with a transparent mesh lying between its instances), and
   per-instance sorting stops at `PER_INSTANCE_SORT_MAX` = 256 instances per batch (split bigger
-  facades into groups of at most 256 per material/mesh). Per-triangle sorting inside one mesh stays out
+  facades into groups of at most 256 per material/mesh). Checked on D3D12/WARP (software): four panes as
+  one instanced transparent draw vs four single draws differ by at most 1/255 per channel. Per-triangle sorting inside one mesh stays out
   of scope (the transparent pass draws far faces then near faces, see Transparency).
 - Not done: per-vertex colour/attribute in `MeshData` (design note: the mesh upload is a
   fixed 8-float interleave of position/normal/uv, stride 32 bytes: `OpenGLRenderer3D.php:949`,
