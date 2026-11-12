@@ -142,6 +142,24 @@ final class ProcModeShaderRegistry
         return self::$textureUnits;
     }
 
+    /** Units a sampler-less texture (read by texelFetch) may use, null = unknown. */
+    private static ?int $fetchUnits = null;
+
+    /**
+     * php-vio `vio_texture_units()['fetch_units']`: texture slots that need no sampler state, so a
+     * texelFetch-only texture may sit above the sampler limit (D3D11, D3D12 with FXC). Absent on
+     * older php-vio; null forgets it.
+     */
+    public static function setFetchUnits(?int $units): void
+    {
+        self::$fetchUnits = $units !== null && $units > 0 ? $units : null;
+    }
+
+    public static function fetchUnits(): ?int
+    {
+        return self::$fetchUnits;
+    }
+
     /**
      * Samplers snippets may declare: the units above FIRST_SAMPLER_SLOT when the
      * context's units are known, else MAX_SAMPLERS.
@@ -857,6 +875,7 @@ final class ProcModeShaderRegistry
     public static function clear(): void
     {
         self::$textureUnits = null;
+        self::$fetchUnits = null;
         self::$glslHelpers = [];
         self::$glslBranch = [];
         self::$postColorHelpers = null;

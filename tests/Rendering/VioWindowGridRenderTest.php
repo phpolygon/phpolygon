@@ -141,4 +141,52 @@ final class VioWindowGridRenderTest extends TestCase
         };
         self::assertGreaterThan($dark($large) + 3, $dark($small), 'more frames (dark pixels) with small cells');
     }
+
+    /** Two identical 4 m quads side by side: the grids of both start at UV (0,0). */
+    private function pair(Material $material): string
+    {
+        self::assertNotNull($this->ctx);
+        MeshRegistry::register('tile', MetricMesh::box(4.0, 4.0, 0.1));
+        MaterialRegistry::register('w', $material);
+        $renderer = new VioRenderer3D($this->ctx, self::W, self::H);
+        $renderer->applySettings(new GraphicsSettings(shadowQuality: ShadowQuality::Off, antiAliasing: AntiAliasing::Off, bloom: false));
+        $list = new RenderCommandList();
+        $list->add(new SetCamera(
+            Mat4::lookAt(new Vec3(0.0, 0.0, 10.0), new Vec3(0.0, 0.0, 0.0), new Vec3(0.0, 1.0, 0.0)),
+            Mat4::orthographic(-4.0, 4.0, -4.0, 4.0, 1.0, 30.0),
+        ));
+        $list->add(new SetAmbientLight(new Color(1.0, 1.0, 1.0), 0.0));
+        $list->add(new DrawMesh('tile', 'w', Mat4::translation(-2.0, 0.0, 0.0)));
+        $list->add(new DrawMesh('tile', 'w', Mat4::translation(2.0, 0.0, 0.0)));
+
+        return $renderer->renderToImage($list, self::W, self::H, new Color(0.0, 0.0, 0.0));
+    }
+
+    /** Mean absolute difference between the left half and the right half of an image. */
+    private static function halvesDiffer(string $image): float
+    {
+        $sum = 0;
+        for ($y = 0; $y < self::H; $y++) {
+            for ($x = 0; $x < self::W / 2; $x++) {
+                $a = ($y * self::W + $x) * 4;
+                $b = ($y * self::W + $x + self::W / 2) * 4;
+                $sum += abs(ord($image[$a]) - ord($image[$b])) + abs(ord($image[$a + 1]) - ord($image[$b + 1]));
+            }
+        }
+
+        return $sum / (self::H * self::W / 2 * 2);
+    }
+
+    public function testWindowVaryMixesTheWorldPositionIntoTheCellChoice(): void
+    {
+        $same = $this->pair($this->wall(['windowCell' => [1.0, 1.0], 'windowUv' => true, 'windowLights' => 0.5]));
+        $mixed = $this->pair($this->wall(['windowCell' => [1.0, 1.0], 'windowUv' => true, 'windowLights' => 0.5, 'windowVary' => true]));
+
+        // Measured on D3D12 hardware: the two halves of identical quads differ by about 4 (edge pixels), mixed ones far more.
+        $sameDiff = self::halvesDiffer($same);
+        $mixedDiff = self::halvesDiffer($mixed);
+        fwrite(STDERR, sprintf("[window vary] halves differ: same %.2f, mixed %.2f\n", $sameDiff, $mixedDiff));
+        self::assertLessThan(8.0, $sameDiff, 'identical quads light the same cells without windowVary');
+        self::assertGreaterThan($sameDiff + 6.0, $mixedDiff, 'windowVary lights different cells on the two quads');
+    }
 }

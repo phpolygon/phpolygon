@@ -79,7 +79,7 @@ trait VioSkinnedDraws
                 => "    mat4 model = u_model;\n    int skinBase = 0;\n    if (u_use_instancing == 1) {\n        int rec = u_skin_inst + gl_InstanceIndex * 2;\n        model = skinData[rec];\n        skinBase = int(skinData[rec + 1][0].x + 0.5);\n    }\n",
             "    vec3 pos = animatePosition(vatPosition(a_position), model, u_time, grassHash);\n"
                 => "    mat4 skinM = {$blend};\n    vec3 skinPos = (skinM * vec4(a_position, 1.0)).xyz;\n    vec3 skinNrm = normalize(mat3(skinM) * a_normal);\n    vec3 pos = animatePosition(vatPosition(skinPos), model, u_time, grassHash);\n",
-            "    vec3 localNormal = a_normal;\n" => "    vec3 localNormal = skinNrm;\n",
+            "    vec3 localNormal = vatNormal(a_normal);\n" =>"    vec3 localNormal = skinNrm;\n",
             "    vec3 prevPos = animatePosition(a_position, prevModel, u_time_prev, grassHash);\n"
                 => "    vec3 prevPos = animatePosition(skinPos, prevModel, u_time_prev, grassHash);\n",
         ];

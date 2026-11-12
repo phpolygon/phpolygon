@@ -5027,6 +5027,8 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         // SAMPLER-LIMITS-PLAN): the snippet sampler budget follows them.
         $units = function_exists('vio_texture_units') ? (vio_texture_units($this->ctx)['units'] ?? null) : null;
         ProcModeShaderRegistry::setTextureUnits(is_int($units) ? $units : null);
+        $fetch = function_exists('vio_texture_units') ? (vio_texture_units($this->ctx)['fetch_units'] ?? null) : null;
+        ProcModeShaderRegistry::setFetchUnits(is_int($fetch) ? $fetch : null);
         ProcModeShaderRegistry::assertSamplerBudget();
         // After the unit count is known: the pyramid takes the highest unit.
         $this->hizUnitBuilt = $this->settings->occlusionCulling ? $this->hizUnit() : -1;
@@ -5215,9 +5217,8 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             && in_array($id, ['default', 'default_mrt', 'default_mrt_mv', 'shadow', 'gbuffer', 'depth', 'minimap'], true)) {
             $vertSrc = self::withDefine($vertSrc, 'PHPOLYGON_INSTANCE_PARAMS');
         }
-        if (in_array($id, ['default', 'default_mrt', 'default_mrt_mv'], true)
-            && (ProcModeShaderRegistry::textureUnits() ?? 0) > self::VAT_SLOT) {
-            $vertSrc = self::withDefine($vertSrc, 'PHPOLYGON_VAT');
+        if (in_array($id, ['default', 'default_mrt', 'default_mrt_mv'], true)) {
+            $vertSrc = self::withVat($vertSrc);
         }
         if (in_array($id, ['default', 'default_mrt', 'default_mrt_mv'], true)
             && (ProcModeShaderRegistry::textureUnits() ?? 0) > self::OCEAN_SLOT) {
@@ -5333,9 +5334,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             $source = self::storageInstancingVertexSource($source);
         }
         $source = $this->withBindless($source, false);
-        if ((ProcModeShaderRegistry::textureUnits() ?? 0) > self::VAT_SLOT) {
-            $source = self::withDefine($source, 'PHPOLYGON_VAT');
-        }
+        $source = self::withVat($source);
         if ((ProcModeShaderRegistry::textureUnits() ?? 0) > self::OCEAN_SLOT) {
             $source = self::withDefine($source, 'PHPOLYGON_OCEAN');
         }
@@ -6276,6 +6275,36 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
     }
 
     /** Inject `#define $name 1` right after the #version line. */
+    /**
+     * How the vertex animation texture is read on this context: 0 = not at all (a context whose
+     * sampler units reach only VAT_SLOT and no sampler-less units), 1 = a combined sampler on
+     * VAT_SLOT (more than VAT_SLOT units: D3D12 with SM 6, OpenGL, Vulkan), 2 = a separate texture
+     * read by texelFetch on VAT_SLOT (php-vio fetch_units, D3D11 and D3D12 with FXC).
+     */
+    private static function vatMode(): int
+    {
+        if ((ProcModeShaderRegistry::textureUnits() ?? 0) > self::VAT_SLOT) {
+            return 1;
+        }
+
+        return (ProcModeShaderRegistry::fetchUnits() ?? 0) > self::VAT_SLOT ? 2 : 0;
+    }
+
+    /** The VAT defines of a mesh vertex source (the version moves to 450 for the sampler-less texture type). */
+    private static function withVat(string $src): string
+    {
+        $mode = self::vatMode();
+        if ($mode === 0) {
+            return $src;
+        }
+        if ($mode === 2) {
+            $src = (string) preg_replace('/^\s*#version[^\n]*\n/', "#version 450\n#extension GL_EXT_samplerless_texture_functions : require\n", str_replace("\r\n", "\n", $src), 1);
+            $src = self::withDefine($src, 'PHPOLYGON_VAT_FETCH');
+        }
+
+        return self::withDefine($src, 'PHPOLYGON_VAT');
+    }
+
     private static function withDefine(string $src, string $name): string
     {
         $define = "#define {$name} 1\n";
@@ -9609,6 +9638,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             'u_weathering'          => $material->weathering,
             'u_glass'               => [$material->glass, $material->glassDirt],
             'u_emissive_look'       => [$material->windowLights, $material->neonTube ? 1.0 : 0.0, $material->windowUv ? 1.0 : 0.0],
+            'u_window_vary'         => $material->windowVary ? 1.0 : 0.0,
             'u_window_grid'         => [
                 max(1.0e-3, $material->windowCell[0]), max(1.0e-3, $material->windowCell[1]),
                 $material->windowOffset[0], $material->windowOffset[1],
@@ -9625,7 +9655,9 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             'u_hair'                => $material->hair ? 1.0 : 0.0,
             'u_fur'                 => [0.0, $material->furLength, 0.0, 0.0],
             'u_fur_shell'           => [0.0, $material->furDensity, 0.35, $material->furLength > 0.0 ? 1.0 : 0.0],
-            'u_vat'                 => $material->vatTexture !== null && count($material->vatInfo) >= 8 ? [$material->vatInfo[0], $material->vatInfo[1], 1.0, 0.0] : [0.0, 0.0, 0.0, 0.0],
+            'u_vat'                 => $material->vatTexture !== null && count($material->vatInfo) >= 8
+                ? [$material->vatInfo[0], $material->vatInfo[1], 1.0 + (($material->vatInfo[9] ?? 0.0) > 0.5 ? 1.0 : 0.0), (float) ($material->vatInfo[8] ?? 0.0)]
+                : [0.0, 0.0, 0.0, 0.0],
             'u_vat_min'             => count($material->vatInfo) >= 8 ? [$material->vatInfo[2], $material->vatInfo[3], $material->vatInfo[4]] : [0.0, 0.0, 0.0],
             'u_vat_extent'          => count($material->vatInfo) >= 8 ? [$material->vatInfo[5], $material->vatInfo[6], $material->vatInfo[7]] : [1.0, 1.0, 1.0],
             // Subsurface scattering (skin path). Gated by strength > 0 in the
@@ -9708,7 +9740,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
                 vio_bind_texture($this->ctx, $ocean, self::OCEAN_SLOT);
             }
         }
-        if ($material->vatTexture !== null && (ProcModeShaderRegistry::textureUnits() ?? 0) > self::VAT_SLOT) {
+        if ($material->vatTexture !== null && self::vatMode() > 0) {
             $vat = $this->resolveTexture($material->vatTexture);
             if ($vat !== null) {
                 vio_set_uniform($this->ctx, 'u_vat_tex', self::VAT_SLOT);

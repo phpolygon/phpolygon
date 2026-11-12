@@ -230,6 +230,8 @@ uniform vec2 u_glass;
 uniform vec3 u_emissive_look;
 // Window grid: xy = cell size, zw = origin (metres, or UV units when z of the look is set).
 uniform vec4 u_window_grid;
+// Material::$windowVary: mix the cell's world position into the lit/dark choice.
+uniform float u_window_vary;
 // Material looks (shader plan 5.5): x = cloth sheen, y = brushed metal, z = glitter.
 uniform vec3 u_material_look;
 // Dithered distance fade (shader plan 6.1): (start, end) metres, end <= 0 = off.
@@ -3092,6 +3094,14 @@ void main() {
         vec2 cuv = (wpos - u_window_grid.zw) / u_window_grid.xy;
         vec2 cell = floor(cuv);
         vec2 f = fract(cuv);
+        if (u_window_vary > 0.5 && u_emissive_look.z > 0.5) {
+            // World position of this cell's centre (UV units are metres along wt and world Y), so identical
+            // quads placed side by side draw different cells. Quantised to 10 cm: constant over the cell.
+            vec2 centre = (cell + 0.5) * u_window_grid.xy + u_window_grid.zw;
+            vec3 cw = v_worldPos + wt * (centre.x - v_uv.x) + vec3(0.0, centre.y - v_uv.y, 0.0);
+            vec3 q = floor(cw * 10.0 + 0.5);
+            cell += vec2(hash21(q.xz + q.y * 17.0 + 3.1), hash21(q.zx + q.y * 5.0 + 9.7)) * 97.0;
+        }
         float h = hash21(cell + 31.7);
         float lit = step(h, u_emissive_look.x);
         vec3 tone = mix(vec3(1.0, 0.82, 0.6), vec3(0.75, 0.86, 1.0), step(0.7, hash21(cell + 5.1)));

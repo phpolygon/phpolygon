@@ -510,6 +510,14 @@ class Material
          * (MetricMesh / WallWithOpenings front faces do).
          */
         public readonly bool $windowUv = false,
+        /**
+         * With $windowUv every placed quad of one material starts at UV (0,0), so identical
+         * quads would all pick the same lit/dark cells. $windowVary mixes the world position
+         * of the cell (its centre, quantised to 10 cm) into the lit/dark and tone choice, so a
+         * facade of identical quads shows mixed windows; a cell keeps its value wherever the
+         * mesh is cut. Off = the previous look, unchanged.
+         */
+        public readonly bool $windowVary = false,
     ) {}
 
     /**
@@ -671,9 +679,9 @@ class Material
      * This material with a different window grid for the lit-window look (see
      * {@see $windowCell}, {@see $windowOffset}, {@see $windowUv}).
      */
-    public function withWindowGrid(float $cellWidth, float $cellHeight, float $offsetX = 0.0, float $offsetY = 0.0, bool $uv = false): self
+    public function withWindowGrid(float $cellWidth, float $cellHeight, float $offsetX = 0.0, float $offsetY = 0.0, bool $uv = false, ?bool $vary = null): self
     {
-        return $this->copy(windowCell: [$cellWidth, $cellHeight], windowOffset: [$offsetX, $offsetY], windowUv: $uv);
+        return $this->copy(windowCell: [$cellWidth, $cellHeight], windowOffset: [$offsetX, $offsetY], windowUv: $uv, windowVary: $vary);
     }
 
     /** This material with its emission scaled by the albedo texture's alpha (see {@see $emissionByTextureAlpha}). */
@@ -794,6 +802,7 @@ class Material
         ?array $windowCell = null,
         ?array $windowOffset = null,
         ?bool $windowUv = null,
+        ?bool $windowVary = null,
     ): self {
         return new self(
             albedo: $albedo ?? $this->albedo,
@@ -886,6 +895,7 @@ class Material
             windowCell: $windowCell ?? $this->windowCell,
             windowOffset: $windowOffset ?? $this->windowOffset,
             windowUv: $windowUv ?? $this->windowUv,
+            windowVary: $windowVary ?? $this->windowVary,
         );
     }
 

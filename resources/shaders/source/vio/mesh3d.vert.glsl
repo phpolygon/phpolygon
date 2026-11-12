@@ -329,28 +329,80 @@ vec3 animatePosition(vec3 pos, mat4 model, float time, float grassHash) {
 // Vertex animation texture (shader plan 6.3, Material::$vatTexture): positions baked
 // per frame (VatBaker: two RGBA8 texels per vertex, 16 bits per axis), played at
 // fps and blended between neighbouring frames.
-uniform vec4 u_vat;          // frames, fps, on, unused
+uniform vec4 u_vat;          // frames, fps, mode (1 = one clip, 2 = clip from the instance params), texels per vertex (3 = baked normals, else 2)
 uniform vec3 u_vat_min;
 uniform vec3 u_vat_extent;
+// Instance params of this draw (x = first row of the clip, y = its frame count, z = time offset in
+// seconds) for u_vat.z == 2: a crowd plays different clips, each instance at its own phase.
+vec3 g_vat_ip = vec3(0.0);
 #ifdef PHPOLYGON_VAT
+#ifdef PHPOLYGON_VAT_FETCH
+// Sampler-less: a separate texture read by texelFetch needs no sampler state, so it may sit above the
+// backend's sampler limit (php-vio fetch_units). The binding is VioRenderer3D::VAT_SLOT.
+layout(binding = 17) uniform texture2D u_vat_tex;
+#else
 uniform sampler2D u_vat_tex;
+#endif
+int vatStride() {
+    return u_vat.w > 2.5 ? 3 : 2;
+}
 vec3 vatFrame(int f) {
-    vec4 a = texelFetch(u_vat_tex, ivec2(gl_VertexID * 2, f), 0) * 255.0;
-    vec4 b = texelFetch(u_vat_tex, ivec2(gl_VertexID * 2 + 1, f), 0) * 255.0;
+    int s = vatStride();
+    vec4 a = texelFetch(u_vat_tex, ivec2(gl_VertexID * s, f), 0) * 255.0;
+    vec4 b = texelFetch(u_vat_tex, ivec2(gl_VertexID * s + 1, f), 0) * 255.0;
     vec3 q = vec3(a.r * 256.0 + a.g, a.b * 256.0 + a.a, b.r * 256.0 + b.g) / 65535.0;
     return u_vat_min + q * u_vat_extent;
+}
+// Octahedral normal of the third texel (VatBaker::bake(..., true)).
+vec3 vatNormalFrame(int f) {
+    vec4 n = texelFetch(u_vat_tex, ivec2(gl_VertexID * 3 + 2, f), 0) * 255.0;
+    vec2 o = vec2(n.r * 256.0 + n.g, n.b * 256.0 + n.a) / 65535.0 * 2.0 - 1.0;
+    vec3 v = vec3(o, 1.0 - abs(o.x) - abs(o.y));
+    if (v.z < 0.0) {
+        v.xy = (1.0 - abs(v.yx)) * vec2(v.x >= 0.0 ? 1.0 : -1.0, v.y >= 0.0 ? 1.0 : -1.0);
+    }
+    return normalize(v);
+}
+// The two frames to blend and the blend factor.
+void vatPlay(out int f0, out int f1, out float t) {
+    float frames = u_vat.x;
+    float start = 0.0;
+    float time = u_time;
+    if (u_vat.z > 1.5) {
+        frames = max(g_vat_ip.y, 1.0);
+        start = g_vat_ip.x;
+        time += g_vat_ip.z;
+    }
+    float fr = mod(time * u_vat.y, frames);
+    int a = int(floor(fr));
+    f0 = int(start) + a;
+    f1 = int(start) + int(mod(float(a + 1), frames));
+    t = fract(fr);
 }
 #endif
 vec3 vatPosition(vec3 p) {
 #ifdef PHPOLYGON_VAT
     if (u_vat.z > 0.5 && u_vat.x >= 1.0) {
-        float fr = mod(u_time * u_vat.y, u_vat.x);
-        int f0 = int(floor(fr));
-        int f1 = int(mod(float(f0 + 1), u_vat.x));
-        return mix(vatFrame(f0), vatFrame(f1), fract(fr));
+        int f0;
+        int f1;
+        float t;
+        vatPlay(f0, f1, t);
+        return mix(vatFrame(f0), vatFrame(f1), t);
     }
 #endif
     return p;
+}
+vec3 vatNormal(vec3 n) {
+#ifdef PHPOLYGON_VAT
+    if (u_vat.z > 0.5 && u_vat.x >= 1.0 && u_vat.w > 2.5) {
+        int f0;
+        int f1;
+        float t;
+        vatPlay(f0, f1, t);
+        return normalize(mix(vatNormalFrame(f0), vatNormalFrame(f1), t));
+    }
+#endif
+    return n;
 }
 
 void main() {
@@ -365,13 +417,15 @@ void main() {
         model[0].w = 0.0;
     }
 #ifdef PHPOLYGON_INSTANCE_PARAMS
-    v_instance_params = u_draw_params;
+    vec3 instanceParams = u_draw_params;
     if (u_use_instancing == 1) {
-        v_instance_params = vec3(model[0].w, model[1].w, model[2].w);
+        instanceParams = vec3(model[0].w, model[1].w, model[2].w);
         model[0].w = 0.0;
         model[1].w = 0.0;
         model[2].w = 0.0;
     }
+    v_instance_params = instanceParams;
+    g_vat_ip = instanceParams;
 #endif // PHPOLYGON_INSTANCE_PARAMS
 #ifdef PHPOLYGON_BINDLESS_MATERIALS
     v_albedo_slot = u_albedo_slot;
@@ -388,7 +442,7 @@ void main() {
         pos += normalize(a_normal) * (u_fur.x * u_fur.y / scale);
         pos.y -= u_fur.x * u_fur.x * u_fur.y * 0.3 / scale;
     }
-    vec3 localNormal = a_normal;
+    vec3 localNormal = vatNormal(a_normal);
 #ifdef PHPOLYGON_OCEAN
     if (u_ocean.w > 0.5) {
         vec3 oceanN;
