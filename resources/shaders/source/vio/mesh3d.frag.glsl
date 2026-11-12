@@ -106,6 +106,9 @@ uniform float u_clearcoat_roughness;
 uniform float u_flakes;
 uniform float u_normal_intensity;
 uniform int   u_use_environment_map;
+#ifdef PHPOLYGON_HEMI_SPECULAR
+uniform float u_hemi_specular;
+#endif // PHPOLYGON_HEMI_SPECULAR
 uniform int   u_normal_pattern;
 uniform float u_normal_scale;
 uniform int   u_surface_pattern;
@@ -3029,8 +3032,21 @@ void main() {
         vec3 R = reflect(-V, N);
         vec3 F_ibl = fresnelSchlick(NdotV, F0);
         vec3 envColor = sampleEnvironment(R, roughness);
+        float envShadow = shadow;
+#ifdef PHPOLYGON_HEMI_SPECULAR
+        // Opt-in (VioRenderer3D::setHemisphereSpecular), so metals do not render black: with no
+        // probe bound reflect the ambient light as a sky/ground hemisphere.
+        if (u_has_environment_map == 0) {
+            float hemiUp = mix(clamp(R.y * 0.5 + 0.5, 0.0, 1.0), 0.5, roughness * roughness);
+            vec3 hemiAmb = u_ambient_color * u_ambient_intensity * (1.0 / 3.14159265);
+            envColor = mix(hemiAmb * 0.6, hemiAmb * 1.2, hemiUp) * u_hemi_specular;
+        }
+        // Sky light, not the sun's: the key light's shadow must not black the reflection out
+        // (with a probe bound too).
+        envShadow = ambientShadow * ao;
+#endif // PHPOLYGON_HEMI_SPECULAR
         float iblWeight = mix(0.15, 1.0, metallic) * (1.0 - roughness * 0.6) * (1.0 - 0.75 * interiorMask(v_worldPos));
-        localAcc += envColor * F_ibl * iblWeight * shadow;
+        localAcc += envColor * F_ibl * iblWeight * envShadow;
     }
 
 #ifndef PHPOLYGON_OMIT_CLEARCOAT

@@ -5287,6 +5287,9 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         if (self::sceneColorAvailable()) {
             $source = self::withDefine($source, 'PHPOLYGON_SCENE_COLOR');
         }
+        if ($this->hemiSpecular > 0.0) {
+            $source = self::withDefine($source, 'PHPOLYGON_HEMI_SPECULAR');
+        }
         if (($this->settings->rayTracedShadows || $this->settings->rayTracedReflections || $this->settings->rayTracedGi) && $this->rayQueryAvailable()) {
             $source = self::withDefine($source, 'PHPOLYGON_RAY_QUERY');
             // GL_EXT_ray_query needs GLSL 460.
@@ -5392,6 +5395,28 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
      */
     private const string CUTOUT_SUFFIX = '+cutout';
 
+    /** Strength of the hemisphere specular fallback (0 = off, the default), see {@see setHemisphereSpecular()}. */
+    private float $hemiSpecular = 0.0;
+    private bool $hemiProgramsStale = false;
+
+    /**
+     * Opt-in fallback for metals without an environment probe: where no cubemap is bound
+     * (no SetSky, no baked probe) a material with `useEnvironmentMap` reflects the
+     * ambient light as a sky/ground hemisphere instead of the flat sky/horizon tint, so
+     * metallic materials do not render black in studio and preview scenes. $strength
+     * scales it (1 = the ambient colour as radiance); 0 (default) leaves the output
+     * unchanged and compiles none of it. Switching it on or off rebuilds the mesh
+     * programs at the start of the next frame.
+     */
+    public function setHemisphereSpecular(float $strength): void
+    {
+        $strength = max(0.0, $strength);
+        if (($strength > 0.0) !== ($this->hemiSpecular > 0.0)) {
+            $this->hemiProgramsStale = true;
+        }
+        $this->hemiSpecular = $strength;
+    }
+
     /** Variant name of a shader profile's program ({@see ShaderProfiles}). */
     private const string PROFILE_PREFIX = 'profile:';
 
@@ -5407,6 +5432,12 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
     {
         if ($this->autoOmitMaterials < 0 && getenv('PHPOLYGON_SHADER_OMIT') === '0') {
             $this->autoOmitOff = true;
+        }
+        if ($this->hemiProgramsStale) {
+            $this->hemiProgramsStale = false;
+            if ($rebuild && isset($this->shaderCache['default'])) {
+                $this->rebuildMeshPrograms();
+            }
         }
         $materials = MaterialRegistry::version();
         $profiles = ShaderProfiles::version();
@@ -10729,6 +10760,9 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         // would respond as intensity² instead of linearly.
         vio_set_uniform($this->ctx, 'u_ambient_color', [$ac->r, $ac->g, $ac->b]);
         vio_set_uniform($this->ctx, 'u_ambient_intensity', $ai * $piScale);
+        if ($this->hemiSpecular > 0.0) {
+            vio_set_uniform($this->ctx, 'u_hemi_specular', $this->hemiSpecular);
+        }
         $this->frameAmbientLight = [$ac->r * $ai * $piScale, $ac->g * $ai * $piScale, $ac->b * $ai * $piScale];
 
         $dirCount = min(count($state['dirLights']), 4);

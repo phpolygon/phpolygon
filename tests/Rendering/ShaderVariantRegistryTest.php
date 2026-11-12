@@ -35,8 +35,10 @@ final class ShaderVariantRegistryTest extends TestCase
      * (automatic omission): measured on the RTX 2080 (2026-11-12) 12 pattern tiles, 7 surface tiles, metal
      * spheres and plain tiles came out byte-identical to the previous shader on D3D12 and D3D11 (without the
      * gating D3D12 differed by 1 LSB on up to 33 pixels per image).
+     * Changed again for the opt-in hemisphere specular (PHPOLYGON_HEMI_SPECULAR: compiled only with its define;
+     * the no-define text differs by the `envShadow` temporary only).
      */
-    private const VIO_FRAG_RELEASE = '6452ade7283934424aa724c508b7040f16357b358d4f82bb173286aba19e1c2a';
+    private const VIO_FRAG_RELEASE = '2a02b153d646935f45a55b0687465621f1effcf0efce05236bbb208573eb3607';
 
     protected function setUp(): void
     {
