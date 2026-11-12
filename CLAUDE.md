@@ -2146,6 +2146,53 @@ Benefits of this approach over file-based assets:
 - Claude Code can generate and iterate geometry directly
 - `DrawMeshInstanced` makes large worlds cheap to render
 
+### Planar mirrors and the hidden body (`PlanarMirrors`, `PlanarMirror`, `MeshRenderer::$hiddenFromMainCamera`)
+
+Opt-in, game-agnostic, vio family only. Without `PlanarMirrors::register()` and without a `SetPlanarMirror` nothing exists (no pass,
+target, sampler or shader text) and frames are the old ones byte for byte (D3D12 and D3D11 hardware, RTX 2080, 2 settings x 3 frames,
+hashes taken before the change and after: equal). `PlanarReflection` (water, one horizontal plane) is untouched; the two may coexist.
+
+- **Mirror** for ANY plane (wall, door, lift, ceiling): the scene mirrored at a rectangle into an FP16 linear target, sampled by the
+  mirror's material. **One mirror image per frame**: `PlanarMirrorSystem` (register after `Camera3DSystem`, before `Renderer3DSystem`)
+  chooses among the `PlanarMirror` components (rectangle `width` x `height` on the entity's Transform3D, reflecting toward local +Z, world
+  scale multiplies it) by `MirrorSelector`: eye in front of the plane, within `maxDistance`, bounding sphere in the camera frustum, then
+  the largest `(radius / distance)^2`. The others show their material's fallback. A game without the component may add
+  `new SetPlanarMirror($center, $normal, $right, $halfWidth, $halfHeight, $resolutionScale, $maxDistance, $updateEvery, $layerMask, $blur, $id, $clipBias)` itself.
+- **Budget controls** (all in the command / component): `resolutionScale` (0.1..1 of the scene size, default 0.5), `maxDistance` (0 = none),
+  `updateEvery` n (redraw every n-th frame while the same mirror id stays chosen; the lookup is PROJECTIVE - the mirror pass's
+  view-projection is uploaded as `u_mirror_viewproj` - so a kept image stays geometrically right under camera motion, only its content
+  lags), `layerMask` (`RenderLayers`: WORLD 1, BODY 2, MIRROR_SURFACE 4; default `MIRROR_DEFAULT` = all but mirror panels; drop BODY to leave
+  the player out), `blur` (px of the mirror texture, 9 taps, roughness), `clipBias` (clip plane 1 cm in front of the mirror). Skipped without
+  a draw when seen from behind, beyond the distance, with a shader override. Per frame the pass draws only `DrawMesh` whose sphere touches the
+  mirrored frustum and whose `layers & mask` is non-zero, instanced batches via `reachesPlanes()`. Opaque only, forward shading, no AO, no
+  sky (alpha 0 -> the panel's fallback), point lights are those of the main view.
+- **What lies behind the camera**: `VisibilityService` culls it before any command exists. With a `SetPlanarMirror` in the list
+  `Renderer3DSystem` asks `VisibilityService::entitiesInVolume($planes)` for the entities the mirrored frustum sees and neither the camera
+  nor the sun draws and emits them as `DrawMesh(shadowOnly: true, castShadows: false)` (camera passes skip them). `Renderer3DSystemShadowOnlyTest`-style test: `PlanarMirrorSystemTest`.
+- **Material**: the engine ships the library, the game owns proc-mode numbers. `PlanarMirrors::register($programs)` declares the sampler
+  `u_mirror_texture` (first free snippet slot, 12 with no other snippet sampler: never above 15, so D3D11 and D3D12-FXC with 16 units work; on SM6
+  with more units it simply takes the next slot), `u_mirror_viewproj`, `u_mirror_info` and the GLSL `mirrorSample(worldPos, N, blurScale, fallback)`.
+  `PlanarMirrors::registerMode($mode)` adds a ready proc mode (image x albedo, albedo x 0.2 as fallback, unlit, through `outputColor()`);
+  `ProcModeRegistry::map($materialId, $mode)`. The panel's MeshRenderer belongs on `RenderLayers::MIRROR_SURFACE` so it never draws itself.
+  Sampler budget: one snippet sampler of the program (see `declareSampler()`; a program with `ProbeGi` has room for one, a variant without it for four).
+- **Hidden body / full-body shadow**: `MeshRenderer::$hiddenFromMainCamera` makes `Renderer3DSystem` emit the entity as `DrawMesh(shadowOnly: true,
+  castShadows: $castShadows, layers: $renderLayers)`: the camera passes (opaque, G-buffer, transparent) skip it, the sun/spot/point shadow pass casts
+  it, mirrors and the water reflection show it. Never batched. Arms and hands that stay visible are separate, ordinary meshes of the game. The
+  ray-traced scene and the minimap read the full list and include it too; the native-GL renderer has no `shadowOnly` and would draw it. `MeshRenderer::$renderLayers`
+  / `DrawMesh::$layers` (default WORLD) only matter to mirrors; a mesh with a non-default layer is not batched.
+- Tests: `MirrorPlaneTest`, `MirrorSelectorTest`, `PlanarMirrorSystemTest` (CPU), `VioPlanarMirrorTest` (GPU, forward and MRT path: upright image,
+  object behind the camera, hidden body in the mirror and not in the view, layer mask, distance / behind skip, `updateEvery` alignment under motion, blur).
+- **Cost**, measured 2026-11-12, RTX 2080, php-vio 2.44.1, 1280x720, the `mirror` GPU mark and the GPU frame (sum of marks), median of 3 runs x 130
+  frames (D3D11: 2 runs x 90), `renderToImage`, shadows Medium, a 15-draw room: so the numbers are the FIXED cost of a pass plus fill rate, not a busy scene
+  (the pass redraws every draw that touches the mirrored frustum: expect it to grow with the draw count, up to the main pass's own cost at scale 1.0).
+  D3D12 / D3D11 in ms: frame without mirror 0.471 / 0.473; mirror pass at scale 0.5 0.069 / 0.077, at 0.75 0.105 / 0.119, at 1.0 0.160 / 0.174; blur 4 px adds
+  0.000 / 0.001 to the pass; `updateEvery` 2 halves it on average (median frame 0.063 / 0.073 = a drawing frame; the other frame costs nothing), 4 leaves
+  three of four frames free. Hidden body: no extra pass; a shadow caster costs what any caster costs in the shadow pass. Orientation, winding (opaque pipelines are
+  unculled) and the behind-the-camera case are pinned on D3D12 and D3D11 hardware and on WARP (forward and MRT path). The mirror target is always FP16 (8 bytes per
+  pixel: 0.5 scale at 1080p = 4.1 MB, 1.0 = 16.6 MB).
+- Open: one mirror per frame (two mirrors in view: the second shows its fallback); no sky or fog in the image; no transparent surfaces in the image; local lights outside
+  the camera's frustum are not in the mirror's light list; untested with ray-traced shadows / reflections; native-GL ignores `SetPlanarMirror`.
+
 ### Mesh assets (`*.mesh.json` / `*.mesh.bin`)
 
 Meshes authored in the editor or imported live as `<id>.mesh.json` (the versioned,

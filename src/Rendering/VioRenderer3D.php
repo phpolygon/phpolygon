@@ -4374,8 +4374,11 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         $ftAoRadius = 1.5;
 
         $this->cameraCutThisFrame = false;
+        $this->pendingMirror = null;
         foreach ($commands as $cmd) {
-            if ($cmd instanceof SetCamera) {
+            if ($cmd instanceof Command\SetPlanarMirror) {
+                $this->pendingMirror = $cmd;
+            } elseif ($cmd instanceof SetCamera) {
                 $this->currentViewMatrix = $cmd->viewMatrix;
                 $this->cameraProjectionMatrix = $cmd->projectionMatrix;
                 $this->cameraCutThisFrame = $this->cameraCutThisFrame || $cmd->cut;
@@ -4566,6 +4569,12 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         PerfProfiler::begin('render3d.submit.planar');
         $this->renderPlanarReflectionPass($commands, $frameState, $hasShadowMap, $dirLights);
         PerfProfiler::end();
+        // --- Planar mirror (any plane): the scene mirrored at the chosen mirror rectangle.
+        if ($this->pendingMirror !== null || $this->mirrorBound) {
+            PerfProfiler::begin('render3d.submit.mirror');
+            $this->renderPlanarMirrorPass($commands, $frameState, $hasShadowMap, $dirLights);
+            PerfProfiler::end();
+        }
 
         // HDR/Bloom disabled — D3D11 fullscreen quad draw produces no pixels (needs investigation)
         $hdrTarget = $this->enableHdr ? $this->hdrTarget : null;
@@ -6344,7 +6353,8 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
      */
     private function sceneTargetIsHdr(): bool
     {
-        return $this->offscreenActive
+        return $this->forceLinearTarget
+            || $this->offscreenActive
             && $this->offscreenTarget !== null
             && $this->offscreenTarget->isHdr();
     }
@@ -8821,6 +8831,195 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         $this->planarDrawn = true;
     }
 
+    /** The mirror command of this frame (null = none), set by the command scan of render(). */
+    /** True while the mirror image is drawn: its target is FP16 and linear whatever the scene target is. */
+    private bool $forceLinearTarget = false;
+    private ?Command\SetPlanarMirror $pendingMirror = null;
+    private ?VioRenderTarget $mirrorTarget = null;
+    private int $mirrorWidth = 0;
+    private int $mirrorHeight = 0;
+    private bool $mirrorHdr = false;
+    /** Whether an image is bound for this frame's mirror lookups (drawn now, or kept from an earlier frame). */
+    private bool $mirrorBound = false;
+    private ?Mat4 $mirrorViewProjection = null;
+    private string $mirrorDrawnId = '';
+    private int $mirrorFrame = 0;
+    private int $mirrorLastDrawFrame = -1;
+    /** Mirror images drawn so far (tests, profiles). */
+    private int $mirrorDraws = 0;
+    /** Draw commands of the last mirror image. */
+    private int $mirrorLastDrawCount = 0;
+
+    /** Mirror images drawn by this renderer so far; a kept image (updateEvery) does not count. */
+    public function planarMirrorDraws(): int
+    {
+        return $this->mirrorDraws;
+    }
+
+    /** Draw commands the last mirror image held. */
+    public function planarMirrorLastDrawCount(): int
+    {
+        return $this->mirrorLastDrawCount;
+    }
+
+    /** Whether the frame just rendered bound a mirror image. */
+    public function planarMirrorBound(): bool
+    {
+        return $this->mirrorBound;
+    }
+
+    /**
+     * The scene mirrored at the rectangle of {@see Command\SetPlanarMirror}, into the
+     * mirror target: general plane, oblique near plane on it, only the draws of the
+     * command's layers that touch the mirrored frustum. Opaque forward shading like the
+     * water pass, cleared to alpha 0. Skipped without registered mirrors, without a
+     * command, from behind the mirror, beyond its distance, with a shader override;
+     * a kept image (updateEvery) is rebound with its own view-projection.
+     *
+     * @param list<object> $commands
+     * @param array{ambientColor: Color, ambientIntensity: float, dirLights: list<SetDirectionalLight>, pointLights: list<AddPointLight>, spotLights: list<AddSpotLight>, rectLights: list<AddRectLight>, fogColor: Color, fogNear: float, fogFar: float, waveEnabled: bool, waveAmplitude: float, waveFrequency: float, wavePhase: float, ftMode: \PHPolygon\Rendering\Quality\FieldtracingMode, ftIntensity: float, ftAoRadius: float} $frameState
+     * @param list<SetDirectionalLight> $dirLights
+     */
+    private function renderPlanarMirrorPass(array $commands, array $frameState, bool $hasShadowMap, array $dirLights): void
+    {
+        $this->mirrorBound = false;
+        $mirror = $this->pendingMirror;
+        $view = $this->currentViewMatrix;
+        $projection = $this->currentProjectionMatrix;
+        if ($mirror === null || !Reflection\PlanarMirrors::registered() || $view === null || $projection === null
+            || $this->activeShaderId() !== 'default') {
+            return;
+        }
+        $eye = $this->cameraPosition ?? $this->extractCameraPosition($view);
+        $offset = $eye->sub($mirror->center);
+        if ($offset->dot($mirror->normal) <= 1e-4
+            || ($mirror->maxDistance > 0.0 && $offset->length() - $mirror->boundingRadius() > $mirror->maxDistance)) {
+            return;
+        }
+        // Always an FP16 linear image: the mirror panel passes it through outputColor(),
+        // which tonemaps on a display-referred target and does not on a linear one.
+        $hdr = true;
+        $scale = max(0.1, min(1.0, $mirror->resolutionScale));
+        $w = max(1, (int) round($this->width * $scale));
+        $h = max(1, (int) round($this->height * $scale));
+        $this->mirrorFrame++;
+        $reuse = $this->mirrorTarget !== null && $this->mirrorViewProjection !== null
+            && $this->mirrorDrawnId === $mirror->id
+            && $this->mirrorWidth === $w && $this->mirrorHeight === $h && $this->mirrorHdr === $hdr
+            && $this->mirrorFrame - $this->mirrorLastDrawFrame < max(1, $mirror->updateEvery);
+        if ($reuse) {
+            $this->mirrorBound = true;
+            return;
+        }
+        if ($this->mirrorTarget === null || $this->mirrorWidth !== $w || $this->mirrorHeight !== $h || $this->mirrorHdr !== $hdr) {
+            $this->mirrorTarget = vio_render_target($this->ctx, ['width' => $w, 'height' => $h, 'hdr' => $hdr]) ?: null;
+            $this->mirrorWidth = $w;
+            $this->mirrorHeight = $h;
+            $this->mirrorHdr = $hdr;
+        }
+        if ($this->mirrorTarget === null) {
+            return;
+        }
+
+        $mirroredView = Reflection\MirrorPlane::mirroredView($view, $mirror->center, $mirror->normal);
+        $mirroredProjection = Reflection\MirrorPlane::obliqueProjection($projection, $mirroredView, $mirror->center, $mirror->normal, $mirror->clipBias);
+        $planes = Frustum::planes($mirroredProjection, $mirroredView);
+        $draws = [];
+        foreach ($commands as $cmd) {
+            if ($cmd instanceof DrawMesh) {
+                if (($cmd->layers & $mirror->layerMask) === 0) {
+                    continue;
+                }
+                $sphere = MeshBounds::worldSphere($cmd->meshId, $cmd->modelMatrix);
+                if ($sphere !== null && Frustum::sphereOutside($planes, $sphere['cx'], $sphere['cy'], $sphere['cz'], $sphere['radius'])) {
+                    continue;
+                }
+            } elseif ($cmd instanceof DrawMeshInstanced) {
+                if (!$this->batchCuller->reachesPlanes($cmd, $planes)) {
+                    continue;
+                }
+            } else {
+                continue;
+            }
+            $draws[] = $cmd;
+        }
+
+        $saved = [$this->mrtThisFrame, $this->motionThisFrame, $this->ssaoActiveThisFrame, $this->sdfAoActiveThisFrame, $this->cameraPosition, $this->sceneVariant];
+        $this->currentViewMatrix = $mirroredView;
+        $this->currentProjectionMatrix = $mirroredProjection;
+        $this->cameraPosition = Reflection\MirrorPlane::mirroredEye($eye, $mirror->center, $mirror->normal);
+        $this->mrtThisFrame = false;
+        $this->motionThisFrame = false;
+        $this->ssaoActiveThisFrame = false;
+        $this->sdfAoActiveThisFrame = false;
+        $this->sceneVariant = $this->frameBaseVariant;
+        $this->forceLinearTarget = true;
+
+        vio_bind_render_target($this->ctx, $this->mirrorTarget);
+        vio_clear($this->ctx, 0.0, 0.0, 0.0, 0.0);
+        vio_viewport($this->ctx, 0, 0, $w, $h);
+        $this->bindPipeline('opaque');
+        $this->uploadFrameUniforms($frameState);
+        $this->uploadShadowUniforms($hasShadowMap, $dirLights);
+        $this->uploadSsaoUniforms();
+        $this->uploadSdfAoUniforms();
+        $this->uploadSnippetInputs();
+        $this->lastMaterialId = null;
+        $reactive = false;
+        $count = 0;
+        foreach (OpaqueDrawOrder::sort($draws, false, $reactive) as [$materialId, , $cmd, $material]) {
+            if ($this->wantsVariantSwitch($material)) {
+                $this->selectVariant($material, $materialId);
+            }
+            if ($cmd instanceof DrawMesh) {
+                $this->drawMeshCommand($cmd->meshId, $material, $cmd->modelMatrix, $cmd->materialId, true, null, $cmd->params);
+            } else {
+                $this->drawMeshInstancedCommand($cmd, $material);
+            }
+            $count++;
+        }
+        vio_unbind_render_target($this->ctx);
+        $this->forceLinearTarget = false;
+        $this->gpuMark('mirror');
+
+        [$this->mrtThisFrame, $this->motionThisFrame, $this->ssaoActiveThisFrame, $this->sdfAoActiveThisFrame, $this->cameraPosition, $this->sceneVariant] = $saved;
+        $this->currentViewMatrix = $view;
+        $this->currentProjectionMatrix = $projection;
+        $this->lastMaterialId = null;
+        $this->variantUniformsUploaded = $this->frameBaseVariant !== ProcModeShaderRegistry::BASE_VARIANT
+            ? [$this->frameBaseVariant => true] : [];
+        $this->mirrorViewProjection = $mirroredProjection->multiply($mirroredView);
+        $this->mirrorDrawnId = $mirror->id;
+        $this->mirrorLastDrawFrame = $this->mirrorFrame;
+        $this->mirrorDraws++;
+        $this->mirrorLastDrawCount = $count;
+        $this->mirrorBound = true;
+    }
+
+    /** The mirror sampler: this frame's image, or white with info.x = 0. */
+    private function bindPlanarMirror(int $slot): void
+    {
+        $texture = $this->mirrorBound && $this->mirrorTarget !== null ? vio_render_target_texture($this->mirrorTarget) : null;
+        if ($texture === null) {
+            $this->ensureWhiteTexture();
+            $texture = $this->whiteTexture;
+        }
+        if ($texture !== null) {
+            vio_set_uniform($this->ctx, Reflection\PlanarMirrors::SAMPLER, $slot);
+            vio_bind_texture($this->ctx, $texture, $slot);
+        }
+        $ready = $texture !== null && $this->mirrorBound && $this->mirrorViewProjection !== null && $this->pendingMirror !== null;
+        $pending = $this->pendingMirror;
+        $blur = $pending === null ? 0.0 : $pending->blur;
+        vio_set_uniform($this->ctx, Reflection\PlanarMirrors::VIEWPROJ, ($this->mirrorViewProjection ?? Mat4::identity())->toArray());
+        vio_set_uniform($this->ctx, Reflection\PlanarMirrors::INFO, [
+            $ready ? 1.0 : 0.0,
+            $this->conventions()->flipRenderTargetClipY() ? 1.0 : 0.0,
+            $this->mirrorWidth > 0 ? $blur / $this->mirrorWidth : 0.0,
+            $this->mirrorHeight > 0 ? $blur / $this->mirrorHeight : 0.0,
+        ]);
+    }
+
     /** The planar sampler: this frame's reflection, or white with info.y = 0. */
     private function bindPlanarReflection(int $slot): void
     {
@@ -11086,6 +11285,10 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
                 $this->bindPlanarReflection($slot);
                 continue;
             }
+            if ($name === Reflection\PlanarMirrors::SAMPLER) {
+                $this->bindPlanarMirror($slot);
+                continue;
+            }
             if (ProcModeShaderRegistry::isCubeSampler($name)) {
                 $this->bindSnippetCubemap($name, $slot, $id);
                 continue;
@@ -11215,3 +11418,4 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         ]);
     }
 }
+

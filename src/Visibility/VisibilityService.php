@@ -325,6 +325,60 @@ final class VisibilityService
         return $out;
     }
 
+    /**
+     * Entity-kind handles that a second view (a planar mirror's frustum, $planes in
+     * world space) sees and that neither the camera's visible set nor the sun's
+     * shadow-only set already holds: what Renderer3DSystem adds so a mirror shows
+     * what lies behind the camera. Dormant entities are left out. Empty when nothing
+     * is culled this frame (no camera, PHPOLYGON_NO_CULL): everything is drawn anyway.
+     * The fog cap of the camera does not apply here.
+     *
+     * @param list<array{0: float, 1: float, 2: float, 3: float}> $planes
+     * @return list<int>
+     */
+    public function entitiesInVolume(array $planes): array
+    {
+        if ($this->visibleSet === null) {
+            return [];
+        }
+        [$insideCells, $intersectedCells] = $this->index->classify($planes);
+        $out = [];
+        foreach ($insideCells as $cellKey => $_) {
+            foreach ($this->index->handlesInCell($cellKey) as $handle) {
+                $this->collectVolumeEntity($handle, $out, null);
+            }
+        }
+        foreach ($intersectedCells as $cellKey => $_) {
+            foreach ($this->index->handlesInCell($cellKey) as $handle) {
+                $this->collectVolumeEntity($handle, $out, $planes);
+            }
+        }
+
+        return array_keys($out);
+    }
+
+    /**
+     * @param array<int, true> $out
+     * @param list<array{0: float, 1: float, 2: float, 3: float}>|null $planes sphere test, null = already inside
+     */
+    private function collectVolumeEntity(int $handle, array &$out, ?array $planes): void
+    {
+        if (isset($this->visibleSet[$handle]) || isset($this->shadowOnlySet[$handle])) {
+            return;
+        }
+        $entry = $this->index->entry($handle);
+        if ($entry === null || $entry['kind'] !== EntryKind::Entity) {
+            return;
+        }
+        if ($planes !== null && Frustum::sphereOutside($planes, $entry['x'], $entry['y'], $entry['z'], $entry['radius'])) {
+            return;
+        }
+        if ($this->boundWorld !== null && $this->boundWorld->isDormant($handle)) {
+            return;
+        }
+        $out[$handle] = true;
+    }
+
     public function isVisible(int $handle): bool
     {
         if ($this->boundWorld !== null && $this->boundWorld->isDormant($handle)) {
