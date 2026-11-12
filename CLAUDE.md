@@ -4025,6 +4025,32 @@ Pure PHP, deterministic, no renderer change; works on every backend and needs no
 - Look-at/Blink conventions: root space of the character builders (netrunner `BodyModel`): +Y up, +Z forward, +X = the character's LEFT;
   `LookAt` yaw is positive toward +X (left), pitch positive up.
 
+### Skinning round 2, baked crowds, window variation - 2026-11-12
+
+- Culling: `DrawSkinnedMesh` instances outside the camera frustum leave the camera's passes (shadow passes still draw all of them).
+  Sphere from `SkinnedMeshRegistry::register($id, $skin, ?array $bounds)`: pass `SkinnedMeshData::boundsOver(...)` of the clips' palettes;
+  without it the bind-pose box grown by 50 % (a guess). `VioRenderer3D::skinInstancesCulled()` reports the last frame. `PHPOLYGON_NO_CULL=1` off.
+- Upload: a ring of three storage buffers filled with `vio_update_buffer` (works on D3D11 and D3D12 hardware), no allocation per frame.
+- Baked crowds (VAT): the vertex stage reads baked normals (`VatBaker::bake($frames, true)`, 3 texels per vertex, `u_vat.w`) and can play a
+  clip per instance: `Material::$vatInfo` entries 8 (texels per vertex) and 9 (1 = per-instance clip mode); the instance params are
+  (first row, frame count, time offset in seconds) - `DrawMesh::$params` or `InstanceParams::matrix()`; needs
+  `ProcModeShaderRegistry::enableInstanceParams()`. Helper `Animation\BakedClipSet::bake($skin, $rig, array<name,PoseClip>, $fps, $normals = true)`
+  -> `->image` (for `vio_texture`), `->vatInfo()`, `->params($clip, $phase)`, `->duration($clip)`. A VAT row is at most 16384 texels: 5461
+  vertices with normals, so bake crowd-level meshes. Default VAT behaviour (two texels, one clip) is unchanged.
+  Cost (RTX 2080, D3D12 SM6, 960x540 incl. readback, 4,941-vertex / 9,600-triangle figure, 2 clips, 3 normals, no shadows): 1,000 figures
+  16.5 ms median, 5,000 figures 43.8 ms (48 M triangles); bake of 2 clips x 24 fps in PHP 1.3 s once. VAT materials do not cast their own shadow.
+- VAT on 16-unit backends: coded (`VioRenderer3D::vatMode()` 2: a separate `texture2D` on slot 17 read by texelFetch, php-vio `fetch_units`,
+  `ProcModeShaderRegistry::fetchUnits()`), but OFF unless `PHPOLYGON_VAT_FETCH=1`: with the local fetch_units build (2026-11-12) the
+  vertex stage numbers the texture t0 (the `layout(binding)` is only honoured in the fragment stage), so the VAT reads the wrong slot and the
+  mesh collapses. Needs a php-vio fix; `VioVatCrowdTest` skips on fetch-only contexts without the env.
+- `Rendering\ShaderModelCheck::detect($ctx): ?int` / `::require($ctx)`: opt-in; throws when a D3D12 context compiled with FXC (shader model 5,
+  16 units) instead of 6. The engine never calls it; a program that needs SM 6 does.
+- `Material::$windowVary` (opt-in, `withWindowGrid(..., ?bool $vary)`): with `windowUv` the cell choice mixes the world position of the cell centre
+  (10 cm grid), so identical quads show different lit windows (D3D12: halves of two identical quads differ 4.0 without, 47.0 with).
+- NOT done this round: hair-card cut-out in the shadow pass, skinned draws in the depth prepass / non-MRT G-buffer pre-pass, transparent skinned
+  materials, previous-frame palette for motion vectors, the sampler-less refraction scene copy (frost blur on 16-unit backends; the existing
+  fallback stays).
+
 ---
 
 ## Character DNA

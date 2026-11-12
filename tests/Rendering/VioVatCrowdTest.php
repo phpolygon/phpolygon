@@ -52,9 +52,9 @@ final class VioVatCrowdTest extends TestCase
             $this->markTestSkipped('vio_create(headless) unavailable');
         }
         $tu = vio_texture_units($ctx);
-        if (($tu['units'] ?? 0) <= 17 && ($tu['fetch_units'] ?? 0) <= 17) {
+        if (($tu['units'] ?? 0) <= 17 && (($tu['fetch_units'] ?? 0) <= 17 || getenv('PHPOLYGON_VAT_FETCH') !== '1')) {
             vio_destroy($ctx);
-            $this->markTestSkipped('needs more than 17 texture units or sampler-less fetch units');
+            $this->markTestSkipped('needs more than 17 texture units, or sampler-less fetch units with PHPOLYGON_VAT_FETCH=1');
         }
         $this->ctx = $ctx;
         MeshRegistry::clear();

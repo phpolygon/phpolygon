@@ -6287,7 +6287,9 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             return 1;
         }
 
-        return (ProcModeShaderRegistry::fetchUnits() ?? 0) > self::VAT_SLOT ? 2 : 0;
+        // Opt-in until php-vio assigns vertex-stage separate textures their layout(binding) register: the
+        // local fetch_units build (2026-11-12) numbers them t0 there, so the texture is read from the wrong slot.
+        return (ProcModeShaderRegistry::fetchUnits() ?? 0) > self::VAT_SLOT && getenv('PHPOLYGON_VAT_FETCH') === '1' ? 2 : 0;
     }
 
     /** The VAT defines of a mesh vertex source (the version moves to 450 for the sampler-less texture type). */
