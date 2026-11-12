@@ -86,7 +86,7 @@ enum ShaderPath: string
             self::FigureLook => $material->rimLight > 0.0 || $material->hairShine > 0.0,
             self::EmissiveLook => $material->windowLights > 0.0 || $material->neonTube,
             self::SoftParticle => $material->softParticle > 0.0,
-            self::Refraction => $material->refraction > 0.0,
+            self::Refraction => $material->refraction > 0.0 || $material->frost > 0.0,
             self::KitPatterns => NormalPattern::codeFor($material->normalPattern) >= 13
                 || SurfacePattern::codeFor($material->surfacePattern) >= 8
                 || self::splatKit($material),

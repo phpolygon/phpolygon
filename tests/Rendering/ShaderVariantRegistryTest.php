@@ -37,8 +37,10 @@ final class ShaderVariantRegistryTest extends TestCase
      * gating D3D12 differed by 1 LSB on up to 33 pixels per image).
      * Changed again for the opt-in hemisphere specular (PHPOLYGON_HEMI_SPECULAR: compiled only with its define;
      * the no-define text differs by the `envShadow` temporary only).
+     * Changed again for the frost fallback inside the refraction path (an automatic path: absent from programs
+     * without refraction / frost materials).
      */
-    private const VIO_FRAG_RELEASE = '2a02b153d646935f45a55b0687465621f1effcf0efce05236bbb208573eb3607';
+    private const VIO_FRAG_RELEASE = '0323f000e02eaff89803e1d4d28cbad3965d962150c12bf7036881309b1f440c';
 
     protected function setUp(): void
     {

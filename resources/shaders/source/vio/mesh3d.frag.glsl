@@ -3176,6 +3176,15 @@ void main() {
 #endif // PHPOLYGON_OMIT_REFRACTION
 #endif
 
+#ifndef PHPOLYGON_OMIT_REFRACTION
+    // Frost without a scene copy (no unit left for it, e.g. D3D11 with 16 units): the
+    // pane cannot blur what lies behind it, so it clouds it - up to 55 % more cover
+    // at frost 1, the pane's own light covering the backdrop.
+    if (refrOn == 0.0 && u_refract.y > 0.0) {
+        alpha = alpha + (1.0 - alpha) * 0.55 * clamp(u_refract.y, 0.0, 1.0);
+    }
+#endif // PHPOLYGON_OMIT_REFRACTION
+
 #ifdef PHPOLYGON_MRT
     // mix(sum, fog, t) is affine: every part scales by (1 - t), the fog colour is
     // local light. Volumetrics are additive local light. The post-colour hook is
