@@ -347,8 +347,28 @@ the frame (`vio_begin`), so settings can reallocate targets while no command lis
 black as the 2D clear after `vio_begin` used to do while the target was bound. On Vulkan php-vio takes a target bound before
 `vio_begin` for a frame that is never presented: up to v0.92.0 every frame with the offscreen path (FXAA, the default) stayed black there,
 offscreen and in a window (measured 2026-11-02, RTX 2080, php-vio 2.39.0). D3D12 frames are byte for byte those of v0.92.0. Code that
-opens the frame itself before `beginFrame()` (tests, `renderToImage()`) keeps the immediate bind; `render()` and `endFrame()` bind a
-pending target too.
+opens the frame itself before `beginFrame()` (plain tests, not `renderToImage()`) keeps the immediate bind; `render()` and `endFrame()`
+bind a pending target too. `renderToImage()` itself now also calls `beginFrame()` before `vio_begin()` (it used to do the reverse) -
+harmless for this particular bind, since `renderingToImage` disables the offscreen pipeline outright and `renderToImage()` binds its
+own target manually either way, but not harmless for the ray-traced-scene update below, which cannot run inside an open frame at all -
+see there.
+
+**Ray-traced scene update: order and failure handling** (`VioRtSecondUpdateAfterContentSwapTest`). `updateRayTracedScene()`'s
+content-driven call - `vio_acceleration_structure_update()`, used for every build after the very first one - must run outside an open
+`vio_begin()`/`vio_end()` frame; php-vio refuses it and returns `false` otherwise (its own test 199, step F). Because `renderToImage()`
+used to open `vio_begin()` BEFORE calling `beginFrame()` (the reverse of the order directly above), a SECOND or later real content
+change reached purely through `renderToImage()` (as every ray-traced-scene test does) always ran inside an already-open frame and
+silently failed - and `updateRayTracedScene()` discarded that return value and advanced `$rtBuiltKey` regardless of it, so the refused
+update was recorded as "built" anyway: the acceleration structure froze on its OLD content forever, not one frame behind - permanently,
+since the next frame's `$rtBuiltKey === $rtPendingKey` early return never retries once it is wrongly satisfied. Both fixed: the frame
+order above, and `updateRayTracedScene()` now only advances `$rtBuiltKey` (and swaps in the new albedo buffer) on a REAL success, so a
+still-possible refusal (any other caller that opens its own frame before calling `beginFrame()`) just retries next frame instead of
+freezing. Ray-traced shadows, reflections, GI and probes share `$rtScene`/`$rtBuiltKey`/`$rtAlbedoBuffer`, so all four were frozen by
+this, not only shadows. `VioRtStaticBatchContentSwapTest`'s straight-down sun over a top-down camera puts the shadow exactly under the
+box, hidden by the box's own top face from that camera - a "the shadow is simply gone" reading while investigating this area is
+consistent with that self-occlusion, not a third bug; `VioRtSecondUpdateAfterContentSwapTest` tilts the light (like
+`VioRayTracedShadowTest`) so the shadow actually reaches the camera, and asserts it lands at the NEW position after the second update,
+not the old one and not nowhere.
 **Transparency** (material `alpha < 1`; `VioRendererTransparencyTest`, `TransparentDrawSorterTest`):
 - Only the opaque pass writes depth. The transparent pipelines (`transparent`, `transparent_water`,
   forward and MRT) test against the opaque depth and never write it, so a pane drawn first does not

@@ -3823,6 +3823,17 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
      * Ray-traced shadows (shader plan 10.1): the acceleration structure over the
      * last frame's static opaque draws, built or updated before the frame opens
      * (php-vio builds outside vio_begin) - a refit when only transforms moved.
+     *
+     * A content-driven update (anything past the very first build) must run
+     * outside an open vio_begin()/vio_end() frame - php-vio refuses it and
+     * returns false otherwise (vio_acceleration_structure_update: "call it
+     * outside vio_begin / vio_end"). $rtBuiltKey only advances on a REAL
+     * success: recording a refused update as "built" would freeze $rtScene on
+     * its old content forever - the early return above compares
+     * $rtBuiltKey === $rtPendingKey and would never retry again, not just run
+     * one frame behind. Found via {@see VioRenderer3D::renderToImage()}, whose
+     * own now-fixed ordering bug used to feed this exact failure on every
+     * second-or-later call.
      */
     private function updateRayTracedScene(): void
     {
@@ -3837,11 +3848,18 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         if ($this->rtScene === null) {
             $as = @vio_acceleration_structure($this->ctx, $this->rtPending);
             $this->rtScene = $as === false ? null : $as;
+            $ok = $this->rtScene !== null;
         } else {
-            @vio_acceleration_structure_update($this->ctx, $this->rtScene, $this->rtPending);
+            $ok = @vio_acceleration_structure_update($this->ctx, $this->rtScene, $this->rtPending) !== false;
+        }
+        $this->rtSceneReady = $this->rtScene !== null;
+        if (!$ok) {
+            // Keep the old $rtBuiltKey (and the old albedo buffer, which still
+            // matches the old content) so the next frame retries instead of
+            // believing it is already current.
+            return;
         }
         $this->rtBuiltKey = $this->rtPendingKey;
-        $this->rtSceneReady = $this->rtScene !== null;
         if ($this->rtPendingAlbedo !== '') {
             $buf = vio_storage_buffer($this->ctx, ['data' => $this->rtPendingAlbedo, 'stride' => 4]);
             $this->rtAlbedoBuffer = $buf === false ? null : $buf;
@@ -4134,6 +4152,16 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
      * Assumes default graphics settings (no render-scale / AA / bloom), so the
      * renderer draws straight into the bound target with no intermediate
      * post-process offscreen. The caller must NOT already have an open frame.
+     *
+     * beginFrame() runs BEFORE vio_begin() opens the command list - the same
+     * order Engine.php uses (renderer3D->beginFrame() then
+     * renderer2D->beginFrame(), which is what actually calls vio_begin()).
+     * Getting this backwards used to run a SECOND (content-driven)
+     * vio_acceleration_structure_update() call inside an already-open frame,
+     * where php-vio refuses it and returns false - silently, behind the `@`
+     * in {@see updateRayTracedScene()} - so a caller driving ray-traced
+     * shadows/reflections/GI/probes purely through renderToImage() (as the
+     * tests do) never saw a second real update succeed.
      */
     public function renderToImage(
         RenderCommandList $commandList,
@@ -4157,7 +4185,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         $this->renderingToImage = true;
         $this->externalSceneTarget = $rt;
         try {
-            $this->refreshAutoOmissions(true);
+            $this->beginFrame();
             vio_begin($this->ctx);
             vio_bind_render_target($this->ctx, $rt);
             // Clear the bound target itself: in-frame vio_clear is eager on every
@@ -4166,7 +4194,6 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
                 vio_clear($this->ctx, $clear->r, $clear->g, $clear->b, $clear->a);
             }
             vio_viewport($this->ctx, 0, 0, $width, $height);
-            $this->beginFrame();
             $this->render($commandList);
             $this->endFrame();
             vio_unbind_render_target($this->ctx);
