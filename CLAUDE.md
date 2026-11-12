@@ -3974,6 +3974,26 @@ to completion (without rendering between yields).
   section above); no second mechanism was added.
 - `GpuPartAnimator` compute works on D3D11 and D3D12 (hardware RTX 2080: kernel matches the CPU math to 4e-6).
 
+### E-B / E-C / E-D data layer (skinning, morphs, face blocks) - 2026-11-12
+
+Pure PHP, deterministic, no renderer change; works on every backend and needs no texture unit.
+- `Geometry\SkinnedMeshData(MeshData $mesh, list<int> $joints, list<float> $weights, list<string> $jointNames, list<list<float>> $inverseBind)`:
+  4 influences per vertex (unused weight 0, weights sum 1), column-major 4x4. `fromInfluences($mesh, list<array<jointName,weight>>, PoseRig)`
+  keeps the 4 strongest, renormalises, takes inverse bind from the rig's rest pose. `palette(PoseRig, rawPose): list<float>` (16 per joint,
+  `jointWorld * inverseBind`), `skin(palette): MeshData` (CPU reference: positions, normals, tangents), `bakeClip($rig, PoseClip, $fps):
+  list<MeshData>` (feed `VatBaker::bake($frames, true)`), `boundsOver(list<palette>)` (culling box of an animation).
+- `Geometry\MorphTargets(int $vertexCount, array $targets)` sparse deltas; `fromShapes($base, array<name,MeshData>)`, `apply($base, array<name,float>)`
+  (apply before skinning). `Animation\Face\ExpressionSet` (state => channel weights: `weights(mix)`, `blend`, static `layer`), `Face\Blink`
+  (stateless seeded lid curve), `Face\LookAt` (`angles`, `rotation` clamped to limits). The set holds no state names: the game defines them.
+- Working path today for every pass (shadows, prepass, bounds): pose on the CPU, `MeshRegistry::register($id, $skinned->skin($palette))`
+  each frame (version bump re-uploads). Crowds: bake clips to a VAT; that path needs a texture unit above 15 (see above), so it is
+  D3D12 SM6 only until php-vio's sampler-less SRV binding lands.
+- NOT built (design): GPU vertex-stage skinning. Extra vertex attributes (location 7 joints as vec4, 8 weights) via `vio_mesh` `layout`;
+  a `default_skin` program derived from mesh3d.vert like `storageInstancingVertexSource()`; the palette in a vertex storage buffer
+  (binding 1, `VIO_FEATURE_VERTEX_STORAGE`, no texture unit, works on 16-unit backends; D3D11 holds one VS storage SRV at a time, so
+  skinned draws must not use storage instancing); the shadow pass needs the same variant; per-instance clip/phase would come from
+  `InstanceParams`.
+
 ---
 
 ## Character DNA
