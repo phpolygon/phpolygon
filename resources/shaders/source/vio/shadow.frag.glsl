@@ -1,6 +1,11 @@
 #version 410 core
 
 in vec3 v_shadow_world;
+#ifdef PHPOLYGON_SHADOW_CUTOUT
+in vec2 v_shadow_uv;
+uniform sampler2D u_albedo_texture;
+uniform float u_alpha_cutoff;
+#endif
 
 // Dappled shadow (shader plan 6.1, Material::$shadowDapple): fragments of the caster
 // drop out in leaf-cluster-sized gaps that drift with the wind, so its shadow lets
@@ -43,5 +48,11 @@ void main() {
             discard;
         }
     }
+#ifdef PHPOLYGON_SHADOW_CUTOUT
+    // Cut-out casters (Material::$alphaCutoff, hair cards): the same albedo-alpha test as the lit pass.
+    if (texture(u_albedo_texture, v_shadow_uv).a < u_alpha_cutoff) {
+        discard;
+    }
+#endif
     frag_color = vec4(gl_FragCoord.z, gl_FragCoord.z, gl_FragCoord.z, 1.0);
 }

@@ -14,6 +14,9 @@ uniform mat4 u_projection;
 uniform int  u_use_instancing;
 
 out vec3 v_shadow_world;   // world position, for the dappled-shadow gaps (shadow.frag)
+#ifdef PHPOLYGON_SHADOW_CUTOUT
+out vec2 v_shadow_uv;      // for the cut-out test (shadow.frag)
+#endif
 
 // Foliage sway in the shadow (shader plan 6.1): the same trunk-and-crown bend as
 // mesh3d.vert's foliageSway (without leaf flutter), so a tree's shadow moves with
@@ -61,5 +64,8 @@ void main() {
     }
     vec4 world = model * vec4(pos, 1.0);
     v_shadow_world = world.xyz;
+#ifdef PHPOLYGON_SHADOW_CUTOUT
+    v_shadow_uv = a_uv;
+#endif
     gl_Position = u_projection * u_view * world;
 }

@@ -440,10 +440,54 @@ trait VioSkinnedDraws
         if ($this->skinDraws === [] || $this->skinBuffer === null || !$this->ensureSkinPrograms()) {
             return;
         }
-        $key = 'shadow:shadow_skin';
+        // Cut-out casters (alphaCutoff on an albedo texture: hair cards) take the shadow program that
+        // tests the texture's alpha; the others the plain one. Two passes over the draws, one pipeline each.
+        $solid = [];
+        $cutout = [];
+        foreach ($this->skinDraws as $d) {
+            if (!$d['cmd']->castShadows) {
+                continue;
+            }
+            $material = $d['material'];
+            if ($material->alphaCutoff > 0.0 && $material->albedoTexture !== null && $this->ensureSkinCutoutShadow()) {
+                $texture = $this->resolveTexture($material->albedoTexture);
+                if ($texture !== null) {
+                    $cutout[] = [$d, $texture];
+                    continue;
+                }
+            }
+            $solid[] = [$d, null];
+        }
+        foreach ([['shadow_skin', $solid], ['shadow_skin_cutout', $cutout]] as [$program, $draws]) {
+            if ($draws === [] || !$this->bindSkinShadowPipeline($program, $view, $projection)) {
+                continue;
+            }
+            foreach ($draws as [$d, $texture]) {
+                $mesh = $this->uploadSkinMesh($d['cmd']->meshId);
+                if ($mesh === null) {
+                    continue;
+                }
+                if ($texture !== null) {
+                    vio_set_uniform($this->ctx, 'u_albedo_texture', 0);
+                    vio_bind_texture($this->ctx, $texture, 0);
+                    vio_set_uniform($this->ctx, 'u_alpha_cutoff', $d['material']->alphaCutoff);
+                }
+                vio_set_uniform($this->ctx, 'u_skin_inst', $d['inst']);
+                if ($this->skinRebindPerDraw()) {
+                    vio_bind_storage_buffer($this->ctx, $this->skinBuffer, 0, VIO_COMPUTE_READ);
+                }
+                vio_draw_instanced_from_buffer($this->ctx, $mesh, count($d['cmd']->models));
+            }
+        }
+    }
+
+    /** Binds a skinned shadow program with the light's view and the skin buffer; false when its pipeline cannot be made. */
+    private function bindSkinShadowPipeline(string $program, Mat4 $view, Mat4 $projection): bool
+    {
+        $key = 'shadow:' . $program;
         if (!isset($this->pipelineCache[$key])) {
             $pipeline = $this->createPipeline([
-                'shader' => $this->shaderCache['shadow_skin'],
+                'shader' => $this->shaderCache[$program],
                 'depth_test' => true,
                 'cull_mode' => VIO_CULL_NONE,
                 'blend' => VIO_BLEND_NONE,
@@ -451,7 +495,7 @@ trait VioSkinnedDraws
                 'slope_scaled_depth_bias' => 1.0,
             ]);
             if ($pipeline === false) {
-                return;
+                return false;
             }
             $this->pipelineCache[$key] = $pipeline;
         }
@@ -462,20 +506,29 @@ trait VioSkinnedDraws
         vio_set_uniform($this->ctx, 'u_foliage_wind', 0);
         vio_set_uniform($this->ctx, 'u_shadow_dapple', 0.0);
         vio_bind_storage_buffer($this->ctx, $this->skinBuffer, 0, VIO_COMPUTE_READ);
-        foreach ($this->skinDraws as $d) {
-            if (!$d['cmd']->castShadows) {
-                continue;
-            }
-            $mesh = $this->uploadSkinMesh($d['cmd']->meshId);
-            if ($mesh === null) {
-                continue;
-            }
-            vio_set_uniform($this->ctx, 'u_skin_inst', $d['inst']);
-            if ($this->skinRebindPerDraw()) {
-                vio_bind_storage_buffer($this->ctx, $this->skinBuffer, 0, VIO_COMPUTE_READ);
-            }
-            vio_draw_instanced_from_buffer($this->ctx, $mesh, count($d['cmd']->models));
+
+        return true;
+    }
+
+    /** The cut-out twin of the skinned shadow program, compiled when the first cut-out caster needs it. */
+    private function ensureSkinCutoutShadow(): bool
+    {
+        if (isset($this->shaderCache['shadow_skin_cutout'])) {
+            return true;
         }
+        try {
+            $vert = self::withDefine(self::skinShadowVertexSource($this->loadShader('shadow.vert.glsl')), 'PHPOLYGON_SHADOW_CUTOUT');
+            if (ProcModeShaderRegistry::instanceParamsEnabled()) {
+                $vert = self::withDefine($vert, 'PHPOLYGON_INSTANCE_PARAMS');
+            }
+            $this->compileShader('shadow_skin_cutout', $vert, self::withDefine($this->loadShader('shadow.frag.glsl'), 'PHPOLYGON_SHADOW_CUTOUT'));
+        } catch (\RuntimeException $e) {
+            fwrite(STDERR, "[VioRenderer3D] cut-out skinned shadows unavailable: {$e->getMessage()}\n");
+
+            return false;
+        }
+
+        return true;
     }
 
     /**

@@ -11,6 +11,7 @@ use PHPolygon\Animation\Pose;
 use PHPolygon\Animation\PoseRig;
 use PHPolygon\Geometry\BoxMesh;
 use PHPolygon\Geometry\MeshRegistry;
+use PHPolygon\Geometry\PlaneMesh;
 use PHPolygon\Geometry\SkinnedMeshData;
 use PHPolygon\Geometry\SkinnedMeshRegistry;
 use PHPolygon\Geometry\SphereMesh;
@@ -213,6 +214,47 @@ final class VioSkinningTest extends TestCase
         $all = $this->image($renderer, [new DrawSkinnedMesh('body', 'm', [$gone], [$pal])], false);
         self::assertSame(1, $renderer->skinInstancesCulled());
         self::assertSame(0, self::lit($all));
+    }
+
+    public function testCutOutCasterLetsLightThroughItsTransparentHalf(): void
+    {
+        self::assertNotNull($this->ctx);
+        $renderer = $this->renderer(ShadowQuality::Medium);
+        if (!$renderer->skinningAvailable()) {
+            $this->markTestSkipped('no vertex storage buffers on this backend');
+        }
+        $card = PlaneMesh::generate(2.0, 2.0);
+        $rig = (new PoseRig())->joint('root', null, new Vec3(0.0, 0.0, 0.0));
+        $infl = array_fill(0, $card->vertexCount(), ['root' => 1.0]);
+        SkinnedMeshRegistry::register('card', SkinnedMeshData::fromInfluences($card, $infl, $rig));
+        MeshRegistry::register('ground', BoxMesh::generate(10.0, 0.1, 10.0));
+        // One texel transparent, one opaque: half the card is cut out.
+        $tex = vio_texture($this->ctx, ['data' => "\xFF\xFF\xFF\x00\xFF\xFF\xFF\xFF", 'width' => 2, 'height' => 1, 'filter' => VIO_FILTER_NEAREST]);
+        self::assertNotFalse($tex);
+        $renderer->registerGpuTexture('half', $tex);
+        MaterialRegistry::register('cut', new Material(albedo: new Color(0.2, 0.8, 0.2), roughness: 1.0, useEnvironmentMap: false, albedoTexture: 'half', alphaCutoff: 0.5, twoSided: true));
+        MaterialRegistry::register('solid', new Material(albedo: new Color(0.2, 0.8, 0.2), roughness: 1.0, useEnvironmentMap: false, twoSided: true));
+        MaterialRegistry::register('g', new Material(albedo: new Color(0.9, 0.9, 0.9), roughness: 1.0, useEnvironmentMap: false));
+        $pal = SkinnedMeshData::packPalette([1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0]);
+        $card1 = Mat4::translation(0.0, 2.0, 0.0);
+        $ground = new DrawMesh('ground', 'g', Mat4::translation(0.0, -0.05, 0.0));
+        $shot = function (string $material) use ($renderer, $ground, $card1, $pal): string {
+            $list = new RenderCommandList();
+            // Top-down; the sun leans toward +X, so the card's shadow lands 2 m to its side, out from under the card.
+            $list->add(new SetCamera(Mat4::lookAt(new Vec3(0.0, 10.0, 0.001), new Vec3(0.0, 0.0, 0.0), new Vec3(0.0, 0.0, -1.0)), Mat4::orthographic(-4.0, 4.0, -4.0, 4.0, 1.0, 30.0)));
+            $list->add(new SetAmbientLight(new Color(1.0, 1.0, 1.0), 0.2));
+            $list->add(new SetDirectionalLight((new Vec3(1.0, -1.0, 0.0))->normalize(), new Color(1.0, 1.0, 1.0), 2.5));
+            $list->add($ground);
+            $list->add(DrawSkinnedMesh::single('card', $material, $card1, $pal));
+
+            return $renderer->renderToImage($list, self::SIZE, self::SIZE, new Color(0.0, 0.0, 0.0));
+        };
+        $at = static fn (string $img, float $x): int => ord($img[(48 * self::SIZE + (int) round(($x + 4.0) / 8.0 * self::SIZE)) * 4]);
+        $cut = $shot('cut');
+        $solid = $shot('solid');
+        // The shadow of the 2 m card spans x 1..3 on the ground; sample both halves of it.
+        self::assertLessThan(15, abs($at($solid, 1.5) - $at($solid, 2.5)), 'a solid card shadows both halves alike');
+        self::assertGreaterThan(30, abs($at($cut, 1.5) - $at($cut, 2.5)), 'the cut-out half lets the sun through');
     }
 
     public function testInstancesShareAndSelectPalettes(): void
