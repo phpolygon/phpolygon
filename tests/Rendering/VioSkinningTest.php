@@ -192,6 +192,29 @@ final class VioSkinningTest extends TestCase
         self::assertGreaterThan(0.2, self::meanAbsDiff($gpu, $noCast), 'the skinned caster darkens the ground');
     }
 
+    public function testInstancesOutsideTheViewAreCulled(): void
+    {
+        self::assertNotNull($this->ctx);
+        $renderer = $this->renderer(ShadowQuality::Off);
+        if (!$renderer->skinningAvailable()) {
+            $this->markTestSkipped('no vertex storage buffers on this backend');
+        }
+        $skin = $this->skinned();
+        SkinnedMeshRegistry::register('body', $skin);
+        MaterialRegistry::register('m', new Material(albedo: new Color(0.8, 0.5, 0.3), roughness: 1.0, useEnvironmentMap: false));
+        $pal = $skin->palette($this->rig(), (new Pose())->raw());
+        $here = Mat4::translation(0.0, 0.0, 0.0);
+        $gone = Mat4::translation(60.0, 0.0, 0.0);
+        $one = $this->image($renderer, [new DrawSkinnedMesh('body', 'm', [$here], [$pal])], false);
+        self::assertSame(0, $renderer->skinInstancesCulled());
+        $both = $this->image($renderer, [new DrawSkinnedMesh('body', 'm', [$gone, $here, $gone], [$pal], [0, 0, 0])], false);
+        self::assertSame(2, $renderer->skinInstancesCulled(), 'the two far instances leave the camera pass');
+        self::assertLessThan(0.2, self::meanAbsDiff($one, $both), 'the visible instance still draws');
+        $all = $this->image($renderer, [new DrawSkinnedMesh('body', 'm', [$gone], [$pal])], false);
+        self::assertSame(1, $renderer->skinInstancesCulled());
+        self::assertSame(0, self::lit($all));
+    }
+
     public function testInstancesShareAndSelectPalettes(): void
     {
         self::assertNotNull($this->ctx);

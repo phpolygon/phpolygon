@@ -29,12 +29,22 @@ use PHPolygon\Rendering\Command\DrawSkinnedMesh;
  */
 trait VioSkinnedDraws
 {
-    /** @var list<array{cmd: DrawSkinnedMesh, material: Material, inst: int}> */
+    /** @var list<array{cmd: DrawSkinnedMesh, material: Material, inst: int, viewInst: int, viewCount: int}> */
     private array $skinDraws = [];
     private ?\VioBuffer $skinBuffer = null;
     private int $skinBufferBytes = 0;
     private ?bool $skinningReady = null;
     private ?bool $skinRebind = null;
+    /** @var array<int, array{0: \VioBuffer, 1: int}> ring of storage buffers and their byte capacity */
+    private array $skinRing = [];
+    private int $skinRingIndex = -1;
+    private int $skinCulled = 0;
+
+    /** Instances the last frame's camera cull dropped (the shadow passes still drew them). */
+    public function skinInstancesCulled(): int
+    {
+        return $this->skinCulled;
+    }
     /** @var array<string, \VioMesh> */
     private array $skinMeshCache = [];
     /** @var array<string, int> */
@@ -120,6 +130,7 @@ trait VioSkinnedDraws
     private function prepareSkinFrame(array $commands): void
     {
         $this->skinDraws = [];
+        $this->skinCulled = 0;
         $found = [];
         foreach ($commands as $cmd) {
             if ($cmd instanceof DrawSkinnedMesh) {
@@ -130,6 +141,9 @@ trait VioSkinnedDraws
             return;
         }
         $bytes = '';
+        $planes = $this->cameraProjectionMatrix !== null && $this->currentViewMatrix !== null && getenv('PHPOLYGON_NO_CULL') !== '1'
+            ? Frustum::planes($this->cameraProjectionMatrix, $this->currentViewMatrix)
+            : null;
         foreach ($found as $cmd) {
             $skin = SkinnedMeshRegistry::get($cmd->meshId);
             $material = MaterialRegistry::get($cmd->materialId);
@@ -148,11 +162,40 @@ trait VioSkinnedDraws
             $base = intdiv(strlen($bytes), 64);
             $bytes .= implode('', $paletteBytes);
             $inst = intdiv(strlen($bytes), 64);
+            $sphere = $planes === null ? null : SkinnedMeshRegistry::sphere($cmd->meshId);
+            $records = [];
+            $visible = [];
             foreach ($cmd->models as $i => $model) {
-                $bytes .= pack('g16', ...$model->toArray());
-                $bytes .= pack('g16', (float) ($base + $cmd->paletteOf($i) * $joints), 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+                $m = $model->toArray();
+                $records[$i] = pack('g16', ...$m)
+                    . pack('g16', (float) ($base + $cmd->paletteOf($i) * $joints), 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+                if ($sphere !== null && $planes !== null) {
+                    // World sphere of the instance: the local sphere moved by the model, scaled by its largest axis.
+                    $cx = $m[0] * $sphere[0] + $m[4] * $sphere[1] + $m[8] * $sphere[2] + $m[12];
+                    $cy = $m[1] * $sphere[0] + $m[5] * $sphere[1] + $m[9] * $sphere[2] + $m[13];
+                    $cz = $m[2] * $sphere[0] + $m[6] * $sphere[1] + $m[10] * $sphere[2] + $m[14];
+                    $scale = sqrt(max($m[0] * $m[0] + $m[1] * $m[1] + $m[2] * $m[2], $m[4] * $m[4] + $m[5] * $m[5] + $m[6] * $m[6], $m[8] * $m[8] + $m[9] * $m[9] + $m[10] * $m[10]));
+                    if (Frustum::sphereOutside($planes, $cx, $cy, $cz, $sphere[3] * $scale * 1.02)) {
+                        continue;
+                    }
+                }
+                $visible[] = $i;
             }
-            $this->skinDraws[] = ['cmd' => $cmd, 'material' => $material, 'inst' => $inst];
+            $this->skinCulled += count($records) - count($visible);
+            $bytes .= implode('', $records);
+            // Shadow passes draw every instance (an off-screen caster still shades the view); the camera's
+            // passes draw the visible subset, which is a second copy of those records when some were culled.
+            $viewInst = $inst;
+            if (count($visible) < count($records) && $visible !== []) {
+                $viewInst = intdiv(strlen($bytes), 64);
+                foreach ($visible as $i) {
+                    $bytes .= $records[$i];
+                }
+            }
+            $this->skinDraws[] = [
+                'cmd' => $cmd, 'material' => $material, 'inst' => $inst,
+                'viewInst' => $viewInst, 'viewCount' => count($visible),
+            ];
         }
         if ($this->skinDraws === []) {
             return;
@@ -163,12 +206,31 @@ trait VioSkinnedDraws
         }
     }
 
+    /**
+     * The frame's storage buffer: a ring of three buffers grown on demand and filled with
+     * vio_update_buffer (measured on D3D11 and D3D12 hardware, 2026-11-12), so a frame does not allocate
+     * and the GPU may still read the buffer of the frame before.
+     */
     private function skinBufferFor(string $bytes): ?\VioBuffer
     {
-        $buffer = vio_storage_buffer($this->ctx, ['data' => $bytes]);
-        $this->skinBufferBytes = strlen($bytes);
+        $need = strlen($bytes);
+        $slot = $this->skinRingIndex = ($this->skinRingIndex + 1) % 3;
+        $current = $this->skinRing[$slot] ?? null;
+        if ($current === null || $current[1] < $need) {
+            $capacity = max(65536, (int) ($need * 1.5));
+            $buffer = vio_storage_buffer($this->ctx, ['size' => $capacity, 'stride' => 4]);
+            if ($buffer === false) {
+                // No sized storage buffer: fall back to a fresh one holding exactly this frame's data.
+                $buffer = vio_storage_buffer($this->ctx, ['data' => $bytes]);
 
-        return $buffer === false ? null : $buffer;
+                return $buffer === false ? null : $buffer;
+            }
+            $current = $this->skinRing[$slot] = [$buffer, $capacity];
+        }
+        vio_update_buffer($current[0], $bytes, 0);
+        $this->skinBufferBytes = $need;
+
+        return $current[0];
     }
 
     private function ensureSkinPrograms(): bool
@@ -352,18 +414,18 @@ trait VioSkinnedDraws
             }
             vio_bind_storage_buffer($this->ctx, $this->skinBuffer, 0, VIO_COMPUTE_READ);
             foreach ($list as $d) {
-                $mesh = $this->uploadSkinMesh($d['cmd']->meshId);
+                $mesh = $d['viewCount'] > 0 ? $this->uploadSkinMesh($d['cmd']->meshId) : null;
                 if ($mesh === null) {
                     continue;
                 }
                 $this->applyMaterialUniforms($d['material'], $d['cmd']->materialId);
                 $this->bindMaterialTextures($d['material']);
                 $this->applyGbufferWrite(1);
-                vio_set_uniform($this->ctx, 'u_skin_inst', $d['inst']);
+                vio_set_uniform($this->ctx, 'u_skin_inst', $d['viewInst']);
                 if ($this->skinRebindPerDraw()) {
                     vio_bind_storage_buffer($this->ctx, $this->skinBuffer, 0, VIO_COMPUTE_READ);
                 }
-                vio_draw_instanced_from_buffer($this->ctx, $mesh, count($d['cmd']->models));
+                vio_draw_instanced_from_buffer($this->ctx, $mesh, $d['viewCount']);
             }
             vio_set_uniform($this->ctx, 'u_use_instancing', 0);
         }
