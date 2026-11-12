@@ -909,7 +909,13 @@ matrix change (the same first/last Mat4 OBJECTS skip the fingerprint - Mat4 is i
 batch (`DrawMeshInstanced::flat()`) is compared whole, so re-sending the same float array costs
 nothing and any changed instance is re-uploaded. Pass a distinct `staticKey` per batch that shares
 mesh and material, and call `VioRenderer3D::invalidateStaticInstances()` for subtler edits of a Mat4
-batch or on scene unload. Each instanced command is packed once per `render()` - the shadow,
+batch or on scene unload. `collectRayTracedScene()` follows the same whole-array convention for its
+own rebuild signature: a keyed static flat batch that keeps its `staticKey` and instance count but
+swaps its mesh, material or matrices (a construction-state reveal replacing N "ruin" instances with N
+"finished" ones under one key) gets a new generation number, folded into the signature that decides
+whether `vio_acceleration_structure_update()` runs - `staticKey . count($flat)` alone could not tell
+the two apart and left the structure on the old geometry indefinitely, not just one frame behind.
+Each instanced command is packed once per `render()` - the shadow,
 G-buffer and colour passes reuse it. A keyed static flat batch re-sent with the very same float array
 is answered from `VioRenderer3D::$staticFlatHits` before the per-frame cache (no compare, no weak
 reference). The opaque pass orders draws with `OpaqueDrawOrder` (the former `(material, mesh, moved)`

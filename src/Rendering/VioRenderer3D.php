@@ -3797,6 +3797,27 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
     private string $rtPendingAlbedo = '';
     private ?\VioBuffer $rtAlbedoBuffer = null;
     private string $rtAlbedoBytes = '';
+    /**
+     * Last content of each static flat batch folded into $rtPendingKey, and the
+     * generation number it was given - keyed like
+     * {@see InstancedBatchCuller::staticSphere()}'s static identity (the caller's
+     * staticKey, else mesh + material). A flat batch is compared whole, the same
+     * convention as {@see resolveInstanceDataOnce()}: cheap when the caller
+     * re-sends the cached merge, no stringifying its floats into the key
+     * otherwise. Catches a batch that keeps its staticKey and instance count but
+     * swaps its matrices, mesh or material underneath them (a construction-state
+     * reveal replacing N "ruin" instances with N "finished" ones) - without it
+     * {@see collectRayTracedScene()} kept the same signature and the
+     * acceleration structure never rebuilt. The generation lives inside the entry
+     * (not a parallel per-key map) so dropping an entry - invalidateStaticInstances(),
+     * scene unload - never hands out a number that was already folded into
+     * $rtBuiltKey: {@see $rtStaticGenerationCounter} only ever counts up.
+     *
+     * @var array<string, array{0: string, 1: string, 2: array<float>, 3: int}>
+     */
+    private array $rtStaticContent = [];
+    /** Never reset - see {@see $rtStaticContent}. */
+    private int $rtStaticGenerationCounter = 0;
 
     /**
      * Ray-traced shadows (shader plan 10.1): the acceleration structure over the
@@ -3886,7 +3907,18 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
                     $inst[] = ['mesh' => $mesh, 'transform' => array_values($t)];
                     array_push($albedo, $mat->albedo->r, $mat->albedo->g, $mat->albedo->b, max($mat->emission->r, $mat->emission->g, $mat->emission->b));
                 }
-                $key .= ($cmd->staticKey ?? $cmd->meshId) . count($flat) . ';';
+                // Same identity as the caller sees in staticSphere()/resolveInstanceDataOnce():
+                // the caller's key, else mesh + material (two unkeyed batches that share both
+                // need their own staticKey - same contract as the static instance cache).
+                $identity = $cmd->staticKey !== null ? 'k:' . $cmd->staticKey : $cmd->meshId . ':' . $cmd->materialId;
+                $prev = $this->rtStaticContent[$identity] ?? null;
+                if ($prev !== null && $prev[0] === $cmd->meshId && $prev[1] === $cmd->materialId && $prev[2] === $flat) {
+                    $generation = $prev[3];
+                } else {
+                    $generation = ++$this->rtStaticGenerationCounter;
+                    $this->rtStaticContent[$identity] = [$cmd->meshId, $cmd->materialId, $flat, $generation];
+                }
+                $key .= $identity . ':' . $generation . ';';
             }
         }
         $this->rtPending = $inst;
@@ -9271,6 +9303,10 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             $this->staticIdentityCache = [];
             $this->staticFlatCache = [];
             $this->staticFlatHits = [];
+            // Not $rtStaticGenerationCounter: it never resets, so the next content
+            // seen for a dropped identity always gets a fresh number - never one
+            // already folded into $rtBuiltKey.
+            $this->rtStaticContent = [];
             return;
         }
         unset($this->staticFlatHits[$staticKey]);
@@ -9281,6 +9317,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             $this->staticFingerprintCache[$key],
             $this->staticIdentityCache[$key],
             $this->staticFlatCache[$key],
+            $this->rtStaticContent[$key],
         );
     }
 
