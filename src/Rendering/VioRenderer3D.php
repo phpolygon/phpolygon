@@ -57,6 +57,8 @@ use VioTexture;
  */
 class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
 {
+    use VioSkinnedDraws;
+
     private int $width;
     private int $height;
 
@@ -4508,6 +4510,8 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         $this->batchCuller->beginFrame(in_array($this->shaderOverride ?? 'default', ['default', 'unlit', 'normals', 'depth'], true));
         $this->localCasterSpheres = self::localShadowLightSpheres($spotLights, $pointLights);
 
+        $this->prepareSkinFrame($commands);
+
         // --- Shadow pass ---
         PerfProfiler::begin('render3d.submit.shadow');
         $hasShadowMap = $this->renderShadowPass($commandList, $dirLights);
@@ -4753,6 +4757,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             }
         }
         $this->drawMeshletRun($meshletDraws, 'opaque');
+        $this->drawSkinnedOpaque();
         PerfProfiler::end();
         $this->gpuMark('opaque');
         if ($this->froxelThisFrame) {
@@ -5319,10 +5324,12 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             : $source;
     }
 
-    private function meshVertexSource(bool $storage = false): string
+    private function meshVertexSource(bool $storage = false, bool $skin = false): string
     {
         $source = $this->loadShader('mesh3d.vert.glsl');
-        if ($storage) {
+        if ($skin) {
+            $source = self::skinVertexSource($source);
+        } elseif ($storage) {
             $source = self::storageInstancingVertexSource($source);
         }
         $source = $this->withBindless($source, false);
@@ -5799,9 +5806,11 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
      * $cull selects a culled variant (VIO_CULL_FRONT / VIO_CULL_BACK) – the
      * transparent pass draws a closed mesh's far faces before its near faces.
      */
-    private function bindPipeline(string $pass, bool $storageInstances = false, int $cull = VIO_CULL_NONE, bool $keepDrawState = false): bool
+    private function bindPipeline(string $pass, bool $storageInstances = false, int $cull = VIO_CULL_NONE, bool $keepDrawState = false, bool $skinned = false): bool
     {
-        $shaderId = $storageInstances ? 'default_storage' : $this->activeShaderId();
+        // A skinned draw is a storage-instance draw of the 'default_skin' programs (VioSkinnedDraws).
+        $storageInstances = $storageInstances || $skinned;
+        $shaderId = $skinned ? 'default_skin' : ($storageInstances ? 'default_storage' : $this->activeShaderId());
         $variantSuffix = $this->sceneVariant === ProcModeShaderRegistry::BASE_VARIANT ? '' : '@' . $this->sceneVariant;
         $hdr = $this->sceneTargetIsHdr();
         $mrt = $this->mrtThisFrame;
@@ -5841,7 +5850,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
                 // With motion, attachment 4 (vectors) is written by opaque
                 // geometry only and attachment 5 (reactive) by transparent
                 // geometry, additively, and by opaque geometry in ':rx' frames.
-                $program = ($storageInstances ? 'default_storage_mrt' : 'default_mrt') . ($mv ? '_mv' : '') . $variantSuffix;
+                $program = ($skinned ? 'default_skin_mrt' : ($storageInstances ? 'default_storage_mrt' : 'default_mrt')) . ($mv ? '_mv' : '') . $variantSuffix;
                 $cfg = [
                     'shader' => $tess ? $this->tessShader($program) : $this->sceneShader($program, $pass, $meshlets),
                     'depth_test' => true,
@@ -6655,6 +6664,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             // (uniforms are sticky until the next pipeline bind).
             vio_set_uniform($this->ctx, 'u_use_instancing', 1);
             $this->drawShadowList($shadowDraws);
+            $this->drawSkinnedShadows($lightView, $lightProj);
         }
 
         PerfProfiler::end();
@@ -7562,6 +7572,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         vio_set_uniform($this->ctx, 'u_projection', $proj->toArray());
         vio_set_uniform($this->ctx, 'u_use_instancing', 1);
         $this->drawShadowList($draws);
+        $this->drawSkinnedShadows($view, $proj);
         vio_unbind_render_target($this->ctx);
         PerfProfiler::end();
 
@@ -7651,10 +7662,12 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             vio_viewport($this->ctx, 0, 0, $res, $res);
             vio_clear($this->ctx, 1.0, 1.0, 1.0, 1.0);
             $this->bindShadowPipeline();
-            vio_set_uniform($this->ctx, 'u_view', Mat4::lookAt($pos, $pos->add($forward), $up)->toArray());
+            $faceView = Mat4::lookAt($pos, $pos->add($forward), $up);
+            vio_set_uniform($this->ctx, 'u_view', $faceView->toArray());
             vio_set_uniform($this->ctx, 'u_projection', $proj->toArray());
             vio_set_uniform($this->ctx, 'u_use_instancing', 1);
             $this->drawShadowList($draws);
+            $this->drawSkinnedShadows($faceView, $proj);
         }
         vio_unbind_render_target($this->ctx);
         PerfProfiler::end();

@@ -3988,11 +3988,34 @@ Pure PHP, deterministic, no renderer change; works on every backend and needs no
 - Working path today for every pass (shadows, prepass, bounds): pose on the CPU, `MeshRegistry::register($id, $skinned->skin($palette))`
   each frame (version bump re-uploads). Crowds: bake clips to a VAT; that path needs a texture unit above 15 (see above), so it is
   D3D12 SM6 only until php-vio's sampler-less SRV binding lands.
-- NOT built (design): GPU vertex-stage skinning. Extra vertex attributes (location 7 joints as vec4, 8 weights) via `vio_mesh` `layout`;
-  a `default_skin` program derived from mesh3d.vert like `storageInstancingVertexSource()`; the palette in a vertex storage buffer
-  (binding 1, `VIO_FEATURE_VERTEX_STORAGE`, no texture unit, works on 16-unit backends; D3D11 holds one VS storage SRV at a time, so
-  skinned draws must not use storage instancing); the shadow pass needs the same variant; per-instance clip/phase would come from
-  `InstanceParams`.
+### GPU skinning (`DrawSkinnedMesh`, trait `Rendering\VioSkinnedDraws`) - 2026-11-12
+
+- API: `Geometry\SkinnedMeshRegistry::register(string $id, SkinnedMeshData)`; command `Rendering\Command\DrawSkinnedMesh(string $meshId,
+  string $materialId, list<Mat4> $models, list<list<float>|string> $palettes, list<int> $paletteIndex = [], bool $castShadows = true)`
+  (`::single($meshId, $materialId, Mat4, $palette)`); `SkinnedMeshData::packPalette(list<float>): string` (float32 bytes, cache per
+  pose); `VioRenderer3D::skinningAvailable(): bool` (= `VIO_FEATURE_VERTEX_STORAGE`; without it the draw is skipped, pose on the CPU
+  as above). Instances share palettes (`$paletteIndex[i]` picks the palette of instance i): a crowd plays a few poses/clip frames.
+- Data path, no texture unit (works on 16-unit backends: D3D11, D3D12 with FXC): ONE vertex storage buffer (binding 0, mat4 units) holds
+  the frame's palettes followed by two mat4 records per instance (the model matrix - its unused `w` of columns 0..2 may carry
+  `InstanceParams` - and a record whose column 0 `x` is the palette base). D3D11 keeps ONE vertex storage SRV, so palettes and instance
+  matrices live in the same buffer; a skinned draw therefore cannot use the matrix buffer of storage instancing (it IS storage instancing
+  with palettes added). Each draw selects its slice with the `u_skin_inst` uniform; per-draw palette offset = the record. Per-instance
+  clip index and phase = the caller picks the palette (baked or evaluated) per instance, `paletteIndex` + palette cache.
+- Mesh layout: location 0 position, 1 normal, 2 uv, 7 joints (vec4 of float indices), 8 weights. Programs `default_skin`, `default_skin_mrt`,
+  `default_skin_mrt_mv`, `default_skin@<variant>` and `shadow_skin` are text-derived from mesh3d.vert / shadow.vert
+  (`VioRenderer3D::skinVertexSource()` / `skinShadowVertexSource()`, anchors pinned by `VioSkinSourceTest`); the fragment stage is mesh3d.frag:
+  lit, shadowed, writes the MRT G-buffer (so SSAO sees it in MRT frames), cut-out materials (hair cards, `alphaCutoff`) take the cut-out variant.
+- Passes: opaque pass (after the regular draws, `drawSkinnedOpaque()`), cascade / spot / point shadow passes (`drawSkinnedShadows()`).
+  NOT covered: depth prepass (skinned draws are simply not prepassed; LEQUAL keeps the result right), the non-MRT forward G-buffer SSAO
+  pre-pass, minimap, planar reflection, ray-traced scene, meshlets/tessellation, transparent skinned materials (alpha < 1 is skipped),
+  ShaderProfiles. Motion vectors use the current pose for the previous frame (skinned parts show no own motion). The shadow of a
+  cut-out hair card is solid (shadow.frag does not sample the cut-out).
+- Touched renderer code (for merges): `VioRenderer3D` gains `use VioSkinnedDraws;`, `meshVertexSource(bool $storage, bool $skin = false)`,
+  `bindPipeline(..., bool $skinned = false)` (+ the `default_skin_mrt` name), `render()` (`prepareSkinFrame()` before the shadow pass,
+  `drawSkinnedOpaque()` after the meshlet run) and one `drawSkinnedShadows()` line after each `drawShadowList()` in `renderShadowPass`,
+  `renderSpotShadowPass`, `renderPointShadowPass`. Everything else is in the trait.
+- Look-at/Blink conventions: root space of the character builders (netrunner `BodyModel`): +Y up, +Z forward, +X = the character's LEFT;
+  `LookAt` yaw is positive toward +X (left), pitch positive up.
 
 ---
 

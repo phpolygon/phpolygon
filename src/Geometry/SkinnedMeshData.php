@@ -115,6 +115,23 @@ final readonly class SkinnedMeshData
     }
 
     /**
+     * A palette as the little-endian float32 bytes the GPU path uploads (64 bytes per
+     * joint). DrawSkinnedMesh accepts these instead of float lists: a crowd that
+     * caches its packed poses skips the per-frame pack.
+     *
+     * @param list<float> $palette
+     */
+    public static function packPalette(array $palette): string
+    {
+        $out = '';
+        foreach (array_chunk($palette, 4096) as $chunk) {
+            $out .= pack('g*', ...$chunk);
+        }
+
+        return $out;
+    }
+
+    /**
      * CPU skinning: positions, normals and tangent xyz blended by the palette. Same
      * vertex order, UVs and indices as the source mesh.
      *

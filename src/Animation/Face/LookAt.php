@@ -8,8 +8,10 @@ use PHPolygon\Animation\QuatMath;
 
 /**
  * Look-at building block for eyes or a head: yaw and pitch from a joint to a target in
- * the joint's own frame (+Z forward, +Y up, +X left), clamped to limits, as the angles and
- * as a quaternion ready for a {@see \PHPolygon\Animation\Pose} rotation (pitch about X,
+ * the joint's own frame, clamped to limits. Frame convention, the same as the character
+ * builders' root space (netrunner BodyModel): +Y up, +Z forward, +X = the character's
+ * LEFT; yaw is positive toward +X (the character's left), pitch positive up. Returned as
+ * the angles and as a quaternion ready for a {@see \PHPolygon\Animation\Pose} rotation (pitch about X,
  * yaw about Y, the Euler order of Pose::degrees()).
  */
 final class LookAt
