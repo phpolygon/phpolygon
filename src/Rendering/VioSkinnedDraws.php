@@ -201,7 +201,7 @@ trait VioSkinnedDraws
                     $dz = $m[14] - $cam[2];
                     $depth[$i] = $dx * $dx + $dy * $dy + $dz * $dz;
                 }
-                if ($sphere !== null && $planes !== null) {
+                if ($sphere !== null) {
                     // World sphere of the instance: the local sphere moved by the model, scaled by its largest axis.
                     $cx = $m[0] * $sphere[0] + $m[4] * $sphere[1] + $m[8] * $sphere[2] + $m[12];
                     $cy = $m[1] * $sphere[0] + $m[5] * $sphere[1] + $m[9] * $sphere[2] + $m[13];
@@ -428,10 +428,51 @@ trait VioSkinnedDraws
         $this->drawSkinned('transparent');
     }
 
-    /** @param 'opaque'|'prepass'|'transparent' $pass */
-    private function drawSkinned(string $pass): void
+    /**
+     * Skinned draws into a planar mirror's image (called by the mirror pass with its mirrored view bound): the
+     * commands of the mirror's layers that touch its frustum, opaque, forward shading.
+     *
+     * @param list<array{0: float, 1: float, 2: float, 3: float}> $planes mirrored frustum planes
+     * @param array{0: array{ambientColor: \PHPolygon\Rendering\Color, ambientIntensity: float, dirLights: list<\PHPolygon\Rendering\Command\SetDirectionalLight>, pointLights: list<\PHPolygon\Rendering\Command\AddPointLight>, spotLights: list<\PHPolygon\Rendering\Command\AddSpotLight>, rectLights: list<\PHPolygon\Rendering\Command\AddRectLight>, fogColor: \PHPolygon\Rendering\Color, fogNear: float, fogFar: float, waveEnabled: bool, waveAmplitude: float, waveFrequency: float, wavePhase: float, ftMode: \PHPolygon\Rendering\Quality\FieldtracingMode, ftIntensity: float, ftAoRadius: float}, 1: bool, 2: list<\PHPolygon\Rendering\Command\SetDirectionalLight>} $inputs frame state, shadow map flag, sun lights
+     */
+    private function drawSkinnedInMirror(array $planes, int $layerMask, array $inputs): void
     {
-        $inputs = $this->sceneUniformInputs;
+        $this->drawSkinned('opaque', $inputs, ['planes' => $planes, 'mask' => $layerMask]);
+    }
+
+    /**
+     * Whether any instance of the command can touch the frustum.
+     *
+     * @param list<array{0: float, 1: float, 2: float, 3: float}> $planes Frustum::planes()
+     */
+    private function skinCommandInFrustum(DrawSkinnedMesh $cmd, array $planes): bool
+    {
+        $sphere = SkinnedMeshRegistry::sphere($cmd->meshId);
+        if ($sphere === null) {
+            return true;
+        }
+        foreach ($cmd->models as $model) {
+            $m = $model->toArray();
+            $cx = $m[0] * $sphere[0] + $m[4] * $sphere[1] + $m[8] * $sphere[2] + $m[12];
+            $cy = $m[1] * $sphere[0] + $m[5] * $sphere[1] + $m[9] * $sphere[2] + $m[13];
+            $cz = $m[2] * $sphere[0] + $m[6] * $sphere[1] + $m[10] * $sphere[2] + $m[14];
+            $scale = sqrt(max($m[0] * $m[0] + $m[1] * $m[1] + $m[2] * $m[2], $m[4] * $m[4] + $m[5] * $m[5] + $m[6] * $m[6], $m[8] * $m[8] + $m[9] * $m[9] + $m[10] * $m[10]));
+            if (!Frustum::sphereOutside($planes, $cx, $cy, $cz, $sphere[3] * $scale * 1.02)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * @param 'opaque'|'prepass'|'transparent' $pass
+     * @param ?array{0: array{ambientColor: \PHPolygon\Rendering\Color, ambientIntensity: float, dirLights: list<\PHPolygon\Rendering\Command\SetDirectionalLight>, pointLights: list<\PHPolygon\Rendering\Command\AddPointLight>, spotLights: list<\PHPolygon\Rendering\Command\AddSpotLight>, rectLights: list<\PHPolygon\Rendering\Command\AddRectLight>, fogColor: \PHPolygon\Rendering\Color, fogNear: float, fogFar: float, waveEnabled: bool, waveAmplitude: float, waveFrequency: float, wavePhase: float, ftMode: \PHPolygon\Rendering\Quality\FieldtracingMode, ftIntensity: float, ftAoRadius: float}, 1: bool, 2: list<\PHPolygon\Rendering\Command\SetDirectionalLight>} $inputs
+     * @param ?array{planes: list<array{0: float, 1: float, 2: float, 3: float}>, mask: int} $mirror
+     */
+    private function drawSkinned(string $pass, ?array $inputs = null, ?array $mirror = null): void
+    {
+        $inputs ??= $this->sceneUniformInputs;
         if ($this->skinDraws === [] || $this->skinBuffer === null || $inputs === null || !$this->ensureSkinPrograms()) {
             return;
         }
@@ -447,6 +488,19 @@ trait VioSkinnedDraws
         foreach ($draws as $d) {
             if (($d['material']->alpha < 1.0) !== $transparent || ($pass === 'prepass' && !self::prepassEligible($d['material']))) {
                 continue;
+            }
+            if ($mirror === null) {
+                // A body hidden from the main camera stays out of its passes (it still casts and shows in mirrors).
+                if ($d['cmd']->shadowOnly) {
+                    continue;
+                }
+            } else {
+                if (($d['cmd']->layers & $mirror['mask']) === 0 || !$this->skinCommandInFrustum($d['cmd'], $mirror['planes'])) {
+                    continue;
+                }
+                // The mirror sees every instance of a command that touches its frustum, not the main camera's visible subset.
+                $d['viewInst'] = $d['inst'];
+                $d['viewCount'] = count($d['cmd']->models);
             }
             $variant = $this->skinVariantOf($d['material'], $d['cmd']->materialId);
             if (!$this->ensureSkinVariant($variant)) {
@@ -475,7 +529,7 @@ trait VioSkinnedDraws
             if ($this->motionThisFrame) {
                 vio_set_uniform($this->ctx, 'u_has_prev', 0);
             }
-            vio_bind_storage_buffer($this->ctx, $this->skinBuffer, 0, VIO_COMPUTE_READ);
+            $this->bindSkinBuffer();
             foreach ($list as $d) {
                 $mesh = $d['viewCount'] > 0 ? $this->uploadSkinMesh($d['cmd']->meshId) : null;
                 if ($mesh === null) {
@@ -486,7 +540,7 @@ trait VioSkinnedDraws
                 $this->applyGbufferWrite($pass === 'prepass' ? 0 : 1);
                 vio_set_uniform($this->ctx, 'u_skin_inst', $d['viewInst']);
                 if ($this->skinRebindPerDraw()) {
-                    vio_bind_storage_buffer($this->ctx, $this->skinBuffer, 0, VIO_COMPUTE_READ);
+                    $this->bindSkinBuffer();
                 }
                 vio_draw_instanced_from_buffer($this->ctx, $mesh, $d['viewCount']);
             }
@@ -538,7 +592,7 @@ trait VioSkinnedDraws
                 }
                 vio_set_uniform($this->ctx, 'u_skin_inst', $d['inst']);
                 if ($this->skinRebindPerDraw()) {
-                    vio_bind_storage_buffer($this->ctx, $this->skinBuffer, 0, VIO_COMPUTE_READ);
+                    $this->bindSkinBuffer();
                 }
                 vio_draw_instanced_from_buffer($this->ctx, $mesh, count($d['cmd']->models));
             }
@@ -569,7 +623,7 @@ trait VioSkinnedDraws
         vio_set_uniform($this->ctx, 'u_use_instancing', 1);
         vio_set_uniform($this->ctx, 'u_foliage_wind', 0);
         vio_set_uniform($this->ctx, 'u_shadow_dapple', 0.0);
-        vio_bind_storage_buffer($this->ctx, $this->skinBuffer, 0, VIO_COMPUTE_READ);
+        $this->bindSkinBuffer();
 
         return true;
     }
@@ -593,6 +647,13 @@ trait VioSkinnedDraws
         }
 
         return true;
+    }
+
+    private function bindSkinBuffer(): void
+    {
+        if ($this->skinBuffer !== null) {
+            vio_bind_storage_buffer($this->ctx, $this->skinBuffer, 0, VIO_COMPUTE_READ);
+        }
     }
 
     /**

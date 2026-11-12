@@ -8978,6 +8978,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             }
             $count++;
         }
+        $this->drawSkinnedInMirror($planes, $mirror->layerMask, [$frameState, $hasShadowMap, $dirLights]);
         vio_unbind_render_target($this->ctx);
         $this->forceLinearTarget = false;
         $this->gpuMark('mirror');

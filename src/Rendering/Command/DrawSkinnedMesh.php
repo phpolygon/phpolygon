@@ -41,6 +41,13 @@ readonly class DrawSkinnedMesh
          * @var list<list<float>|string>
          */
         public array $prevPalettes = [],
+        /**
+         * True = hidden from the main camera's passes (opaque, prepass, transparent) but still cast into the
+         * shadow maps and drawn by mirrors: a first-person player's body ({@see DrawMesh::$shadowOnly}).
+         */
+        public bool $shadowOnly = false,
+        /** What a mirror ({@see SetPlanarMirror::$layerMask}) sees this draw as; see {@see \PHPolygon\Rendering\RenderLayers}. */
+        public int $layers = \PHPolygon\Rendering\RenderLayers::WORLD,
     ) {
         if ($models === [] || $palettes === []) {
             throw new \InvalidArgumentException('DrawSkinnedMesh needs at least one model and one palette');

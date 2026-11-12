@@ -4101,6 +4101,13 @@ Pure PHP, deterministic, no renderer change; works on every backend and needs no
   the pose). Not covered: the non-MRT forward G-buffer SSAO pre-pass (MRT frames are covered). Touched renderer places added: `drawSkinnedPrepass()`
   after the prepass meshlet run, `drawSkinnedTransparent()` after the transparent loop; `sceneColorAvailable()` / `sceneColorFetch()`, the
   fragment defines for the scene copy and `vatMode()` / `withVat()`.
+- Skinned bodies and planar mirrors (integration of `feat/planar-mirror`, see "Planar mirrors and the hidden body"): `DrawSkinnedMesh` has
+  `$shadowOnly` (hidden from the main camera's opaque / prepass / transparent passes, still cast into the shadow maps and drawn by mirrors) and
+  `$layers` (`RenderLayers`, default WORLD; a mirror draws only the layers of its mask). The mirror pass calls `drawSkinnedInMirror()` after its
+  `DrawMesh` loop (mirrored view bound, forward shading, opaque, commands whose bounds touch the mirrored frustum, all instances). Touched mirror code:
+  one line in `renderPlanarMirrorPass()`. Tests `VioSkinnedMirrorTest` (forward and MRT path: hidden skinned body in the mirror and not in the view,
+  layer mask, hidden body shadow), D3D12 SM6 and D3D11 hardware. Default frames (no skinning, mirror, VAT): hashes of 3 frames x 2 settings
+  (shadows Medium; TAA with shadows off) equal between v0.105.0-kit base (613d976) and this branch on D3D12 and D3D11.
 - `Rendering\ShaderModelCheck::detect($ctx): ?int` / `::require($ctx)`: opt-in; throws when a D3D12 context compiled with FXC (shader model 5,
   16 units) instead of 6. The engine never calls it; a program that needs SM 6 does.
 - `Material::$windowVary` (opt-in, `withWindowGrid(..., ?bool $vary)`): with `windowUv` the cell choice mixes the world position of the cell centre
