@@ -449,13 +449,17 @@ build_target() {
     local t0=$SECONDS rc=0 log="/tmp/buildlog-${target}-${type}.txt"
     local -a extra=()
     [ -n "$derive" ] && extra=(--derive-phar "$derive")
+    # memory_limit=-1: PeIconWriter (Windows icon patching) allocates against the whole
+    # PE binary; the default 128M CLI limit is exhausted on a game with a real icon set
+    # (observed on a 7-size icon, Allowed memory size of 134217728 bytes exhausted) -
+    # same class of fix as the prebake hooks below, which already pass it (2026-11-12).
     if [ "$mode" = "stream" ]; then
-        php -d phar.readonly=0 vendor/bin/phpolygon build "$target" \
+        php -d phar.readonly=0 -d memory_limit=-1 vendor/bin/phpolygon build "$target" \
             --variant "$VARIANT" --type "$type" --php-version "$PHP_VERSION" --phar "$phar" "${extra[@]}" \
             2>&1 | sed "s/^/    ${C_DIM}|${C_0} /"
         rc=${PIPESTATUS[0]}
     else
-        php -d phar.readonly=0 vendor/bin/phpolygon build "$target" \
+        php -d phar.readonly=0 -d memory_limit=-1 vendor/bin/phpolygon build "$target" \
             --variant "$VARIANT" --type "$type" --php-version "$PHP_VERSION" --phar "$phar" "${extra[@]}" >"$log" 2>&1
         rc=$?
     fi
