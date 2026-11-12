@@ -56,6 +56,8 @@ enum ShaderPath: string
     case SoftParticle = 'SOFT_PARTICLE';
     /** Refraction and frosted glass (Material::$refraction). */
     case Refraction = 'REFRACTION';
+    /** Kit patterns: NormalPattern codes 13+ and SurfacePattern codes 8+ (formwork, aggregate, planks, ...). */
+    case KitPatterns = 'KIT_PATTERNS';
 
     public function define(): string
     {
@@ -85,6 +87,9 @@ enum ShaderPath: string
             self::EmissiveLook => $material->windowLights > 0.0 || $material->neonTube,
             self::SoftParticle => $material->softParticle > 0.0,
             self::Refraction => $material->refraction > 0.0,
+            self::KitPatterns => NormalPattern::codeFor($material->normalPattern) >= 13
+                || SurfacePattern::codeFor($material->surfacePattern) >= 8
+                || self::splatKit($material),
         };
     }
 
@@ -98,6 +103,16 @@ enum ShaderPath: string
     {
         $frameDriven = [self::Snow, self::Volumetric, self::CloudShadow, self::ProbeGi, self::Weathering];
         return array_values(array_filter(self::cases(), static fn (self $p): bool => !in_array($p, $frameDriven, true)));
+    }
+
+    private static function splatKit(Material $material): bool
+    {
+        foreach ($material->splatLayers as $layer) {
+            if (NormalPattern::codeFor($layer->pattern) >= 13) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static function splatPatterned(Material $material): bool

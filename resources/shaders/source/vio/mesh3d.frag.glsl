@@ -1487,6 +1487,77 @@ vec3 np_skin(vec2 uv) {
     return normalize(vec3(-grad * 0.06, 1.0));
 }
 
+#ifndef PHPOLYGON_OMIT_KIT_PATTERNS
+// ── Kit patterns: formwork, aggregate, brushed, soft hammered, planks ─────────
+// Lengths are metres of pattern UV at normalScale 1 (metric UVs). Each normal is
+// taken from the pattern's own height field (central differences over a few
+// millimetres), so relief, cavity and parallax agree.
+
+// Plank layout: rows 0.12 m wide, planks 1.2 m long along U, a random butt-joint
+// offset per row. id = (plank, row), local = position in the plank (along, across) 0..1.
+void plankLayout(vec2 p, out vec2 id, out vec2 local) {
+    float row = floor(p.y / 0.12);
+    float along = (p.x + hash21(vec2(row, 4.1)) * 1.2) / 1.2;
+    id = vec2(floor(along), row);
+    local = vec2(fract(along), fract(p.y / 0.12));
+}
+
+// One octave of aggregate: a jittered pit or bump per cell, soft-edged. -1..1.
+float aggregateCell(vec2 p, float seed) {
+    vec2 id = floor(p);
+    vec2 f = fract(p) - 0.5;
+    vec2 j = (vec2(hash21(id + seed), hash21(id + seed + 7.3)) - 0.5) * 0.4;
+    float size = 0.2 + 0.25 * hash21(id + seed + 3.1);
+    float sgn = hash21(id + seed + 9.7) > 0.5 ? 1.0 : -1.0;
+    return sgn * smoothstep(size, 0.0, length(f - j));
+}
+
+float nh_formwork(vec2 uv);
+vec3 np_formwork(vec2 uv) {
+    float e = 0.003;
+    float hx = nh_formwork(uv + vec2(e, 0.0)) - nh_formwork(uv - vec2(e, 0.0));
+    float hy = nh_formwork(uv + vec2(0.0, e)) - nh_formwork(uv - vec2(0.0, e));
+    return normalize(vec3(-hx * 1.5, -hy * 1.5, 1.0));
+}
+
+float nh_aggregate(vec2 uv);
+vec3 np_aggregate(vec2 uv) {
+    float e = 0.002;
+    float hx = nh_aggregate(uv + vec2(e, 0.0)) - nh_aggregate(uv - vec2(e, 0.0));
+    float hy = nh_aggregate(uv + vec2(0.0, e)) - nh_aggregate(uv - vec2(0.0, e));
+    return normalize(vec3(-hx * 1.2, -hy * 1.2, 1.0));
+}
+
+// Anisotropic strands along U: 300 per metre, each with its own depth and phase.
+// Fades out where a strand is thinner than about a pixel.
+vec3 np_brushed(vec2 uv) {
+    float t = uv.y * 300.0;
+    float lane = floor(t);
+    float strand = hash21(vec2(lane, 11.3));
+    float along = 0.7 + 0.3 * noise(vec2(uv.x * 5.0, lane * 0.37));
+    float aa = 1.0 - smoothstep(0.3, 0.8, fwidth(t));
+    float slopeY = cos(fract(t) * 6.28318 + strand * 6.28318) * (0.3 + 0.7 * strand) * along * aa;
+    float slopeX = (noise(vec2(uv.x * 60.0, lane * 0.31)) - 0.5) * 0.3 * strand * aa;
+    return normalize(vec3(-slopeX * 0.25, -slopeY * 0.25, 1.0));
+}
+
+float nh_hammered_soft(vec2 uv);
+vec3 np_hammered_soft(vec2 uv) {
+    float e = 0.01;
+    float hx = nh_hammered_soft(uv + vec2(e, 0.0)) - nh_hammered_soft(uv - vec2(e, 0.0));
+    float hy = nh_hammered_soft(uv + vec2(0.0, e)) - nh_hammered_soft(uv - vec2(0.0, e));
+    return normalize(vec3(-hx * 4.0, -hy * 4.0, 1.0));
+}
+
+float nh_wood_planks(vec2 uv);
+vec3 np_wood_planks(vec2 uv) {
+    float e = 0.0003;
+    float hx = nh_wood_planks(uv + vec2(e, 0.0)) - nh_wood_planks(uv - vec2(e, 0.0));
+    float hy = nh_wood_planks(uv + vec2(0.0, e)) - nh_wood_planks(uv - vec2(0.0, e));
+    return normalize(vec3(-hx * 3.0, -hy * 3.0, 1.0));
+}
+
+#endif // PHPOLYGON_OMIT_KIT_PATTERNS
 float nh_cobblestone(vec2 uv);
 // Normal from the cobblestone height field (central differences).
 float nh_roof_tiles(vec2 uv);
@@ -1517,6 +1588,13 @@ vec3 dispatchProceduralNormal(int code, vec2 uv) {
     if (code == 10) return np_skin(uv);
     if (code == 11) return np_cobblestone(uv);
     if (code == 12) return np_roof_tiles(uv);
+#ifndef PHPOLYGON_OMIT_KIT_PATTERNS
+    if (code == 13) return np_formwork(uv);
+    if (code == 14) return np_aggregate(uv);
+    if (code == 15) return np_brushed(uv);
+    if (code == 16) return np_hammered_soft(uv);
+    if (code == 17) return np_wood_planks(uv);
+#endif // PHPOLYGON_OMIT_KIT_PATTERNS
     return vec3(0.0, 0.0, 1.0);
 }
 #endif // PHPOLYGON_OMIT_NORMAL_PATTERNS
@@ -1582,6 +1660,34 @@ vec3 sp_sandstone(vec2 uv) {
     return vec3(0.5 + (layers - 0.5) * 0.12 + (grain - 0.5) * 0.08, 0.05, 0.0);
 }
 
+#ifndef PHPOLYGON_OMIT_KIT_PATTERNS
+// Soft mottling of the albedo only: +-8 % at intensity 1, blotches of about a metre.
+vec3 sp_mottle(vec2 uv) {
+    float m = smoothstep(0.3, 0.7, fbm3(uv * 1.3));
+    return vec3(0.5 + (m - 0.5) * 0.08, 0.0, 0.0);
+}
+
+// Worn paint without the hard step: chips fade in, the underlay is 15 % darker,
+// roughness / metal deltas stop at 0.1 (scuffing, not camouflage).
+vec3 sp_worn_paint_soft(vec2 uv) {
+    float chip = smoothstep(0.50, 0.68, fbm3(uv * 3.0));
+    return vec3(mix(0.50, 0.425, chip), 0.1 * chip, 0.1 * chip);
+}
+
+// Per-plank tone, roughness and darker gaps; the layout of np_wood_planks (same
+// scale gives the same planks): rows 0.12 m wide, planks 1.2 m long along U.
+vec3 sp_wood_planks(vec2 uv) {
+    float row = floor(uv.y / 0.12);
+    float along = (uv.x + hash21(vec2(row, 4.1)) * 1.2) / 1.2;
+    vec2 id = vec2(floor(along), row);
+    vec2 loc = vec2(fract(along), fract(uv.y / 0.12));
+    vec2 edge = min(loc, 1.0 - loc) * vec2(1.2, 0.12);
+    float gap = 1.0 - smoothstep(0.0015, 0.004, min(edge.x, edge.y));
+    float tone = (hash21(id + 1.3) - 0.5) * 0.11 + (noise(vec2(uv.x * 2.0, row * 3.1)) - 0.5) * 0.03;
+    return vec3((0.5 + tone) * (1.0 - 0.35 * gap), (hash21(id + 6.1) - 0.5) * 0.1, 0.0);
+}
+
+#endif // PHPOLYGON_OMIT_KIT_PATTERNS
 vec3 dispatchSurfacePattern(int code, vec2 uv) {
     if (code == 1) return sp_worn_paint(uv);
     if (code == 2) return sp_rust(uv);
@@ -1590,6 +1696,11 @@ vec3 dispatchSurfacePattern(int code, vec2 uv) {
     if (code == 5) return sp_skin(uv);
     if (code == 6) return sp_marble(uv);
     if (code == 7) return sp_sandstone(uv);
+#ifndef PHPOLYGON_OMIT_KIT_PATTERNS
+    if (code == 8) return sp_mottle(uv);
+    if (code == 9) return sp_worn_paint_soft(uv);
+    if (code == 10) return sp_wood_planks(uv);
+#endif // PHPOLYGON_OMIT_KIT_PATTERNS
     return vec3(0.5, 0.0, 0.0);
 }
 #endif // PHPOLYGON_OMIT_SURFACE_PATTERNS
@@ -1706,6 +1817,63 @@ float nh_roof_tiles(vec2 uv) {
     return (0.35 + 0.45 * lift + 0.2 * round_) * gap * (0.9 + 0.1 * hash21(floor(p) + 3.0));
 }
 
+#ifndef PHPOLYGON_OMIT_KIT_PATTERNS
+// Board-formed concrete (metres): soft board joints every 0.2 m (each board a hair
+// higher or lower), a panel joint every 2.4 m, tie holes on a 0.6 m grid (they sit
+// mid-board), fine grain.
+float nh_formwork(vec2 uv) {
+    float board = uv.y / 0.2;
+    float bf = fract(board);
+    float joint = 1.0 - smoothstep(0.0, 0.012, min(bf, 1.0 - bf) * 0.2);
+    float level = 0.03 * hash21(vec2(floor(board), 1.3));
+    float pf = fract(uv.x / 2.4);
+    float panel = 1.0 - smoothstep(0.0, 0.01, min(pf, 1.0 - pf) * 2.4);
+    float tie = smoothstep(0.03, 0.012, length((fract(uv / 0.6) - 0.5) * 0.6));
+    float grain = (fbm3(uv * 30.0) - 0.5) * 0.04;
+    return clamp(1.0 - 0.35 * joint - 0.5 * panel - 0.45 * tie - level + grain, 0.0, 1.0);
+}
+
+// Aggregate: two octaves of soft pits and bumps (about 2.2 cm and 0.9 cm cells).
+float nh_aggregate(vec2 uv) {
+    return 0.85 + aggregateCell(uv * 45.0, 0.0) * 0.10 + aggregateCell(uv * 110.0, 17.0) * 0.05;
+}
+
+// Brushed strands, 300 per metre along U.
+float nh_brushed(vec2 uv) {
+    float t = uv.y * 300.0;
+    float strand = hash21(vec2(floor(t), 11.3));
+    return 1.0 - 0.15 * (0.5 + 0.5 * sin(fract(t) * 6.28318 + strand * 6.28318)) * (0.3 + 0.7 * strand);
+}
+
+// Soft hammered: dimples about 0.33 m apart, each a little deeper or shallower.
+float nh_hammered_soft(vec2 uv) {
+    vec2 grid = uv * 3.0;
+    vec2 cell = floor(grid);
+    vec2 jitter = vec2(hash21(cell), hash21(cell + 17.0)) - 0.5;
+    float r = length(fract(grid) - 0.5 - jitter * 0.3);
+    return 1.0 - (0.25 + 0.2 * hash21(cell + 5.0)) * smoothstep(0.42, 0.0, r);
+}
+
+// Planks: per-plank grain spacing (500..1200 rad/m across the plank) and phase, a
+// slow waver along the plank, an occasional knot with rings, a gap between planks.
+float nh_wood_planks(vec2 uv) {
+    vec2 id;
+    vec2 loc;
+    plankLayout(uv, id, loc);
+    float freq = 500.0 + 700.0 * hash21(id + 2.3);
+    float warp = noise(vec2(uv.x * 3.0 + hash21(id) * 17.0, uv.y * 14.0)) * 5.0;
+    float grain = 0.5 + 0.5 * sin(uv.y * freq + hash21(id + 5.9) * 6.2832 + warp);
+    float h = 0.92 + 0.08 * grain * (0.5 + 0.5 * hash21(id + 8.8));
+    float knot = step(0.82, hash21(id + 3.7));
+    vec2 kc = vec2(0.2 + 0.6 * hash21(id + 6.6), 0.3 + 0.4 * hash21(id + 7.7));
+    float kd = length((loc - kc) * vec2(1.2, 0.12));
+    h -= knot * (0.25 * smoothstep(0.03, 0.0, kd) - 0.05 * sin(kd * 200.0) * smoothstep(0.06, 0.0, kd));
+    vec2 edge = min(loc, 1.0 - loc) * vec2(1.2, 0.12);
+    h -= 0.5 * (1.0 - smoothstep(0.0015, 0.004, min(edge.x, edge.y)));
+    return clamp(h, 0.0, 1.0);
+}
+
+#endif // PHPOLYGON_OMIT_KIT_PATTERNS
 float dispatchProceduralHeight(int code, vec2 uv) {
     if (code == 1)  return nh_bricks(uv);
     if (code == 2)  return nh_bumps(uv);
@@ -1719,6 +1887,13 @@ float dispatchProceduralHeight(int code, vec2 uv) {
     if (code == 10) return nh_skin(uv);
     if (code == 11) return nh_cobblestone(uv);
     if (code == 12) return nh_roof_tiles(uv);
+#ifndef PHPOLYGON_OMIT_KIT_PATTERNS
+    if (code == 13) return nh_formwork(uv);
+    if (code == 14) return nh_aggregate(uv);
+    if (code == 15) return nh_brushed(uv);
+    if (code == 16) return nh_hammered_soft(uv);
+    if (code == 17) return nh_wood_planks(uv);
+#endif // PHPOLYGON_OMIT_KIT_PATTERNS
     return 1.0;
 }
 

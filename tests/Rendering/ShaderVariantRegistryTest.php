@@ -30,8 +30,13 @@ final class ShaderVariantRegistryTest extends TestCase
      * Changed again for the window grid (u_window_grid, u_emissive_look.z): the lit-window
      * look reads its cell size/origin from uniforms whose defaults are the old constants
      * (2.2 x 2.8 m); the default window image is byte-identical (D3D12/WARP and D3D11/RTX 2080).
+     * Changed again for the kit patterns (ShaderPath::KitPatterns, normal codes 13-17, surface 8-10). This
+     * hash is the program with nothing omitted; a game without kit materials compiles it without them
+     * (automatic omission): measured on the RTX 2080 (2026-11-12) 12 pattern tiles, 7 surface tiles, metal
+     * spheres and plain tiles came out byte-identical to the previous shader on D3D12 and D3D11 (without the
+     * gating D3D12 differed by 1 LSB on up to 33 pixels per image).
      */
-    private const VIO_FRAG_RELEASE = '3a29a6b6004a9ac02f8def2473853193fdf482561ddf5beddafcf7abcca61cea';
+    private const VIO_FRAG_RELEASE = '6452ade7283934424aa724c508b7040f16357b358d4f82bb173286aba19e1c2a';
 
     protected function setUp(): void
     {

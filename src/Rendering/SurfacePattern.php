@@ -42,6 +42,23 @@ final class SurfacePattern
     public const MARBLE          = 'marble';
     /** Sandstone: fine grain and horizontal bedding layers. */
     public const SANDSTONE       = 'sandstone';
+    /**
+     * Soft mottling of the albedo only (about +-8 % at intensity 1, blotches of a
+     * metre or so at surfaceScale 1): no roughness or metal change. For concrete,
+     * plaster and paint.
+     */
+    public const MOTTLE          = 'mottle';
+    /**
+     * WORN_PAINT without the hard step: chips fade in (smoothstep), the underlay is
+     * only 15 % darker and roughness / metal deltas stop at 0.1, so edge wear reads
+     * as scuffing instead of camouflage.
+     */
+    public const WORN_PAINT_SOFT = 'worn_paint_soft';
+    /**
+     * Per-plank tone and roughness of NormalPattern::WOOD_PLANKS (+-11 % albedo per
+     * plank, a slow streak along it, darker gaps): same layout at the same scale.
+     */
+    public const WOOD_PLANKS     = 'wood_planks';
 
     public static function codeFor(?string $pattern): int
     {
@@ -53,6 +70,9 @@ final class SurfacePattern
             self::SKIN           => 5,
             self::MARBLE         => 6,
             self::SANDSTONE      => 7,
+            self::MOTTLE         => 8,
+            self::WORN_PAINT_SOFT => 9,
+            self::WOOD_PLANKS    => 10,
             default              => 0,
         };
     }

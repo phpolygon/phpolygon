@@ -74,8 +74,10 @@ final class VioAutomaticOmissionTest extends TestCase
     {
         foreach (ShaderPath::automatic() as $left) {
             MaterialRegistry::clear();
+            // Kit patterns live inside the surface patterns path: a kit material keeps it in.
+            $expected = $left === ShaderPath::SurfacePatterns ? [$left->define(), ShaderPath::KitPatterns->define()] : [$left->define()];
             foreach (ShaderPath::automatic() as $path) {
-                if ($path !== $left) {
+                if ($path !== $left && !($left === ShaderPath::SurfacePatterns && $path === ShaderPath::KitPatterns)) {
                     MaterialRegistry::register('m_' . $path->value, self::needing($path));
                 }
             }
@@ -83,7 +85,7 @@ final class VioAutomaticOmissionTest extends TestCase
             foreach (MaterialRegistry::ids() as $id) {
                 $this->draw($r, $id);
             }
-            self::assertSame([$left->define()], $r->automaticShaderOmissions(), "only {$left->value} left out");
+            self::assertEqualsCanonicalizing($expected, $r->automaticShaderOmissions(), "only {$left->value} left out");
         }
     }
 
@@ -143,6 +145,7 @@ final class VioAutomaticOmissionTest extends TestCase
             ShaderPath::EmissiveLook => new Material(albedo: $c, emission: new Color(1.0, 0.2, 0.6), neonTube: true),
             ShaderPath::SoftParticle => new Material(albedo: $c, alpha: 0.5, softParticle: 0.5),
             ShaderPath::Refraction => new Material(albedo: $c, alpha: 0.5, refraction: 0.5),
+            ShaderPath::KitPatterns => new Material(albedo: $c, surfacePattern: SurfacePattern::WOOD_PLANKS),
             default => throw new \LogicException($path->value),
         };
         self::assertTrue($path->neededBy($m), "{$path->value} fixture");

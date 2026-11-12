@@ -49,6 +49,35 @@ final class NormalPattern
     public const COBBLESTONE = 'cobblestone';
     /** Overlapping roof tiles in rows, each a little lifted at its lower edge (shader plan 5.5). */
     public const ROOF_TILES  = 'roof_tiles';
+    /**
+     * Board-formed / panel concrete: soft horizontal board joints every 0.2 m (each
+     * board a hair higher or lower), a vertical panel joint every 2.4 m and round tie
+     * holes on a 0.6 x 0.6 m grid, in metres of mesh UV at normalScale 1 (metric UVs,
+     * see MetricMesh); normalScale 2 halves every distance. Joints run along U.
+     */
+    public const FORMWORK    = 'formwork';
+    /**
+     * Concrete / terrazzo aggregate: small rounded pits and bumps from two octaves of
+     * cell noise (about 2.2 cm and 0.9 cm at normalScale 1), no hard edges. A calm,
+     * low-contrast replacement for NOISE on concrete and plaster.
+     */
+    public const AGGREGATE   = 'aggregate';
+    /**
+     * Anisotropic brushed metal: fine strands along U (300 per metre at normalScale 1,
+     * each with its own depth, fading out where a strand is thinner than a pixel).
+     * The relief counterpart of SurfacePattern::BRUSHED_METAL, which only varies
+     * albedo/roughness.
+     */
+    public const BRUSHED     = 'brushed';
+    /** Larger (about 0.33 m at normalScale 1), shallower dimples than HAMMERED, no hard rim: dented sheet. */
+    public const HAMMERED_SOFT = 'hammered_soft';
+    /**
+     * Wooden planks 0.12 m wide and 1.2 m long along U (normalScale 1), laid in rows
+     * with a random butt-joint offset per row; every plank has its own grain spacing,
+     * grain phase and sometimes a knot, with a subtle gap between planks. Pairs with
+     * SurfacePattern::WOOD_PLANKS (same layout at the same scale) for the tone.
+     */
+    public const WOOD_PLANKS = 'wood_planks';
 
     /**
      * Map a string pattern id to the integer code consumed by the shader's
@@ -70,6 +99,11 @@ final class NormalPattern
             self::SKIN        => 10,
             self::COBBLESTONE => 11,
             self::ROOF_TILES  => 12,
+            self::FORMWORK    => 13,
+            self::AGGREGATE   => 14,
+            self::BRUSHED     => 15,
+            self::HAMMERED_SOFT => 16,
+            self::WOOD_PLANKS => 17,
             default           => 0,
         };
     }
