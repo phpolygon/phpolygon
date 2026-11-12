@@ -36,8 +36,12 @@ use PHPolygon\Rendering\Quality\FieldtracingMode;
 use PHPolygon\Rendering\InstanceParams;
 use PHPolygon\Rendering\MaterialRegistry;
 use PHPolygon\Rendering\MeshBounds;
+use PHPolygon\Rendering\Command\SetPlanarMirror;
+use PHPolygon\Rendering\Frustum;
 use PHPolygon\Rendering\RenderCommandList;
+use PHPolygon\Rendering\RenderLayers;
 use PHPolygon\Rendering\Renderer3DInterface;
+use PHPolygon\Rendering\Reflection\MirrorPlane;
 use PHPolygon\Rendering\TransparentDrawSorter;
 use PHPolygon\Runtime\PerfProfiler;
 use PHPolygon\Visibility\VisibilityService;
@@ -532,6 +536,22 @@ class Renderer3DSystem extends AbstractSystem
                 }
             }
 
+            // Hidden from the main camera (a first-person body): a shadow-only
+            // draw, so the camera passes skip it while the shadow pass casts it
+            // and mirrors / the water reflection still see it. Single, unbatched.
+            if ($mesh->hiddenFromMainCamera) {
+                $this->commandList->add(new DrawMesh(
+                    $mesh->meshId,
+                    $mesh->materialId,
+                    $matrix,
+                    castShadows: $mesh->castShadows,
+                    params: $mesh->shaderParams,
+                    shadowOnly: true,
+                    layers: $mesh->renderLayers,
+                ));
+                continue;
+            }
+
             $material = MaterialRegistry::get($mesh->materialId);
             $isTransparent = $material !== null && $material->alpha < 1.0;
             $prev = $lastDrawn[$entityId] ?? null;
@@ -540,7 +560,8 @@ class Renderer3DSystem extends AbstractSystem
             // Batchable draws wait until culling is through: what survived of
             // one mesh + material becomes one draw below. A mover needs its own
             // draw for the motion vector.
-            if ($mesh->batchable && (!$isTransparent || $mesh->batchTransparent) && !$mesh->excludeFromGbuffer && ($prev === null || $prev === $matrix)) {
+            if ($mesh->batchable && (!$isTransparent || $mesh->batchTransparent) && !$mesh->excludeFromGbuffer && ($prev === null || $prev === $matrix)
+                && $mesh->renderLayers === RenderLayers::WORLD) {
                 $key = $mesh->meshId . '|' . $mesh->materialId . '|' . ($mesh->castShadows ? '1' : '0');
                 $batches[$key][0] = $mesh;
                 $batches[$key][1][] = $matrix;
@@ -558,6 +579,7 @@ class Renderer3DSystem extends AbstractSystem
                 $prev !== $matrix ? $prev : null,
                 $mesh->castShadows,
                 $mesh->shaderParams,
+                layers: $mesh->renderLayers,
             );
 
             if ($isTransparent) {
@@ -594,7 +616,36 @@ class Renderer3DSystem extends AbstractSystem
                 $transform->worldMatrix,
                 castShadows: true,
                 shadowOnly: true,
+                layers: $mesh->renderLayers,
             ));
+        }
+
+        // A planar mirror shows what lies behind the camera, which the camera's own
+        // cull dropped before any command existed: add the entities that the
+        // mirror's frustum sees and neither the camera nor the sun draws, as
+        // shadow-only draws without shadow (the camera passes skip them, the
+        // mirror pass takes them). Nothing happens without a SetPlanarMirror.
+        $mirror = $this->commandList->lastOfType(SetPlanarMirror::class);
+        $camera = $mirror instanceof SetPlanarMirror ? $this->commandList->lastOfType(SetCamera::class) : null;
+        if ($mirror instanceof SetPlanarMirror && $camera instanceof SetCamera) {
+            $mirroredView = MirrorPlane::mirroredView($camera->viewMatrix, $mirror->center, $mirror->normal);
+            $mirrorProjection = MirrorPlane::obliqueProjection($camera->projectionMatrix, $mirroredView, $mirror->center, $mirror->normal, $mirror->clipBias);
+            foreach ($visibility->entitiesInVolume(Frustum::planes($mirrorProjection, $mirroredView)) as $entityId) {
+                $mesh = $meshes[$entityId] ?? null;
+                $transform = $transforms[$entityId] ?? null;
+                if ($mesh === null || $transform === null || $mesh->hiddenFromMainCamera || ($mesh->renderLayers & $mirror->layerMask) === 0) {
+                    continue;
+                }
+                $this->commandList->add(new DrawMesh(
+                    $mesh->meshId,
+                    $mesh->materialId,
+                    $transform->worldMatrix,
+                    castShadows: false,
+                    params: $mesh->shaderParams,
+                    shadowOnly: true,
+                    layers: $mesh->renderLayers,
+                ));
+            }
         }
 
         foreach ($batches as $batch) {

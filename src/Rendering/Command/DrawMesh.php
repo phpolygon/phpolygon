@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace PHPolygon\Rendering\Command;
 
 use PHPolygon\Math\Mat4;
+use PHPolygon\Rendering\RenderLayers;
 
 readonly class DrawMesh
 {
@@ -44,5 +45,11 @@ readonly class DrawMesh
          * main camera's.
          */
         public bool $shadowOnly = false,
+        /**
+         * {@see \PHPolygon\Rendering\RenderLayers} bits of this draw. Only planar
+         * mirrors choose by layer ({@see SetPlanarMirror::$layerMask}); the camera,
+         * the shadow pass and the water reflection draw every layer.
+         */
+        public int $layers = RenderLayers::WORLD,
     ) {}
 }

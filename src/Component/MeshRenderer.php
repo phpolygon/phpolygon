@@ -95,6 +95,24 @@ class MeshRenderer extends AbstractComponent
     public bool $batchTransparent = false;
 
     /**
+     * When true, the main camera never draws this mesh, while the shadow pass still
+     * casts it (when {@see $castShadows}) and the planar mirror and water reflection
+     * still see it: a first-person player's own body, which must shadow the ground
+     * and show in a mirror without filling the view. Never batched, never in the
+     * main camera's G-buffer. The ray-traced scene and the minimap read the full
+     * command list and include it too.
+     */
+    #[Property]
+    public bool $hiddenFromMainCamera = false;
+
+    /**
+     * {@see \PHPolygon\Rendering\RenderLayers} bits of this mesh; a planar mirror draws
+     * the layers of its mask. Use BODY for a figure's body, MIRROR_SURFACE for a mirror panel.
+     */
+    #[Property]
+    public int $renderLayers = \PHPolygon\Rendering\RenderLayers::WORLD;
+
+    /**
      * Three floats for `v_instance_params` of this entity's draw, whether it draws
      * alone or in a batch. Runtime state (a stage, a random value): set by a system, not saved.
      *
