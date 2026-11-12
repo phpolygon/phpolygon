@@ -2017,7 +2017,12 @@ unlike older generators, to stay free of shared state).
 - `WallWithOpenings::parts()/generate(w, h, thickness, list<WallOpening>, uvScale)`: slab
   x 0..w, y 0..h, z 0..thickness (front = +Z), openings cut through (real reveals,
   optional arch via `archRise`), optional sill/lintel ledges as separate parts
-  (`['wall','sills','lintels']`). Openings must lie strictly inside and not overlap.
+  (`['wall','sills','lintels']`). Openings must not overlap/touch each other nor touch the
+  top edge. Opening kinds: rectangle (+ arch), **floor-level notch** (`y = 0`: doors,
+  shopfronts; spliced into the outline, may also touch the left/right edge, no sill) and
+  **ring** (`WallOpening::ring(list<Vec2>)`, `WallOpening::circle(cx, cy, r, sides)`; a
+  polygon/porthole hole, strictly inside; sill/lintel use its bounding box). The slab stays a
+  closed manifold with metric UVs for all kinds. `WallOpening::isFloorLevel()`.
 - `Profile::rect/chamferedRect/roundedRect/circle/archedRect` + `Profile::chamfer()/round()`
   (corner softening of any ring): cross-sections for `PolygonExtrude` and `SweepMesh`.
 - `BevelBoxMesh::generate(w, h, d, bevel, segments, uvScale)`: rounded-edge box (smooth
