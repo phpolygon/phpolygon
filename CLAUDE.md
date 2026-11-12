@@ -2061,6 +2061,11 @@ unlike older generators, to stay free of shared state).
   byte-stable across platforms with 64-bit ints and across versions, never use
   `mt_rand`/`rand`/libm. Geometry generators use `sin/cos` (identical per platform/PHP
   build, not guaranteed across libms).
+- `Physics\RampPose::fromEdges(lowEdge, highEdge, width, thickness)` -> `{position, rotation,
+  size}`: entity pose + `BoxCollider3D::$size` for a walkable ramp/kerb. The engine has no
+  wedge shape and needs none: a rotated `BoxCollider3D` becomes a solid `OrientedBox`
+  (capsule push-out, StepAssist/slope limit walk it); `fromEdges` puts the box's top surface
+  through the two edge midpoints (unrolled). Arc kerbs: approximate with several slabs.
 - Not done: per-vertex colour/attribute in `MeshData` (design note: the mesh upload is a
   fixed 8-float interleave of position/normal/uv, stride 32 bytes: `OpenGLRenderer3D.php:949`,
   `VulkanRenderer3D.php:1124`, vio layouts in `VioRenderer3D.php` (`interleaveMeshData`, layout
