@@ -24,6 +24,11 @@ use PHPolygon\Math\Vec2;
  * the outline and must not touch each other. Collinear input vertices are
  * allowed but may leave T-junctions in the caps (the side walls keep them).
  *
+ * `$axis` ('x'|'y'|'z', default 'z') picks the extrusion axis: the prism is built as
+ * described above and then rotated by the cyclic permutation that takes Z onto that
+ * axis, so the outline's (x, y) becomes (y, z) for 'x' and (z, x) for 'y'; winding
+ * and normals stay outward. Caps keep their meaning (front = +axis end, z = depth).
+ *
  * Pure function: no static state, safe inside a worker.
  */
 final class PolygonExtrude
@@ -39,7 +44,14 @@ final class PolygonExtrude
         bool $capFront = true,
         bool $capBack = true,
         float $uvScale = 1.0,
+        string $axis = 'z',
     ): MeshData {
+        if ($axis !== 'z') {
+            // Build along +Z, then rotate (see MeshData::axisRotated): 'x' maps the outline's
+            // (x, y) to world (y, z) and extrudes along +X; 'y' maps it to (z, x), along +Y.
+            return self::generate($outline, $depth, $holes, $capFront, $capBack, $uvScale)
+                ->axisRotated(2, MeshData::axisIndex($axis));
+        }
         if (count($outline) < 3) {
             return new MeshData([], [], [], []);
         }

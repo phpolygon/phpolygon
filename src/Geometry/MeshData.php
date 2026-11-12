@@ -174,6 +174,136 @@ readonly class MeshData
     }
 
     /**
+     * Place many parts and merge them into one mesh in a single pass: the batch form
+     * of `transformed()` + `merge()` for assemblies of hundreds of small parts
+     * (rivets, slats, bolts). Positions go through the matrix, normals through the
+     * cofactor matrix of its upper 3x3 (no 4x4 inverse per part), the winding flips
+     * for mirroring matrices. Output equals `merge(...transformed())`; tangents are
+     * recomputed once over the result when every part carries tangents (and
+     * `$computeTangents` is true), else null. Tangent computation is the dominant cost
+     * of the call; pass false when the result needs none.
+     *
+     * @param list<array{0: self, 1: \PHPolygon\Math\Mat4}> $parts
+     */
+    public static function mergeTransformed(array $parts, bool $computeTangents = true): self
+    {
+        $vertices = [];
+        $normals = [];
+        $uvs = [];
+        $indices = [];
+        $allHaveTangents = true;
+        $offset = 0;
+        foreach ($parts as [$mesh, $model]) {
+            $m = $model->toArray();
+            $c00 = $m[5] * $m[10] - $m[9] * $m[6];
+            $c01 = $m[9] * $m[2] - $m[1] * $m[10];
+            $c02 = $m[1] * $m[6] - $m[5] * $m[2];
+            $c10 = $m[8] * $m[6] - $m[4] * $m[10];
+            $c11 = $m[0] * $m[10] - $m[8] * $m[2];
+            $c12 = $m[4] * $m[2] - $m[0] * $m[6];
+            $c20 = $m[4] * $m[9] - $m[8] * $m[5];
+            $c21 = $m[8] * $m[1] - $m[0] * $m[9];
+            $c22 = $m[0] * $m[5] - $m[4] * $m[1];
+            $det = $m[0] * $c00 + $m[4] * $c01 + $m[8] * $c02;
+            $sign = $det < 0.0 ? -1.0 : 1.0;
+
+            $src = $mesh->vertices;
+            for ($i = 0, $n = count($src); $i + 2 < $n; $i += 3) {
+                $x = (float) $src[$i];
+                $y = (float) $src[$i + 1];
+                $z = (float) $src[$i + 2];
+                $vertices[] = $m[0] * $x + $m[4] * $y + $m[8] * $z + $m[12];
+                $vertices[] = $m[1] * $x + $m[5] * $y + $m[9] * $z + $m[13];
+                $vertices[] = $m[2] * $x + $m[6] * $y + $m[10] * $z + $m[14];
+            }
+            $src = $mesh->normals;
+            for ($i = 0, $n = count($src); $i + 2 < $n; $i += 3) {
+                $x = (float) $src[$i];
+                $y = (float) $src[$i + 1];
+                $z = (float) $src[$i + 2];
+                $nx = ($c00 * $x + $c01 * $y + $c02 * $z) * $sign;
+                $ny = ($c10 * $x + $c11 * $y + $c12 * $z) * $sign;
+                $nz = ($c20 * $x + $c21 * $y + $c22 * $z) * $sign;
+                $len = sqrt($nx * $nx + $ny * $ny + $nz * $nz);
+                $len = $len > 1e-12 ? $len : 1.0;
+                $normals[] = $nx / $len;
+                $normals[] = $ny / $len;
+                $normals[] = $nz / $len;
+            }
+            foreach ($mesh->uvs as $v) {
+                $uvs[] = $v;
+            }
+            $src = $mesh->indices;
+            if ($det < 0.0) {
+                for ($i = 0, $n = count($src); $i + 2 < $n; $i += 3) {
+                    $indices[] = $src[$i] + $offset;
+                    $indices[] = $src[$i + 2] + $offset;
+                    $indices[] = $src[$i + 1] + $offset;
+                }
+            } else {
+                foreach ($src as $i) {
+                    $indices[] = $i + $offset;
+                }
+            }
+            if ($mesh->tangents === null) {
+                $allHaveTangents = false;
+            }
+            $offset += $mesh->vertexCount();
+        }
+
+        $merged = new self($vertices, $normals, $uvs, $indices);
+        return $computeTangents && $allHaveTangents && $parts !== [] ? $merged->withComputedTangents() : $merged;
+    }
+
+    /**
+     * Index (0 = X, 1 = Y, 2 = Z) of an axis name 'x'|'y'|'z' (case-insensitive).
+     */
+    public static function axisIndex(string $axis): int
+    {
+        return match (strtolower($axis)) {
+            'x' => 0,
+            'y' => 1,
+            'z' => 2,
+            default => throw new \InvalidArgumentException("Axis must be 'x', 'y' or 'z', got '$axis'"),
+        };
+    }
+
+    /**
+     * Rotate the mesh by the proper (cyclic-permutation) rotation that carries axis
+     * `$from` onto axis `$to` (0 = X, 1 = Y, 2 = Z): world component (i + k) mod 3 is
+     * the local component i, k = to - from. The winding is kept (no mirroring), tangents
+     * are permuted along with the positions. Y -> X maps (x, y, z) to (y, z, x),
+     * Y -> Z to (z, x, y), Z -> X to (z, x, y), Z -> Y to (y, z, x).
+     */
+    public function axisRotated(int $from, int $to): self
+    {
+        $k = (($to - $from) % 3 + 3) % 3;
+        if ($k === 0) {
+            return $this;
+        }
+        $permute = static function (array $a, int $stride) use ($k): array {
+            $out = [];
+            for ($i = 0, $n = count($a); $i + 2 < $n; $i += $stride) {
+                $out[$i + ($k) % 3] = $a[$i];
+                $out[$i + (1 + $k) % 3] = $a[$i + 1];
+                $out[$i + (2 + $k) % 3] = $a[$i + 2];
+                if ($stride === 4) {
+                    $out[$i + 3] = $a[$i + 3];
+                }
+            }
+            ksort($out);
+            return array_values($out);
+        };
+        return new self(
+            $permute($this->vertices, 3),
+            $permute($this->normals, 3),
+            $this->uvs,
+            $this->indices,
+            $this->tangents === null ? null : $permute($this->tangents, 4),
+        );
+    }
+
+    /**
      * Return self if tangents are already populated; otherwise return a new
      * MeshData with tangents computed from the existing vertex / normal /
      * uv / index buffers.

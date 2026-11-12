@@ -2023,6 +2023,24 @@ unlike older generators, to stay free of shared state).
   **ring** (`WallOpening::ring(list<Vec2>)`, `WallOpening::circle(cx, cy, r, sides)`; a
   polygon/porthole hole, strictly inside; sill/lintel use its bounding box). The slab stays a
   closed manifold with metric UVs for all kinds. `WallOpening::isFloorLevel()`.
+  `PolygonExtrude::generate(..., uvScale, string $axis = 'z')` extrudes along 'x'|'y'|'z'
+  (built along Z, then `MeshData::axisRotated(2, to)`: outline (x, y) becomes (y, z) for
+  'x', (z, x) for 'y'; proper rotation, winding/normals stay outward).
+- `RoundMesh::cylinder(radius, length, axis = 'y', sides, caps, uvScale)`, `::sphere(radius,
+  stacks, slices, axis, uvScale)`, `::lathe(list<Vec2> profile, segments, axis, uvScale)`,
+  `::torus(major, minor, tubularSegments, radialSegments, axis, uvScale)`: pure (no
+  PerfProfiler, worker-safe), centred, outward winding (positive signed volume), metric UVs
+  (u = metres around at the vertex radius, v = metres along the surface), tangents. The old
+  Cylinder/Sphere/Lathe/TorusMesh are unchanged (and their winding is not uniform: cylinder
+  and sphere come out negative by signed volume, box and torus positive; RoundMesh is
+  positive everywhere).
+- `MeshData::mergeTransformed(list<[MeshData, Mat4]>, bool $computeTangents = true)`: batch
+  place + merge (cofactor normal matrix instead of a 4x4 inverse per part, no intermediate
+  meshes); equals `merge(...transformed())`; tangents recomputed once if every part has
+  them. Measured (300 small parts, median of 15, PHP 8.5.5 Windows, 2026-11-12): old
+  transformed+merge 8.8 ms vs new 6.1 ms without tangents; with tangents 20.7 ms (old +
+  `withComputedTangents`) vs 18.3 ms - tangent computation dominates, skip it when unneeded.
+  `MeshData::axisRotated(from, to)` / `axisIndex('x'|'y'|'z')`: cyclic axis rotation.
 - `Profile::rect/chamferedRect/roundedRect/circle/archedRect` + `Profile::chamfer()/round()`
   (corner softening of any ring): cross-sections for `PolygonExtrude` and `SweepMesh`.
 - `BevelBoxMesh::generate(w, h, d, bevel, segments, uvScale)`: rounded-edge box (smooth
