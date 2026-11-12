@@ -2043,9 +2043,12 @@ unlike older generators, to stay free of shared state).
   `MeshData::axisRotated(from, to)` / `axisIndex('x'|'y'|'z')`: cyclic axis rotation.
 - `Profile::rect/chamferedRect/roundedRect/circle/archedRect` + `Profile::chamfer()/round()`
   (corner softening of any ring): cross-sections for `PolygonExtrude` and `SweepMesh`.
-- `BevelBoxMesh::generate(w, h, d, bevel, segments, uvScale)`: rounded-edge box (smooth
-  normals over the bevel); `MetricMesh::box/boxBetween/plane`: boxes/planes whose UV unit is
-  one metre on every face (BoxMesh maps every face to 0..1).
+- `BevelBoxMesh::generate(w, h, d, bevel, segments, uvScale, bool $topOnly = false)`:
+  rounded-edge box (smooth normals over the bevel); `$topOnly` rounds just the four edges of
+  the +Y face (flat bottom, sharp vertical edges, mitred rim groins; for tiles/setts/bars).
+  `MetricMesh::box/boxBetween/plane`: boxes/planes whose UV unit is one metre on every face
+  (BoxMesh maps every face to 0..1). `MetricMesh::boxBetween(a, b, uvScale, int $skipFaces)`
+  skips faces by mask (`FACE_POS_X|NEG_X|POS_Y|NEG_Y|POS_Z|NEG_Z`; the mesh is open there).
 - `ArrayRun::line/alongPath/placements/build`: instance a mesh by count, spacing,
   spacing+`fit` (hit both ends) or `centered`; local +X is yawed onto the path tangent;
   optional per-instance `callable(int, placement): ?Mat4` for alternation/variation.
@@ -2064,7 +2067,8 @@ unlike older generators, to stay free of shared state).
   location 0/1/2); there is no colour slot, so a baked-dirt channel needs a vertex layout and
   shader change on every backend, i.e. a separate backend feature gated per capability);
   single-facet hard chamfer on a full box (chamfer a `Profile` and extrude instead); bevel
-  on extrusion cap edges.
+  on `PolygonExtrude` cap edges (needs a robust polygon inset incl. holes; model a bevelled
+  slab with `BevelBoxMesh(topOnly)` or sweep a chamfered `Profile`).
 
 **Ground-following surfaces — `ConformingSurfaceSet` / `ConformingRegionMesh`.** Paths,
 plazas, yards, borders and inlays that lie ON a terrain (no floating slab, no slab edge seen

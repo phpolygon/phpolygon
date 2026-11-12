@@ -21,6 +21,14 @@ use PHPolygon\Math\Vec3;
  */
 final class MetricMesh
 {
+    /** Face bits for boxBetween()'s `$skipFaces` mask (box faces in generation order). */
+    public const FACE_POS_X = 1;
+    public const FACE_NEG_X = 2;
+    public const FACE_POS_Y = 4;
+    public const FACE_NEG_Y = 8;
+    public const FACE_POS_Z = 16;
+    public const FACE_NEG_Z = 32;
+
     /** Box centred at the origin. */
     public static function box(float $width, float $height, float $depth, float $uvScale = 1.0): MeshData
     {
@@ -30,8 +38,13 @@ final class MetricMesh
         return self::boxBetween(new Vec3(-$hw, -$hh, -$hd), new Vec3($hw, $hh, $hd), $uvScale);
     }
 
-    /** Axis-aligned box between two corners (any order). */
-    public static function boxBetween(Vec3 $a, Vec3 $b, float $uvScale = 1.0): MeshData
+    /**
+     * Axis-aligned box between two corners (any order). `$skipFaces` is a bit mask of
+     * FACE_* constants: those faces are not emitted (hidden bottoms of stacked tiles,
+     * faces against a wall), saving their 2 triangles and 4 vertices each. The result
+     * is then open on those faces. 0 (default) builds all six, byte-identical to before.
+     */
+    public static function boxBetween(Vec3 $a, Vec3 $b, float $uvScale = 1.0, int $skipFaces = 0): MeshData
     {
         $x0 = min($a->x, $b->x);
         $x1 = max($a->x, $b->x);
@@ -57,7 +70,11 @@ final class MetricMesh
         $normals = [];
         $uvs = [];
         $indices = [];
+        $base = 0;
         foreach ($faces as $fi => [$o, $r, $u, $rl, $ul, $n]) {
+            if (($skipFaces & (1 << $fi)) !== 0) {
+                continue;
+            }
             for ($k = 0; $k < 4; $k++) {
                 $sr = ($k === 1 || $k === 2) ? $rl : 0.0;
                 $su = ($k >= 2) ? $ul : 0.0;
@@ -70,8 +87,8 @@ final class MetricMesh
                 array_push($normals, (float) $n[0], (float) $n[1], (float) $n[2]);
                 array_push($uvs, $sr * $uvScale, $su * $uvScale);
             }
-            $base = $fi * 4;
             array_push($indices, $base, $base + 1, $base + 2, $base, $base + 2, $base + 3);
+            $base += 4;
         }
         return (new MeshData($vertices, $normals, $uvs, $indices))->withComputedTangents();
     }
