@@ -29,6 +29,13 @@ final class ThreadedLogWriterTest extends TestCase
 
     protected function tearDown(): void
     {
+        // setUp() may have stopped at markTestSkipped() (ParallelCapability::isAvailable()
+        // false) before $dir was ever assigned - tearDown() still runs then, and the typed
+        // property throws on read instead of a clean skip.
+        if (!isset($this->dir)) {
+            parent::tearDown();
+            return;
+        }
         foreach (glob($this->dir . '/*') ?: [] as $f) {
             @unlink($f);
         }
