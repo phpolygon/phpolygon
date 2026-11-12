@@ -4014,6 +4014,14 @@ Pure PHP, deterministic, no renderer change; works on every backend and needs no
   `bindPipeline(..., bool $skinned = false)` (+ the `default_skin_mrt` name), `render()` (`prepareSkinFrame()` before the shadow pass,
   `drawSkinnedOpaque()` after the meshlet run) and one `drawSkinnedShadows()` line after each `drawShadowList()` in `renderShadowPass`,
   `renderSpotShadowPass`, `renderPointShadowPass`. Everything else is in the trait.
+- D3D11 quirk (measured): a changed `u_skin_inst` between two instanced-from-buffer draws is only picked up when the storage buffer is bound
+  again, so on D3D11 the buffer is re-bound per draw (D3D12 does not need it).
+- Tests: `VioSkinningTest` (GPU pose = CPU-posed mesh, image and shadow; instance palette selection; passes on D3D11 and D3D12
+  hardware, RTX 2080, 2026-11-12), `VioSkinSourceTest` (no GPU). Frame cost (RTX 2080 hardware, 960x540 `renderToImage` incl. readback,
+  one directional light with 3 cascades, 51,200-triangle character, 22 joints, median of 9 frames after 3 warm-up): D3D12 1 / 50 / 500
+  characters = 10.1 / 11.1 / 64.7 ms instanced with a shared palette, 9.5 / 11.7 / 85.6 ms as one command per character; D3D11 14.1 /
+  17.5 / 71.8 ms instanced, 15.9 / 20.1 / 86.8 ms one command each. 500 characters = 25.6 M triangles per camera pass plus the shadow
+  cascades. One character posed on the CPU in PHP (25,921 vertices): 67-81 ms.
 - Look-at/Blink conventions: root space of the character builders (netrunner `BodyModel`): +Y up, +Z forward, +X = the character's LEFT;
   `LookAt` yaw is positive toward +X (left), pitch positive up.
 
