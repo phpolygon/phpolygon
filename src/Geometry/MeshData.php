@@ -281,6 +281,10 @@ readonly class MeshData
         if ($k === 0) {
             return $this;
         }
+        /**
+         * @param array<float> $a
+         * @return list<float>
+         */
         $permute = static function (array $a, int $stride) use ($k): array {
             $out = [];
             for ($i = 0, $n = count($a); $i + 2 < $n; $i += $stride) {

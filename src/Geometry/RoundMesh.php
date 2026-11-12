@@ -132,7 +132,6 @@ final class RoundMesh
     public static function lathe(array $profile, int $segments = 24, string $axis = 'y', float $uvScale = 1.0): MeshData
     {
         $segments = max(3, $segments);
-        $profile = array_values($profile);
         $n = count($profile);
         if ($n < 2) {
             return new MeshData([], [], [], []);

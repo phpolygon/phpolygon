@@ -27,8 +27,11 @@ final class ShaderVariantRegistryTest extends TestCase
      * program is a decision: update this hash in the commit that makes it and say why.
      * Changed for emission behind the albedo texture's alpha (u_emission_mask, glowing
      * text on surfaces): off by default, the frames of other materials stay the same.
+     * Changed again for the window grid (u_window_grid, u_emissive_look.z): the lit-window
+     * look reads its cell size/origin from uniforms whose defaults are the old constants
+     * (2.2 x 2.8 m); the default window image is byte-identical (D3D12/WARP and D3D11/RTX 2080).
      */
-    private const VIO_FRAG_RELEASE = '2974807e5f0f50b1a5779abbf870e137953f289f28c5afacb9663433dbe6eb4b';
+    private const VIO_FRAG_RELEASE = '3a29a6b6004a9ac02f8def2473853193fdf482561ddf5beddafcf7abcca61cea';
 
     protected function setUp(): void
     {
