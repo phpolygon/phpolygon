@@ -14,10 +14,17 @@ namespace PHPolygon\Geometry;
 final class VatBaker
 {
     /**
+     * With $normals the frames' unit normals (one per vertex) are baked too, as a third
+     * texel per vertex: the octahedral-encoded normal as two 16-bit values (u = r,g;
+     * v = b,a; each maps 0..65535 to -1..1; decode with the standard octahedral map).
+     * The row is then three texels per vertex ('texelsPerVertex'); without $normals the
+     * image is byte-identical to what this baker always produced. The engine's vertex
+     * stage does not read the normals yet.
+     *
      * @param list<MeshData> $frames
-     * @return array{rgba: string, width: int, height: int, min: array{0: float, 1: float, 2: float}, extent: array{0: float, 1: float, 2: float}}
+     * @return array{rgba: string, width: int, height: int, texelsPerVertex: int, min: array{0: float, 1: float, 2: float}, extent: array{0: float, 1: float, 2: float}}
      */
-    public static function bake(array $frames): array
+    public static function bake(array $frames, bool $normals = false): array
     {
         if ($frames === []) {
             throw new \InvalidArgumentException('VatBaker: no frames');
@@ -31,6 +38,9 @@ final class VatBaker
         foreach ($frames as $f) {
             if (count($f->vertices) !== $count) {
                 throw new \InvalidArgumentException('VatBaker: every frame needs the same vertices');
+            }
+            if ($normals && count($f->normals) !== $count) {
+                throw new \InvalidArgumentException('VatBaker: every frame needs one normal per vertex to bake normals');
             }
             for ($i = 0; $i < $count; $i += 3) {
                 for ($a = 0; $a < 3; $a++) {
@@ -49,9 +59,52 @@ final class VatBaker
                 }
                 $rgba .= chr(($q[0] >> 8) & 0xFF) . chr($q[0] & 0xFF) . chr(($q[1] >> 8) & 0xFF) . chr($q[1] & 0xFF)
                        . chr(($q[2] >> 8) & 0xFF) . chr($q[2] & 0xFF) . "\0\xFF";
+                if ($normals) {
+                    [$u, $v] = self::octEncode((float) $f->normals[$i], (float) $f->normals[$i + 1], (float) $f->normals[$i + 2]);
+                    $rgba .= chr(($u >> 8) & 0xFF) . chr($u & 0xFF) . chr(($v >> 8) & 0xFF) . chr($v & 0xFF);
+                }
             }
         }
+        $texels = $normals ? 3 : 2;
 
-        return ['rgba' => $rgba, 'width' => intdiv($count, 3) * 2, 'height' => count($frames), 'min' => $min, 'extent' => $extent];
+        return ['rgba' => $rgba, 'width' => intdiv($count, 3) * $texels, 'height' => count($frames), 'texelsPerVertex' => $texels, 'min' => $min, 'extent' => $extent];
+    }
+
+    /**
+     * Octahedral encoding of a unit vector to two 16-bit values.
+     *
+     * @return array{0: int, 1: int}
+     */
+    public static function octEncode(float $x, float $y, float $z): array
+    {
+        $l = abs($x) + abs($y) + abs($z);
+        if ($l < 1e-12) {
+            return [32768, 32768];
+        }
+        $x /= $l;
+        $y /= $l;
+        if ($z < 0.0) {
+            [$x, $y] = [(1.0 - abs($y)) * ($x >= 0.0 ? 1.0 : -1.0), (1.0 - abs($x)) * ($y >= 0.0 ? 1.0 : -1.0)];
+        }
+
+        return [(int) round(($x * 0.5 + 0.5) * 65535.0), (int) round(($y * 0.5 + 0.5) * 65535.0)];
+    }
+
+    /**
+     * Inverse of {@see octEncode()}: a unit vector.
+     *
+     * @return array{0: float, 1: float, 2: float}
+     */
+    public static function octDecode(int $u, int $v): array
+    {
+        $x = $u / 65535.0 * 2.0 - 1.0;
+        $y = $v / 65535.0 * 2.0 - 1.0;
+        $z = 1.0 - abs($x) - abs($y);
+        if ($z < 0.0) {
+            [$x, $y] = [(1.0 - abs($y)) * ($x >= 0.0 ? 1.0 : -1.0), (1.0 - abs($x)) * ($y >= 0.0 ? 1.0 : -1.0)];
+        }
+        $l = sqrt($x * $x + $y * $y + $z * $z);
+
+        return [$x / $l, $y / $l, $z / $l];
     }
 }

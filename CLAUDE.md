@@ -3948,6 +3948,34 @@ to completion (without rendering between yields).
 
 ---
 
+## Character engine work E-A (hair, VAT, instance data) - 2026-11-12
+
+- `Geometry\HairMesh` draws from a local `Random\Randomizer(Mt19937($seed))`, no global `mt_srand`: thread-safe, and
+  byte-identical to the old output for every seed (`nextInt()` on Mt19937 is the `mt_rand()` sequence; pinned in `HairMeshTest`).
+- Hair cards: `Geometry\HairGuides::grow(MeshData $scalp, int $count, float $length, int $points = 6, float $gravity = 0.6,
+  float $combing = 0.6, ?callable $flow = null, float $lengthJitter = 0.2, float $waves = 0.0, float $waviness = 0.0, int $seed = 1)`
+  returns `list<HairGuide>` (root-to-tip polyline + root normal). `$flow` is `fn(px,py,pz,nx,ny,nz): [x,y,z]` (combing direction);
+  `HairGuides::partingFlow($origin, $lineDir)` and `whorlFlow($center, $outward)` are ready-made. `Geometry\HairCardMesh::generate(
+  array $guides, float $width, int $segments = 0, float $tipWidth = 0.25, float $taper = 1.0, float $twist = 0.0, int $atlasColumns = 1)`
+  builds one strip per guide: u across (0..1, or the card's atlas column), v root 0 to tip 1, normal = card face, tangents = strand
+  direction; `generateLod(..., int $level, ...)` keeps every 2^level-th guide, widens by sqrt(2^level), halves the segments. Draw
+  with a two-sided Material with `alphaCutoff`. Pure and deterministic.
+- VAT texture units: a texture unit is `min(SRV slots, sampler states)` in php-vio. Measured 2026-11-12, RTX 2080 / driver of this
+  host, `vio_texture_units()`: D3D11 16 (128 SRVs, 16 sampler states); D3D12 with FXC (no `shader_model`) 16; D3D12 with
+  `shader_model => 6` (the `EngineConfig::$vioShaderModel` default) 768; WARP with SM6 128. `VAT_SLOT = 17` therefore works on
+  D3D12 with DXC (`VioVatTest` green on D3D12 hardware) and stays off on D3D11 / FXC. A slot <= 15 is not possible: on 16-unit
+  backends every unit 0..15 is used by mesh3d.frag (albedo, SSAO, SDF AO, probe, spot, point, cascades, cloud, env, scene depth,
+  snippets, normal map) and D3D11 mirrors each unit into the vertex stage at the same register. A sampler-less path needs php-vio
+  (SRV-only binding above the sampler limit) or a vertex storage-buffer path (not built).
+- `VatBaker::bake($frames, bool $normals = false)`: with `$normals` a third texel per vertex holds the octahedral normal
+  (`octEncode` / `octDecode`); `texelsPerVertex` reports 2 or 3. Default output unchanged. The vertex stage does not read the
+  normals yet.
+- Per-instance parameters already exist (`InstanceParams`, `enableInstanceParams()`, `v_instance_params`, see the parameters
+  section above); no second mechanism was added.
+- `GpuPartAnimator` compute works on D3D11 and D3D12 (hardware RTX 2080: kernel matches the CPU math to 4e-6).
+
+---
+
 ## Character DNA
 
 Procedural humanoid characters are built from an 18-byte / 72-base / 24-codon
