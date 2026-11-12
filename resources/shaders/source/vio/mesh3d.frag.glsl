@@ -260,8 +260,29 @@ uniform float u_rt_reflections;
 uniform float u_rt_gi;
 #endif
 #ifdef PHPOLYGON_SCENE_COLOR
-// Copy of the opaque scene colour (more than 16 texture units only).
+// Copy of the opaque scene colour (more than 16 texture units, or a sampler-less texture above them).
+#ifdef PHPOLYGON_SCENE_COLOR_FETCH
+// Separate texture read by texelFetch: no sampler state, so it sits above the sampler limit of D3D11 and
+// D3D12 with FXC (php-vio fetch_units). The binding is VioRenderer3D::SCENE_COLOR_SLOT.
+layout(binding = 16) uniform texture2D u_scene_color;
+vec3 sceneColorAt(vec2 uv) {
+    vec2 sz = vec2(textureSize(u_scene_color, 0));
+    vec2 p = uv * sz - 0.5;
+    ivec2 i0 = ivec2(floor(p));
+    vec2 f = fract(p);
+    ivec2 hi = ivec2(sz) - 1;
+    vec3 a = texelFetch(u_scene_color, clamp(i0, ivec2(0), hi), 0).rgb;
+    vec3 b = texelFetch(u_scene_color, clamp(i0 + ivec2(1, 0), ivec2(0), hi), 0).rgb;
+    vec3 c = texelFetch(u_scene_color, clamp(i0 + ivec2(0, 1), ivec2(0), hi), 0).rgb;
+    vec3 d = texelFetch(u_scene_color, clamp(i0 + ivec2(1, 1), ivec2(0), hi), 0).rgb;
+    return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+}
+#else
 uniform sampler2D u_scene_color;
+vec3 sceneColorAt(vec2 uv) {
+    return textureLod(u_scene_color, uv, 0.0).rgb;
+}
+#endif
 uniform float     u_scene_color_ready;
 #endif
 // Wind for fragment looks (shader plan 6.1): xz direction, intensity.
@@ -3169,13 +3190,13 @@ void main() {
             vec2 suv = gl_FragCoord.xy / u_viewport_size;
             vec2 ruv = clamp(suv + rdir * (0.035 * u_refract.x), vec2(0.001), vec2(0.999));
             float fr = u_refract.y * 0.012;
-            vec3 acc = textureLod(u_scene_color, ruv, 0.0).rgb;
+            vec3 acc = sceneColorAt(ruv);
             if (fr > 0.0) {
                 vec2 asp = vec2(u_viewport_size.y / max(u_viewport_size.x, 1.0), 1.0);
                 for (int k = 0; k < 8; k++) {
                     float a = float(k) * 0.785398 + 0.39;
-                    acc += textureLod(u_scene_color, clamp(ruv + vec2(cos(a), sin(a)) * asp * fr, vec2(0.001), vec2(0.999)), 0.0).rgb;
-                    acc += textureLod(u_scene_color, clamp(ruv + vec2(cos(a), sin(a)) * asp * fr * 0.5, vec2(0.001), vec2(0.999)), 0.0).rgb;
+                    acc += sceneColorAt(clamp(ruv + vec2(cos(a), sin(a)) * asp * fr, vec2(0.001), vec2(0.999)));
+                    acc += sceneColorAt(clamp(ruv + vec2(cos(a), sin(a)) * asp * fr * 0.5, vec2(0.001), vec2(0.999)));
                 }
                 acc /= 17.0;
             }

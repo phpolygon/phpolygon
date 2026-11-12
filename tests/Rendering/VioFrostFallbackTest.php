@@ -44,9 +44,10 @@ final class VioFrostFallbackTest extends TestCase
         if ($ctx === null) {
             $this->markTestSkipped('vio_create(headless) unavailable');
         }
-        if (!function_exists('vio_texture_units') || vio_texture_units($ctx)['units'] > 16) {
+        $tu = function_exists('vio_texture_units') ? vio_texture_units($ctx) : ['units' => 99];
+        if ($tu['units'] > 16 || ($tu['fetch_units'] ?? 0) > 16) {
             vio_destroy($ctx);
-            $this->markTestSkipped('has more than 16 texture units: the scene-copy refraction runs (VioRefractionTest)');
+            $this->markTestSkipped('has more than 16 texture units or sampler-less fetch units: the scene-copy refraction runs (VioRefractionTest)');
         }
         $this->ctx = $ctx;
         MeshRegistry::clear();

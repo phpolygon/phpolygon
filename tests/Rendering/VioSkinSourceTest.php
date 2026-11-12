@@ -28,7 +28,7 @@ final class VioSkinSourceTest extends TestCase
         self::assertStringContainsString('vec3 localNormal = skinNrm;', $out);
         self::assertStringNotContainsString('a_instance_col0', $out);
         // The normal and motion paths read the skinned position, not the bind pose.
-        self::assertStringContainsString('animatePosition(skinPos, prevModel', $out);
+        self::assertStringContainsString('animatePosition(skinPosPrev, prevModel', $out);
     }
 
     public function testShadowVertexSourceIsSkinned(): void

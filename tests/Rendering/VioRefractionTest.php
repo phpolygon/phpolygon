@@ -40,13 +40,16 @@ final class VioRefractionTest extends TestCase
 
     protected function setUp(): void
     {
-        $ctx = VioTestContext::create(self::SIZE, self::SIZE, ['shader_model' => 6, 'shader_cache' => sys_get_temp_dir() . '/phpolygon-test-shader-cache']);
+        // PHPOLYGON_TEST_VIO_FXC=1: a D3D12 context without shader model 6 (16 units): the scene copy is then a sampler-less texture.
+        $options = getenv('PHPOLYGON_TEST_VIO_FXC') === '1' ? [] : ['shader_model' => 6];
+        $ctx = VioTestContext::create(self::SIZE, self::SIZE, $options + ['shader_cache' => sys_get_temp_dir() . '/phpolygon-test-shader-cache']);
         if ($ctx === null) {
             $this->markTestSkipped('vio_create(headless) unavailable');
         }
-        if (!function_exists('vio_texture_units') || vio_texture_units($ctx)['units'] <= 16) {
+        $tu = function_exists('vio_texture_units') ? vio_texture_units($ctx) : ['units' => 0];
+        if ($tu['units'] <= 16 && ($tu['fetch_units'] ?? 0) <= 16) {
             vio_destroy($ctx);
-            $this->markTestSkipped('needs more than 16 texture units (php-vio >= 2.42, DXC on D3D12)');
+            $this->markTestSkipped('needs more than 16 texture units (php-vio >= 2.42, DXC on D3D12) or sampler-less fetch units');
         }
         $this->ctx = $ctx;
         MeshRegistry::clear();

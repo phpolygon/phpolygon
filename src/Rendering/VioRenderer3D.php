@@ -2415,7 +2415,20 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
 
     private static function sceneColorAvailable(): bool
     {
-        return (ProcModeShaderRegistry::textureUnits() ?? 0) > self::SCENE_COLOR_SLOT;
+        return (ProcModeShaderRegistry::textureUnits() ?? 0) > self::SCENE_COLOR_SLOT || self::sceneColorFetch();
+    }
+
+    /**
+     * The scene copy as a sampler-less texture read by texelFetch on SCENE_COLOR_SLOT: a context
+     * with at most 16 sampler units but more fetch units (php-vio fetch_units: D3D11, D3D12 with FXC)
+     * keeps real frost blur and refraction. Without fetch_units the old behaviour stays: no copy, the
+     * pane clouds what lies behind it.
+     */
+    private static function sceneColorFetch(): bool
+    {
+        return (ProcModeShaderRegistry::textureUnits() ?? 0) <= self::SCENE_COLOR_SLOT
+            && (ProcModeShaderRegistry::fetchUnits() ?? 0) > self::SCENE_COLOR_SLOT
+            && getenv('PHPOLYGON_SCENE_COLOR_FETCH') !== '0';
     }
 
     /** @param list<object> $commands */
@@ -4734,6 +4747,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
                 }
             }
             $this->drawMeshletRun($meshletDraws, 'prepass');
+            $this->drawSkinnedPrepass();
             $this->gpuMark('prepass');
             $this->hizReady = $meshletsOn && $this->hizUnitBuilt >= 0 && $this->buildHiZ($hdrTarget, $sceneViewportW, $sceneViewportH);
             $this->bindPipeline('opaque');
@@ -4847,6 +4861,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         if ($this->currentSceneCull !== VIO_CULL_NONE) {
             $this->bindPipeline($transparentPass);
         }
+        $this->drawSkinnedTransparent();
         PerfProfiler::end();
         $this->gpuMark('transparent');
 
@@ -5292,6 +5307,10 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         }
         if (self::sceneColorAvailable()) {
             $source = self::withDefine($source, 'PHPOLYGON_SCENE_COLOR');
+            if (self::sceneColorFetch()) {
+                $source = (string) preg_replace('/^\s*#version 410 core\n/', "#version 450\n#extension GL_EXT_samplerless_texture_functions : require\n", str_replace("\r\n", "\n", $source), 1);
+                $source = self::withDefine($source, 'PHPOLYGON_SCENE_COLOR_FETCH');
+            }
         }
         if ($this->hemiSpecular > 0.0) {
             $source = self::withDefine($source, 'PHPOLYGON_HEMI_SPECULAR');
@@ -6287,9 +6306,9 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             return 1;
         }
 
-        // Opt-in until php-vio assigns vertex-stage separate textures their layout(binding) register: the
-        // local fetch_units build (2026-11-12) numbers them t0 there, so the texture is read from the wrong slot.
-        return (ProcModeShaderRegistry::fetchUnits() ?? 0) > self::VAT_SLOT && getenv('PHPOLYGON_VAT_FETCH') === '1' ? 2 : 0;
+        // Needs a php-vio that honours layout(binding) for separate vertex-stage textures (fetch_units, local
+        // commit 8d4286f); PHPOLYGON_VAT_FETCH=0 switches it off.
+        return (ProcModeShaderRegistry::fetchUnits() ?? 0) > self::VAT_SLOT && getenv('PHPOLYGON_VAT_FETCH') !== '0' ? 2 : 0;
     }
 
     /** The VAT defines of a mesh vertex source (the version moves to 450 for the sampler-less texture type). */

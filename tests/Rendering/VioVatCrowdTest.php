@@ -47,14 +47,16 @@ final class VioVatCrowdTest extends TestCase
 
     protected function setUp(): void
     {
-        $ctx = VioTestContext::create(self::SIZE, self::SIZE, ['shader_model' => 6, 'shader_cache' => sys_get_temp_dir() . '/phpolygon-test-shader-cache']);
+        // PHPOLYGON_TEST_VIO_FXC=1: a D3D12 context without shader model 6 (16 units), to exercise the sampler-less path there.
+        $options = getenv('PHPOLYGON_TEST_VIO_FXC') === '1' ? [] : ['shader_model' => 6];
+        $ctx = VioTestContext::create(self::SIZE, self::SIZE, $options + ['shader_cache' => sys_get_temp_dir() . '/phpolygon-test-shader-cache']);
         if ($ctx === null || !function_exists('vio_texture_units')) {
             $this->markTestSkipped('vio_create(headless) unavailable');
         }
         $tu = vio_texture_units($ctx);
-        if (($tu['units'] ?? 0) <= 17 && (($tu['fetch_units'] ?? 0) <= 17 || getenv('PHPOLYGON_VAT_FETCH') !== '1')) {
+        if (($tu['units'] ?? 0) <= 17 && ($tu['fetch_units'] ?? 0) <= 17) {
             vio_destroy($ctx);
-            $this->markTestSkipped('needs more than 17 texture units, or sampler-less fetch units with PHPOLYGON_VAT_FETCH=1');
+            $this->markTestSkipped('needs more than 17 texture units, or sampler-less fetch units (php-vio fetch_units)');
         }
         $this->ctx = $ctx;
         MeshRegistry::clear();

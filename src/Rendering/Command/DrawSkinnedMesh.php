@@ -34,6 +34,13 @@ readonly class DrawSkinnedMesh
         public array $palettes,
         public array $paletteIndex = [],
         public bool $castShadows = true,
+        /**
+         * Last frame's palettes, same count and indexing as $palettes: the motion vectors of a temporal
+         * frame (TAA, upscalers) then include the skinned motion. Empty = the current pose (no own motion).
+         *
+         * @var list<list<float>|string>
+         */
+        public array $prevPalettes = [],
     ) {
         if ($models === [] || $palettes === []) {
             throw new \InvalidArgumentException('DrawSkinnedMesh needs at least one model and one palette');

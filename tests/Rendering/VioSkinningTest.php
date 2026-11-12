@@ -91,10 +91,10 @@ final class VioSkinningTest extends TestCase
         return SkinnedMeshData::fromInfluences($mesh, $infl, $this->rig());
     }
 
-    private function renderer(ShadowQuality $shadows): VioRenderer3D
+    private function renderer(ShadowQuality $shadows, AntiAliasing $aa = AntiAliasing::Off, bool $prepass = false): VioRenderer3D
     {
         $r = new VioRenderer3D($this->ctx, self::SIZE, self::SIZE);
-        $r->applySettings(new GraphicsSettings(shadowQuality: $shadows, ambientOcclusion: ScreenSpaceAO::Off, antiAliasing: AntiAliasing::Off, bloom: false));
+        $r->applySettings(new GraphicsSettings(shadowQuality: $shadows, ambientOcclusion: ScreenSpaceAO::Off, antiAliasing: $aa, bloom: false, depthPrepass: $prepass));
 
         return $r;
     }
@@ -255,6 +255,50 @@ final class VioSkinningTest extends TestCase
         // The shadow of the 2 m card spans x 1..3 on the ground; sample both halves of it.
         self::assertLessThan(15, abs($at($solid, 1.5) - $at($solid, 2.5)), 'a solid card shadows both halves alike');
         self::assertGreaterThan(30, abs($at($cut, 1.5) - $at($cut, 2.5)), 'the cut-out half lets the sun through');
+    }
+
+    public function testPrepassTransparencyAndTemporalFramesWithSkinnedDraws(): void
+    {
+        self::assertNotNull($this->ctx);
+        $probe = $this->renderer(ShadowQuality::Off);
+        if (!$probe->skinningAvailable()) {
+            $this->markTestSkipped('no vertex storage buffers on this backend');
+        }
+        $skin = $this->skinned();
+        SkinnedMeshRegistry::register('body', $skin);
+        MaterialRegistry::register('m', new Material(albedo: new Color(0.8, 0.5, 0.3), roughness: 1.0, useEnvironmentMap: false));
+        MaterialRegistry::register('glass', new Material(albedo: new Color(0.8, 0.5, 0.3), roughness: 1.0, useEnvironmentMap: false, alpha: 0.5));
+        $pal = $skin->palette($this->rig(), Pose::degrees(['arm' => [0, 0, 60]])->raw());
+        $prev = $skin->palette($this->rig(), Pose::degrees(['arm' => [0, 0, 50]])->raw());
+        $id = Mat4::identity();
+
+        // Depth prepass: the skinned draw is in it and shades the same pixels (LEQUAL).
+        $plain = $this->image($this->renderer(ShadowQuality::Off), [DrawSkinnedMesh::single('body', 'm', $id, $pal)], false);
+        $pre = $this->image($this->renderer(ShadowQuality::Off, AntiAliasing::Off, true), [DrawSkinnedMesh::single('body', 'm', $id, $pal)], false);
+        self::assertGreaterThan(300, self::lit($pre));
+        self::assertLessThan(1.0, self::meanAbsDiff($plain, $pre), 'prepass and no prepass agree');
+
+        // Transparent: blended over black it is dimmer than the opaque draw.
+        $glass = $this->image($this->renderer(ShadowQuality::Off), [DrawSkinnedMesh::single('body', 'glass', $id, $pal)], false);
+        $sum = static function (string $img): int {
+            $s = 0;
+            for ($i = 0; $i < strlen($img); $i += 4) {
+                $s += ord($img[$i]);
+            }
+
+            return $s;
+        };
+        self::assertLessThan($sum($plain) * 0.8, $sum($glass), 'alpha 0.5 over black is dimmer than opaque');
+        // Measured: about 7 % of the opaque sum (the pane's own light is scaled by its alpha twice); black would be 0.
+        self::assertGreaterThan($sum($plain) * 0.02, $sum($glass), 'but it is drawn');
+
+        // Temporal frames (motion vectors with the previous palette) still draw the character.
+        $taa = $this->renderer(ShadowQuality::Off, AntiAliasing::Taa);
+        $img = '';
+        for ($f = 0; $f < 4; $f++) {
+            $img = $this->image($taa, [new DrawSkinnedMesh('body', 'm', [$id], [$pal], [], true, [$prev])], false);
+        }
+        self::assertGreaterThan(300, self::lit($img), 'the character survives the temporal resolve');
     }
 
     public function testInstancesShareAndSelectPalettes(): void

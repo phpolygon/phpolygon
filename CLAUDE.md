@@ -4039,17 +4039,25 @@ Pure PHP, deterministic, no renderer change; works on every backend and needs no
   vertices with normals, so bake crowd-level meshes. Default VAT behaviour (two texels, one clip) is unchanged.
   Cost (RTX 2080, D3D12 SM6, 960x540 incl. readback, 4,941-vertex / 9,600-triangle figure, 2 clips, 3 normals, no shadows): 1,000 figures
   16.5 ms median, 5,000 figures 43.8 ms (48 M triangles); bake of 2 clips x 24 fps in PHP 1.3 s once. VAT materials do not cast their own shadow.
-- VAT on 16-unit backends: coded (`VioRenderer3D::vatMode()` 2: a separate `texture2D` on slot 17 read by texelFetch, php-vio `fetch_units`,
-  `ProcModeShaderRegistry::fetchUnits()`), but OFF unless `PHPOLYGON_VAT_FETCH=1`: with the local fetch_units build (2026-11-12) the
-  vertex stage numbers the texture t0 (the `layout(binding)` is only honoured in the fragment stage), so the VAT reads the wrong slot and the
-  mesh collapses. Needs a php-vio fix; `VioVatCrowdTest` skips on fetch-only contexts without the env.
+- Sampler-less textures on 16-unit backends (D3D11, D3D12 with FXC), feature-detected by php-vio `vio_texture_units()['fetch_units']`
+  (`ProcModeShaderRegistry::fetchUnits()`; absent = old behaviour, nothing changes): (a) the VAT is a separate `texture2D` on slot 17 read by
+  `texelFetch` (`VioRenderer3D::vatMode()` 2; `PHPOLYGON_VAT_FETCH=0` switches it off), (b) the refraction / frost scene copy is a separate
+  texture on slot 16 (`sceneColorFetch()`, `sceneColorAt()` does the bilinear taps by hand; `PHPOLYGON_SCENE_COLOR_FETCH=0` off), so frost blurs on
+  those backends; without fetch_units the cloud fallback stays. Both need php-vio with layout(binding) honoured for separate textures in every stage
+  (local build commit 8d4286f, 2026-11-12). Verified on RTX 2080 hardware with that build: D3D11 and D3D12-FXC (`PHPOLYGON_TEST_VIO_FXC=1` in the
+  tests) pass `VioVatCrowdTest` and `VioRefractionTest`; D3D12 SM6 is unchanged (combined samplers, units 768). The 16-unit crowd and frost
+  tests skip on a php-vio without fetch_units; `VioFrostFallbackTest` then runs the cloud fallback.
+- Skinned draws, round 3: cut-out shadows (`alphaCutoff` on an albedo texture: `shadow_skin_cutout`, `PHPOLYGON_SHADOW_CUTOUT` in shadow.vert/frag;
+  skinned casters only - static meshes still cast solid shadows), the depth prepass (eligible materials), transparent skinned materials (back then
+  front faces, instances sorted far to near in the buffer, commands by distance, drawn after the regular transparents - not interleaved with
+  them), and previous-frame palettes for motion vectors (`DrawSkinnedMesh::$prevPalettes`; object motion of the instance is not tracked, only
+  the pose). Not covered: the non-MRT forward G-buffer SSAO pre-pass (MRT frames are covered). Touched renderer places added: `drawSkinnedPrepass()`
+  after the prepass meshlet run, `drawSkinnedTransparent()` after the transparent loop; `sceneColorAvailable()` / `sceneColorFetch()`, the
+  fragment defines for the scene copy and `vatMode()` / `withVat()`.
 - `Rendering\ShaderModelCheck::detect($ctx): ?int` / `::require($ctx)`: opt-in; throws when a D3D12 context compiled with FXC (shader model 5,
   16 units) instead of 6. The engine never calls it; a program that needs SM 6 does.
 - `Material::$windowVary` (opt-in, `withWindowGrid(..., ?bool $vary)`): with `windowUv` the cell choice mixes the world position of the cell centre
   (10 cm grid), so identical quads show different lit windows (D3D12: halves of two identical quads differ 4.0 without, 47.0 with).
-- NOT done this round: hair-card cut-out in the shadow pass, skinned draws in the depth prepass / non-MRT G-buffer pre-pass, transparent skinned
-  materials, previous-frame palette for motion vectors, the sampler-less refraction scene copy (frost blur on 16-unit backends; the existing
-  fallback stays).
 
 ---
 

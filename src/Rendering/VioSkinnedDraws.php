@@ -29,7 +29,7 @@ use PHPolygon\Rendering\Command\DrawSkinnedMesh;
  */
 trait VioSkinnedDraws
 {
-    /** @var list<array{cmd: DrawSkinnedMesh, material: Material, inst: int, viewInst: int, viewCount: int}> */
+    /** @var list<array{cmd: DrawSkinnedMesh, material: Material, inst: int, viewInst: int, viewCount: int, depth: float}> */
     private array $skinDraws = [];
     private ?\VioBuffer $skinBuffer = null;
     private int $skinBufferBytes = 0;
@@ -76,12 +76,16 @@ trait VioSkinnedDraws
                 . "// Bone palettes and per-instance records (model, palette base) from the storage buffer at slot 0.\n"
                 . "layout(std430, binding = 0) readonly buffer SkinStorage { mat4 skinData[]; };\nuniform int u_skin_inst;\n",
             "    mat4 model = u_model;\n    if (u_use_instancing == 1) {\n        model = mat4(a_instance_col0, a_instance_col1, a_instance_col2, a_instance_col3);\n    }\n"
-                => "    mat4 model = u_model;\n    int skinBase = 0;\n    if (u_use_instancing == 1) {\n        int rec = u_skin_inst + gl_InstanceIndex * 2;\n        model = skinData[rec];\n        skinBase = int(skinData[rec + 1][0].x + 0.5);\n    }\n",
+                => "    mat4 model = u_model;\n    int skinBase = 0;\n    int skinBasePrev = -1;\n    if (u_use_instancing == 1) {\n        int rec = u_skin_inst + gl_InstanceIndex * 2;\n        model = skinData[rec];\n        skinBase = int(skinData[rec + 1][0].x + 0.5);\n        float pb = skinData[rec + 1][0].y;\n        skinBasePrev = pb < 0.0 ? -1 : int(pb + 0.5);\n    }\n",
             "    vec3 pos = animatePosition(vatPosition(a_position), model, u_time, grassHash);\n"
                 => "    mat4 skinM = {$blend};\n    vec3 skinPos = (skinM * vec4(a_position, 1.0)).xyz;\n    vec3 skinNrm = normalize(mat3(skinM) * a_normal);\n    vec3 pos = animatePosition(vatPosition(skinPos), model, u_time, grassHash);\n",
             "    vec3 localNormal = vatNormal(a_normal);\n" =>"    vec3 localNormal = skinNrm;\n",
             "    vec3 prevPos = animatePosition(a_position, prevModel, u_time_prev, grassHash);\n"
-                => "    vec3 prevPos = animatePosition(skinPos, prevModel, u_time_prev, grassHash);\n",
+                => "    // Previous-frame pose for the motion vectors (DrawSkinnedMesh::\$prevPalettes); the current one without.\n"
+                . "    vec3 skinPosPrev = skinPos;\n    if (skinBasePrev >= 0) {\n"
+                . "        mat4 skinMp = " . str_replace('skinBase +', 'skinBasePrev +', $blend) . ";\n"
+                . "        skinPosPrev = (skinMp * vec4(a_position, 1.0)).xyz;\n    }\n"
+                . "    vec3 prevPos = animatePosition(skinPosPrev, prevModel, u_time_prev, grassHash);\n",
         ];
         foreach ($edits as $old => $new) {
             if (substr_count($src, $old) !== 1) {
@@ -144,6 +148,11 @@ trait VioSkinnedDraws
         $planes = $this->cameraProjectionMatrix !== null && $this->currentViewMatrix !== null && getenv('PHPOLYGON_NO_CULL') !== '1'
             ? Frustum::planes($this->cameraProjectionMatrix, $this->currentViewMatrix)
             : null;
+        $cam = null;
+        if ($this->currentViewMatrix !== null) {
+            $eye = $this->currentViewMatrix->inverse()->getTranslation();
+            $cam = [$eye->x, $eye->y, $eye->z];
+        }
         foreach ($found as $cmd) {
             $skin = SkinnedMeshRegistry::get($cmd->meshId);
             $material = MaterialRegistry::get($cmd->materialId);
@@ -161,14 +170,37 @@ trait VioSkinnedDraws
             }
             $base = intdiv(strlen($bytes), 64);
             $bytes .= implode('', $paletteBytes);
+            // Last frame's palettes (same indexing), for the motion vectors of a temporal frame.
+            $prevBase = -1;
+            if ($cmd->prevPalettes !== [] && count($cmd->prevPalettes) === count($cmd->palettes)) {
+                $prevBytes = [];
+                foreach ($cmd->prevPalettes as $p) {
+                    $packed = is_string($p) ? $p : SkinnedMeshData::packPalette($p);
+                    if (strlen($packed) === $joints * 64) {
+                        $prevBytes[] = $packed;
+                    }
+                }
+                if (count($prevBytes) === count($cmd->prevPalettes)) {
+                    $prevBase = intdiv(strlen($bytes), 64);
+                    $bytes .= implode('', $prevBytes);
+                }
+            }
             $inst = intdiv(strlen($bytes), 64);
             $sphere = $planes === null ? null : SkinnedMeshRegistry::sphere($cmd->meshId);
             $records = [];
             $visible = [];
+            $depth = [];
             foreach ($cmd->models as $i => $model) {
                 $m = $model->toArray();
                 $records[$i] = pack('g16', ...$m)
-                    . pack('g16', (float) ($base + $cmd->paletteOf($i) * $joints), 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+                    . pack('g16', (float) ($base + $cmd->paletteOf($i) * $joints), $prevBase < 0 ? -1.0 : (float) ($prevBase + $cmd->paletteOf($i) * $joints), 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+                $transparent = $material->alpha < 1.0;
+                if ($transparent && $cam !== null) {
+                    $dx = $m[12] - $cam[0];
+                    $dy = $m[13] - $cam[1];
+                    $dz = $m[14] - $cam[2];
+                    $depth[$i] = $dx * $dx + $dy * $dy + $dz * $dz;
+                }
                 if ($sphere !== null && $planes !== null) {
                     // World sphere of the instance: the local sphere moved by the model, scaled by its largest axis.
                     $cx = $m[0] * $sphere[0] + $m[4] * $sphere[1] + $m[8] * $sphere[2] + $m[12];
@@ -185,8 +217,12 @@ trait VioSkinnedDraws
             $bytes .= implode('', $records);
             // Shadow passes draw every instance (an off-screen caster still shades the view); the camera's
             // passes draw the visible subset, which is a second copy of those records when some were culled.
+            // A transparent material draws its instances far to near, so the camera's copy is always made.
             $viewInst = $inst;
-            if (count($visible) < count($records) && $visible !== []) {
+            if ($visible !== [] && (count($visible) < count($records) || ($material->alpha < 1.0 && $depth !== []))) {
+                if ($material->alpha < 1.0 && $depth !== []) {
+                    usort($visible, static fn (int $a, int $b): int => ($depth[$b] ?? 0.0) <=> ($depth[$a] ?? 0.0));
+                }
                 $viewInst = intdiv(strlen($bytes), 64);
                 foreach ($visible as $i) {
                     $bytes .= $records[$i];
@@ -195,6 +231,7 @@ trait VioSkinnedDraws
             $this->skinDraws[] = [
                 'cmd' => $cmd, 'material' => $material, 'inst' => $inst,
                 'viewInst' => $viewInst, 'viewCount' => count($visible),
+                'depth' => $depth === [] ? 0.0 : array_sum($depth) / count($depth),
             ];
         }
         if ($this->skinDraws === []) {
@@ -376,6 +413,24 @@ trait VioSkinnedDraws
     /** Opaque skinned draws, after the regular opaque draws of the frame. */
     private function drawSkinnedOpaque(): void
     {
+        $this->drawSkinned('opaque');
+    }
+
+    /** Skinned draws of the depth prepass (the eligible opaque materials), after the regular prepass draws. */
+    private function drawSkinnedPrepass(): void
+    {
+        $this->drawSkinned('prepass');
+    }
+
+    /** Transparent skinned draws, far to near (instances sorted in the buffer, commands here), after the regular transparent draws. */
+    private function drawSkinnedTransparent(): void
+    {
+        $this->drawSkinned('transparent');
+    }
+
+    /** @param 'opaque'|'prepass'|'transparent' $pass */
+    private function drawSkinned(string $pass): void
+    {
         $inputs = $this->sceneUniformInputs;
         if ($this->skinDraws === [] || $this->skinBuffer === null || $inputs === null || !$this->ensureSkinPrograms()) {
             return;
@@ -383,9 +438,14 @@ trait VioSkinnedDraws
         if ($this->motionThisFrame && !$this->ensureSkinMotionShader()) {
             return;
         }
+        $transparent = $pass === 'transparent';
+        $draws = $this->skinDraws;
+        if ($transparent) {
+            usort($draws, static fn (array $a, array $b): int => $b['depth'] <=> $a['depth']);
+        }
         $groups = [];
-        foreach ($this->skinDraws as $d) {
-            if ($d['material']->alpha < 1.0) {
+        foreach ($draws as $d) {
+            if (($d['material']->alpha < 1.0) !== $transparent || ($pass === 'prepass' && !self::prepassEligible($d['material']))) {
                 continue;
             }
             $variant = $this->skinVariantOf($d['material'], $d['cmd']->materialId);
@@ -397,9 +457,12 @@ trait VioSkinnedDraws
         $cull = $this->currentSceneCull;
         $saved = $this->sceneVariant;
         [$frameState, $hasShadowMap, $dirLights] = $inputs;
+        // A transparent mesh draws its back faces, then its front faces (blending writes no depth).
+        $culls = $transparent ? [VIO_CULL_FRONT, VIO_CULL_BACK] : [$cull];
         foreach ($groups as $variant => $list) {
+            foreach ($culls as $faceCull) {
             $this->sceneVariant = (string) $variant;
-            if (!$this->bindPipeline('opaque', cull: $cull, skinned: true)) {
+            if (!$this->bindPipeline($pass, cull: $faceCull, skinned: true)) {
                 continue;
             }
             $this->uploadFrameUniforms($frameState);
@@ -420,7 +483,7 @@ trait VioSkinnedDraws
                 }
                 $this->applyMaterialUniforms($d['material'], $d['cmd']->materialId);
                 $this->bindMaterialTextures($d['material']);
-                $this->applyGbufferWrite(1);
+                $this->applyGbufferWrite($pass === 'prepass' ? 0 : 1);
                 vio_set_uniform($this->ctx, 'u_skin_inst', $d['viewInst']);
                 if ($this->skinRebindPerDraw()) {
                     vio_bind_storage_buffer($this->ctx, $this->skinBuffer, 0, VIO_COMPUTE_READ);
@@ -428,10 +491,11 @@ trait VioSkinnedDraws
                 vio_draw_instanced_from_buffer($this->ctx, $mesh, $d['viewCount']);
             }
             vio_set_uniform($this->ctx, 'u_use_instancing', 0);
+            }
         }
         $this->sceneVariant = $saved;
         // Back to the pass's regular program, like the storage-instance draw.
-        $this->bindPipeline('opaque', cull: $cull);
+        $this->bindPipeline($pass, cull: $cull);
     }
 
     /** Skinned casters into the shadow map the caller is rendering (view / projection of that map). */
