@@ -4189,6 +4189,36 @@ to the v0.105.0-kit base on both backends), everything opt-in. Before/after pict
 - NOT done: reflection of the street/buildings on glass (needs SSR or probes on transparents), a wall-wetness splash zone near the ground, edge wear from true convexity (the curvature test is sign-less),
   interior rooms with their own window light spilling onto the street.
 
+### Body template building blocks (branch `feat/body-template`, 2026-11-13): subdivision, adjacency, landmark warp
+
+Pure CPU, deterministic, no static state (thread-safe: share the immutable objects, call from workers), game-agnostic. For a quad-dominant template body mesh
+that is warped per spec and smoothed by subdivision. Tests `CatmullClarkTest`, `LandmarkWarpTest`.
+
+- `Geometry\PolyMesh(array $positions, list<list<int>> $faces, ?array $uvs, ?list<list<int>> $faceUvs, array<string,float> $creases)`: polygon faces (3+ vertices), UVs on their own
+  vertex list with their own face indices (a UV seam = two faces sharing a position but not a UV vertex), crease sharpness per edge (`PolyMesh::edgeKey($a, $b)`; 1 = sharp for one
+  level, `INF` = always: lid margins, nails, fingertips). `withCreases()`, `withPositions()` (same topology, e.g. a warped template), `toTriangles(): MeshData`.
+- `Geometry\CatmullClark::subdivide(PolyMesh, int $levels = 2 (0..3), bool $stencils = true): SubdivisionResult`. Pixar semi-sharp rules (dart / crease / corner vertices,
+  fractional sharpness blends, sharpness minus one per level), boundary and non-manifold edges are always sharp. UVs are subdivided as a mesh of their own over the same faces (the seam is
+  its boundary, so it stays a line) and the output mesh is split along it; positions stay watertight (`MeshCleanup::topology` of the result: 0 open, 0 non-manifold, 0 flipped on
+  the test cube and a 3000-quad torus with seams). Normals are smooth over the surface and split at edges that are still sharp after the last level; tangents (xyz + handedness w) from the UV
+  derivatives. A boundary vertex with exactly two boundary edges follows the cubic boundary curve (a rim); pin a corner with three creases or accept it moving inward.
+- `SubdivisionResult`: `$mesh` (MeshData), `$levels`, `$baseVertexCount`, `$vertexCount` (position vertices), `$stencilIndex` / `$stencilWeight` (every subdivided position vertex as a combination
+  of base vertices, weights sum to 1), `$outputToVertex` (mesh vertex -> position vertex; UV seams and hard creases duplicate vertices). Base vertex i is subdivided vertex i at every level.
+  `interpolate(array $baseValues, int $components = 1)` carries any per-base-vertex attribute (skin weights, region labels, landmarks) to the subdivided vertices;
+  `interpolateOutput()` per mesh vertex; `positions($basePositions)` / `outputPositions()` re-smooth DEFORMED base positions without subdividing again (the stencils depend on topology and
+  creases only).
+- `Geometry\MeshAdjacency::of(PolyMesh)` / `new MeshAdjacency($faces)`: `edgeFaces()`, `facesOfEdge($a,$b)`, `facesOfVertex()`, `valence()`, `neighbours()`, `boundaryEdges()`, `boundaryLoops()`,
+  `nonManifoldEdges()`, `isClosedManifold()`, `quadRatio()`; `MeshAdjacency::quadsFromTriangles(MeshData, float $maxAngleDegrees = 25): PolyMesh` pairs triangles that share an edge into quads
+  (nearly coplanar, most regular first, winding kept) for meshes that arrive triangulated.
+- `Geometry\LandmarkWarp::fit(array $source, array $target, string $kernel = 'tps' | 'cubic', float $regularization = 0.0)`: radial-basis warp (biharmonic thin-plate kernel phi(r) = r, or r^3) with an
+  affine part; solves the dense (N + 4) system once (LU with pivoting), `apply(array $positions)` / `point(x,y,z)`; `regularization > 0` relaxes the interpolation for noisy targets; throws on fewer
+  than 4 or degenerate (coplanar, coincident) landmarks. Warp the BASE template, then subdivide or use the stencils: applying it to the subdivided surface costs 16x more vertices.
+- `Geometry\TemplateDeformer($template, ?MorphTargets $shapes)->deform(array $shapeWeights, ?LandmarkWarp $warp): PolyMesh`: linear blend of sparse shape deltas (`MorphTargets`), then the warp.
+- Measured (2026-11-13, PHP 8.5.5 without JIT, this host, 3 runs): a closed 3000-quad torus with UV seams: 2 levels with stencils, UVs and tangents 1.23 s median (1.06 s without stencils) ->
+  48,000 position vertices, 48,441 mesh vertices, 96,000 triangles, peak 310 MB; 1 level 0.26 s; 3 levels (no stencils) 4.8 s, 192,000 vertices, 631 MB; `MeshCleanup::topology` of the 2-level
+  result 0.70 s; re-smoothing new base positions through the stencils 0.10 s. RBF with 300 landmarks: fit 0.38 s (thin-plate) / 0.39 s (cubic), apply to 20,000 vertices 1.21 s / 1.25 s.
+  Subdivide on a worker (`RuntimePool`) and cache per spec hash; re-smooth with the stencils per variation.
+
 ---
 
 ## Character DNA
