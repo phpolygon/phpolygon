@@ -60,6 +60,20 @@ final class VioImageChain
         $this->exposurePrimed = false;
     }
 
+    /**
+     * The dither amplitude in 8-bit steps the finish pass uses. A request of 0.05 or more is raised to
+     * 1.5 steps: measured on a glow in the dark (512 px, deband 0.5 left 8 runs of 5 px or more of one
+     * value along the halo, 1.0 one run, 2.0 none; without it a 67 px band), so a smaller amplitude does
+     * not hide the rings. Below 0.05 the value is kept (a game that wants the chain without dither passes
+     * 0.0001).
+     */
+    public static function debandAmplitude(float $deband): float
+    {
+        $d = max(0.0, $deband);
+
+        return $d >= 0.05 ? max($d, 1.5) : $d;
+    }
+
     public function release(): void
     {
         $this->targets = [];
@@ -317,7 +331,7 @@ final class VioImageChain
             'u_lut_blend' => $look->lutBlend !== null ? max(0.0, min(1.0, $look->lutBlendWeight)) : 0.0,
             'u_saturation_boost' => $pulse,
             'u_grain' => $clean ? 0.0 : max(0.0, $look->grain),
-            'u_deband' => max(0.0, $look->deband),
+            'u_deband' => self::debandAmplitude($look->deband),
             'u_ca' => $clean ? 0.0 : max(0.0, $look->chromaticAberration),
             'u_night_vision' => $hdr ? max(0.0, min(1.0, $look->nightVision)) : 0.0,
             'u_time' => $a11y->reducedMotion ? 0.0 : $grainTime,
