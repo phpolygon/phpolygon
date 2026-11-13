@@ -6320,7 +6320,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
     }
 
     /** Scatter width of the screen-space subsurface blur, metres (skin: a few millimetres). */
-    public const float SSS_WIDTH = 0.012;
+    public const float SSS_WIDTH = 0.02;
 
     /** Strength of the screen-space contact shadows on the sun term. */
     public const float CONTACT_SHADOW_STRENGTH = 0.85;
