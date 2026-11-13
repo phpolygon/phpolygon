@@ -2015,6 +2015,19 @@ vec3 perturbNormalMap(vec3 N, vec3 worldPos, vec2 uv, vec2 sampleUv, float inten
 //  Main
 // ================================================================
 
+// Light falloff (SetLightFalloff): 0 = the classic smooth window (1 - d^2/r^2)^2, 1 = inverse square
+// with a smooth window at the light's radius (intensity = radiance at 1 m, distances in metres).
+uniform float u_light_falloff;
+float lightFalloff(float dist, float r) {
+    if (u_light_falloff > 0.5) {
+        float x = dist / max(r, 1e-3);
+        float w = clamp(1.0 - x * x * x * x, 0.0, 1.0);
+        return w * w / max(dist * dist, 0.01);
+    }
+    float a = clamp(1.0 - dist * dist / (r * r), 0.0, 1.0);
+    return a * a;
+}
+
 void main() {
 #ifdef PHPOLYGON_DEPTH_ONLY
     // Depth prepass twin (shader plan 9.1): colour is masked, only depth counts.
@@ -2955,8 +2968,7 @@ void main() {
         float dist = length(Lp);
         Lp /= dist;
         float r = max(u_point_lights[i].radius, 0.001);
-        float atten = clamp(1.0 - dist*dist/(r*r), 0.0, 1.0);
-        atten *= atten;
+        float atten = lightFalloff(dist, r);
         atten *= pointShadowFor(u_point_lights[i].position, v_worldPos, N, Lp, dist);
         float NdotPL = max(dot(N, Lp), 0.0);
         if (NdotPL > 0.0) {
@@ -2977,8 +2989,7 @@ void main() {
         float dist = length(Ls);
         Ls /= dist;
         float r = max(u_spot_lights[i].range, 0.001);
-        float atten = clamp(1.0 - dist*dist/(r*r), 0.0, 1.0);
-        atten *= atten;
+        float atten = lightFalloff(dist, r);
 
         float cosOuter = cos(u_spot_lights[i].angle);
         float cosInner = cos(u_spot_lights[i].angle * (1.0 - u_spot_lights[i].penumbra));

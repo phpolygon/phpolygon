@@ -4375,8 +4375,11 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
 
         $this->cameraCutThisFrame = false;
         $this->pendingMirror = null;
+        $this->physicalLightFalloff = false;
         foreach ($commands as $cmd) {
-            if ($cmd instanceof Command\SetPlanarMirror) {
+            if ($cmd instanceof Command\SetLightFalloff) {
+                $this->physicalLightFalloff = $cmd->physical;
+            } elseif ($cmd instanceof Command\SetPlanarMirror) {
                 $this->pendingMirror = $cmd;
             } elseif ($cmd instanceof SetCamera) {
                 $this->currentViewMatrix = $cmd->viewMatrix;
@@ -6174,6 +6177,9 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         }
         $this->renderSdfAoPass($frameState, $gbufferTex);
     }
+
+    /** SetLightFalloff: inverse-square point and spot lights this frame. */
+    private bool $physicalLightFalloff = false;
 
     /** The denoised half-res GI gather of this frame is ready for the composite. */
     private bool $ssgiDenoisedThisFrame = false;
@@ -11098,6 +11104,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         }
         vio_set_uniform($this->ctx, 'u_view', $this->currentViewMatrix->toArray());
         vio_set_uniform($this->ctx, 'u_projection', $this->currentProjectionMatrix->toArray());
+        vio_set_uniform($this->ctx, 'u_light_falloff', $this->physicalLightFalloff ? 1.0 : 0.0);
         // Linear output: when the scene target is FP16 (HDR offscreen path) the
         // mesh shader skips its inline ACES+gamma and writes unclamped linear
         // colour; the resolve pass tonemaps. Otherwise it tonemaps inline (LDR).
