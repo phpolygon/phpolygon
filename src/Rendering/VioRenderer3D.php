@@ -4378,9 +4378,11 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         $this->cameraCutThisFrame = false;
         $this->pendingMirror = null;
         $this->physicalLightFalloff = false;
-        $this->skyAmbient = null;
+        $this->grimeAmount = 0.0;
         foreach ($commands as $cmd) {
-            if ($cmd instanceof Command\SetLightFalloff) {
+            if ($cmd instanceof Command\SetGrime) {
+                $this->grimeAmount = max(0.0, min(1.0, $cmd->amount));
+            } elseif ($cmd instanceof Command\SetLightFalloff) {
                 $this->physicalLightFalloff = $cmd->physical;
             } elseif ($cmd instanceof Command\SetSkyAmbient) {
                 $this->skyAmbient = $cmd;
@@ -6185,6 +6187,8 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
     }
 
     private bool $patternFiltering = false;
+    /** SetGrime of this frame. */
+    private float $grimeAmount = 0.0;
 
     /**
      * Fade procedural surface and normal patterns out where one of their cycles covers less than about a pixel
@@ -10030,6 +10034,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             'u_alpha_hash'          => $material->alphaHash ? 1.0 : 0.0,
             'u_window_room'         => $material->windowRoom ? 1.0 : 0.0,
             'u_glass_reflect'       => $material->glassReflection,
+            'u_grime'               => $material->grime,
             'u_ocean_chop'          => $material->oceanChop,
             'u_tess'                => [max(1.0, min(64.0, $material->tessellation)), $material->tessNear, $material->tessFar, $material->tessellation > 0.0 ? 1.0 : 0.0],
             'u_hair'                => $material->hair ? 1.0 : 0.0,
@@ -11157,6 +11162,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         vio_set_uniform($this->ctx, 'u_projection', $this->currentProjectionMatrix->toArray());
         vio_set_uniform($this->ctx, 'u_light_falloff', $this->physicalLightFalloff ? 1.0 : 0.0);
         vio_set_uniform($this->ctx, 'u_pattern_filter', $this->patternFiltering ? 1.0 : 0.0);
+        vio_set_uniform($this->ctx, 'u_grime_amount', $this->grimeAmount);
         // Linear output: when the scene target is FP16 (HDR offscreen path) the
         // mesh shader skips its inline ACES+gamma and writes unclamped linear
         // colour; the resolve pass tonemaps. Otherwise it tonemaps inline (LDR).

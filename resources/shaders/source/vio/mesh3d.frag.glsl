@@ -210,6 +210,8 @@ uniform vec2  u_viewport_size;
 uniform float u_snow_cover; // 0.0 = no snow, 1.0 = full blanket
 uniform float u_rain_wetness; // 0.0 = dry, 1.0 = rain-soaked
 uniform float u_rain_dry_below; // no rain below this world height (Weather::$dryBelowY)
+uniform float u_grime;          // Material::$grime: opt-in to ageing, 0 = clean
+uniform float u_grime_amount;   // SetGrime::$amount of the frame
 uniform float u_rain_walls;     // SetGroundWetness::$wallWetness: how much of the rain wets walls and props (0 = only the ground)
 uniform vec3 u_fog_color;
 uniform float u_fog_near;
@@ -2499,6 +2501,27 @@ void main() {
         }
     }
 
+    // Grime (Material::$grime, Command\SetGrime): cheap ageing from the surface itself. Dirt gathers in the creases
+    // (the normal changes fast there: curvature), dark streaks run down walls from them (long vertical noise bands,
+    // strongest under a crease, i.e. under a ledge), and the edges that stick out wear: a little lighter and rougher
+    // where the normal turns sharply. World-position noise, so it works with any UVs; no texture.
+    if (u_grime > 0.0 && u_grime_amount > 0.0 && u_proc_mode != 2 && alpha > 0.95) {
+        float gAmount = clamp(u_grime * u_grime_amount, 0.0, 1.0);
+        vec3 gdx = dFdx(N);
+        vec3 gdy = dFdy(N);
+        float gCurv = clamp((length(gdx) + length(gdy)) * 2.2, 0.0, 1.0);
+        float gSide = 1.0 - smoothstep(0.35, 0.8, abs(N.y));
+        vec2 ghv = normalize(vec2(-N.z, N.x) + vec2(1e-5));
+        float gAlong = dot(v_worldPos.xz, ghv);
+        float gRun = smoothstep(0.40, 0.80, noise(vec2(gAlong * 3.2, v_worldPos.y * 0.22)) * 0.6 + noise(vec2(gAlong * 9.0, v_worldPos.y * 0.7)) * 0.4);
+        float gPatch = noise(v_worldPos.xz * 0.9 + v_worldPos.y * 0.5);
+        float gDirt = gAmount * clamp(gCurv * 0.9 + gSide * gRun * (0.55 + 0.45 * gCurv) + gPatch * 0.25, 0.0, 1.0);
+        albedo = mix(albedo, albedo * vec3(0.40, 0.36, 0.31), gDirt);
+        roughness = mix(roughness, max(roughness, 0.85), gDirt * 0.7);
+        float gEdge = gAmount * smoothstep(0.55, 1.0, gCurv) * (1.0 - gDirt * 0.6);
+        albedo = mix(albedo, albedo * 1.25 + vec3(0.03), gEdge * 0.35);
+        roughness = mix(roughness, min(roughness + 0.25, 1.0), gEdge * 0.5);
+    }
     // Decal volumes (shader plan 5.1): stains, soot, moss and cracks painted on
     // whatever lies inside each box (the ground, a wall, a crate), fading towards
     // its edges and broken up by noise. Not on water or unlit materials.

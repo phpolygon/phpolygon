@@ -537,6 +537,11 @@ class Material
          * strength (not thinned by the pane's transparency): 0 = none, 1 = the physical amount, more for a showroom look.
          */
         public readonly float $glassReflection = 0.0,
+        /**
+         * Opt in to ageing: 0 = clean (the default), 1 = the full grime of the frame's {@see \PHPolygon\Rendering\Command\SetGrime}
+         * (creases darkened, dirt streaks down walls, worn edges). The effective amount is this times SetGrime's.
+         */
+        public readonly float $grime = 0.0,
     ) {}
 
     /**
@@ -703,6 +708,12 @@ class Material
         return $this->copy(windowCell: [$cellWidth, $cellHeight], windowOffset: [$offsetX, $offsetY], windowUv: $uv, windowVary: $vary);
     }
 
+    /** This material opted in to ageing, see {@see $grime}. */
+    public function withGrime(float $amount = 1.0): self
+    {
+        return $this->copy(grime: $amount);
+    }
+
     /** This material with interior mapping behind its window cells, see {@see $windowRoom}. */
     public function withWindowRoom(bool $on = true): self
     {
@@ -843,6 +854,7 @@ class Material
         ?bool $alphaHash = null,
         ?bool $windowRoom = null,
         ?float $glassReflection = null,
+        ?float $grime = null,
     ): self {
         return new self(
             albedo: $albedo ?? $this->albedo,
@@ -939,6 +951,7 @@ class Material
             alphaHash: $alphaHash ?? $this->alphaHash,
             windowRoom: $windowRoom ?? $this->windowRoom,
             glassReflection: $glassReflection ?? $this->glassReflection,
+            grime: $grime ?? $this->grime,
         );
     }
 
