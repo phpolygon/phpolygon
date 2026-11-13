@@ -21,7 +21,20 @@ uniform vec3 u_sky_amb_up;
 uniform vec3 u_sky_amb_side;
 uniform vec3 u_sky_amb_down;
 uniform float u_sky_amb_mode;
+// mode 2: second-order spherical harmonics of the sky cube (SphericalHarmonics, SetSkyAmbient::$fromCubemap), the
+// cosine-lobe convolution and the gain already folded into the nine colours.
+uniform vec3 u_sky_sh0; uniform vec3 u_sky_sh1; uniform vec3 u_sky_sh2;
+uniform vec3 u_sky_sh3; uniform vec3 u_sky_sh4; uniform vec3 u_sky_sh5;
+uniform vec3 u_sky_sh6; uniform vec3 u_sky_sh7; uniform vec3 u_sky_sh8;
 vec3 flatOrSkyAmbient(vec3 n) {
+    if (u_sky_amb_mode > 1.5) {
+        return max(vec3(0.0),
+            u_sky_sh0 * 0.282095
+            + u_sky_sh1 * (0.488603 * n.y) + u_sky_sh2 * (0.488603 * n.z) + u_sky_sh3 * (0.488603 * n.x)
+            + u_sky_sh4 * (1.092548 * n.x * n.y) + u_sky_sh5 * (1.092548 * n.y * n.z)
+            + u_sky_sh6 * (0.315392 * (3.0 * n.z * n.z - 1.0)) + u_sky_sh7 * (1.092548 * n.x * n.z)
+            + u_sky_sh8 * (0.546274 * (n.x * n.x - n.y * n.y)));
+    }
     if (u_sky_amb_mode > 0.5) {
         float up = clamp(n.y, 0.0, 1.0);
         float down = clamp(-n.y, 0.0, 1.0);

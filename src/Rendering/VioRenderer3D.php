@@ -6200,6 +6200,21 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
     private bool $physicalLightFalloff = false;
     /** SetSkyAmbient of this frame: the ambient follows the sky colours. */
     private ?Command\SetSkyAmbient $skyAmbient = null;
+    /** Spherical harmonics of the sky cube, read back when the cube is drawn (SetSkyAmbient::$fromCubemap). */
+    private ?SphericalHarmonics $skySh = null;
+
+    private function readSkySh(\VioRenderTarget $rt): void
+    {
+        $faces = [];
+        for ($f = 0; $f < 6; $f++) {
+            $px = vio_read_render_target($rt, $f);
+            if (!is_string($px)) {
+                return;
+            }
+            $faces[] = $px;
+        }
+        $this->skySh = SphericalHarmonics::fromCubeFaces($faces, VioEnvironmentCubemap::FACE_SIZE, 8, $this->conventions()->flipRenderTargetClipY());
+    }
 
     /** The denoised half-res GI gather of this frame is ready for the composite. */
     private bool $ssgiDenoisedThisFrame = false;
@@ -8309,7 +8324,15 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             return;
         }
         $env = $this->envCubemap ??= new VioEnvironmentCubemap($this->ctx);
-        if (!$env->ensureAllocated() || !$env->needsUpdate($sky)) {
+        if (!$env->ensureAllocated()) {
+            return;
+        }
+        if (!$env->needsUpdate($sky)) {
+            // A cube that exists but was drawn before the ambient asked for it: read its harmonics now.
+            $existing = $env->target();
+            if ($existing !== null && $this->skyAmbient?->fromCubemap === true && $this->skySh === null && $env->cubemap() !== null) {
+                $this->readSkySh($existing);
+            }
             return;
         }
         $rt = $env->target();
@@ -8328,6 +8351,9 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         vio_unbind_render_target($this->ctx);
         vio_generate_mipmaps($this->ctx, $rt);
         $env->markRendered($sky);
+        if ($this->skyAmbient?->fromCubemap === true) {
+            $this->readSkySh($rt);
+        }
         $this->gpuMark('envcube');
     }
 
@@ -11167,7 +11193,15 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         $this->frameAmbientLight = [$ac->r * $ai * $piScale, $ac->g * $ai * $piScale, $ac->b * $ai * $piScale];
         $skyAmbient = $this->skyAmbient;
         $sky = $this->pendingSky;
-        if ($skyAmbient !== null && $sky !== null) {
+        if ($skyAmbient !== null && $sky !== null && $skyAmbient->fromCubemap && $this->skySh !== null) {
+            $coef = $this->skySh->irradianceCoefficients($skyAmbient->gain);
+            foreach ($coef as $i => $v) {
+                vio_set_uniform($this->ctx, 'u_sky_sh' . $i, [$v[0], $v[1], $v[2]]);
+            }
+            vio_set_uniform($this->ctx, 'u_sky_amb_mode', 2.0);
+            // The mean colour (band 0) stands in where the GI gather recovers albedo from ambient.
+            $this->frameAmbientLight = [$coef[0][0] * 0.282095, $coef[0][1] * 0.282095, $coef[0][2] * 0.282095];
+        } elseif ($skyAmbient !== null && $sky !== null) {
             $k = $skyAmbient->gain * $piScale;
             $b = $skyAmbient->groundBounce;
             $up = [$sky->zenithColor->r * $k, $sky->zenithColor->g * $k, $sky->zenithColor->b * $k];

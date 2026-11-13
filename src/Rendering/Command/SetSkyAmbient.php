@@ -19,5 +19,13 @@ readonly class SetSkyAmbient
     public function __construct(
         public float $gain = 1.0,
         public float $groundBounce = 0.4,
+        /**
+         * Take the diffuse ambient from the sky cube the renderer draws for the frame's SetSky (the same image the reflections use):
+         * its six faces are read back once per sky change and projected to second-order spherical harmonics, so clouds, the
+         * sun's glow and the haze colour the ambient too, not only the three gradient colours. The cube is an 8-bit image
+         * (the sun disc is clipped): the sun itself stays the directional light's business. Needs a backend with render-target
+         * cubemaps; without it (or before the first cube) the three-colour ambient is used.
+         */
+        public bool $fromCubemap = false,
     ) {}
 }
