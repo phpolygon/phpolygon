@@ -4113,6 +4113,50 @@ Pure PHP, deterministic, no renderer change; works on every backend and needs no
 - `Material::$windowVary` (opt-in, `withWindowGrid(..., ?bool $vary)`): with `windowUv` the cell choice mixes the world position of the cell centre
   (10 cm grid), so identical quads show different lit windows (D3D12: halves of two identical quads differ 4.0 without, 47.0 with).
 
+### Realism round (branch `feat/photoreal-engine`, 2026-11-13) - from the photoreal gap analysis
+
+All procedural (no texture files), backend-agnostic, tests on D3D12 SM6 and D3D11 hardware (RTX 2080). Default frames are unchanged: hashes of 3 frames x
+2 settings equal between the v0.105.0-kit base and this branch on D3D12 and D3D11 (`defhash.php` scene); every new behaviour below is opt-in or only
+acts where its feature was already switched on.
+
+- **Screen-space GI noise** (`GraphicsSettings::$screenSpaceGi`): the sparkle on smooth surfaces came from the per-pixel rotated 12-tap gather inside
+  `composite.frag`, un-denoised, with unclamped sun/local radiance of the neighbours (a highlight became a speckle). Now: a half-resolution gather
+  (`ssgi.frag.glsl`, per-sample clamp 10) plus two bilateral blur passes over depth and normal (`ssgi_blur.frag.glsl`), the composite reads the result
+  (`u_gi_map`, unit 6). Measured on a smooth wall at 960x540: high-frequency pixels 15.1 % (old) -> 0.5 % (new), 0.6 % with GI off; median frame 12.2 ms
+  -> 8.9 ms (GI off 8.4). `PHPOLYGON_SSGI_DENOISE=0` restores the inline gather; it is also the fallback when the shaders fail to compile. Test `VioSsgiDenoiseTest`.
+- **Screen-space SSS** (`screenSpaceSss`): the blur now carries the sun, the LOCAL lights and the ambient (it ignored local light), uses a per-channel
+  diffusion profile (weights exp(-r^2 k), k = 0.8 / 3 / 14 for R / G / B, so red travels furthest) and reaches 2 cm (`SSS_WIDTH` 0.012 -> 0.02, the radius no
+  longer halved). Why the measured effect was ~0: a smooth diffuse face has no edges for a blur to soften; the visible effect is at shadow and terminator
+  edges. `VioScreenSpaceSssTest` (cube edge): red bleed 14 of a 23 jump, blue 15 of 60 (before: 13 / 12).
+- **Skin specular** has two lobes (`cookTorranceSpecular` for subsurface, closed-surface materials): 70 % a tight lobe (roughness x 0.8), 30 % a broad one
+  (x 1.9). On a black sphere the highlight covers 26 % more pixels at a comparable total (`VioSkinSpecularTest`).
+- `Command\SetLightFalloff(bool $physical = true)`: opt-in inverse-square point and spot lights with a smooth window at the radius, so intensity is the radiance at
+  1 m (D3D12/D3D11: wall at 1.5 m -> 3 m: legacy 222 -> 218, inverse square 141 -> 56). `VioLightFalloffTest`.
+- `Command\SetSkyAmbient(float $gain = 1.0, float $groundBounce = 0.4)`: opt-in diffuse ambient that follows the frame's `SetSky` zenith / horizon / ground colours
+  (up / side / down blended by the normal's elevation, a first-order SH-like irradiance) instead of the flat `SetAmbientLight`. A grey sphere is blue on top and warm
+  below (top r/b 202/230, bottom 224/214). The GI gather's albedo recovery uses the mean of the three colours. It reads SetSky's colours, not the cubemap pixels (no
+  readback). `VioSkyAmbientTest`.
+- `Rendering\EmissiveLights::fromDraws($commands, $gain, $reach, $threshold, $minRadius, $max)`: point lights at the centres of emissive `DrawMesh` (neon tubes, signs),
+  colour of the emission, sized by the bounding sphere, strongest first; the caller adds them to the frame. An approximation of an area light.
+  More than 8 point lights work (24 lights light their own patches on D3D12 and D3D11: `VioManyLightsTest`; the Light Grid path).
+- **Eyes**: `Rendering\EyeShading::glsl()` is a surface-hook library (`resources/shaders/lib/eye.glsl`): `eye_surface(localPos, worldPos, cameraPos, irisColor, p, seed)`
+  gives albedo, roughness and a little emission for a sphere-mesh eye (pupil axis local +Z): the iris is seen through the cornea (the view ray refracts, n 1.336, to an
+  iris plane behind the apex: depth, shifts with the view angle), radial fibres, collarette, limbal ring, a pupil of controllable size, an off-white veined sclera, a
+  smooth wet cornea (roughness 0.035) so a light leaves a small sharp highlight. The local view comes from screen derivatives, so no model matrix and instancing works. Opaque
+  single surface (no transparent cornea shell). Test `VioEyeShadingTest` (pupil dark, iris blue, sclera light, 2 near-white pixels of 18,288).
+- **Pattern filtering** (opt-in, `VioRenderer3D::setPatternFiltering(true)`): procedural surface patterns and normal patterns fade to their neutral value where a cycle
+  covers less than about a pixel (derivatives of the pattern UV against a per-pattern finest cycle): a grazing ground with orange peel + brushed metal had 80.8 % noisy
+  pixels in the far rows without it, 13.0 % with, near rows unchanged (6.1 %). `VioPatternFilteringTest`. The pattern list of `engine-requests.md` (pattern rotation,
+  weave/knit/twill/leather) is NOT done.
+- **Hair**: the two Kajiya-Kay lobes of `Material::$hairShine` now answer point and spot lights too (peak 203 -> 250 on a brown sphere under one point light);
+  `Material::$alphaHash` (`withAlphaHash()`) dithers the cut-out threshold (+-0.25 around `alphaCutoff`, per-frame noise) so cards and lashes get soft coverage under TAA
+  (alpha to coverage itself needs a php-vio pipeline switch, which does not exist). `VioHairShadingTest`. Hair is still lit by strand direction = up-projected tangent,
+  not the mesh tangent; transmission and card self-shadow are not done.
+- NOT done: banding in the point-light glow (not isolated), glass reflection / interior cards, SH ambient read from the sky cubemap, mesh-tangent hair, the
+  physical-sky preset beyond `SetSkyAmbient`.
+- Touched renderer places: `composite.frag.glsl` (`u_gi_map`, SSS), `renderSsgiPass()` (+ call after `renderAoFromMrt`), `compositeMrt()` (unit 6),
+  `uploadFrameUniforms()` (`u_light_falloff`, `u_sky_amb_*`, `u_pattern_filter`), the command scan of `render()`, `applyMaterialUniforms` (`u_alpha_hash`).
+
 ---
 
 ## Character DNA
