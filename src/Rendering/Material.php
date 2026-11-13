@@ -524,6 +524,19 @@ class Material
          * hard stair-stepped line. Off = the plain cut-out, unchanged.
          */
         public readonly bool $alphaHash = false,
+        /**
+         * A furnished room behind every window cell of the lit-window look (interior mapping): the view ray enters a box
+         * the size of the cell and takes the colour of the back wall, side walls, floor or ceiling it hits, shaded from
+         * per-cell seeds (paint, picture, furniture, curtains, ceiling lamp); lit cells glow warm or cool, dark ones show a
+         * faint night blue. Parallax follows the view. Needs $windowLights and emission like the plain look; with
+         * $windowVary the rooms differ between identical quads. Off = the previous flat look.
+         */
+        public readonly bool $windowRoom = false,
+        /**
+         * The environment (sky, horizon, cubemap) reflected in a transparent pane with $glass set, by Fresnel and at full
+         * strength (not thinned by the pane's transparency): 0 = none, 1 = the physical amount, more for a showroom look.
+         */
+        public readonly float $glassReflection = 0.0,
     ) {}
 
     /**
@@ -690,6 +703,18 @@ class Material
         return $this->copy(windowCell: [$cellWidth, $cellHeight], windowOffset: [$offsetX, $offsetY], windowUv: $uv, windowVary: $vary);
     }
 
+    /** This material with interior mapping behind its window cells, see {@see $windowRoom}. */
+    public function withWindowRoom(bool $on = true): self
+    {
+        return $this->copy(windowRoom: $on);
+    }
+
+    /** This material with the environment reflected in the pane, see {@see $glassReflection}. */
+    public function withGlassReflection(float $amount = 1.0): self
+    {
+        return $this->copy(glassReflection: $amount);
+    }
+
     /** This material with a hashed (dithered) cut-out threshold, see {@see $alphaHash}. */
     public function withAlphaHash(bool $on = true): self
     {
@@ -816,6 +841,8 @@ class Material
         ?bool $windowUv = null,
         ?bool $windowVary = null,
         ?bool $alphaHash = null,
+        ?bool $windowRoom = null,
+        ?float $glassReflection = null,
     ): self {
         return new self(
             albedo: $albedo ?? $this->albedo,
@@ -910,6 +937,8 @@ class Material
             windowUv: $windowUv ?? $this->windowUv,
             windowVary: $windowVary ?? $this->windowVary,
             alphaHash: $alphaHash ?? $this->alphaHash,
+            windowRoom: $windowRoom ?? $this->windowRoom,
+            glassReflection: $glassReflection ?? $this->glassReflection,
         );
     }
 

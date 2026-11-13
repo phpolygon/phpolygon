@@ -197,6 +197,7 @@ uniform vec2  u_viewport_size;
 uniform float u_snow_cover; // 0.0 = no snow, 1.0 = full blanket
 uniform float u_rain_wetness; // 0.0 = dry, 1.0 = rain-soaked
 uniform float u_rain_dry_below; // no rain below this world height (Weather::$dryBelowY)
+uniform float u_rain_walls;     // SetGroundWetness::$wallWetness: how much of the rain wets walls and props (0 = only the ground)
 uniform vec3 u_fog_color;
 uniform float u_fog_near;
 uniform float u_fog_far;
@@ -241,6 +242,7 @@ uniform vec4 u_age_params;
 uniform float u_weathering;
 // Glass look (shader plan 5.3): x = Fresnel edges, y = dirt.
 uniform vec2 u_glass;
+uniform float u_glass_reflect;  // Material::$glassReflection: the environment reflected in the pane, 0 = none
 // Emissive looks (shader plan 5.4): x = lit window fraction, y = neon tube,
 // z = window grid follows the mesh UV instead of the world position.
 uniform vec3 u_emissive_look;
@@ -248,6 +250,8 @@ uniform vec3 u_emissive_look;
 uniform vec4 u_window_grid;
 // Material::$windowVary: mix the cell's world position into the lit/dark choice.
 uniform float u_window_vary;
+// Material::$windowRoom: a furnished room behind every window cell (interior mapping), lit or dark per cell.
+uniform float u_window_room;
 // Material looks (shader plan 5.5): x = cloth sheen, y = brushed metal, z = glitter.
 uniform vec3 u_material_look;
 // Dithered distance fade (shader plan 6.1): (start, end) metres, end <= 0 = off.
@@ -2098,6 +2102,55 @@ float lightFalloff(float dist, float r) {
     return a * a;
 }
 
+// Interior mapping: the room behind one window cell (width w, height h in metres, depth max(2.6, 1.15 h)). The
+// view ray enters the box at the glass plane at (f * cell size) and leaves through the first of back wall,
+// side walls, floor or ceiling it hits; each surface is shaded procedurally from per-cell seeds: paint colour,
+// a picture, furniture against the back wall, curtains, a ceiling lamp. A lit room glows by its lamp, a dark one
+// shows a faint blue night ambient. vt = the view ray in (wall right, up, inward).
+vec3 windowRoom(vec2 f, vec3 vt, vec2 cellM, vec2 cell, float lit, vec3 tone) {
+    float w = max(cellM.x, 0.1);
+    float h = max(cellM.y, 0.1);
+    float D = max(2.6, h * 1.15);
+    vec3 p = vec3(f.x * w, f.y * h, 0.0);
+    vec3 d = vec3(vt.x, vt.y, max(vt.z, 0.05));
+    vec3 tm = vec3(d.x > 0.0 ? (w - p.x) / d.x : -p.x / min(d.x, -1e-5),
+                   d.y > 0.0 ? (h - p.y) / d.y : -p.y / min(d.y, -1e-5),
+                   D / d.z);
+    float t = min(tm.x, min(tm.y, tm.z));
+    vec3 q = p + d * t;
+    float s1 = hash21(cell + 3.7);
+    float s2 = hash21(cell + 11.3);
+    float s3 = hash21(cell + 19.9);
+    vec3 paint = mix(vec3(0.85, 0.78, 0.65), vec3(0.62, 0.70, 0.82), s1) * (0.65 + 0.35 * s2);
+    vec3 col;
+    if (t >= tm.z - 1e-5) {
+        // Back wall: paint, a picture, furniture, curtains.
+        vec2 uw = q.xy / vec2(w, h);
+        col = paint;
+        if (s3 < 0.4 && abs(uw.x - 0.5) < 0.18 && uw.y > 0.45 && uw.y < 0.78) {
+            col = mix(col * 0.4, vec3(0.35, 0.45, 0.55), step(0.5, fract(uw.x * 9.0 + uw.y * 5.0)));
+        }
+        if (s2 > 0.45 && uw.y < 0.3 && uw.x > 0.12 && uw.x < 0.88) {
+            col = mix(vec3(0.16, 0.11, 0.09), paint * 0.3, step(0.22, uw.y));
+        }
+        if (s3 > 0.72 && (uw.x < 0.14 || uw.x > 0.86)) {
+            col = vec3(0.55, 0.14, 0.18) * (0.65 + 0.35 * sin(uw.x * 90.0));
+        }
+        col *= 0.8;
+    } else if (t >= tm.x - 1e-5) {
+        col = paint * 0.62;                       // side walls
+    } else if (d.y < 0.0) {
+        float board = 0.7 + 0.3 * step(0.5, fract(q.z * 3.0 / D * 4.0 + s2));
+        col = vec3(0.42, 0.30, 0.19) * board * mix(1.0, 0.55, q.z / D);  // floor
+    } else {
+        col = vec3(0.82);                         // ceiling
+        vec2 lc = vec2(q.x / w - 0.5, q.z / D - 0.45);
+        col += tone * 2.2 * (1.0 - smoothstep(0.05, 0.22, length(lc * vec2(1.0, 0.7))));
+    }
+    float room = lit > 0.5 ? (0.7 + 0.7 * s2) : 0.025;
+    vec3 night = vec3(0.65, 0.78, 1.0);
+    return col * room * (lit > 0.5 ? tone : night);
+}
 void main() {
 #ifdef PHPOLYGON_DEPTH_ONLY
     // Depth prepass twin (shader plan 9.1): colour is masked, only depth counts.
@@ -2413,6 +2466,26 @@ void main() {
         N = normalize(N + vec3(rip.x, 0.0, rip.y));
     }
 
+    // Rain on walls and props (SetGroundWetness::$wallWetness): the vertical surfaces soak too - porous paint and plaster
+    // darken, the water film smooths them, and the wet runs down in streaks: long vertical bands, darker and
+    // glossier than the rest, wider toward the ground where the water gathers. Not on water, not inside an
+    // interior volume, not below the dry height.
+    if (u_rain_walls > 0.0 && u_rain_wetness > 0.0 && soak.x <= 0.0 && u_proc_mode != 2 && v_worldPos.y >= u_rain_dry_below
+        && interiorMask(v_worldPos) <= 0.0) {
+        float side = 1.0 - smoothstep(0.35, 0.8, abs(N.y));
+        if (side > 0.0) {
+            vec2 hv = normalize(vec2(-N.z, N.x) + vec2(1e-5));
+            float along = dot(v_worldPos.xz, hv);
+            float runA = noise(vec2(along * 4.0, v_worldPos.y * 0.30));
+            float runB = noise(vec2(along * 11.0, v_worldPos.y * 0.85));
+            float streak = smoothstep(0.38, 0.78, runA * 0.62 + runB * 0.38);
+            float wallWet = clamp(u_rain_wetness, 0.0, 1.0) * clamp(u_rain_walls, 0.0, 1.0) * side;
+            float film = wallWet * (0.40 + 0.60 * streak);
+            albedo *= mix(1.0, 0.60, film * (1.0 - metallic));
+            roughness = mix(roughness, max(0.14, roughness * 0.42), film);
+        }
+    }
+
     // Decal volumes (shader plan 5.1): stains, soot, moss and cracks painted on
     // whatever lies inside each box (the ground, a wall, a crate), fading towards
     // its edges and broken up by noise. Not on water or unlit materials.
@@ -2551,10 +2624,16 @@ void main() {
     // Glass (shader plan 5.3, Material::$glass): towards grazing angles the pane
     // turns opaque and mirror-like, so edges and curvature read; dirt (smudges and
     // dried rain runs) thickens and dulls it.
+    vec3 glassRefl = vec3(0.0);
 #ifndef PHPOLYGON_OMIT_GLASS
     if (u_glass.x > 0.0 && alpha < 0.98) {
         float gNdotV = clamp(dot(N, V), 0.0, 1.0);
         float gF = 0.04 + 0.96 * pow(1.0 - gNdotV, 5.0);
+        if (u_glass_reflect > 0.0) {
+            // The sky and the horizon in the pane, by Fresnel: a dark room behind a clean window shows the sky at
+            // grazing angles and a little of it head on. Added at full strength (see the alpha divide below).
+            glassRefl = sampleEnvironment(reflect(-V, N), clamp(roughness, 0.02, 0.6)) * gF * u_glass_reflect;
+        }
         alpha = mix(alpha, 1.0, gF * u_glass.x * 0.85);
         if (u_glass.y > 0.0) {
             vec3 gan = abs(N);
@@ -3229,11 +3308,15 @@ void main() {
         float lit = step(h, u_emissive_look.x);
         vec3 tone = mix(vec3(1.0, 0.82, 0.6), vec3(0.75, 0.86, 1.0), step(0.7, hash21(cell + 5.1)));
         vec3 vt = vec3(dot(-V, wt), -V.y, dot(-V, -N));
-        float depth = 0.8;
-        vec2 back = f + vt.xy / max(vt.z, 0.05) * depth / u_window_grid.xy * 2.0;
-        float room = (back.x > 0.0 && back.x < 1.0 && back.y > 0.0 && back.y < 1.0) ? 1.0 : (back.y < 0.0 ? 0.35 : 0.55);
         float frame = smoothstep(0.0, 0.06, f.x) * smoothstep(1.0, 0.94, f.x) * smoothstep(0.0, 0.08, f.y) * smoothstep(1.0, 0.92, f.y);
-        emission *= mix(0.03, (0.6 + 0.6 * hash21(cell + 2.3)) * room, lit) * frame * tone;
+        if (u_window_room > 0.5) {
+            emission = windowRoom(f, vt, u_window_grid.xy, cell, lit, tone) * frame * dot(emission, vec3(1.0 / 3.0));
+        } else {
+            float depth = 0.8;
+            vec2 back = f + vt.xy / max(vt.z, 0.05) * depth / u_window_grid.xy * 2.0;
+            float room = (back.x > 0.0 && back.x < 1.0 && back.y > 0.0 && back.y < 1.0) ? 1.0 : (back.y < 0.0 ? 0.35 : 0.55);
+            emission *= mix(0.03, (0.6 + 0.6 * hash21(cell + 2.3)) * room, lit) * frame * tone;
+        }
     }
     if (u_emissive_look.y > 0.5) {
         // Neon tube: hot, whitish core facing the viewer, the colour at the rim.
@@ -3246,6 +3329,8 @@ void main() {
     // Wet-leaf drops catch the sky (see above).
     localAcc += leafDrops * u_ambient_color * u_ambient_intensity * 0.9;
     localAcc += glassDrops * u_ambient_color * u_ambient_intensity * 0.6;
+    // The reflection of a pane is not thinned by the pane's own transparency: the blend multiplies the colour by alpha, so divide it out.
+    localAcc += glassRefl / max(alpha, 0.04);
     localAcc += snowSparkle * (u_ambient_color * u_ambient_intensity + u_dir_light_color * 0.5) * 1.2;
 
     vec4 sceneFogV = sceneFog(v_worldPos);

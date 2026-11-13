@@ -19,5 +19,10 @@ final readonly class SetGroundWetness
         public float $raining = 0.0,
         /** Below this world height nothing is wet (Weather::$dryBelowY), null = everywhere. */
         public ?float $dryBelowY = null,
+        /**
+         * How much of the rain wets walls and props (0..1; 0 = only the ground, as before): vertical surfaces darken,
+         * smooth and run with streaks, from the same wetness. Opt-in: the default leaves every wall dry.
+         */
+        public float $wallWetness = 0.0,
     ) {}
 }

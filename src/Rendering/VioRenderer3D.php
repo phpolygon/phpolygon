@@ -598,6 +598,8 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
     private ?string $pendingSkyboxId = null;
     private ?SetSky $pendingSky = null;
     private float $rainWetness = 0.0;
+    /** SetGroundWetness::$wallWetness */
+    private float $rainWalls = 0.0;
     private float $raining = 0.0;
     private float $rainDryBelow = -1.0e6;
     /** @var list<list<float>> nearest point lights for the sky's halos: (position, radius), (radiance, 0) */
@@ -4435,6 +4437,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
                 $this->snowCover = $cmd->cover;
             } elseif ($cmd instanceof Command\SetGroundWetness) {
                 $this->rainWetness = $cmd->rainWetness;
+                $this->rainWalls = $cmd->wallWetness;
                 $this->raining = $cmd->raining;
                 $this->rainDryBelow = $cmd->dryBelowY ?? -1.0e6;
             } elseif ($cmd instanceof Command\SetSandstorm) {
@@ -6986,6 +6989,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         // metallic / roughness are pushed per draw in applyGbufferVertexAnim.
         vio_set_uniform($this->ctx, 'u_rain_wetness', $this->rainWetness);
         vio_set_uniform($this->ctx, 'u_rain_dry_below', $this->rainDryBelow);
+        vio_set_uniform($this->ctx, 'u_rain_walls', $this->rainWalls);
         // The G-buffer now stores raw LINEAR view depth in the FP16 alpha channel
         // (world units), so there is no normalisation range to share with the SSAO
         // pass any more — both sides read depth directly.
@@ -7161,6 +7165,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         vio_set_uniform($this->ctx, 'u_projection', $projMatrix->toArray());
         vio_set_uniform($this->ctx, 'u_rain_wetness', $this->rainWetness);
         vio_set_uniform($this->ctx, 'u_rain_dry_below', $this->rainDryBelow);
+        vio_set_uniform($this->ctx, 'u_rain_walls', $this->rainWalls);
 
         foreach ($waterDraws as [$cmd, $material]) {
             if ($cmd instanceof DrawMesh) {
@@ -9997,6 +10002,8 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             'u_flipbook'            => [(float) $material->flipbook[0], (float) $material->flipbook[1], $material->flipbookFps, $material->streakFade ? 1.0 : 0.0],
             'u_alpha_cutoff'        => $material->alphaCutoff,
             'u_alpha_hash'          => $material->alphaHash ? 1.0 : 0.0,
+            'u_window_room'         => $material->windowRoom ? 1.0 : 0.0,
+            'u_glass_reflect'       => $material->glassReflection,
             'u_ocean_chop'          => $material->oceanChop,
             'u_tess'                => [max(1.0, min(64.0, $material->tessellation)), $material->tessNear, $material->tessFar, $material->tessellation > 0.0 ? 1.0 : 0.0],
             'u_hair'                => $material->hair ? 1.0 : 0.0,
@@ -11389,6 +11396,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         vio_set_uniform($this->ctx, 'u_snow_cover', $this->snowCover);
         vio_set_uniform($this->ctx, 'u_rain_wetness', $this->rainWetness);
         vio_set_uniform($this->ctx, 'u_rain_dry_below', $this->rainDryBelow);
+        vio_set_uniform($this->ctx, 'u_rain_walls', $this->rainWalls);
         vio_set_uniform($this->ctx, 'u_vertex_anim', 0); // enabled per-material in applyMaterial
         vio_set_uniform($this->ctx, 'u_wave_amplitude', $state['waveAmplitude']);
         vio_set_uniform($this->ctx, 'u_wave_frequency', $state['waveFrequency']);
