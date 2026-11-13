@@ -39,7 +39,8 @@ uniform float u_proj00;
 uniform float u_proj11;
 uniform float u_uv_flip_y;
 // Screen-space radiosity (shader plan 10.2, GraphicsSettings::$screenSpaceGi).
-uniform vec4  u_ssgi;           // x strength, y gather radius (m), w on
+uniform vec4  u_ssgi;           // x strength, y gather radius (m), z 1 = the denoised half-res gather in u_gi_map, w on
+uniform sampler2D u_gi_map;     // ssgi.frag + ssgi_blur.frag, when u_ssgi.z is set
 uniform vec3  u_ssgi_ambient;   // the ambient light the ambient attachment was lit with
 // Screen-space subsurface scattering (GraphicsSettings::$screenSpaceSss): x on (strength
 // scale), y scatter width in metres. Skin pixels carry -strength in the G-buffer's b.
@@ -206,7 +207,8 @@ void main() {
     vec3 color = max(sun.rgb * sunShadow + local.rgb + ambient * ao, vec3(0.0));
     if (u_ssgi.w > 0.5) {
         vec3 albedo = clamp(ambient / max(u_ssgi_ambient, vec3(1e-4)), 0.0, 1.0);
-        color += albedo * screenSpaceGi(v_uv) * u_ssgi.x * ao;
+        vec3 gi = u_ssgi.z > 0.5 ? texture(u_gi_map, v_uv).rgb : screenSpaceGi(v_uv);
+        color += albedo * gi * u_ssgi.x * ao;
     }
 
     // The composite is alpha-blended over the scene target so pixels nothing was

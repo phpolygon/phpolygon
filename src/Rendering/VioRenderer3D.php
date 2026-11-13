@@ -4882,6 +4882,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             vio_unbind_render_target($this->ctx);
             PerfProfiler::begin('render3d.submit.ssao');
             $this->renderAoFromMrt($frameState);
+            $this->renderSsgiPass();
             PerfProfiler::end();
             $this->bindSceneTarget($hdrTarget);
             vio_viewport($this->ctx, 0, 0, $sceneViewportW, $sceneViewportH);
@@ -6174,6 +6175,101 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         $this->renderSdfAoPass($frameState, $gbufferTex);
     }
 
+    /** The denoised half-res GI gather of this frame is ready for the composite. */
+    private bool $ssgiDenoisedThisFrame = false;
+    private ?VioRenderTarget $ssgiTarget = null;
+    private ?VioRenderTarget $ssgiBlurTarget = null;
+    private int $ssgiWidth = 0;
+    private int $ssgiHeight = 0;
+    private ?bool $ssgiShadersReady = null;
+    private int $ssgiFrame = 0;
+
+    /** Per-sample radiance clamp of the GI gather (linear, scene units): a highlight cannot become a speckle. */
+    private const SSGI_SAMPLE_CLAMP = 10.0;
+
+    /**
+     * Screen-space GI as a half-resolution gather plus two bilateral blur passes instead of the
+     * per-pixel noisy gather inside the composite: the rotation noise of twelve taps was visible
+     * as sparkle on smooth surfaces (measured: 20 % high-frequency pixels with GI against 2 % without)
+     * and the full-resolution gather cost about 6 ms at 1080p. Skipped (the composite keeps its inline
+     * gather) when the shaders do not compile, with PHPOLYGON_SSGI_DENOISE=0, or without GI.
+     */
+    private function renderSsgiPass(): void
+    {
+        $this->ssgiDenoisedThisFrame = false;
+        $gbuffer = $this->mrtGbufferTexture();
+        $mrt = $this->mrtTarget;
+        $quad = $this->screenQuad;
+        $projection = $this->currentProjectionMatrix;
+        if (!$this->settings->screenSpaceGi || $gbuffer === null || $mrt === null || $quad === null || $projection === null
+            || getenv('PHPOLYGON_SSGI_DENOISE') === '0') {
+            return;
+        }
+        if ($this->ssgiShadersReady === null) {
+            try {
+                $this->compileShaderFromFiles('ssgi', 'postprocess.vert.glsl', 'ssgi.frag.glsl');
+                $this->compileShaderFromFiles('ssgi_blur', 'postprocess.vert.glsl', 'ssgi_blur.frag.glsl');
+                $this->ssgiShadersReady = true;
+            } catch (\Throwable $e) {
+                unset($this->shaderCache['ssgi'], $this->shaderCache['ssgi_blur']);
+                $this->ssgiShadersReady = false;
+                fwrite(STDERR, "[VioRenderer3D] denoised screen-space GI unavailable: {$e->getMessage()}\n");
+            }
+        }
+        if ($this->ssgiShadersReady !== true) {
+            return;
+        }
+        $hw = max(1, (int) (max(1, $this->gbufferWidth) / 2));
+        $hh = max(1, (int) (max(1, $this->gbufferHeight) / 2));
+        if ($this->ssgiTarget === null || $this->ssgiBlurTarget === null || $this->ssgiWidth !== $hw || $this->ssgiHeight !== $hh) {
+            $this->ssgiTarget = vio_render_target($this->ctx, ['width' => $hw, 'height' => $hh, 'hdr' => true]) ?: null;
+            $this->ssgiBlurTarget = vio_render_target($this->ctx, ['width' => $hw, 'height' => $hh, 'hdr' => true]) ?: null;
+            $this->ssgiWidth = $hw;
+            $this->ssgiHeight = $hh;
+        }
+        $gather = $this->ssgiTarget;
+        $blur = $this->ssgiBlurTarget;
+        if ($gather === null || $blur === null) {
+            return;
+        }
+        $p = $projection->toArray();
+        $flip = $this->conventions()->flipRenderTargetClipY() ? -1.0 : 1.0;
+
+        vio_bind_render_target($this->ctx, $gather);
+        vio_viewport($this->ctx, 0, 0, $hw, $hh);
+        vio_clear($this->ctx, 0, 0, 0, 0);
+        $this->bindPostProcessPipeline('ssgi', true);
+        vio_bind_texture($this->ctx, $gbuffer, 0);
+        vio_set_uniform($this->ctx, 'u_gbuffer', 0);
+        vio_bind_texture($this->ctx, vio_render_target_texture($mrt, 0), 1);
+        vio_set_uniform($this->ctx, 'u_sun', 1);
+        vio_bind_texture($this->ctx, vio_render_target_texture($mrt, 1), 2);
+        vio_set_uniform($this->ctx, 'u_local', 2);
+        vio_set_uniform($this->ctx, 'u_ssgi', [0.0, 3.0, self::SSGI_SAMPLE_CLAMP, 0.0]);
+        vio_set_uniform($this->ctx, 'u_proj00', $p[0]);
+        vio_set_uniform($this->ctx, 'u_proj11', $p[5]);
+        vio_set_uniform($this->ctx, 'u_uv_flip_y', $flip);
+        vio_set_uniform($this->ctx, 'u_frame_angle', $this->settings->antiAliasing === \PHPolygon\Rendering\Quality\AntiAliasing::Taa ? fmod($this->ssgiFrame++ * 2.39996, 6.2831853) : 0.0);
+        vio_draw($this->ctx, $quad);
+        vio_unbind_render_target($this->ctx);
+
+        foreach ([[$gather, $blur, [1.0 / $hw, 0.0]], [$blur, $gather, [0.0, 1.0 / $hh]]] as [$from, $to, $step]) {
+            vio_bind_render_target($this->ctx, $to);
+            vio_viewport($this->ctx, 0, 0, $hw, $hh);
+            vio_clear($this->ctx, 0, 0, 0, 0);
+            $this->bindPostProcessPipeline('ssgi_blur', true);
+            vio_bind_texture($this->ctx, vio_render_target_texture($from), 0);
+            vio_set_uniform($this->ctx, 'u_source', 0);
+            vio_bind_texture($this->ctx, $gbuffer, 1);
+            vio_set_uniform($this->ctx, 'u_gbuffer', 1);
+            vio_set_uniform($this->ctx, 'u_step', $step);
+            vio_draw($this->ctx, $quad);
+            vio_unbind_render_target($this->ctx);
+        }
+        $this->ssgiDenoisedThisFrame = true;
+        $this->gpuMark('ssgi');
+    }
+
     /**
      * Fold the MRT attachments into the bound scene target:
      *   colour = sun · sdfShadow + local + ambient · ssao · sdfAo
@@ -6211,6 +6307,12 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             vio_set_uniform($this->ctx, 'u_sdf_ao_map', 4);
         }
         vio_set_uniform($this->ctx, 'u_sdf_ao_enabled', $sdfOn ? 1.0 : 0.0);
+        // The denoised GI gather, or white to keep the declared sampler bound.
+        $giTex = $this->ssgiDenoisedThisFrame && $this->ssgiTarget !== null ? vio_render_target_texture($this->ssgiTarget) : $this->whiteTexture;
+        if ($giTex !== null) {
+            vio_bind_texture($this->ctx, $giTex, 6);
+            vio_set_uniform($this->ctx, 'u_gi_map', 6);
+        }
         vio_set_uniform($this->ctx, 'u_linear_output', $hdr ? 1 : 0);
         $this->uploadContactShadowUniforms();
 
@@ -6249,7 +6351,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         }
         // Screen-space radiosity (shader plan 10.2) reads the same G-buffer.
         $gi = $gbuffer !== null && $projection !== null && $this->settings->screenSpaceGi;
-        vio_set_uniform($this->ctx, 'u_ssgi', $gi ? [6.0, 3.0, 0.0, 1.0] : [0.0, 0.0, 0.0, 0.0]);
+        vio_set_uniform($this->ctx, 'u_ssgi', $gi ? [6.0, 3.0, $this->ssgiDenoisedThisFrame ? 1.0 : 0.0, 1.0] : [0.0, 0.0, 0.0, 0.0]);
         vio_set_uniform($this->ctx, 'u_ssgi_ambient', $this->frameAmbientLight);
         // Screen-space subsurface scattering (shader plan 6.2) as well.
         $sss = $gbuffer !== null && $projection !== null && $this->settings->screenSpaceSss;
