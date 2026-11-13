@@ -4157,6 +4157,38 @@ acts where its feature was already switched on.
 - Touched renderer places: `composite.frag.glsl` (`u_gi_map`, SSS), `renderSsgiPass()` (+ call after `renderAoFromMrt`), `compositeMrt()` (unit 6),
   `uploadFrameUniforms()` (`u_light_falloff`, `u_sky_amb_*`, `u_pattern_filter`), the command scan of `render()`, `applyMaterialUniforms` (`u_alpha_hash`).
 
+### Realism round 2 (branch `feat/photoreal-engine-2`, 2026-11-13): glass, rain, banding, sky SH, grime
+
+Same rules as round 1: procedural, backend-agnostic, D3D12 SM6 + D3D11 hardware tests, default frames byte-identical (hashes of 3 frames x 2 settings equal
+to the v0.105.0-kit base on both backends), everything opt-in. Before/after picture: `E:\ClaudeTemp\netrunner\element-preview\lookdev-realism2\glass_wet_{before,after}.png`
+(the engine script `char-e-a\look2.php`: facade with window cells, two glass panes, ledges, wet street; "after" turns the options below on).
+
+- **Glow banding (the rings round point lights)**: cause = 8-bit quantisation of the slow halo gradient; the finish pass dithered by only `deband` steps and the games asked for 0.5
+  (measured on a bloomed lamp in the dark, 512 px: 67 px bands without dither, 0.5 left runs of 5-7 px, 1.0 left one, 2.0 none). `VioImageChain::debandAmplitude()` now raises any
+  `ImageLook::$deband >= 0.05` to at least 1.5 steps (TPDF); below 0.05 the value is kept (0.0001 = chain without dither). With 0.5 the longest run is now 3 px. `VioGlowBandingTest`.
+  This changes frames only where a game had set a deband between 0.05 and 1.5.
+- **Glass**: `Material::$glassReflection` / `withGlassReflection($amount)`: the environment (sky, horizon, the sky cube) reflected in a pane with `$glass` set, by Fresnel, added at full
+  strength (divided by the pane's alpha so the blend does not thin it). Pane region brightness over a dark back wall: 125k -> 306k at a grazing angle. It reflects the sky/environment
+  only, not the street (no SSR on transparents, no probes). `Material::$windowRoom` / `withWindowRoom()`: interior mapping for the lit-window look: the view ray enters a box the size
+  of the cell (depth max(2.6 m, 1.15 x cell height)) and takes the colour of back wall, side walls, floor or ceiling, shaded from per-cell seeds (paint, picture, furniture block, curtains,
+  ceiling lamp); lit cells glow warm or cool by the cell's lit variation, dark ones show a faint night blue; parallax follows the view; `windowVary` makes identical quads differ.
+  Spread of brightness inside a cell 42 vs 19 for the flat look; 10 of 16 cells lit, 5 dark. Dirt/fresnel tint of `$glass`/`$glassDirt` is unchanged. `VioGlassRoomTest`.
+- **Rain on walls and props**: `SetGroundWetness(..., float $wallWetness = 0.0)`: vertical surfaces soak with the same wetness - paint darkens, the film smooths, and the wet runs
+  in vertical streaks (two noise bands, long in Y, darker and glossier). Ground puddles and ripples are the ones that were already there (`rainSoak`, `rainRipples`). 0 = walls stay dry as
+  before. Wall mean 204 -> 191.6, column spread 0.41 -> 3.22 on a plaster wall. `VioWallWetnessTest`.
+- **Sky SH**: `SetSkyAmbient(gain, groundBounce, bool $fromCubemap = false)`: with `fromCubemap` the six faces of the environment cube the renderer draws for `SetSky` are read back once per
+  sky change (`vio_read_render_target`, 128 px, every 8th texel) and projected to second-order spherical harmonics (`Rendering\SphericalHarmonics::fromCubeFaces`, nine colours, cosine
+  convolution and gain folded in, uploaded as `u_sky_sh0..8`, mode 2 of `flatOrSkyAmbient`). So clouds, haze and sun glow tint the ambient, not only the three gradient colours. The cube is
+  an 8-bit LDR image (the sun disc is clipped; the sun stays the directional light's). Face orientation verified on D3D12 and D3D11 (grey sphere: top r/b 202/222, bottom 222/193). Needs
+  backend render-target cubemaps, else the three-colour ambient. `SphericalHarmonicsTest`, `VioSkyShAmbientTest`.
+- **Grime**: `Material::$grime` / `withGrime($amount)` (opt-in, default 0) times `Command\SetGrime($amount)` of the frame: dirt gathers in creases (curvature from screen derivatives of the normal),
+  dark brownish streaks run down walls (world-position noise, so any UVs), and edges that turn sharply wear lighter and rougher. A material that did not opt in, or a frame without SetGrime, is
+  bit-identical to before; aged plaster mean 184.8 -> 174.3 with streaks. `VioGrimeTest`.
+- Touched renderer places: command scan of `render()` (`SetGrime`, `SetSkyAmbient`), `updateEnvironmentCubemap()` (+ `readSkySh()`), `uploadFrameUniforms()` (`u_sky_sh*`, `u_grime_amount`, `u_rain_walls`),
+  `applyMaterialUniforms` (`u_window_room`, `u_glass_reflect`, `u_grime`), `VioImageChain::debandAmplitude()`.
+- NOT done: reflection of the street/buildings on glass (needs SSR or probes on transparents), a wall-wetness splash zone near the ground, edge wear from true convexity (the curvature test is sign-less),
+  interior rooms with their own window light spilling onto the street.
+
 ---
 
 ## Character DNA
