@@ -226,6 +226,7 @@ uniform int  u_fog_volume_count;
 uniform vec4 u_fog_volumes[12];   // per volume: (centre, yaw), (half extents, density), (colour, edge)
 uniform float u_soft_particle;    // Material::$softParticle: soft puff, depth fade distance
 uniform float u_triplanar;        // Material::$triplanar: tiles per metre, 0 = mesh UVs
+uniform float u_alpha_hash;       // Material::$alphaHash: dither the cut-out threshold
 uniform float u_alpha_cutoff;     // Material::$alphaCutoff: cut out below this albedo alpha, 0 = off
 uniform float u_hair;             // Material::$hair: v_normal is the strand direction
 uniform vec4 u_fur_shell;         // Material::$furLength: shell height 0..1, strands per UV unit, darkening at the skin, on
@@ -1181,6 +1182,21 @@ vec3 cookTorranceSpecular(vec3 N, vec3 V, vec3 L, float roughness, vec3 F0) {
     return cookTorranceLobe(N, V, L, roughness, F0);
 }
 
+#ifndef PHPOLYGON_OMIT_FIGURE_LOOK
+// Hair shine (Kajiya-Kay, two lobes as Marschner's R and TRT peaks): strands run down the surface, the highlight is
+// a ring across them - a sharp white lobe from the cuticle's surface reflection and a broad one in the hair colour,
+// shifted along the strand, from the light that went through the strand and out again. Used by every light kind.
+vec3 hairLobes(vec3 N, vec3 V, vec3 Ldir, vec3 hairColor) {
+    vec3 hT = vec3(0.0, 1.0, 0.0) - N * N.y;
+    hT = dot(hT, hT) > 1e-5 ? normalize(hT) : vec3(1.0, 0.0, 0.0);
+    vec3 hH = normalize(Ldir + V);
+    float th = dot(hT, hH);
+    float sTH = sqrt(max(1.0 - th * th, 0.0));
+    float th2 = dot(hT, normalize(hH + hT * 0.12));
+    float sTH2 = sqrt(max(1.0 - th2 * th2, 0.0));
+    return vec3(pow(sTH, 90.0) * 0.35) + hairColor * pow(sTH2, 18.0) * 0.6;
+}
+#endif // PHPOLYGON_OMIT_FIGURE_LOOK
 // Curvature-based AO (mirrors mesh3d.frag.glsl). Cheap per-fragment
 // surrogate for SSAO until a depth-buffer pass lands.
 float curvatureAO(vec3 N, float strength) {
@@ -2253,8 +2269,19 @@ void main() {
         }
 #endif // PHPOLYGON_OMIT_FUR
 #ifdef PHPOLYGON_CUTOUT
-        if (u_alpha_cutoff > 0.0 && albedoGrad(fbUv, uvDx * mipScale * fbScale, uvDy * mipScale * fbScale).a < u_alpha_cutoff) {
-            discard;
+        if (u_alpha_cutoff > 0.0) {
+            float cutA = albedoGrad(fbUv, uvDx * mipScale * fbScale, uvDy * mipScale * fbScale).a;
+            // Hashed (screen-door) cut-out: the threshold wanders by +-0.25 around the cutoff with interleaved
+            // gradient noise that changes every frame, so hair and fabric edges dither and the temporal resolve
+            // turns the dither into soft coverage (the stand-in for alpha to coverage, which vio has no switch for).
+            float cutT = u_alpha_cutoff;
+            if (u_alpha_hash > 0.5) {
+                float ign = fract(52.9829189 * fract(dot(gl_FragCoord.xy + fract(u_frag_time * 7.0) * 47.0, vec2(0.06711056, 0.00583715))));
+                cutT += (ign - 0.5) * 0.5;
+            }
+            if (cutA < cutT) {
+                discard;
+            }
         }
 #endif
         if (u_emission_mask > 0.5) {
@@ -2934,14 +2961,7 @@ void main() {
                 // lobe and a broad one in the hair colour.
 #ifndef PHPOLYGON_OMIT_FIGURE_LOOK
                 if (u_figure_look.y > 0.0) {
-                    vec3 hT = vec3(0.0, 1.0, 0.0) - N * N.y;
-                    hT = dot(hT, hT) > 1e-5 ? normalize(hT) : vec3(1.0, 0.0, 0.0);
-                    vec3 hH = normalize(dL + V);
-                    float th = dot(hT, hH);
-                    float sTH = sqrt(max(1.0 - th * th, 0.0));
-                    float th2 = dot(hT, normalize(hH + hT * 0.12));
-                    float sTH2 = sqrt(max(1.0 - th2 * th2, 0.0));
-                    vec3 hairSpec = vec3(pow(sTH, 90.0) * 0.35) + albedo * pow(sTH2, 18.0) * 0.6;
+                    vec3 hairSpec = hairLobes(N, V, dL, albedo);
                     lit += hairSpec * u_figure_look.y * radiance * dNdotL * dShadow;
                 }
 #endif // PHPOLYGON_OMIT_FIGURE_LOOK
@@ -3040,6 +3060,11 @@ void main() {
             vec3 radiance = u_point_lights[i].color * u_point_lights[i].intensity * atten;
             float msPoint = u_micro_shadow > 0.5 ? mix(1.0, clamp(NdotPL + 2.0 * msAo * msAo - 1.0, 0.0, 1.0), 0.7) : 1.0;
             localAcc += (kD * albedo / 3.14159265 + spec) * radiance * NdotPL * msPoint;
+#ifndef PHPOLYGON_OMIT_FIGURE_LOOK
+            if (u_figure_look.y > 0.0) {
+                localAcc += hairLobes(N, V, Lp, albedo) * u_figure_look.y * radiance * NdotPL;
+            }
+#endif // PHPOLYGON_OMIT_FIGURE_LOOK
         }
     }
 
@@ -3069,6 +3094,11 @@ void main() {
 
             vec3 radiance = u_spot_lights[i].color * u_spot_lights[i].intensity * atten;
             localAcc += (kD * albedo / 3.14159265 + spec) * radiance * NdotSL;
+#ifndef PHPOLYGON_OMIT_FIGURE_LOOK
+            if (u_figure_look.y > 0.0) {
+                localAcc += hairLobes(N, V, Ls, albedo) * u_figure_look.y * radiance * NdotSL;
+            }
+#endif // PHPOLYGON_OMIT_FIGURE_LOOK
         }
     }
 

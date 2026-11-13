@@ -9996,6 +9996,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             'u_particle_tint'       => $material->particleTint ? 1.0 : 0.0,
             'u_flipbook'            => [(float) $material->flipbook[0], (float) $material->flipbook[1], $material->flipbookFps, $material->streakFade ? 1.0 : 0.0],
             'u_alpha_cutoff'        => $material->alphaCutoff,
+            'u_alpha_hash'          => $material->alphaHash ? 1.0 : 0.0,
             'u_ocean_chop'          => $material->oceanChop,
             'u_tess'                => [max(1.0, min(64.0, $material->tessellation)), $material->tessNear, $material->tessFar, $material->tessellation > 0.0 ? 1.0 : 0.0],
             'u_hair'                => $material->hair ? 1.0 : 0.0,

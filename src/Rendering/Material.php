@@ -518,6 +518,12 @@ class Material
          * mesh is cut. Off = the previous look, unchanged.
          */
         public readonly bool $windowVary = false,
+        /**
+         * With $alphaCutoff: dither the cut-out threshold (hashed alpha test, +-0.25 around the cutoff, noise changing every
+         * frame) so the edges of hair cards, lashes and leaves take on soft coverage under temporal anti-aliasing instead of a
+         * hard stair-stepped line. Off = the plain cut-out, unchanged.
+         */
+        public readonly bool $alphaHash = false,
     ) {}
 
     /**
@@ -684,6 +690,12 @@ class Material
         return $this->copy(windowCell: [$cellWidth, $cellHeight], windowOffset: [$offsetX, $offsetY], windowUv: $uv, windowVary: $vary);
     }
 
+    /** This material with a hashed (dithered) cut-out threshold, see {@see $alphaHash}. */
+    public function withAlphaHash(bool $on = true): self
+    {
+        return $this->copy(alphaHash: $on);
+    }
+
     /** This material with its emission scaled by the albedo texture's alpha (see {@see $emissionByTextureAlpha}). */
     public function withEmissionByTextureAlpha(bool $on = true): self
     {
@@ -803,6 +815,7 @@ class Material
         ?array $windowOffset = null,
         ?bool $windowUv = null,
         ?bool $windowVary = null,
+        ?bool $alphaHash = null,
     ): self {
         return new self(
             albedo: $albedo ?? $this->albedo,
@@ -896,6 +909,7 @@ class Material
             windowOffset: $windowOffset ?? $this->windowOffset,
             windowUv: $windowUv ?? $this->windowUv,
             windowVary: $windowVary ?? $this->windowVary,
+            alphaHash: $alphaHash ?? $this->alphaHash,
         );
     }
 
