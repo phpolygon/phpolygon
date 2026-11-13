@@ -6181,6 +6181,18 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         $this->renderSdfAoPass($frameState, $gbufferTex);
     }
 
+    private bool $patternFiltering = false;
+
+    /**
+     * Fade procedural surface and normal patterns out where one of their cycles covers less than about a pixel
+     * (derivative based), instead of letting them alias into stair steps and moire at a distance. Off by default
+     * (frames stay as they were); a game that wants it turns it on once.
+     */
+    public function setPatternFiltering(bool $on): void
+    {
+        $this->patternFiltering = $on;
+    }
+
     /** SetLightFalloff: inverse-square point and spot lights this frame. */
     private bool $physicalLightFalloff = false;
     /** SetSkyAmbient of this frame: the ambient follows the sky colours. */
@@ -11110,6 +11122,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         vio_set_uniform($this->ctx, 'u_view', $this->currentViewMatrix->toArray());
         vio_set_uniform($this->ctx, 'u_projection', $this->currentProjectionMatrix->toArray());
         vio_set_uniform($this->ctx, 'u_light_falloff', $this->physicalLightFalloff ? 1.0 : 0.0);
+        vio_set_uniform($this->ctx, 'u_pattern_filter', $this->patternFiltering ? 1.0 : 0.0);
         // Linear output: when the scene target is FP16 (HDR offscreen path) the
         // mesh shader skips its inline ACES+gamma and writes unclamped linear
         // colour; the resolve pass tonemaps. Otherwise it tonemaps inline (LDR).

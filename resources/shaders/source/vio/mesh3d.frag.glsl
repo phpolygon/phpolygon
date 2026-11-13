@@ -1651,6 +1651,34 @@ vec3 dispatchProceduralNormal(int code, vec2 uv) {
 }
 #endif // PHPOLYGON_OMIT_NORMAL_PATTERNS
 
+// Pattern filtering (VioRenderer3D::setPatternFiltering): a procedural pattern is a function of the surface
+// position, so far away, where one cycle covers less than about a pixel, it aliases into stair steps and moire.
+// The footprint of a pixel in pattern units (fwidth) against the pattern's finest cycle fades it out to its
+// neutral value: no pattern is better than a wrong one. Frequencies are cycles per pattern unit.
+uniform float u_pattern_filter;
+float surfacePatternFreq(int code) {
+    if (code == 3) return 95.0;   // brushed metal
+    if (code == 7) return 60.0;   // sandstone grain
+    if (code == 2 || code == 5 || code == 6) return 22.0;
+    if (code == 4) return 13.0;
+    if (code == 1 || code == 9) return 14.0;
+    if (code == 10) return 8.0;
+    return 6.0;
+}
+float normalPatternFreq(int code) {
+    if (code == 15) return 100.0; // brushed
+    if (code == 3) return 60.0;   // orange peel
+    if (code == 7 || code == 14) return 45.0;
+    if (code == 1) return 20.0;   // bricks (mortar lines)
+    if (code == 10 || code == 9) return 18.0;
+    if (code == 5) return 10.0;
+    if (code == 2) return 8.0;
+    return 6.0;
+}
+float patternFade(vec2 uv, float freq) {
+    vec2 fw = fwidth(uv);
+    return 1.0 - smoothstep(0.35, 0.9, max(fw.x, fw.y) * freq);
+}
 #ifndef PHPOLYGON_OMIT_SURFACE_PATTERNS
 // ── Procedural Surface-Wear (mirrors mesh3d.frag.glsl) ────────────────────────
 
@@ -2295,14 +2323,21 @@ void main() {
     }
 #endif
 #ifndef PHPOLYGON_OMIT_NORMAL_PATTERNS
+    vec3 Nplain = N;
     N = perturbNormalProcedural(N, v_worldPos, v_uv, patternUv,
                                 nPattern, nScale,
                                 u_normal_intensity);
+    if (u_pattern_filter > 0.5 && nPattern > 0) {
+        N = normalize(mix(Nplain, N, patternFade(patternUv * nScale, normalPatternFreq(nPattern))));
+    }
 #endif // PHPOLYGON_OMIT_NORMAL_PATTERNS
 
 #ifndef PHPOLYGON_OMIT_SURFACE_PATTERNS
     if (u_surface_pattern > 0 && u_surface_intensity > 0.0) {
         vec3 wear = dispatchSurfacePattern(u_surface_pattern, patternUv * u_surface_scale);
+        if (u_pattern_filter > 0.5) {
+            wear = mix(vec3(0.5, 0.0, 0.0), wear, patternFade(patternUv * u_surface_scale, surfacePatternFreq(u_surface_pattern)));
+        }
         float t = clamp(u_surface_intensity, 0.0, 4.0);
         vec3 tint = mix(vec3(1.0), vec3(wear.x * 2.0), t);
         albedo *= tint;
