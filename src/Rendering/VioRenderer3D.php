@@ -4376,9 +4376,12 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         $this->cameraCutThisFrame = false;
         $this->pendingMirror = null;
         $this->physicalLightFalloff = false;
+        $this->skyAmbient = null;
         foreach ($commands as $cmd) {
             if ($cmd instanceof Command\SetLightFalloff) {
                 $this->physicalLightFalloff = $cmd->physical;
+            } elseif ($cmd instanceof Command\SetSkyAmbient) {
+                $this->skyAmbient = $cmd;
             } elseif ($cmd instanceof Command\SetPlanarMirror) {
                 $this->pendingMirror = $cmd;
             } elseif ($cmd instanceof SetCamera) {
@@ -6180,6 +6183,8 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
 
     /** SetLightFalloff: inverse-square point and spot lights this frame. */
     private bool $physicalLightFalloff = false;
+    /** SetSkyAmbient of this frame: the ambient follows the sky colours. */
+    private ?Command\SetSkyAmbient $skyAmbient = null;
 
     /** The denoised half-res GI gather of this frame is ready for the composite. */
     private bool $ssgiDenoisedThisFrame = false;
@@ -11139,6 +11144,23 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             vio_set_uniform($this->ctx, 'u_hemi_specular', $this->hemiSpecular);
         }
         $this->frameAmbientLight = [$ac->r * $ai * $piScale, $ac->g * $ai * $piScale, $ac->b * $ai * $piScale];
+        $skyAmbient = $this->skyAmbient;
+        $sky = $this->pendingSky;
+        if ($skyAmbient !== null && $sky !== null) {
+            $k = $skyAmbient->gain * $piScale;
+            $b = $skyAmbient->groundBounce;
+            $up = [$sky->zenithColor->r * $k, $sky->zenithColor->g * $k, $sky->zenithColor->b * $k];
+            $side = [$sky->horizonColor->r * $k, $sky->horizonColor->g * $k, $sky->horizonColor->b * $k];
+            $down = [$sky->groundColor->r * $k * $b, $sky->groundColor->g * $k * $b, $sky->groundColor->b * $k * $b];
+            vio_set_uniform($this->ctx, 'u_sky_amb_up', $up);
+            vio_set_uniform($this->ctx, 'u_sky_amb_side', $side);
+            vio_set_uniform($this->ctx, 'u_sky_amb_down', $down);
+            vio_set_uniform($this->ctx, 'u_sky_amb_mode', 1.0);
+            // The GI gather recovers albedo from ambient / this: the mean of the three is the best single colour.
+            $this->frameAmbientLight = [($up[0] + $side[0] + $down[0]) / 3.0, ($up[1] + $side[1] + $down[1]) / 3.0, ($up[2] + $side[2] + $down[2]) / 3.0];
+        } else {
+            vio_set_uniform($this->ctx, 'u_sky_amb_mode', 0.0);
+        }
 
         $dirCount = min(count($state['dirLights']), 4);
 

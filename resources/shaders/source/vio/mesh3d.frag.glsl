@@ -14,6 +14,21 @@ flat in vec3 v_instance_params;
 
 uniform vec3 u_ambient_color;
 uniform float u_ambient_intensity;
+// Sky ambient (Command\SetSkyAmbient): diffuse ambient that follows the sky instead of one flat colour: the
+// light of the zenith from above, of the horizon from the sides, of the ground bounce from below, blended by
+// the normal's elevation (a first-order SH-like irradiance). Already scaled by the gain and pi. mode 0 = off.
+uniform vec3 u_sky_amb_up;
+uniform vec3 u_sky_amb_side;
+uniform vec3 u_sky_amb_down;
+uniform float u_sky_amb_mode;
+vec3 flatOrSkyAmbient(vec3 n) {
+    if (u_sky_amb_mode > 0.5) {
+        float up = clamp(n.y, 0.0, 1.0);
+        float down = clamp(-n.y, 0.0, 1.0);
+        return u_sky_amb_up * up + u_sky_amb_down * down + u_sky_amb_side * (1.0 - up - down);
+    }
+    return u_ambient_color * u_ambient_intensity;
+}
 
 struct DirLight {
     vec3 direction;
@@ -2687,7 +2702,7 @@ void main() {
     // summed at the end (same result as the former single `color`); on the MRT path
     // they leave as separate attachments so the composite can apply SSAO / SDF-AO to
     // the ambient part and the SDF sun shadow to the sun part only.
-    vec3 ambientAcc = u_ambient_color * u_ambient_intensity * albedo * kD_ambient * ambientShadow * ao;
+    vec3 ambientAcc = flatOrSkyAmbient(N) * albedo * kD_ambient * ambientShadow * ao;
 #ifdef PHPOLYGON_RAY_QUERY
     // Ray-traced GI (shader plan 10.2): two cosine-distributed rays per pixel. A hit
     // brings the hit instance's albedo lit by the ambient and the sun (one more ray
