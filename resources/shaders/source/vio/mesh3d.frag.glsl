@@ -1153,7 +1153,8 @@ vec3 sampleEnvironmentProbe(vec3 R, float roughness) {
     return mix(envColor, fallback, blur);
 }
 
-vec3 cookTorranceSpecular(vec3 N, vec3 V, vec3 L, float roughness, vec3 F0) {
+// One GGX lobe.
+vec3 cookTorranceLobe(vec3 N, vec3 V, vec3 L, float roughness, vec3 F0) {
     vec3 H = normalize(V + L);
     float NdotH = max(dot(N, H), 0.0);
     float NdotV = max(dot(N, V), 0.001);
@@ -1168,6 +1169,16 @@ vec3 cookTorranceSpecular(vec3 N, vec3 V, vec3 L, float roughness, vec3 F0) {
     vec3  F = fresnelSchlick(HdotV, F0);
 
     return (D * G * F) / max(4.0 * NdotV * NdotL, 0.001);
+}
+
+// Specular of every light. Skin (a closed surface with subsurface) has two lobes, as real skin does: a tight
+// one from the oil film and a broad one from the rough stratum corneum (Digital Emily, Jimenez), 70 % / 30 %,
+// the broad one about twice as rough; a single lobe reads as wax or plastic.
+vec3 cookTorranceSpecular(vec3 N, vec3 V, vec3 L, float roughness, vec3 F0) {
+    if (u_subsurface_strength > 0.0 && u_two_sided == 0) {
+        return 0.7 * cookTorranceLobe(N, V, L, roughness * 0.8, F0) + 0.3 * cookTorranceLobe(N, V, L, min(roughness * 1.9, 1.0), F0);
+    }
+    return cookTorranceLobe(N, V, L, roughness, F0);
 }
 
 // Curvature-based AO (mirrors mesh3d.frag.glsl). Cheap per-fragment
