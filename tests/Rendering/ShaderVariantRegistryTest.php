@@ -39,8 +39,14 @@ final class ShaderVariantRegistryTest extends TestCase
      * the no-define text differs by the `envShadow` temporary only).
      * Changed again for the frost fallback inside the refraction path (an automatic path: absent from programs
      * without refraction / frost materials).
+     * Changed again in v0.105.0 for the look features of the release (sky ambient incl. SH, inverse-square light falloff,
+     * pattern filtering, hashed alpha cut-out, glass reflection, interior-mapped window rooms, rain on walls, grime,
+     * sampler-less scene copy). Each is gated by a uniform whose default is off, so the default image is unchanged
+     * for materials that do not use them. Two changes are intended to alter the default image of existing materials:
+     * the two specular lobes of skin (subsurface materials) and the hair lobes for point and spot lights (hair
+     * materials, u_figure_look.y > 0).
      */
-    private const VIO_FRAG_RELEASE = '0323f000e02eaff89803e1d4d28cbad3965d962150c12bf7036881309b1f440c';
+    private const VIO_FRAG_RELEASE = 'cf4badaeeebf37d3c36f48913c3d3f53f343cbd479d22a97a9d28fdabd732516';
 
     protected function setUp(): void
     {
