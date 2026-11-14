@@ -281,30 +281,35 @@ readonly class MeshData
         if ($k === 0) {
             return $this;
         }
-        /**
-         * @param array<float> $a
-         * @return list<float>
-         */
-        $permute = static function (array $a, int $stride) use ($k): array {
-            $out = [];
-            for ($i = 0, $n = count($a); $i + 2 < $n; $i += $stride) {
-                $out[$i + ($k) % 3] = $a[$i];
-                $out[$i + (1 + $k) % 3] = $a[$i + 1];
-                $out[$i + (2 + $k) % 3] = $a[$i + 2];
-                if ($stride === 4) {
-                    $out[$i + 3] = $a[$i + 3];
-                }
-            }
-            ksort($out);
-            return array_values($out);
-        };
         return new self(
-            $permute($this->vertices, 3),
-            $permute($this->normals, 3),
+            self::permuteComponents($this->vertices, 3, $k),
+            self::permuteComponents($this->normals, 3, $k),
             $this->uvs,
             $this->indices,
-            $this->tangents === null ? null : $permute($this->tangents, 4),
+            $this->tangents === null ? null : self::permuteComponents($this->tangents, 4, $k),
         );
+    }
+
+    /**
+     * Cyclically permute the first three components of every $stride-wide element by $k.
+     *
+     * @param array<float> $a
+     * @return array<float>
+     */
+    private static function permuteComponents(array $a, int $stride, int $k): array
+    {
+        /** @var array<int, float> $out */
+        $out = [];
+        for ($i = 0, $n = count($a); $i + 2 < $n; $i += $stride) {
+            $out[$i + ($k) % 3] = $a[$i];
+            $out[$i + (1 + $k) % 3] = $a[$i + 1];
+            $out[$i + (2 + $k) % 3] = $a[$i + 2];
+            if ($stride === 4) {
+                $out[$i + 3] = $a[$i + 3];
+            }
+        }
+        ksort($out);
+        return array_values($out);
     }
 
     /**
