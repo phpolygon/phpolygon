@@ -97,6 +97,13 @@ class Engine
     private float $editorSyncAccum = 0.0;
     private int $editorSyncWorldVersion = 0;
     private int $editorSyncMtime = 0;
+    private EditorSyncMode $editorSyncMode = EditorSyncMode::Reconcile;
+
+    /** Simulation is halted; rendering and editor sync continue. */
+    private bool $paused = false;
+
+    /** Update ticks still owed to a step() request while paused. */
+    private int $pendingSteps = 0;
 
     public readonly Window $window;
     public readonly InputInterface $input;
@@ -529,18 +536,21 @@ class Engine
     }
 
     /**
-     * Enable game-authoritative live sync with the editor via a snapshot file.
+     * Enable live sync with the editor via a snapshot file.
      *
-     * On enable, the current world is exported (the editor sees it). Each frame
-     * (throttled) the engine reconciles: if the world has structurally advanced
-     * since the last export, the game re-exports and overwrites an out-of-date
-     * editor; only when the world is unchanged is an editor save imported. This
-     * keeps code/game authoritative (AI-authoring), with editor tweaks applied
-     * only while the editor is current (e.g. while the game is paused/idle).
+     * On enable, the current world is exported (the editor sees it). What each
+     * throttled tick does afterwards depends on the mode — see
+     * {@see EditorSyncMode}: `Reconcile` keeps code authoritative and accepts
+     * editor saves only while the world stands still, `Stream` publishes the
+     * world continuously so an editor can WATCH it move.
      */
-    public function enableEditorSync(string $path, float $intervalSeconds = 0.5): void
-    {
+    public function enableEditorSync(
+        string $path,
+        float $intervalSeconds = 0.5,
+        EditorSyncMode $mode = EditorSyncMode::Reconcile,
+    ): void {
         $this->editorSyncPath = $path;
+        $this->editorSyncMode = $mode;
         $this->editorSyncInterval = max(0.05, $intervalSeconds);
         $this->exportWorldSnapshot($path);
         $this->editorSyncWorldVersion = $this->world->version();
@@ -551,6 +561,12 @@ class Engine
     public function disableEditorSync(): void
     {
         $this->editorSyncPath = null;
+    }
+
+    /** The mode live sync is running in, if it is running at all. */
+    public function editorSyncMode(): ?EditorSyncMode
+    {
+        return $this->editorSyncPath === null ? null : $this->editorSyncMode;
     }
 
     private function tickEditorSync(float $dt): void
@@ -564,6 +580,20 @@ class Engine
         }
         $this->editorSyncAccum = 0.0;
         $path = $this->editorSyncPath;
+
+        $this->readEditorControl($path);
+
+        if ($this->editorSyncMode === EditorSyncMode::Stream) {
+            // A moving world changes component VALUES without changing its
+            // structure, so a version check would publish nothing and the
+            // editor would show a world frozen at the first frame. Importing is
+            // off here: the game is being watched, not edited.
+            $this->exportWorldSnapshot($path);
+            $this->editorSyncWorldVersion = $this->world->version();
+            $this->editorSyncMtime = $this->snapshotMtime($path);
+
+            return;
+        }
 
         if ($this->world->version() !== $this->editorSyncWorldVersion) {
             // Game moved on since the last export → authoritative; overwrite the
@@ -582,6 +612,96 @@ class Engine
             $this->editorSyncWorldVersion = $this->world->version();
             $this->editorSyncMtime = $this->snapshotMtime($path);
         }
+    }
+
+    /**
+     * Pick up pause/step requests an editor left beside the snapshot.
+     *
+     * The control file sits next to the snapshot rather than inside it: the
+     * snapshot is rewritten by the game every tick, so a request written into
+     * it would be overwritten before it was ever read. A game that no editor is
+     * driving never sees one.
+     */
+    private function readEditorControl(string $path): void
+    {
+        $controlPath = $path . '.control';
+        clearstatcache(true, $controlPath);
+        if (!is_file($controlPath)) {
+            return;
+        }
+
+        $raw = file_get_contents($controlPath);
+        $data = $raw === false ? null : json_decode($raw, true);
+        if (!is_array($data)) {
+            // Half-written: the editor rewrites it in place. Try again next tick.
+            return;
+        }
+
+        if (isset($data['paused'])) {
+            $this->paused = (bool) $data['paused'];
+        }
+        if (isset($data['step']) && is_int($data['step']) && $data['step'] > 0) {
+            $this->pendingSteps += $data['step'];
+            // Consume the request, or every tick would step again.
+            @file_put_contents(
+                $controlPath,
+                (string) json_encode(['paused' => $this->paused, 'step' => 0]),
+            );
+        }
+    }
+
+    /**
+     * Halt the simulation while rendering and editor sync keep running.
+     *
+     * Pausing is not stopping: the frame loop continues so the window stays
+     * responsive and an editor can still read the world and un-pause it.
+     */
+    public function pause(): void
+    {
+        $this->paused = true;
+    }
+
+    public function resume(): void
+    {
+        $this->paused = false;
+        $this->pendingSteps = 0;
+    }
+
+    public function isPaused(): bool
+    {
+        return $this->paused;
+    }
+
+    /**
+     * Advance the simulation by $frames update ticks while paused.
+     *
+     * The point of stepping is watching one frame's worth of change at a time,
+     * which is why it only means anything while paused; on a running game the
+     * next frame arrives on its own.
+     */
+    public function step(int $frames = 1): void
+    {
+        if ($frames > 0) {
+            $this->pendingSteps += $frames;
+        }
+    }
+
+    /**
+     * Whether this frame should advance the simulation, consuming a pending
+     * step if one is owed.
+     */
+    private function shouldSimulate(): bool
+    {
+        if (!$this->paused) {
+            return true;
+        }
+        if ($this->pendingSteps > 0) {
+            $this->pendingSteps--;
+
+            return true;
+        }
+
+        return false;
     }
 
     private function snapshotMtime(string $path): int
@@ -1025,11 +1145,15 @@ class Engine
                 },
                 update: function (float $dt) {
                     PerfProfiler::begin('engine.update');
-                    $this->animationTime += $dt;
-                    $this->world->updateMainThread($dt);
+                    // Editor sync runs whether or not the simulation does, so a
+                    // paused game can still be inspected and un-paused.
+                    if ($this->shouldSimulate()) {
+                        $this->animationTime += $dt;
+                        $this->world->updateMainThread($dt);
 
-                    if ($this->onUpdate !== null) {
-                        ($this->onUpdate)($this, $dt);
+                        if ($this->onUpdate !== null) {
+                            ($this->onUpdate)($this, $dt);
+                        }
                     }
                     $this->audio->update($dt);
                     $this->tickEditorSync($dt);
@@ -1126,11 +1250,13 @@ class Engine
                 update: function (float $dt) {
                     $this->frameSpikes?->beginUpdate();
                     PerfProfiler::begin('engine.update');
-                    $this->animationTime += $dt;
-                    $this->world->update($dt);
+                    if ($this->shouldSimulate()) {
+                        $this->animationTime += $dt;
+                        $this->world->update($dt);
 
-                    if ($this->onUpdate !== null) {
-                        ($this->onUpdate)($this, $dt);
+                        if ($this->onUpdate !== null) {
+                            ($this->onUpdate)($this, $dt);
+                        }
                     }
                     $this->audio->update($dt);
                     $this->tickEditorSync($dt);

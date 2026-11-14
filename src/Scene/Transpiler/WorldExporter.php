@@ -51,7 +51,17 @@ final class WorldExporter
                     $components[] = $this->serializer->toArray($component);
                 }
             }
-            $entities[] = ['name' => $this->nameOf($world, $id), 'components' => $components];
+            // The entity id travels with the snapshot. Transform3D references
+            // its parent BY id, so without it a consumer cannot tell which
+            // entity a child belongs to — and a child positioned by its
+            // parent-relative transform without that link lands somewhere else
+            // entirely. Names cannot stand in: they are not unique in a live
+            // world.
+            $entities[] = [
+                'id' => $id,
+                'name' => $this->nameOf($world, $id),
+                'components' => $components,
+            ];
         }
 
         $declaredSystems = $systems ?? array_map(
