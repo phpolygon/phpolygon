@@ -3365,6 +3365,177 @@ down at all on an uncaught exception from the main loop is unchecked.
 
 ---
 
+## World streaming — packed hand-off, async jobs, per-cell buffers, collider grid, cell streamer (branch `feat/world-streaming`, 2026-11-14)
+
+Building blocks for a gridded world that is generated and baked in worker threads and streamed in cells around a moving
+focus. All of it is generic: cells are names, sizes and budgets are parameters, and nothing here knows what a cell contains.
+Numbers below were measured 2026-11-14 on the development machine (Windows, PHP 8.5.5 ZTS, ext-parallel 1.2.13) with
+`php -d memory_limit=2G benchmarks/streaming-glue.php [mesh|jobs|latency|instances|colliders|streamer]`; other machines differ.
+
+| Class | One line |
+|---|---|
+| `Geometry\PackedMeshData` | `MeshData` as byte strings; `pack()` / `unpack()` cross a thread as ONE string |
+| `Thread\AsyncJobPool` (+ `AsyncJobResult`, `AsyncJobStatus`, `WorkerCache`) | non-blocking `submit(key, lod, epoch, handler, payload, priority)` / `collect()`, cancellation by epoch, per-worker `memory_limit`, hang and crash recovery |
+| `Rendering\CellInstanceBuffers` (+ `InstanceBufferSink`) | packed instance matrices per (cell, mesh, material), edit in place, bounds for culling, per-frame upload budget |
+| `Physics\CellColliderGrid` | static collider boxes per cell, only active cells are queried |
+| `Streaming\CellStreamer` (+ `CellStreamerConfig`, `StreamFrame`) | which cells to load / evict, prefetch along the movement, time and byte budgets, epochs |
+
+### PackedMeshData
+
+Positions, normals, uvs, optional tangents and RGBA colors as float32 strings, indices as u16 (up to 65536 vertices, the width
+`vio_mesh` stores) or u32, bounds as f64, one 64-byte header (`PPK1`). `fromMeshData()` / `fromArrays()` / `toMeshData()` /
+`pack()` / `unpack()`; `byteSize()` is known without unpacking (what an upload budget charges). Exact means: float32-valued input
+survives `MeshData -> Packed -> MeshData` bit for bit, any double is rounded to float32 once and is stable afterwards, and
+`Packed -> string -> Packed` is byte identical. It is not `MeshCacheIO` (a disk format: version hash, compression, no colors, no
+bounds, decodes straight to arrays); this one stays packed on purpose.
+
+Measured (289 to 40,401 vertices, 0.01 to 1.69 MB packed): `pack()` 0.08 ms and `unpack()` 0.06 ms for 1.69 MB (about 0.03 ms
+per MB); `toMeshData()` 2.9 to 5.3 ms per MB; `fromMeshData()` 13.1 ms for 40,401 vertices (7.8 ms per MB, worker side);
+`gpuVertexBytes()` (interleaved position/normal/uv for `vio_mesh`) 14.1 ms for 40,401 vertices (worker side).
+
+**What the main thread cannot do:** `MeshRegistry` holds PHP float arrays, so installing a packed mesh costs `toMeshData()` plus
+the renderer's own `interleaveMeshData()` plus `vio_mesh()` parsing a PHP array. At 3 to 5 ms per MB for the first step alone,
+2 ms of glue installs about 0.4 to 0.6 MB of mesh, not 8 MB. Count mesh installs against the time budget, not the byte budget
+(`CellStreamerConfig::$frameBudgetMs` does). The real fix is in php-vio (see the requests below).
+
+### AsyncJobPool
+
+`submit()` queues a job and returns false for a duplicate (same key, lod, epoch) or an epoch below the floor; `collect()` hands
+queued jobs to idle workers, notices hung ones and returns finished results without ever waiting; `drain()` busy-waits (tests,
+save points); `cancelOlderThan($epoch)` raises the epoch floor and drops pending jobs, cancels running ones that have not
+started and discards the rest when they finish; `cancel($key, ?$lod)`; `stats()`.
+
+- **Handlers** are registered by name as callable STRINGS (`'Class::method'` or a function name) and called
+  `handler(mixed $payload, WorkerCache $cache): mixed` in the worker, which autoloads the class through
+  `ParallelCapability::autoloadBootstrap()` (same bootstrap as `RuntimePool`). A closure cannot cross; a class name can.
+  Payload and result are what `parallel` copies: scalars, strings, arrays of those. A payload that cannot cross (an object) comes
+  back as an Error result, not an exception.
+- **`WorkerCache`** is a class static, one instance per thread: a handler's memo (tables, prototypes). Closure `static`
+  variables do NOT persist between `Runtime::run()` calls (measured), which is why it is a class. A handler must stay a pure
+  function of its payload; the cache may only change how fast it gets there. A recycled worker starts empty.
+- **`memory_limit`**: every worker applies the pool's limit with `ini_set()` at the start of every job (default `512M`).
+  Workers start with the php.ini default (128 MB stock), which a baked tile outgrows. `ini_get()` read back inside a worker is
+  pinned by `AsyncJobPoolTest::testWorkerAppliesTheMemoryLimitToEveryJob`.
+- **Scheduling**: the pending queue lives on the main thread, ordered by (priority, submit order), lower number first. A worker
+  holds at most `inFlightPerWorker` jobs (default 2), so a nearer job submitted late overtakes far ones, and dropping a queued
+  job is an array unset.
+- **Failure**: a handler that throws gives `Status::Error` and the worker lives. A fatal inside a worker (memory limit) makes the
+  `Future` throw `Killed`; the pool reports Error, recycles that worker (kill, respawn on demand) and requeues its other jobs once.
+  A job running longer than `hungAfterSeconds` (default 30) is reported `TimedOut`, its worker killed (`Runtime::kill()`
+  interrupted a spinning PHP loop in 16 ms) and replaced. A hang costs the main thread that kill, once; it is the only path
+  that does. A fatal in a worker prints its PHP fatal message to stderr (the test suite shows one on purpose).
+- **No `parallel`, 0 workers, or every spawn failing**: jobs run inline inside `collect()` in priority order, at most
+  `inlineJobsPerCollect` per call: identical results, deterministic, how the headless streamer tests run.
+
+Deliberate deviation from "on top of the existing transport": `ThreadScheduler` / `ChannelTransport` carry ONE outstanding job
+per subsystem and the scheduler waits through `Events::poll()` (documented 15 ms floor when blocking; the non-blocking path is the
+flagged macOS risk). The pool uses `Runtime::run()` + `Future::done()` (a boolean read), so several jobs fly at once, priorities
+and cancellation work, and a hung worker can be killed. Latency is not the reason: submit to collected for a trivial job, hot
+polling, 200 runs, median / p90: pool 0.126 / 0.142 ms (depth 1) and 0.127 / 0.161 ms (depth 2); `ChannelTransport`
+`submit()` / `collect()` (40 runs) 0.091 / 0.228 ms. `collect()` with a busy worker and nothing finished: 0.001 ms. Throughput of
+cheap jobs is not a win: 64 jobs of about 1.2 ms producing 200 KB each took 76.8 ms inline, 85.2 ms on 1 worker, 56.3 ms on 2
+and 63.9 ms on 4 (result copy-back runs on the calling thread). The benefit is overlap with the main thread, so jobs should cost
+clearly more than their transfer. `usleep()` rounds up to the ~15 ms timer tick here, which is why `drain()` does not sleep.
+
+### CellInstanceBuffers
+
+One buffer per (cell, mesh, material): `count * 64` bytes of column-major f32 matrices, the `DrawMeshInstanced::packed()` format.
+`set()` replaces a buffer from a worker-made string (with worker-measured `BatchBounds::extentsOfPacked()` so the main thread never
+walks the matrices), `append()` / `replaceAt()` / `removeAt()` edit by index (`removeAt()` swaps the last instance into the hole and
+returns the index that moved), `removeCell()` drops a cell and releases its sink buffers, `commands($cellsNearestFirst, $budget)`
+returns `DrawMeshInstanced` commands carrying `BatchBounds`, `fits()` / the `maxInstances` constructor cap guard residency.
+
+- **Bounds**: every command carries a sphere from the buffer's translation box and largest stretch plus the mesh radius
+  (`BatchBounds::sphereOfExtents()`, never looser than the renderer's own `sphereOfFlat()`, no second pass over the matrices). An
+  unregistered mesh gives no bounds. Without them a non-static batch above `InstancedBatchCuller::DYNAMIC_DERIVE_MAX` (32) is never
+  culled. `BatchBounds::extentsOfPacked()` is the new chunked measurement (0.7 microseconds per instance: 7.5 ms for 10,000,
+  73 ms for 100,000), so it belongs in the worker. Removals leave the box larger (still correct); a buffer up to 1024 instances is
+  re-measured on the main thread once a quarter of it changed, bigger ones keep the loose box until rebuilt.
+- **Upload budget**: `commands()` serves the cells in the given order and "admits" each buffer's pending byte range while the byte
+  budget lasts; the first change of a frame is always admitted; a deferred buffer keeps drawing its last admitted state, a never
+  admitted one is not drawn yet. **What the budget throttles depends on the path, and without a sink it throttles nothing on the
+  GPU**: `VioRenderer3D::resolveInstanceDataOnce()` forces `isStatic` off for packed batches and php-vio's `vio_draw_instanced`
+  copies the whole string into one shared dynamic buffer on every draw (D3D11: `Map` `WRITE_DISCARD` + `memcpy` per draw), so a
+  packed command costs its full byte size every frame it is drawn, changed or not. With 1,000,000 resident instances that is 61 MB
+  of strings (measured) and up to that many bytes of GPU traffic per frame if every cell is visible; the visible-cell count bounds
+  it, the budget does not. The persistent path is `InstanceBufferSink` (write a byte range into a GPU buffer, release it, build the
+  draw command): `ArrayInstanceBufferSink` in the tests proves the accounting (an append costs 64 bytes, not the buffer); the engine
+  ships NO php-vio sink yet because `vio_update_buffer` into a buffer a frame in flight still reads needs a ring or a fence (the
+  caveat `GpuParticleBaker` documents).
+- **Commands are not static** (`isStatic: false`, explicit bounds): the renderer never caches packed batches, and a static flag would
+  make `InstancedBatchCuller` (keyed sphere cache, holds the packed string) and the ray-traced scene key (`rtStaticContent`)
+  keep an entry per cell that nothing releases when the cell streams out. The `staticKey` (`cell|mesh|material`) stays as identity.
+- **Edit cost**: strings are values. An edit after admission copies the buffer once (the admitted snapshot shares the string):
+  100,000 instances (6.1 MB) `append` + `commands()` 1.56 ms, `replaceAt` 1.55 ms, `removeAt` 3.0 ms; 10,000 instances 0.026 / 0.026 /
+  0.042 ms. 1000 appends with no `commands()` between cost 3 ms for the lot (the string grows in place). Rebuild through `set()` when
+  many instances change. `commands()` with nothing changed: 0.049 ms for 25 visible cells, 0.163 ms for 100 (1,000,000 instances).
+
+### CellColliderGrid
+
+Static collider boxes keyed by cell. `CellColliderGrid::packBoxes()` (worker side) makes `n * 24` bytes of f32 boxes plus `n * 4`
+bytes of u32 ids; `add($cell, $packed)` stores it (cheap), `setActive($cells)` says which cells take part and returns what changed,
+`query(min, max)` returns ids of overlapping boxes of ACTIVE cells (touching faces do not overlap), `prepare($cell)` builds the index
+ahead, `remove($cell)` drops a cell. It needs no cell size: each cell measures its own AABB, and inside a cell a lazily built XZ
+bucket grid narrows the candidates (boxes over 16 buckets go on a per-cell list). Measured: index build 0.34 ms for 500 boxes,
+1.4 ms for 2000, 3.2 ms for 5000 (about 0.65 microseconds per box: `prepare()` a big cell inside the streaming budget); a 1 x 2 x 1 m
+query over 9 active cells of 2000 boxes 0.004 ms against 1.26 ms for a linear scan of the same 18,000 boxes in a PHP list;
+`setActive()` 0.001 ms. **Not wired into any engine system**: `RigidBody3DSystem::resolveStaticCollisions()` still scans every
+static `BoxCollider3D` of the world per body. `SpatialIndex` (visibility spheres by handle) and `SpatialHash3D` (per-frame pairs) do not
+fit this job, see the class doc.
+
+### CellStreamer
+
+`new CellStreamer($config, $pool, $handlerName, $payload, $apply, $evict)`, then `update($x, $z)` every frame returns a
+`StreamFrame` (requested, applied, evicted, droppedStale, failed, appliedBytes, elapsedNs, outstanding). The game supplies three
+closures: `payload(cx, cz, lod, epoch)` builds the job input, `apply(cx, cz, lod, value, epoch)` installs a result on the main
+thread (register meshes, `CellInstanceBuffers::set()`, `CellColliderGrid::add()`), `evict(cx, cz)` releases a cell. Optional
+`sizeOf` (bytes a result costs the upload budget, default: the string length, or the summed string lengths of an array result) and
+`clock` (tests inject a fake one). **One pool per streamer**: `invalidate()` raises the pool's epoch floor and the streamer cancels
+by cell key across every handler, so another user of the same pool would lose its jobs too.
+
+- **Wanted set**: every cell within `loadRadius` rings (Chebyshev) of the focus cell plus `prefetchRadius` rings around the cell
+  `prefetchDistance` cells ahead along the smoothed movement direction; LOD per ring (`lodByRing`, 0 = finest); priority = distance
+  in cells (look-ahead cells plus `prefetchPenalty`), fixed when the set is recomputed (nearest first at cell granularity). Cells
+  outside `gridWidth` x `gridHeight` are never wanted. Recomputed only when the focus cell or the look-ahead cell changes.
+- **Per frame**: collect results, drop the unwanted, evict resident cells beyond `unloadRadius` (default `loadRadius + 1`, hysteresis),
+  install nearest-first until `uploadBudgetBytes` or `frameBudgetMs` is used up (the first install of a frame always goes through, so
+  nothing starves; one install is not interruptible and can overshoot), then submit missing cells nearest-first up to
+  `maxRequestsPerFrame` and `maxInFlight`.
+- **Guarantees** (pinned by `CellStreamerTest`, deterministic: inline pool with a fixed jobs-per-frame, fake clock): a (cell, lod,
+  epoch) is not requested again while it is resident or in flight; on a walk that does not return to a cell it is requested once per LOD
+  level, and levels only go from coarse to fine; a cell is requested again only after an eviction, after `invalidate()`, after a
+  result that was dropped before it was installed, or after a failure (`maxRetries`, then given up until the next `invalidate()`);
+  installed bytes per frame stay within the budget (except the first install); nothing of an older epoch is installed after
+  `invalidate()`; a focus jittering over a cell border evicts and re-requests nothing.
+- **Epochs** change when cell CONTENT changed (a quality setting, an edited world), not when the focus moves: a teleport needs no
+  `invalidate()`, cells that are no longer wanted simply never install. `invalidate()` cancels the pool's older jobs, drops finished
+  but uninstalled results and re-requests every wanted cell at the new epoch; resident cells keep drawing their old content until
+  the replacement installs (`invalidate(true)` evicts them at once). Resident cells are only ever upgraded to a finer LOD, never
+  downgraded; they leave through eviction.
+- Measured glue (trivial handler and install, inline pool, 100 u cells, 1500 frames at 10 u per frame): `update()` median
+  0.023 ms and worst 0.75 ms with `loadRadius` 2, median 0.051 ms and worst 0.41 ms with `loadRadius` 4; settled and standing still
+  0.007 ms and 0.017 ms. That is the streamer's own bookkeeping; the real cost of a frame is whatever `apply` does.
+
+### What a game must adapt
+
+- Heavy work (bake, packing, `PackedMeshData::fromMeshData()`, `gpuVertexBytes()`, `BatchBounds::extentsOfPacked()`,
+  `CellColliderGrid::packBoxes()`) belongs in the handler. Return one packed string, or an array of strings, per job.
+- Count installs against time: mesh install is 3 to 5 ms per MB (see above), collider index build 0.65 microseconds per box,
+  `set()` without worker extents 0.7 microseconds per instance.
+- Put `Streaming` / `Thread` classes it needs in handlers as static methods of autoloadable classes; set `memory_limit` on the pool.
+- Wire `CellColliderGrid` queries into its own collision code; the engine's ECS physics does not use it.
+
+### Requests for php-vio
+
+1. `vio_mesh()` accepting `'vertices'` as a raw float32 string already interleaved per `layout` and `'indices'` as a raw u16/u32 string
+   (with `'index_type'`), the way `vio_draw_instanced()` already takes a matrix string. Today `ext/php_vio.c` requires PHP arrays
+   (`vio_mesh requires 'vertices' array`), so every streamed mesh pays unpack, interleave and array parsing on the main thread.
+   `PackedMeshData::gpuVertexBytes()` / `gpuIndexBytes()` already produce exactly these bytes.
+2. A persistent instance buffer that an instanced draw can reference across frames and update in ranges safely while earlier frames
+   are in flight (a ring inside php-vio, or a documented fence), so `InstanceBufferSink` can be implemented without every game
+   re-deriving the hazard; `vio_storage_buffer` + `vio_update_buffer($buf, $data, $offset)` + `vio_draw_instanced_from_buffer`
+   cover the pieces, not the synchronisation.
+
 ## Start language — Steam, then the system
 
 A game's first start should speak the player's language without asking. The

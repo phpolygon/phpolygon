@@ -146,6 +146,84 @@ final class BatchBounds
     }
 
     /**
+     * Measure `$count` packed column-major f32 matrices without unpacking them
+     * all at once (chunks of 2048): the box around their translations and the
+     * largest axis stretch among them. Independent of any mesh, so a worker can
+     * compute it next to the matrices and {@see sphereOfExtents()} applies a
+     * mesh radius later, on whichever thread knows the mesh.
+     *
+     * @return array{0: float, 1: float, 2: float, 3: float, 4: float, 5: float, 6: float}|null
+     *         min xyz, max xyz, largest stretch; null when empty or not finite
+     */
+    public static function extentsOfPacked(string $packed, int $count): ?array
+    {
+        $count = min($count, intdiv(strlen($packed), 64));
+        if ($count <= 0) {
+            return null;
+        }
+        $minX = $minY = $minZ = INF;
+        $maxX = $maxY = $maxZ = -INF;
+        $stretch = 0.0;
+        for ($start = 0; $start < $count; $start += 2048) {
+            $n = min(2048, $count - $start);
+            $f = self::unpackFloats(substr($packed, $start * 64, $n * 64));
+            if ($f === []) {
+                return null;
+            }
+            for ($i = 0, $o = 0; $i < $n; $i++, $o += 16) {
+                $s = self::maxStretch($f, $o);
+                if ($s > $stretch) { $stretch = $s; }
+                $x = $f[$o + 12];
+                $y = $f[$o + 13];
+                $z = $f[$o + 14];
+                if ($x < $minX) { $minX = $x; }
+                if ($x > $maxX) { $maxX = $x; }
+                if ($y < $minY) { $minY = $y; }
+                if ($y > $maxY) { $maxY = $y; }
+                if ($z < $minZ) { $minZ = $z; }
+                if ($z > $maxZ) { $maxZ = $z; }
+            }
+        }
+        if (!is_finite($minX + $minY + $minZ + $maxX + $maxY + $maxZ + $stretch)) {
+            return null;
+        }
+
+        return [$minX, $minY, $minZ, $maxX, $maxY, $maxZ, $stretch];
+    }
+
+    /** @return list<float> */
+    private static function unpackFloats(string $bytes): array
+    {
+        $u = unpack('g*', $bytes);
+
+        /** @var list<float> */
+        return $u === false ? [] : array_values($u);
+    }
+
+    /**
+     * The sphere that holds every instance of a batch measured by
+     * {@see extentsOfPacked()}: around the translation box, grown by the mesh
+     * radius times the largest stretch. A little looser than
+     * {@see sphereOfFlat()} (which fits the box of the instance spheres), never
+     * tighter, and it needs no second pass over the matrices.
+     *
+     * @param array{0: float, 1: float, 2: float, 3: float, 4: float, 5: float, 6: float} $extents
+     */
+    public static function sphereOfExtents(array $extents, float $meshRadius): self
+    {
+        $dx = $extents[3] - $extents[0];
+        $dy = $extents[4] - $extents[1];
+        $dz = $extents[5] - $extents[2];
+
+        return new self(
+            0.5 * ($extents[0] + $extents[3]),
+            0.5 * ($extents[1] + $extents[4]),
+            0.5 * ($extents[2] + $extents[5]),
+            0.5 * sqrt($dx * $dx + $dy * $dy + $dz * $dz) + $meshRadius * $extents[6],
+        );
+    }
+
+    /**
      * {@see sphereOfFlat()} for a Mat4 batch.
      *
      * @param array<int|string, Mat4> $matrices
