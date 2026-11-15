@@ -27,6 +27,12 @@ use PHPolygon\UI\Widget\WidgetTree;
  */
 final class AccessibilityBridge
 {
+    /** Node ids of the two live regions {@see announce()} writes to. */
+    public const LIVE_POLITE = 'announce:polite';
+    public const LIVE_ASSERTIVE = 'announce:assertive';
+
+    private const ZERO_WIDTH_SPACE = "\u{200B}";
+
     private readonly bool $available;
     private readonly WidgetAccessibilityMapper $mapper;
 
@@ -37,6 +43,12 @@ final class AccessibilityBridge
 
     /** @var list<array{0: string, 1: string, 2: mixed}> */
     private array $pendingActions = [];
+
+    /** @var array{polite: string, assertive: string} the text of each live region as last announced */
+    private array $announced = ['polite' => '', 'assertive' => ''];
+
+    /** @var array{polite: bool, assertive: bool} flipped on a repeat, so an identical message is still a change */
+    private array $announceFlip = ['polite' => false, 'assertive' => false];
 
     private ?string $lastError = null;
     private bool $failed = false;
@@ -125,6 +137,11 @@ final class AccessibilityBridge
     private function send(AccessibilitySnapshot $snapshot): bool
     {
         $nodes = $snapshot->nodes;
+        // The live regions hang off the window for the life of the bridge.
+        $nodes[$snapshot->rootId]['children'][] = self::LIVE_POLITE;
+        $nodes[$snapshot->rootId]['children'][] = self::LIVE_ASSERTIVE;
+        $nodes[self::LIVE_POLITE] = $this->liveNode('polite');
+        $nodes[self::LIVE_ASSERTIVE] = $this->liveNode('assertive');
 
         $changed = [];
         foreach ($nodes as $id => $node) {
@@ -167,6 +184,66 @@ final class AccessibilityBridge
         $this->sentFocus = $focus;
 
         return true;
+    }
+
+    /**
+     * Have a screen reader speak a status message ("Game saved", "Level 3
+     * reached") without moving focus.
+     *
+     * php-vio has no dedicated live-region call, so this is realised with its
+     * own node roles: two permanent children of the window, a 'status' node for
+     * polite messages and an 'alert' node for assertive ones, whose label is the
+     * message. Changing the label is what assistive technology notices. An
+     * identical repeat is made a change with a trailing zero-width space.
+     *
+     * Limitation: vio exposes no 'live' property, so whether the platform
+     * speaks a changed status/alert label on its own depends on the platform's
+     * handling of those roles; this has not been checked against a real screen
+     * reader. An empty text clears the region. Before the first sync() the text
+     * is held and goes out with the first tree. No-op where accessibility is
+     * unavailable.
+     */
+    public function announce(string $text, bool $polite = true): void
+    {
+        if (!$this->isAvailable()) {
+            return;
+        }
+        $kind = $polite ? 'polite' : 'assertive';
+        $repeat = $text !== '' && $text === rtrim($this->announced[$kind], self::ZERO_WIDTH_SPACE);
+        $this->announceFlip[$kind] = $repeat && !$this->announceFlip[$kind];
+        $this->announced[$kind] = $text . ($this->announceFlip[$kind] ? self::ZERO_WIDTH_SPACE : '');
+
+        if (!$this->started) {
+            return; // goes out with the first tree
+        }
+        $node = $this->liveNode($kind);
+        try {
+            $ok = $this->sink->update(['nodes' => [$node]]);
+        } catch (\ValueError | \TypeError $e) {
+            $this->failed = true;
+            $this->lastError = $e->getMessage();
+
+            return;
+        }
+        if ($ok) {
+            $this->sent[$node['id']] = $node;
+        } else {
+            $this->failed = true;
+        }
+    }
+
+    /** @return array<string, mixed> */
+    private function liveNode(string $kind): array
+    {
+        $node = [
+            'id' => $kind === 'polite' ? self::LIVE_POLITE : self::LIVE_ASSERTIVE,
+            'role' => $kind === 'polite' ? 'status' : 'alert',
+        ];
+        if ($this->announced[$kind] !== '') {
+            $node['label'] = $this->announced[$kind];
+        }
+
+        return $node;
     }
 
     /** @return bool whether any action changed the tree */
