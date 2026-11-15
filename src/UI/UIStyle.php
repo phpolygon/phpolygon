@@ -28,6 +28,24 @@ class UIStyle
         public float $lineHeight = 1.3,
     ) {}
 
+    /**
+     * This style with the font size multiplied by the player's text-size factor
+     * (see AccessibilitySettings::$textScale). Factor 1.0 returns the same
+     * object, so a tree that never changes the factor lays out exactly as before.
+     * Only the font size changes: paddings and borders stay, so widgets that size
+     * themselves from their text grow and fixed-size ones do not.
+     */
+    public function withTextScale(float $factor): self
+    {
+        if ($factor === 1.0) {
+            return $this;
+        }
+        $scaled = clone $this;
+        $scaled->fontSize = $this->fontSize * $factor;
+
+        return $scaled;
+    }
+
     public static function dark(): self
     {
         return new self();
