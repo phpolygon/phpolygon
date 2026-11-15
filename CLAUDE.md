@@ -3039,6 +3039,61 @@ Effect2DRegistry::draw($renderer, 'panel_glow', $x, $y, $w, $h, ['u_glow_color' 
 
 ---
 
+## Widget accessibility — keyboard focus and screen reader (`PHPolygon\UI\Widget`, `PHPolygon\UI\Accessibility`)
+
+Two independent, opt-in layers on the retained `WidgetTree`. Both are off by default: a tree that is never told
+otherwise reads no extra keys, draws no extra pixel and sends nothing anywhere.
+
+**Keyboard focus** (`$tree->setKeyboardNavigation(true)`):
+- Tab / Shift+Tab walk `getFocusOrder()`: visible, enabled, focusable widgets in document order (Button, Checkbox,
+  Toggle, Slider, Dropdown, TextInput/TextArea, TabView tab bar), wrapping at the ends. `Widget::$focusable` (null = by
+  type) forces it either way; `Widget::$focusOrder` > 0 moves a widget to the front like HTML tabindex.
+  `setFocusScope($subtree)` keeps traversal inside a dialog. Only the shown tab of a `TabView` is reachable.
+- Enter / Space activate (`activate()` fires the mouse's events: `press` + `click`, or flip + `change`). Arrows work
+  inside a slider (`Slider::$keyStep`, default 1/20 of the range), a tab bar and an open dropdown (`highlightedIndex`
+  cursor, Enter commits, Esc cancels). Esc closes an open dropdown, otherwise clears focus. `setArrowsMoveFocus(true)`
+  also lets the arrows move between plain controls.
+- A focused TextInput/TextArea keeps every key except Tab and Esc; typed text and caret keys are untouched.
+- Suppression: a keyboard-focused button does NOT swallow the game's keys (unlike a focused text field); only a key
+  the tree actually used is suppressed for that frame.
+- Focus ring: drawn after the whole tree, only when focus came from the keyboard (`setFocus($w, true)`; a click never
+  shows it), from `FocusStyle` (colour, width, offset, radius); off the widget geometry, clipped to the enclosing
+  `ScrollView`. Focus moving into a scroll view scrolls the widget into view.
+- A host that builds a new `WidgetTree` (or new row widgets) every frame must keep one `FocusState` and pass it as the
+  last constructor argument; focus is then re-found by `focusKeyOf()` (explicit `accessibleId`, else the child-index
+  path). `onFocusChange(fn(?Widget $now, ?Widget $before))` reports changes.
+- The game must adopt it: call `setKeyboardNavigation(true)` (Tab, Enter, Space, Esc and the arrows are common game
+  keys, which is why it is not the default) and share a `FocusState` if it rebuilds trees.
+
+**Screen reader** (`AccessibilityBridge` over an `AccessibilitySink`; `VioAccessibilitySink` = php-vio's
+`vio_a11y_update` / `vio_on_a11y_action`):
+- `new AccessibilityBridge(VioAccessibilitySink::forWindow($window), 'Window title', $boundsTransform)`, then
+  `$bridge->sync($tree)` once per frame after layout. `$boundsTransform(Rect): Rect` maps design-space bounds to
+  logical window coordinates (letterboxing, UI scale); identity if null. Gated per feature: without
+  `vio_a11y_update` or with `vio_platform_info()['accessibility']` false the bridge is a silent no-op.
+- `WidgetAccessibilityMapper` ids are the focus keys (stable per position, or `Widget::$accessibleId`); layout
+  containers contribute no node; roles button, check_box, switch, slider, combo_box (+ list_box_option when open),
+  text_input / multiline_text_input, tab_list/tab, progress_indicator, label, image, group (Panel or any widget with an
+  accessibleLabel). Name: `accessibleLabel`, then the widget's own text, then the first tooltip line; description:
+  `accessibleDescription`, else the tooltip. Widgets with no text of their own (icon or flat overlay buttons) need an
+  `accessibleLabel`.
+- Only changed nodes and a changed `focus` are sent (focus rests on `root` when nothing is focused). A rejected update
+  (a mapping bug) switches the bridge off and keeps the message in `getLastError()`.
+- Requests from assistive technology (click, focus, blur, set_value, increment, decrement, expand, collapse) are queued
+  by the `vio_on_a11y_action` callback and applied in the next `sync()` against that frame's tree by node id.
+- `announce(string $text, bool $polite = true)`: two permanent children of the window, a `status` node (polite) and an
+  `alert` node (assertive), whose label is the message; a repeat flips a trailing zero-width space. vio has no `live`
+  property, so whether a platform speaks the change by itself is unverified (see below).
+- Tests are headless: `tests/UI/Accessibility/RecordingAccessibilitySink` enforces vio's contract (roles, actions,
+  unique ids, references). One test runs the mapped tree through the real `vio_a11y_update` of a headless window and
+  skips when that is not available; it proves the contract, not what a screen reader says.
+- Not verified on a real screen reader (Narrator, NVDA, VoiceOver, Orca). Open php-vio wishes: a `live` node property
+  (polite / assertive) for `announce()`, `selected` (tabs, list options) and `expanded` (combo box) instead of the
+  `checked` stand-in, and node removal (src/vio_a11y.c has none that a grep finds; the bridge only unlinks a gone
+  widget from its parent's children, so its node stays unreferenced in vio's table).
+
+---
+
 ## Window — mode switching (macOS notes)
 
 `Window` (`src/Runtime/Window.php`) wraps GLFW and provides:
