@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace PHPolygon\Input;
 
 use PHPolygon\Runtime\InputInterface;
+use PHPolygon\Runtime\KeyModifiers;
 
 /**
  * "Press a key" for a key-binding menu: reports the first key (or mouse
@@ -39,6 +40,8 @@ final class KeyCapture
 
     private bool $active = false;
 
+    private bool $withModifiers = false;
+
     public function __construct(private readonly InputInterface $input) {}
 
     /**
@@ -46,10 +49,13 @@ final class KeyCapture
      *
      * @param list<int>|null $keys         key codes to listen for (null = every GLFW key except Escape)
      * @param list<int>      $mouseButtons mouse buttons to listen for (none by default)
+     * @param bool           $withModifiers capture Shift/Ctrl/Alt/Super held at the moment as part of the
+     *        binding (Shift+Tab). The modifier keys themselves are then no candidates by default.
      */
-    public function start(?array $keys = null, array $mouseButtons = []): void
+    public function start(?array $keys = null, array $mouseButtons = [], bool $withModifiers = false): void
     {
-        $this->keys = $keys ?? self::defaultKeys();
+        $this->withModifiers = $withModifiers;
+        $this->keys = $keys ?? ($withModifiers ? array_values(array_diff(self::defaultKeys(), range(340, 347))) : self::defaultKeys());
         $this->buttons = $mouseButtons;
         $this->keyArmed = [];
         $this->buttonArmed = [];
@@ -87,7 +93,7 @@ final class KeyCapture
                 $this->keyArmed[$key] = true;
             } elseif ($this->keyArmed[$key] ?? false) {
                 $this->active = false;
-                return InputBinding::key($key);
+                return InputBinding::key($key, $this->withModifiers ? self::heldModifiers($this->input) : 0);
             }
         }
         foreach ($this->buttons as $button) {
@@ -96,10 +102,23 @@ final class KeyCapture
                 $this->buttonArmed[$button] = true;
             } elseif ($this->buttonArmed[$button] ?? false) {
                 $this->active = false;
-                return InputBinding::mouseButton($button);
+                return $this->withModifiers
+                    ? new InputBinding(InputBindingType::MouseButton, $button, self::heldModifiers($this->input))
+                    : InputBinding::mouseButton($button);
             }
         }
         return null;
+    }
+
+    /** The MOD_* bits of the modifier keys held right now. */
+    public static function heldModifiers(InputInterface $input): int
+    {
+        $held = KeyModifiers::fromInput($input);
+
+        return ($held->shift ? InputBinding::MOD_SHIFT : 0)
+            | ($held->control ? InputBinding::MOD_CONTROL : 0)
+            | ($held->alt ? InputBinding::MOD_ALT : 0)
+            | ($held->super ? InputBinding::MOD_SUPER : 0);
     }
 
     /**
