@@ -68,6 +68,15 @@ abstract class Widget
     public string $accessibleDescription = '';
 
     /**
+     * Screen-reader role override, one of the roles of the accessibility contract
+     * (WidgetAccessibilityMapper::ROLES), e.g. 'list' on a Repeater or VBox whose
+     * rows are then reported as list items, 'heading' on a label, 'tab_list' or
+     * 'toolbar' on a container. Empty keeps the role of the widget's type; an
+     * unknown name is ignored.
+     */
+    public string $accessibleRole = '';
+
+    /**
      * Explicit accessibility id and keyboard-focus key. Empty derives one from the
      * widget's position in the tree. Set it when a widget keeps its identity while
      * its siblings are inserted or removed (a stable id avoids resending the node,

@@ -37,6 +37,28 @@ final class WidgetAccessibilityMapper
 {
     public const ROOT_ID = 'root';
 
+    /** Roles of php-vio's accessibility contract that a widget's accessibleRole may name. */
+    public const ROLES = [
+        'unknown', 'window', 'dialog', 'alert_dialog', 'button', 'check_box', 'radio_button', 'switch', 'text_input',
+        'multiline_text_input', 'search_input', 'password_input', 'label', 'image', 'link', 'list', 'list_item', 'list_box',
+        'list_box_option', 'menu', 'menu_bar', 'menu_item', 'menu_item_check_box', 'menu_item_radio', 'tab', 'tab_list',
+        'tab_panel', 'slider', 'spin_button', 'progress_indicator', 'combo_box', 'group', 'heading', 'paragraph', 'scroll_view',
+        'alert', 'status', 'toolbar', 'tooltip', 'tree', 'tree_item', 'table', 'row', 'cell', 'column_header', 'row_header',
+        'generic', 'pane', 'document', 'canvas', 'splitter',
+    ];
+
+    /** Role of a container => role its rows take when they are plain layout boxes. */
+    private const ITEM_ROLES = [
+        'list' => 'list_item',
+        'list_box' => 'list_box_option',
+        'menu' => 'menu_item',
+        'menu_bar' => 'menu_item',
+        'tree' => 'tree_item',
+        'table' => 'row',
+        'row' => 'cell',
+        'toolbar' => 'group',
+    ];
+
     /** @var array<string, array<string, mixed>> */
     private array $nodes = [];
 
@@ -99,7 +121,7 @@ final class WidgetAccessibilityMapper
     /**
      * @return list<string> ids of the nodes this widget contributes to its parent
      */
-    private function walk(Widget $widget): array
+    private function walk(Widget $widget, string $itemRole = ''): array
     {
         if (!$widget->visible) {
             return [];
@@ -112,14 +134,19 @@ final class WidgetAccessibilityMapper
         }
 
         $own = $this->ownNode($widget, $id);
+        // Rows of a list, menu, tree or table become items of it even when the row is a plain layout box.
+        $childItemRole = $own !== null && is_string($own['role'] ?? null) ? (self::ITEM_ROLES[$own['role']] ?? '') : '';
         $childIds = [];
         // A dropdown's options are not widgets; the node mapping adds them itself.
         if (!$widget instanceof Dropdown) {
             foreach ($widget->getFocusChildren() as $child) {
-                array_push($childIds, ...$this->walk($child));
+                array_push($childIds, ...$this->walk($child, $childItemRole));
             }
         }
 
+        if ($own === null && $itemRole !== '' && $childIds !== []) {
+            $own = $this->base($id, $itemRole, '', $widget);
+        }
         if ($own === null) {
             return $childIds;
         }
@@ -142,6 +169,26 @@ final class WidgetAccessibilityMapper
      * @return array<string, mixed>|null
      */
     private function ownNode(Widget $widget, string $id): ?array
+    {
+        $node = $this->typedNode($widget, $id);
+        $role = in_array($widget->accessibleRole, self::ROLES, true) ? $widget->accessibleRole : '';
+        if ($role === '') {
+            return $node;
+        }
+        if ($node === null) {
+            return $this->base($id, $role, $widget->accessibleLabel, $widget);
+        }
+        $node['role'] = $role;
+
+        return $node;
+    }
+
+    /**
+     * The node the widget's type gives it, before an accessibleRole override.
+     *
+     * @return array<string, mixed>|null
+     */
+    private function typedNode(Widget $widget, string $id): ?array
     {
         $tooltipHead = $this->firstLine($widget->tooltip);
         $explicit = $widget->accessibleLabel;
