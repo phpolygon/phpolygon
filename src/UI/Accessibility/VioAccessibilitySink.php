@@ -15,8 +15,11 @@ use PHPolygon\Runtime\VioMainWindow;
  */
 final class VioAccessibilitySink implements AccessibilitySink
 {
-    /** @param object $context a VioContext or VioWindow */
-    public function __construct(private readonly object $context) {}
+    /**
+     * Holds the context for the sink's lifetime: a VioMainWindow creates its
+     * context once, so build a new sink (and bridge) with a new window.
+     */
+    public function __construct(private readonly \VioContext|\VioWindow $context) {}
 
     public static function forWindow(VioMainWindow $window): self
     {

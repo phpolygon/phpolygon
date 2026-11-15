@@ -3060,8 +3060,8 @@ otherwise reads no extra keys, draws no extra pixel and sends nothing anywhere.
   shows it), from `FocusStyle` (colour, width, offset, radius); off the widget geometry, clipped to the enclosing
   `ScrollView`. Focus moving into a scroll view scrolls the widget into view.
 - A host that builds a new `WidgetTree` (or new row widgets) every frame must keep one `FocusState` and pass it as the
-  last constructor argument; focus is then re-found by `focusKeyOf()` (explicit `accessibleId`, else the child-index
-  path). `onFocusChange(fn(?Widget $now, ?Widget $before))` reports changes.
+  last constructor argument (one state per tree, never shared between different trees); focus is then re-found by
+  `focusKeyOf()` (explicit `accessibleId`, else the child-index path). `onFocusChange(fn(?Widget $now, ?Widget $before))` reports changes.
 - The game must adopt it: call `setKeyboardNavigation(true)` (Tab, Enter, Space, Esc and the arrows are common game
   keys, which is why it is not the default) and share a `FocusState` if it rebuilds trees.
 
