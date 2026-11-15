@@ -365,6 +365,19 @@ os_name_for() {
 cache_key_for() {
     if [ "$VARIANT" != "base" ]; then echo "$1-${VARIANT}-php${PHP_VERSION}"; else echo "$1-php${PHP_VERSION}"; fi
 }
+# Package directory suffix GameBuilder actually appends for $VARIANT (see
+# GameBuilder::build): "" for "base" unless build.json php.threading is true,
+# in which case GameBuilder silently swaps it for the "zts" variant; any other
+# variant (e.g. "steam") always gets its own name as the suffix.
+variant_suffix_for() {
+    if [ "$VARIANT" != "base" ]; then
+        echo "-${VARIANT}"
+    elif [ "$(jq -r '.php.threading // false' build.json 2>/dev/null)" = "true" ]; then
+        echo "-zts"
+    else
+        echo ""
+    fi
+}
 # Per-OS destination name for the Steam API library (must match
 # StaticPhpResolver::steamLibName / PlatformPackager basename copy).
 steam_lib_name_for() {
@@ -504,7 +517,7 @@ human_size() { local b; b="$(du -sb "$1" 2>/dev/null | cut -f1)"; awk -v b="${b:
 # Build one target. Writes a TSV result line to $1 (result file). $5=stream|quiet.
 build_target() {
     local rfile="$1" target="$2" type="$3" phar="$4" mode="$5" derive="${6:-}"
-    local out="build/${target}-${VARIANT}"; [ "$type" != "full" ] && out="${out}-${type}"
+    local out="build/${target}$(variant_suffix_for)"; [ "$type" != "full" ] && out="${out}-${type}"
     local t0=$SECONDS rc=0 log="/tmp/buildlog-${target}-${type}.txt"
     local -a extra=()
     [ -n "$derive" ] && extra=(--derive-phar "$derive")
