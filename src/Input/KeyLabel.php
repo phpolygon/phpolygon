@@ -72,10 +72,22 @@ final class KeyLabel
             : static fn (int $key): ?string => null);
     }
 
-    /** Label for a key code or binding. */
+    /** Label for a key code or binding; modifiers come first ("Shift+Tab"). */
     public function label(InputBinding|int $binding): string
     {
         $binding = is_int($binding) ? InputBinding::key($binding) : $binding;
+        $prefix = '';
+        foreach ([InputBinding::MOD_CONTROL => 341, InputBinding::MOD_SHIFT => 340, InputBinding::MOD_ALT => 342, InputBinding::MOD_SUPER => 343] as $bit => $modifierKey) {
+            if (($binding->modifiers & $bit) !== 0) {
+                $prefix .= $this->label($modifierKey) . '+';
+            }
+        }
+
+        return $prefix . $this->baseLabel($binding);
+    }
+
+    private function baseLabel(InputBinding $binding): string
+    {
 
         if ($binding->type === InputBindingType::Key && $binding->code > 32 && $binding->code < 256) {
             $name = ($this->keyName)($binding->code);

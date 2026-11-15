@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace PHPolygon\Input;
 
 use PHPolygon\Runtime\InputInterface;
+use PHPolygon\Runtime\KeyModifiers;
 use RuntimeException;
 
 /**
@@ -372,6 +373,10 @@ class InputMap
 
     private function isBindingDown(InputInterface $input, InputBinding $binding): bool
     {
+        if ($binding->modifiers !== 0 && !$binding->modifiersHeld(KeyModifiers::fromInput($input))) {
+            return false;
+        }
+
         return match ($binding->type) {
             InputBindingType::Key => $input->isKeyDown($binding->code),
             InputBindingType::MouseButton => $input->isMouseButtonDown($binding->code),
