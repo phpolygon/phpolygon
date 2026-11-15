@@ -57,6 +57,38 @@ abstract class Widget
     public string $stackAnchor = '';
 
     /**
+     * Accessible name read by a screen reader. Empty falls back to the widget's
+     * own text (a button's label, a label's text) and then to the first line of
+     * the tooltip. Set it on widgets that carry no text of their own, such as an
+     * icon-only or flat card-overlay button.
+     */
+    public string $accessibleLabel = '';
+
+    /** Longer accessible description (what the control does). Empty falls back to the tooltip. */
+    public string $accessibleDescription = '';
+
+    /**
+     * Explicit accessibility id and keyboard-focus key. Empty derives one from the
+     * widget's position in the tree. Set it when a widget keeps its identity while
+     * its siblings are inserted or removed (a stable id avoids resending the node,
+     * and keeps keyboard focus on it across rebuilds).
+     */
+    public string $accessibleId = '';
+
+    /**
+     * Keyboard focusability: null follows the widget type (buttons, toggles,
+     * sliders, dropdowns, text fields and tab bars are focusable), true or false
+     * forces it either way.
+     */
+    public ?bool $focusable = null;
+
+    /**
+     * Keyboard focus order override, like HTML tabindex: widgets with a value
+     * above 0 come first in ascending order, then the rest (0) in document order.
+     */
+    public int $focusOrder = 0;
+
+    /**
      * Editor-authored value bindings: widget property name => context path.
      * Resolved by {@see WidgetBinder} against a {@see WidgetContext}; two-way for
      * input widgets. Not persisted as a literal — the serializer emits each as
@@ -262,6 +294,37 @@ abstract class Widget
             max(0.0, $this->bounds->width - $this->padding->horizontal()),
             max(0.0, $this->bounds->height - $this->padding->vertical()),
         );
+    }
+
+    // ── Keyboard focus ───────────────────────────────────────────
+
+    /** Whether this widget type takes keyboard focus unless {@see $focusable} says otherwise. */
+    protected function focusableByDefault(): bool
+    {
+        return false;
+    }
+
+    /** Can keyboard focus land on this widget right now? */
+    public function isFocusable(): bool
+    {
+        return $this->visible && $this->enabled && ($this->focusable ?? $this->focusableByDefault());
+    }
+
+    /**
+     * The children keyboard traversal and the accessibility tree descend into.
+     * A container that shows only some of its children (a tab view) narrows this.
+     *
+     * @return list<Widget>
+     */
+    public function getFocusChildren(): array
+    {
+        return $this->children;
+    }
+
+    /** The area the focus ring surrounds; defaults to the whole widget. */
+    public function focusRect(): Rect
+    {
+        return $this->bounds;
     }
 
     // ── Events ───────────────────────────────────────────────────

@@ -22,6 +22,11 @@ class Toggle extends Widget
         $this->padding = EdgeInsets::all(4.0);
     }
 
+    protected function focusableByDefault(): bool
+    {
+        return true;
+    }
+
     public function measure(float $availableWidth, float $availableHeight, UIStyle $style): void
     {
         $style = $this->resolveStyle($style);

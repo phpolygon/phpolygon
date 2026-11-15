@@ -32,6 +32,12 @@ class Dropdown extends Widget
     public float $maxListHeight = 0.0;
 
     /**
+     * The option the keyboard cursor is on while the list is open, -1 when no key
+     * moved it (the mouse never sets it). Enter commits it as the selection.
+     */
+    public int $highlightedIndex = -1;
+
+    /**
      * The style the widget was last measured/drawn with. Hit-test geometry
      * ({@see getOptionRect}, {@see listBounds}) has no style argument, so it reads
      * this to stay pixel-identical to what {@see drawOpenList} rendered — using a
@@ -55,6 +61,11 @@ class Dropdown extends Widget
     public function getSelectedValue(): ?string
     {
         return $this->options[$this->selectedIndex] ?? null;
+    }
+
+    protected function focusableByDefault(): bool
+    {
+        return true;
     }
 
     public function measure(float $availableWidth, float $availableHeight, UIStyle $style): void
@@ -156,6 +167,9 @@ class Dropdown extends Widget
                 if ($i === $this->selectedIndex) {
                     $renderer->drawRect($b->x + 1.0, $optY, $b->width - 2.0, $rowH, $style->accentColor->withAlpha(0.3));
                 }
+                if ($i === $this->highlightedIndex) {
+                    $renderer->drawRect($b->x + 1.0, $optY, $b->width - 2.0, $rowH, $style->hoverColor);
+                }
                 $renderer->drawText($opt, $b->x + $this->padding->left, $optY + $this->padding->top, $style->fontSize, $style->textColor);
             }
         } finally {
@@ -197,6 +211,48 @@ class Dropdown extends Widget
     public function scrollListBy(float $delta): void
     {
         $this->listScrollY = max(0.0, min($this->listScrollY + $delta, $this->maxListScroll()));
+    }
+
+    /**
+     * Move the keyboard cursor through the open list by $delta rows (clamped),
+     * scrolling it into view. Starts from the selected option when no key has
+     * moved the cursor yet.
+     */
+    public function moveHighlight(int $delta): void
+    {
+        $count = count($this->options);
+        if ($count === 0) {
+            return;
+        }
+        $from = $this->highlightedIndex >= 0 ? $this->highlightedIndex : $this->selectedIndex;
+        $this->setHighlight(max(0, min($count - 1, $from + $delta)));
+    }
+
+    /** Put the keyboard cursor on option $index (clamped) and scroll it into view. */
+    public function setHighlight(int $index): void
+    {
+        $count = count($this->options);
+        if ($count === 0) {
+            return;
+        }
+        $this->highlightedIndex = max(0, min($count - 1, $index));
+        $rowH = $this->rowHeight();
+        $top = $this->highlightedIndex * $rowH;
+        $visibleH = $this->visibleListHeight();
+        if ($top < $this->listScrollY) {
+            $this->listScrollY = $top;
+        } elseif ($top + $rowH > $this->listScrollY + $visibleH) {
+            $this->listScrollY = $top + $rowH - $visibleH;
+        }
+        $this->listScrollY = max(0.0, min($this->listScrollY, $this->maxListScroll()));
+    }
+
+    /** The field without its caption: where the focus ring goes. */
+    public function focusRect(): Rect
+    {
+        $labelH = $this->label !== '' ? $this->metricsStyle()->fontSize + 4.0 : 0.0;
+
+        return new Rect($this->bounds->x, $this->bounds->y + $labelH, $this->bounds->width, max(0.0, $this->bounds->height - $labelH));
     }
 
     /** Height of one option row. */

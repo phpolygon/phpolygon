@@ -20,6 +20,21 @@ use PHPolygon\UI\UIStyle;
  */
 class WidgetTree
 {
+    // GLFW key codes read by keyboard navigation.
+    private const KEY_SPACE = 32;
+    private const KEY_ESCAPE = 256;
+    private const KEY_ENTER = 257;
+    private const KEY_TAB = 258;
+    private const KEY_RIGHT = 262;
+    private const KEY_LEFT = 263;
+    private const KEY_DOWN = 264;
+    private const KEY_UP = 265;
+    private const KEY_HOME = 268;
+    private const KEY_END = 269;
+    private const KEY_KP_ENTER = 335;
+    private const KEY_LEFT_SHIFT = 340;
+    private const KEY_RIGHT_SHIFT = 344;
+
     private Widget $root;
     private Renderer2DInterface $renderer;
     private InputInterface $input;
@@ -32,6 +47,22 @@ class WidgetTree
     private ?Widget $focusedWidget = null;
     private ?Widget $pressedWidget = null;
     private ?WidgetBinder $binder = null;
+
+    /** Focus that survives this tree being rebuilt; see {@see FocusState}. */
+    private FocusState $focusState;
+    private FocusStyle $focusStyle;
+
+    /** Tab / arrow / Enter / Esc navigation. Off by default: those are common game keys. */
+    private bool $keyboardNavigation = false;
+
+    /** With navigation on, the arrow keys also move focus between plain controls. */
+    private bool $arrowsMoveFocus = false;
+
+    /** Traversal and wrap-around stay inside this subtree (a modal dialog), when set. */
+    private ?Widget $focusScope = null;
+
+    /** @var list<callable(?Widget, ?Widget): void> */
+    private array $focusListeners = [];
 
     private float $viewportWidth;
     private float $viewportHeight;
@@ -55,6 +86,7 @@ class WidgetTree
         ?UIStyle $style = null,
         float $viewportX = 0.0,
         float $viewportY = 0.0,
+        ?FocusState $focusState = null,
     ) {
         $this->root = $root;
         $this->renderer = $renderer;
@@ -64,6 +96,8 @@ class WidgetTree
         $this->style = $style ?? UIStyle::dark();
         $this->viewportX = $viewportX;
         $this->viewportY = $viewportY;
+        $this->focusState = $focusState ?? new FocusState;
+        $this->focusStyle = new FocusStyle;
     }
 
     /**
@@ -127,15 +161,501 @@ class WidgetTree
         return $this->focusedWidget;
     }
 
-    public function setFocus(?Widget $widget): void
+    /**
+     * Give focus to $widget (null clears it). $viaKeyboard marks focus that came
+     * from keys, which is what makes the focus ring show; a click never does.
+     */
+    public function setFocus(?Widget $widget, bool $viaKeyboard = false): void
     {
-        if ($this->focusedWidget instanceof TextInput) {
-            $this->focusedWidget->focused = false;
+        $previous = $this->focusedWidget;
+        if ($previous instanceof TextInput) {
+            $previous->focused = false;
         }
         $this->focusedWidget = $widget;
         if ($widget instanceof TextInput) {
             $widget->focused = true;
             $widget->cursorPos = mb_strlen($widget->text);
+        }
+        $this->focusState->widget = $widget;
+        $this->focusState->key = $widget !== null ? $this->focusKeyOf($widget) : '';
+        $this->focusState->visible = $widget !== null && $viaKeyboard;
+
+        if ($previous !== $widget) {
+            foreach ($this->focusListeners as $listener) {
+                $listener($widget, $previous);
+            }
+        }
+    }
+
+    // ── Keyboard navigation ──────────────────────────────────────
+
+    /**
+     * Turn keyboard navigation on or off. On: Tab / Shift+Tab walk the focusable
+     * widgets, Enter or Space activates the focused one, the arrow keys work
+     * inside sliders, tab bars and open dropdowns, Esc closes a dropdown or
+     * leaves focus, and the focus ring is drawn. A text field being edited keeps
+     * every key except Tab and Esc. Off (the default) changes nothing: the tree
+     * reads no keys except for the focused text field.
+     */
+    public function setKeyboardNavigation(bool $enabled): void
+    {
+        $this->keyboardNavigation = $enabled;
+    }
+
+    public function isKeyboardNavigation(): bool
+    {
+        return $this->keyboardNavigation;
+    }
+
+    /** Let the arrow keys also move focus between buttons, checkboxes and toggles. */
+    public function setArrowsMoveFocus(bool $enabled): void
+    {
+        $this->arrowsMoveFocus = $enabled;
+    }
+
+    /** Limit traversal to a subtree (null: the whole tree), e.g. while a dialog is open. */
+    public function setFocusScope(?Widget $scope): void
+    {
+        $this->focusScope = $scope;
+    }
+
+    public function getFocusStyle(): FocusStyle
+    {
+        return $this->focusStyle;
+    }
+
+    public function setFocusStyle(FocusStyle $style): void
+    {
+        $this->focusStyle = $style;
+    }
+
+    public function getFocusState(): FocusState
+    {
+        return $this->focusState;
+    }
+
+    /** True when the focus ring is being drawn: navigation on and focus set by keys. */
+    public function isFocusRingVisible(): bool
+    {
+        return $this->keyboardNavigation && $this->focusState->visible && $this->focusedWidget !== null;
+    }
+
+    /**
+     * Call $listener(?Widget $focused, ?Widget $previous) whenever focus moves
+     * to another widget or is cleared.
+     *
+     * @param callable(?Widget, ?Widget): void $listener
+     */
+    public function onFocusChange(callable $listener): void
+    {
+        $this->focusListeners[] = $listener;
+    }
+
+    /**
+     * The widgets keyboard focus visits, in order: visible, enabled, focusable
+     * widgets in document order, with {@see Widget::$focusOrder} above 0 moved to
+     * the front in ascending order.
+     *
+     * @return list<Widget>
+     */
+    public function getFocusOrder(): array
+    {
+        $found = [];
+        $this->collectFocusable($this->focusScope ?? $this->root, $found);
+
+        $explicit = [];
+        $rest = [];
+        foreach ($found as $widget) {
+            if ($widget->focusOrder > 0) {
+                $explicit[] = $widget;
+            } else {
+                $rest[] = $widget;
+            }
+        }
+        // usort is stable: equal focusOrder values keep document order.
+        usort($explicit, static fn (Widget $a, Widget $b): int => $a->focusOrder <=> $b->focusOrder);
+
+        return [...$explicit, ...$rest];
+    }
+
+    /** @param list<Widget> $out */
+    private function collectFocusable(Widget $widget, array &$out): void
+    {
+        if (!$widget->visible) {
+            return;
+        }
+        if ($widget->isFocusable()) {
+            $out[] = $widget;
+        }
+        foreach ($widget->getFocusChildren() as $child) {
+            $this->collectFocusable($child, $out);
+        }
+    }
+
+    /**
+     * Identity of a widget that survives the tree being rebuilt: its explicit
+     * accessibleId, otherwise its child-index path from the root ('' when the
+     * widget is not under this root).
+     */
+    public function focusKeyOf(Widget $widget): string
+    {
+        if ($widget->accessibleId !== '') {
+            return 'id:' . $widget->accessibleId;
+        }
+        $path = [];
+        $node = $widget;
+        while ($node !== $this->root) {
+            $parent = $node->getParent();
+            if ($parent === null) {
+                return '';
+            }
+            $index = array_search($node, $parent->getChildren(), true);
+            if ($index === false) {
+                return '';
+            }
+            $path[] = $index;
+            $node = $parent;
+        }
+
+        return 'path:' . implode('.', array_reverse($path));
+    }
+
+    /** Move focus to the next ($direction > 0) or previous focusable widget, wrapping around. */
+    public function moveFocus(int $direction): ?Widget
+    {
+        $order = $this->getFocusOrder();
+        $count = count($order);
+        if ($count === 0) {
+            return null;
+        }
+        $current = $this->focusedWidget;
+        $index = $current !== null ? array_search($current, $order, true) : false;
+        if ($index === false) {
+            $next = $direction > 0 ? 0 : $count - 1;
+        } else {
+            $next = (($index + ($direction > 0 ? 1 : -1)) % $count + $count) % $count;
+        }
+        if ($current instanceof Dropdown) {
+            $current->open = false;
+            $current->highlightedIndex = -1;
+        }
+        $this->setFocus($order[$next], true);
+        $this->scrollIntoView($order[$next]);
+
+        return $order[$next];
+    }
+
+    /**
+     * Do what a click (or Enter) on $widget does: press a button, flip a
+     * checkbox or toggle, open or close a dropdown, focus a text field. The same
+     * events fire as for the mouse. False when nothing was done (disabled, or a
+     * widget with no activation).
+     */
+    public function activate(Widget $widget): bool
+    {
+        if (!$widget->enabled || !$widget->visible) {
+            return false;
+        }
+        if ($widget instanceof Button) {
+            $widget->emit('press');
+            $widget->emit('click');
+        } elseif ($widget instanceof Checkbox) {
+            $widget->checked = !$widget->checked;
+            $widget->emit('change', $widget->checked);
+            $widget->emit('press');
+        } elseif ($widget instanceof Toggle) {
+            $widget->on = !$widget->on;
+            $widget->emit('change', $widget->on);
+            $widget->emit('press');
+        } elseif ($widget instanceof Dropdown) {
+            $widget->open = !$widget->open;
+            $widget->listScrollY = 0.0;
+            $widget->highlightedIndex = -1;
+            if ($widget->open) {
+                $widget->setHighlight($widget->selectedIndex);
+            }
+            $widget->emit('press');
+        } elseif ($widget instanceof TextInput) {
+            $this->setFocus($widget, true);
+        } else {
+            return false;
+        }
+
+        return true;
+    }
+
+    /**
+     * Step a slider or move a tab bar by $direction (+1 / -1): a slider by its
+     * key step, a tab view to the next or previous tab. False for other widgets
+     * or when the value is already at the end.
+     */
+    public function adjust(Widget $widget, int $direction): bool
+    {
+        if (!$widget->enabled) {
+            return false;
+        }
+        if ($widget instanceof Slider) {
+            $step = $widget->keyStep > 0.0 ? $widget->keyStep : ($widget->max - $widget->min) / 20.0;
+            $value = max($widget->min, min($widget->max, $widget->value + ($direction > 0 ? $step : -$step)));
+            if ($value === $widget->value) {
+                return false;
+            }
+            $widget->value = $value;
+            $widget->emit('change', $widget->value);
+
+            return true;
+        }
+        if ($widget instanceof TabView) {
+            $before = $widget->selectedIndex;
+            $widget->selectTab($widget->selectedIndex + ($direction > 0 ? 1 : -1));
+
+            return $widget->selectedIndex !== $before;
+        }
+
+        return false;
+    }
+
+    /**
+     * Set a value from outside (an assistive technology's set_value): a text
+     * field's text, a slider's value (clamped). False when the widget takes none.
+     */
+    public function setWidgetValue(Widget $widget, string|int|float $value): bool
+    {
+        if (!$widget->enabled) {
+            return false;
+        }
+        if ($widget instanceof TextInput) {
+            $widget->text = (string) $value;
+            $widget->cursorPos = mb_strlen($widget->text);
+            $widget->emit('input', $widget->text);
+
+            return true;
+        }
+        if ($widget instanceof Slider && is_numeric($value)) {
+            $widget->value = max($widget->min, min($widget->max, (float) $value));
+            $widget->emit('change', $widget->value);
+
+            return true;
+        }
+
+        return false;
+    }
+
+    /**
+     * Scroll the nearest scroll views so $widget is inside them, then lay out
+     * again so its bounds (and the focus ring) are where it now is.
+     */
+    private function scrollIntoView(Widget $widget): void
+    {
+        $moved = false;
+        for ($node = $widget->getParent(); $node !== null; $node = $node->getParent()) {
+            if (!$node instanceof ScrollView) {
+                continue;
+            }
+            $view = $node->getBounds();
+            $rect = $widget->getBounds();
+            if ($rect->y < $view->y) {
+                $node->scrollBy($rect->y - $view->y);
+                $moved = true;
+            } elseif ($rect->bottom() > $view->bottom()) {
+                $node->scrollBy($rect->bottom() - $view->bottom());
+                $moved = true;
+            }
+        }
+        if ($moved) {
+            $this->performLayout();
+        }
+    }
+
+    /**
+     * Put focus back on the widget the shared {@see FocusState} remembers: the
+     * same instance while it is still in the tree, otherwise the widget with the
+     * same focus key (the host rebuilt its rows). Focus is dropped when neither
+     * exists any more, or the widget can no longer take it (hidden, disabled,
+     * outside the focus scope).
+     */
+    private function restoreKeyboardFocus(): void
+    {
+        $state = $this->focusState;
+        if ($state->widget === null) {
+            return;
+        }
+        $order = $this->getFocusOrder();
+        if (in_array($state->widget, $order, true)) {
+            $this->focusedWidget = $state->widget;
+
+            return;
+        }
+        foreach ($order as $candidate) {
+            if ($state->key !== '' && $this->focusKeyOf($candidate) === $state->key) {
+                $this->focusedWidget = $candidate;
+                $state->widget = $candidate;
+                if ($candidate instanceof TextInput) {
+                    $candidate->focused = true;
+                }
+
+                return;
+            }
+        }
+        $this->setFocus(null);
+        $state->clear();
+    }
+
+    /**
+     * Keys while navigation is on. Returns true when a key was taken, so the
+     * game does not also see it. A focused text field keeps all keys but Tab
+     * and Esc.
+     */
+    private function handleKeyboardNavigation(): bool
+    {
+        $input = $this->input;
+        $focused = $this->focusedWidget;
+
+        if ($input->isKeyPressed(self::KEY_TAB)) {
+            $shift = $input->isKeyDown(self::KEY_LEFT_SHIFT) || $input->isKeyDown(self::KEY_RIGHT_SHIFT);
+            $this->moveFocus($shift ? -1 : 1);
+
+            return true;
+        }
+
+        if ($focused === null) {
+            return false;
+        }
+
+        if ($input->isKeyPressed(self::KEY_ESCAPE)) {
+            if ($focused instanceof Dropdown && $focused->open) {
+                $focused->open = false;
+                $focused->highlightedIndex = -1;
+            } else {
+                $this->setFocus(null);
+            }
+
+            return true;
+        }
+
+        if ($focused instanceof TextInput) {
+            return false;
+        }
+
+        $activate = $input->isKeyPressed(self::KEY_ENTER) || $input->isKeyPressed(self::KEY_KP_ENTER)
+            || $input->isKeyPressed(self::KEY_SPACE);
+        $left = $input->isKeyTyped(self::KEY_LEFT);
+        $right = $input->isKeyTyped(self::KEY_RIGHT);
+        $up = $input->isKeyTyped(self::KEY_UP);
+        $down = $input->isKeyTyped(self::KEY_DOWN);
+        $home = $input->isKeyPressed(self::KEY_HOME);
+        $end = $input->isKeyPressed(self::KEY_END);
+
+        if ($focused instanceof Dropdown) {
+            if ($focused->open) {
+                if ($up || $down) {
+                    $focused->moveHighlight($down ? 1 : -1);
+                } elseif ($home) {
+                    $focused->setHighlight(0);
+                } elseif ($end) {
+                    $focused->setHighlight(count($focused->options) - 1);
+                } elseif ($activate) {
+                    if ($focused->highlightedIndex >= 0 && $focused->highlightedIndex < count($focused->options)) {
+                        $focused->selectedIndex = $focused->highlightedIndex;
+                        $focused->open = false;
+                        $focused->highlightedIndex = -1;
+                        $focused->emit('change', $focused->selectedIndex);
+                    } else {
+                        $focused->open = false;
+                    }
+                } else {
+                    return false;
+                }
+
+                return true;
+            }
+            if ($activate || $up || $down) {
+                $this->activate($focused);
+
+                return true;
+            }
+
+            return false;
+        }
+
+        if ($focused instanceof Slider) {
+            if ($left || $down) {
+                $this->adjust($focused, -1);
+            } elseif ($right || $up) {
+                $this->adjust($focused, 1);
+            } elseif ($home) {
+                $this->setWidgetValue($focused, $focused->min);
+            } elseif ($end) {
+                $this->setWidgetValue($focused, $focused->max);
+            } else {
+                return false;
+            }
+
+            return true;
+        }
+
+        if ($focused instanceof TabView) {
+            if ($left) {
+                $this->adjust($focused, -1);
+            } elseif ($right) {
+                $this->adjust($focused, 1);
+            } elseif ($home) {
+                $focused->selectTab(0);
+            } elseif ($end) {
+                $focused->selectTab(count($focused->getTabTitles()) - 1);
+            } else {
+                return false;
+            }
+
+            return true;
+        }
+
+        if ($activate) {
+            $this->activate($focused);
+
+            return true;
+        }
+        if ($this->arrowsMoveFocus && ($left || $right || $up || $down)) {
+            $this->moveFocus($left || $up ? -1 : 1);
+
+            return true;
+        }
+
+        return false;
+    }
+
+    /** Outline the keyboard-focused widget, clipped to the scroll view it sits in. */
+    private function drawFocusRing(): void
+    {
+        $widget = $this->focusedWidget;
+        if ($widget === null || !$widget->visible) {
+            return;
+        }
+        $style = $this->focusStyle;
+        $rect = $widget->focusRect();
+        $gap = $style->offset + $style->width * 0.5;
+
+        $scissor = null;
+        for ($node = $widget->getParent(); $node !== null; $node = $node->getParent()) {
+            if ($node instanceof ScrollView) {
+                $scissor = $node->getBounds();
+                break;
+            }
+        }
+        if ($scissor !== null) {
+            $this->renderer->pushScissor($scissor->x, $scissor->y, $scissor->width, $scissor->height);
+        }
+        $this->renderer->drawRoundedRectOutline(
+            $rect->x - $gap,
+            $rect->y - $gap,
+            $rect->width + $gap * 2.0,
+            $rect->height + $gap * 2.0,
+            $style->radius,
+            $style->color,
+            $style->width,
+        );
+        if ($scissor !== null) {
+            $this->renderer->popScissor();
         }
     }
 
@@ -189,6 +709,9 @@ class WidgetTree
         // game hotkeys leak through while a field is focused.
         if ($this->focusedWidget === null) {
             $this->focusedWidget = $this->findFocusedTextInput($this->root);
+        }
+        if ($this->keyboardNavigation) {
+            $this->restoreKeyboardFocus();
         }
 
         $mouse = $this->input->getMousePosition();
@@ -252,6 +775,10 @@ class WidgetTree
             $this->pressedWidget = null;
         }
 
+        // Keyboard navigation (opt-in). Runs before the text field reads its keys
+        // so Tab can leave the field; every other key stays with the field.
+        $navigationTookKey = $this->keyboardNavigation && $this->handleKeyboardNavigation();
+
         // Keyboard input for focused text input
         if ($this->focusedWidget instanceof TextInput) {
             $this->handleTextInput($this->focusedWidget);
@@ -282,7 +809,12 @@ class WidgetTree
             || $this->hoveredWidget instanceof Toggle
             || $this->hoveredWidget instanceof Dropdown
             || $this->hoveredWidget instanceof TextInput;
-        if ($hoverIsControl || $this->focusedWidget !== null) {
+        // With navigation on, a focused button or slider does not swallow the
+        // game's keys; only a key the tree actually used, or a field being typed
+        // into, does.
+        $focusSuppresses = $this->focusedWidget !== null
+            && (!$this->keyboardNavigation || $this->focusedWidget instanceof TextInput);
+        if ($hoverIsControl || $focusSuppresses || $navigationTookKey) {
             $this->input->suppress();
         }
     }
@@ -308,6 +840,9 @@ class WidgetTree
         // are never covered by a sibling drawn later (e.g. a ScrollView below
         // the filter row). Dropdowns first, tooltip last (truly top-most).
         $this->drawOpenDropdowns();
+        if ($this->isFocusRingVisible()) {
+            $this->drawFocusRing();
+        }
         $this->drawTooltip();
     }
 
@@ -500,6 +1035,7 @@ class WidgetTree
                 // Reopen at the top of the list, not wherever it was last scrolled.
                 $hit->listScrollY = 0.0;
             }
+            $hit->highlightedIndex = -1;
         }
 
         // TabView — clicking a tab in the bar switches the active child.
@@ -684,6 +1220,7 @@ class WidgetTree
     {
         if ($widget instanceof Dropdown && $widget !== $keep) {
             $widget->open = false;
+            $widget->highlightedIndex = -1;
         }
         foreach ($widget->getChildren() as $child) {
             $this->closeDropdowns($child, $keep);
