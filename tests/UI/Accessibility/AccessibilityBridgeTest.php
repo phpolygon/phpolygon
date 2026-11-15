@@ -50,7 +50,7 @@ class AccessibilityBridgeTest extends TestCase
         $this->assertCount(1, $this->sink->updates);
         $update = $this->sink->updates[0];
         $this->assertSame('root', $update['root']);
-        $this->assertCount(3, $update['nodes']);
+        $this->assertCount(5, $update['nodes'], 'window, button, label and the two live regions');
         $this->assertSame('root', $update['nodes'][0]['id']);
         $this->assertSame('root', $update['focus']);
     }
@@ -125,7 +125,7 @@ class AccessibilityBridgeTest extends TestCase
         $bridge->sync($tree);
 
         $this->assertCount(3, $this->sink->updates);
-        $this->assertCount(1, $this->sink->tree['root']['children'], 'the window lists only the button that stayed');
+        $this->assertCount(3, $this->sink->tree['root']['children'], 'the window lists the button that stayed and the two live regions');
     }
 
     public function testUnavailableSinkIsASilentNoOp(): void
@@ -170,7 +170,7 @@ class AccessibilityBridgeTest extends TestCase
 
         $this->assertCount(2, $this->sink->updates);
         $this->assertSame('root', $this->sink->updates[1]['root']);
-        $this->assertCount(2, $this->sink->updates[1]['nodes']);
+        $this->assertCount(4, $this->sink->updates[1]['nodes']);
     }
 
     public function testBoundsTransformIsApplied(): void
@@ -370,6 +370,11 @@ class AccessibilityBridgeTest extends TestCase
         $dd->open = false;
         $this->assertTrue($bridge->sync($tree), 'and the follow-up update');
         $this->assertNull($bridge->getLastError());
+
+        $bridge->announce('Saved');
+        $bridge->announce('Saved', false);
+        $this->assertNull($bridge->getLastError(), 'the live-region nodes are valid vio nodes');
+        $this->assertTrue($bridge->isAvailable());
 
         vio_destroy($ctx);
     }
