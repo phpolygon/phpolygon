@@ -10,6 +10,7 @@ use PHPolygon\Rendering\Color;
 use PHPolygon\Rendering\Renderer2DInterface;
 use PHPolygon\Rendering\TextAlign;
 use PHPolygon\Runtime\InputInterface;
+use PHPolygon\UI\TextScale;
 use PHPolygon\UI\UIStyle;
 
 /**
@@ -57,6 +58,9 @@ class WidgetTree
 
     /** With navigation on, the arrow keys also move focus between plain controls. */
     private bool $arrowsMoveFocus = false;
+
+    /** The player's text-size factor (AccessibilitySettings::$textScale); 1.0 changes nothing. */
+    private float $textScale = 1.0;
 
     /** Traversal and wrap-around stay inside this subtree (a modal dialog), when set. */
     private ?Widget $focusScope = null;
@@ -154,6 +158,28 @@ class WidgetTree
     public function setStyle(UIStyle $style): void
     {
         $this->style = $style;
+    }
+
+    /**
+     * Scale the font size of all widget text by the player's factor
+     * (AccessibilitySettings::$textScale, or a TextScale). Widgets that size
+     * themselves from their text, wrapped labels and the tooltip grow with it;
+     * widgets with a fixed size do not, and a widget with its own styleOverride
+     * keeps that style's font size. 1.0, the default, changes nothing.
+     */
+    public function setTextScale(float $factor): void
+    {
+        $this->textScale = (new TextScale($factor))->factor;
+    }
+
+    public function getTextScale(): float
+    {
+        return $this->textScale;
+    }
+
+    private function effectiveStyle(): UIStyle
+    {
+        return $this->style->withTextScale($this->textScale);
     }
 
     public function getFocusedWidget(): ?Widget
@@ -824,9 +850,10 @@ class WidgetTree
      */
     public function performLayout(): void
     {
-        $this->root->measure($this->viewportWidth, $this->viewportHeight, $this->style);
+        $style = $this->effectiveStyle();
+        $this->root->measure($this->viewportWidth, $this->viewportHeight, $style);
         $this->root->setBounds(new Rect($this->viewportX, $this->viewportY, $this->viewportWidth, $this->viewportHeight));
-        $this->root->layout($this->style);
+        $this->root->layout($style);
     }
 
     /**
@@ -835,7 +862,7 @@ class WidgetTree
     public function draw(): void
     {
         $this->renderer->setFont($this->style->fontName);
-        $this->root->draw($this->renderer, $this->style);
+        $this->root->draw($this->renderer, $this->effectiveStyle());
         // Open dropdown lists and tooltips float above the whole tree so they
         // are never covered by a sibling drawn later (e.g. a ScrollView below
         // the filter row). Dropdowns first, tooltip last (truly top-most).
@@ -884,7 +911,7 @@ class WidgetTree
         $r = $this->renderer;
         $r->setFont($this->style->fontName);
 
-        $fontSize = 13.0;
+        $fontSize = 13.0 * $this->textScale;
         $pad = 8.0;
         $boxW = 270.0;
         $inner = $boxW - $pad * 2.0;

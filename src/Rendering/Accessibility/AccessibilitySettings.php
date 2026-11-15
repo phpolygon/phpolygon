@@ -15,6 +15,9 @@ namespace PHPolygon\Rendering\Accessibility;
  */
 final class AccessibilitySettings
 {
+    public const float MIN_TEXT_SCALE = 0.75;
+    public const float MAX_TEXT_SCALE = 3.0;
+
     public function __construct(
         /** Colour vision deficiency the image is corrected for; VioRenderer2D corrects the UI's draw colours too. */
         public readonly ColorVisionMode $colorVision = ColorVisionMode::Off,
@@ -56,6 +59,12 @@ final class AccessibilitySettings
          * (SetFocusRegion: a terminal, a dialogue) is dimmed. Costs nothing while no region is set.
          */
         public readonly float $focusDim = 0.0,
+        /**
+         * The player's text-size factor for UI text, 1 = as designed ({@see MIN_TEXT_SCALE}..{@see MAX_TEXT_SCALE}).
+         * Changes no pixel by itself: a UI applies it through {@see \PHPolygon\UI\TextScale} or
+         * WidgetTree::setTextScale(). It composes with UIScale (screen size) instead of replacing it.
+         */
+        public readonly float $textScale = 1.0,
     ) {
     }
 
@@ -97,6 +106,7 @@ final class AccessibilitySettings
         ?float $nightBoost = null,
         ?float $comfortVignette = null,
         ?float $focusDim = null,
+        ?float $textScale = null,
     ): self {
         return new self(
             colorVision: $colorVision ?? $this->colorVision,
@@ -110,6 +120,7 @@ final class AccessibilitySettings
             nightBoost: self::unit($nightBoost ?? $this->nightBoost),
             comfortVignette: self::unit($comfortVignette ?? $this->comfortVignette),
             focusDim: self::unit($focusDim ?? $this->focusDim),
+            textScale: self::textScaleRange($textScale ?? $this->textScale),
         );
     }
 
@@ -128,6 +139,7 @@ final class AccessibilitySettings
             'nightBoost' => $this->nightBoost,
             'comfortVignette' => $this->comfortVignette,
             'focusDim' => $this->focusDim,
+            'textScale' => $this->textScale,
         ];
     }
 
@@ -153,7 +165,15 @@ final class AccessibilitySettings
             nightBoost: $float('nightBoost', $d->nightBoost),
             comfortVignette: $float('comfortVignette', $d->comfortVignette),
             focusDim: $float('focusDim', $d->focusDim),
+            textScale: is_int($data['textScale'] ?? null) || is_float($data['textScale'] ?? null)
+                ? self::textScaleRange((float) $data['textScale'])
+                : $d->textScale,
         );
+    }
+
+    private static function textScaleRange(float $v): float
+    {
+        return max(self::MIN_TEXT_SCALE, min(self::MAX_TEXT_SCALE, $v));
     }
 
     private static function unit(float $v): float
