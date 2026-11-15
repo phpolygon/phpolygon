@@ -21,7 +21,10 @@
 #   PLATFORMS      space-separated targets, or "all"   (default: all)
 #                  valid: windows-x86_64 linux-x86_64 macos-arm64 macos-x86_64
 #   TYPE           a build type from build.json, or "all-types"   (default: full)
-#   VARIANT        build variant (e.g. base, steam)    (default: steam)
+#   VARIANT        build variant: "steam", "base", or "both"   (default: steam)
+#                  "both" builds steam then base, sequentially, in one run; a
+#                  Steam upload target still only ever applies to the steam
+#                  pass - the base pass skips it (see VARIANT_LIST below)
 #   SIGN_MAC       1 | 0  ad-hoc sign macOS bundles     (default: 1)
 #   MAC_HARDENED   1 | 0  sign the macOS runtime with the hardened runtime flag
 #                  (default: 0; the JIT/library entitlements are always embedded)
@@ -158,6 +161,17 @@ if [ "$INTERACTIVE" = "1" ]; then
     read -rp "Type [full]: " _t
     TYPE="${_t:-full}"
 
+    # variant
+    echo ""
+    echo "Variant:  1) steam   2) non-steam (base)   3) both"
+    read -rp "Variant [steam]: " _va
+    case "$_va" in
+        2|base) VARIANT="base" ;;
+        3|both) VARIANT="both" ;;
+        1|steam|"") VARIANT="steam" ;;
+        *) echo "  ${C_Y}unknown '$_va' - defaulting to steam${C_0}"; VARIANT="steam" ;;
+    esac
+
     # signing (only relevant if a macOS target is selected)
     if [[ "$PLATFORMS" == *macos-* ]]; then
         read -rp "Ad-hoc sign macOS bundles? [Y/n]: " _s
@@ -167,8 +181,14 @@ if [ "$INTERACTIVE" = "1" ]; then
     # optional Steam upload after the build - offer the configured targets as a
     # numbered pick list (a pre-set UPLOAD, e.g. from a CLI arg, stays the default
     # on Enter). Each line shows app id, build type and whether it sets a branch
-    # live, so 'beta'-style branch targets are picked deliberately.
+    # live, so 'beta'-style branch targets are picked deliberately. A pure "base"
+    # choice has no Steam upload target at all - don't even offer it (matches the
+    # env-driven refusal below for VARIANT=base + UPLOAD).
     echo ""
+    if [ "$VARIANT" = "base" ]; then
+        echo "Variant 'base' has no Steam upload target - skipping upload."
+        UPLOAD=""
+    else
     mapfile -t _UT < <(jq -r '.uploads | keys_unsorted[]' steam-build.json 2>/dev/null)
     if [ "${#_UT[@]}" -eq 0 ]; then
         echo "No Steam upload targets in steam-build.json - skipping upload."
@@ -208,6 +228,7 @@ if [ "$INTERACTIVE" = "1" ]; then
             UPLOAD="$(echo "$_sel" | xargs)"
         fi
     fi
+    fi
 else
     PLATFORMS="$(expand_platforms "$PLATFORMS")"
 fi
@@ -216,6 +237,27 @@ PLATFORMS="$(expand_platforms "$PLATFORMS")"
 # A Steam upload ships all four desktop depots (win + linux + universal mac), so
 # every desktop target must be built regardless of the platform selection.
 if [ -n "$UPLOAD" ]; then PLATFORMS="$ALL_TARGETS"; fi
+
+# Steam upload only ever targets the "steam" variant. Interactive mode already
+# hides the upload prompt for a pure "base" choice (above), so this only fires
+# for the env-driven case (VARIANT=base + UPLOAD set directly) - refuse the
+# whole run rather than silently dropping the upload.
+if [ -n "$UPLOAD" ] && [ "$VARIANT" = "base" ]; then
+    echo "FATAL: VARIANT=base has no Steam upload target - drop the upload argument or unset VARIANT." >&2
+    exit 1
+fi
+
+# Resolve the variant selection into the ordered list of variants to actually
+# build. "both" builds steam then base, sequentially, in this one run; any
+# other value is the existing single-pass behaviour, unchanged.
+case "$VARIANT" in
+    both) VARIANT_LIST=(steam base) ;;
+    *)    VARIANT_LIST=("$VARIANT") ;;
+esac
+VARIANT_LIST_STR=""
+for _v in "${VARIANT_LIST[@]}"; do
+    VARIANT_LIST_STR="${VARIANT_LIST_STR:+$VARIANT_LIST_STR, }$_v"
+done
 
 # ── version injection (build.json is canonical; const file is the in-game mirror) ─
 inject_version() {
@@ -267,9 +309,12 @@ if [ "$INTERACTIVE" = "1" ]; then
     echo "  version    $VERSION ${C_DIM}(was $CUR_VERSION)${C_0}"
     echo "  platforms  $PLATFORMS"
     echo "  type       $TYPE"
-    echo "  variant    $VARIANT"
+    echo "  variant    $VARIANT_LIST_STR"
     echo "  sign mac   $SIGN_MAC"
-    [ -n "$UPLOAD" ] && echo "  steam      ${C_Y}upload after build: $UPLOAD${C_0}"
+    if [ -n "$UPLOAD" ]; then
+        _upload_note=""; [ "${#VARIANT_LIST[@]}" -gt 1 ] && _upload_note=" (steam pass only)"
+        echo "  steam      ${C_Y}upload after build: $UPLOAD${_upload_note}${C_0}"
+    fi
     echo ""
     read -rp "Start build? [Y/n]: " _go
     case "$_go" in n|N|no|No) echo "Aborted."; exit 0 ;; esac
@@ -409,6 +454,19 @@ prefetch_runtime() {
     fi
 }
 
+# Run the rest of the pipeline once per resolved variant ("both" -> steam then
+# base, sequentially; every other value is today's single pass, unchanged). A
+# Steam upload target only ever applies to the steam pass: PASS_UPLOAD is $UPLOAD
+# for a single-variant run (whatever the variant), and for "both" it is $UPLOAD
+# on the steam pass, empty on the base pass (announced, not attempted).
+OVERALL_FAILS=0
+for VARIANT in "${VARIANT_LIST[@]}"; do
+    PASS_UPLOAD="$UPLOAD"
+    if [ "${#VARIANT_LIST[@]}" -gt 1 ] && [ "$VARIANT" != "steam" ]; then
+        PASS_UPLOAD=""
+        [ -n "$UPLOAD" ] && echo "  ${C_Y}variant '${VARIANT}' has no Steam upload target - skipping upload for this pass.${C_0}"
+    fi
+
 echo ""
 echo "Prefetching micro.sfx runtimes..."
 for target in $PLATFORMS; do
@@ -416,7 +474,8 @@ for target in $PLATFORMS; do
 done
 
 echo ""
-echo "${C_B}===============================================${C_0}"
+_variant_suffix=""; [ "${#VARIANT_LIST[@]}" -gt 1 ] && _variant_suffix="  ${C_C}[variant: ${VARIANT}]${C_0}"
+echo "${C_B}===============================================${C_0}${_variant_suffix}"
 echo "${C_B}  PHPolygon - Cross-platform Docker build${C_0}"
 echo "==============================================="
 printf "  %-10s %s\n" "App:" "$APP_NAME"
@@ -492,11 +551,12 @@ fi
 
 # ── Steam: prepare config + authenticate BEFORE building ─────────────────────
 # (so Steam Guard is entered up front, not after a long build). Also ensures
-# each upload target's build type is in the build set.
-if [ -n "$UPLOAD" ]; then
+# each upload target's build type is in the build set. Uses PASS_UPLOAD, not
+# UPLOAD: on the base pass of a "both" run there is nothing to prepare/auth.
+if [ -n "$PASS_UPLOAD" ]; then
     # shellcheck source=/dev/null
     source /usr/local/bin/steam-upload
-    for t in $UPLOAD; do
+    for t in $PASS_UPLOAD; do
         steam_prepare "$t" || { echo "FATAL: cannot prepare Steam target '$t'"; exit 1; }
         bt="$(steam_cfg_get ".uploads[\"$t\"].buildType")"; bt="${bt:-full}"
         case " ${TYPES[*]} " in *" $bt "*) ;; *) TYPES+=("$bt") ;; esac
@@ -548,9 +608,9 @@ done
 
 TOTAL=$(( SECONDS - TOTAL_START ))
 
-# ── summary ───────────────────────────────────────────────────────────────────
+# ── summary (one per variant pass) ────────────────────────────────────────────
 echo ""
-echo "${C_B}===============================================${C_0}"
+echo "${C_B}===============================================${C_0}${_variant_suffix}"
 echo "${C_B}  Build complete${C_0}  -  ${TOTAL}s  ($(uname -m), $(nproc) cpus)"
 echo "==============================================="
 printf "  ${C_B}%-15s %-6s %5s %7s %-22s %s${C_0}\n" "TARGET" "TYPE" "TIME" "SIZE" "SIGNATURE" "OUTPUT"
@@ -597,7 +657,7 @@ if [ "$fails" -eq 0 ]; then
     done
     echo ""
 fi
-if [ -n "$UPLOAD" ] && [ "$fails" -eq 0 ] && [ -f scripts/verify_build.php ]; then
+if [ -n "$PASS_UPLOAD" ] && [ "$fails" -eq 0 ] && [ -f scripts/verify_build.php ]; then
     echo "${C_B}=== Build verification (project) ===${C_0}"
     declare -A _verified=()
     for rf in "${RESULTS[@]}"; do
@@ -615,7 +675,7 @@ if [ -n "$UPLOAD" ] && [ "$fails" -eq 0 ] && [ -f scripts/verify_build.php ]; th
     done
     # Fail closed: any upload target whose type was not natively verified still
     # gets the source/config check so a bad build config cannot slip through.
-    for t in $UPLOAD; do
+    for t in $PASS_UPLOAD; do
         bt="$(steam_cfg_get ".uploads[\"$t\"].buildType")"; bt="${bt:-full}"
         if [ -z "${_verified[$bt]:-}" ] && ! php scripts/verify_build.php --type "$bt"; then
             fails=$((fails+1))
@@ -624,15 +684,16 @@ if [ -n "$UPLOAD" ] && [ "$fails" -eq 0 ] && [ -f scripts/verify_build.php ]; th
     echo ""
 fi
 
-# ── Steam upload (only when every build succeeded) ───────────────────────────
-if [ -n "$UPLOAD" ] && [ "$fails" -eq 0 ]; then
+# ── Steam upload (only when every build succeeded; PASS_UPLOAD is empty on the
+# base pass of a "both" run - see the loop header above) ─────────────────────
+if [ -n "$PASS_UPLOAD" ] && [ "$fails" -eq 0 ]; then
     echo "${C_B}=== Steam upload ===${C_0}"
     # All targets in one steamcmd session (one login), live status per app.
     # shellcheck disable=SC2086
-    steam_upload_many $UPLOAD || { echo "  ${C_R}Steam upload failed${C_0}"; fails=$((fails+1)); }
+    steam_upload_many $PASS_UPLOAD || { echo "  ${C_R}Steam upload failed${C_0}"; fails=$((fails+1)); }
     echo ""
     [ "$fails" -eq 0 ] && echo "  ${C_G}Steam upload(s) complete.${C_0}  Build logs in steam/output/."
-elif [ -n "$UPLOAD" ]; then
+elif [ -n "$PASS_UPLOAD" ]; then
     echo "  ${C_Y}Skipping Steam upload${C_0} - not all targets built."
 fi
 
@@ -651,6 +712,10 @@ if [ -n "${PHPOLYGON_WORKDIR:-}" ] && [ -n "${PHPOLYGON_COPY_OUT:-}" ]; then
     done
 fi
 
-# clean up scratch result files (not the cache volume)
+# clean up scratch result files (not the cache volume) before the next pass
+# (or exit, for a single-variant run)
 rm -f /tmp/res-*-* /tmp/buildlog-*-* 2>/dev/null || true
-exit "$(( fails > 0 ? 1 : 0 ))"
+OVERALL_FAILS=$(( OVERALL_FAILS + fails ))
+done   # VARIANT in VARIANT_LIST
+
+exit "$(( OVERALL_FAILS > 0 ? 1 : 0 ))"

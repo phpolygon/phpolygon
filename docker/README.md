@@ -134,10 +134,14 @@ build/macos-x86_64-steam/<App>.app        # ad-hoc signed
 ### Interactive mode
 
 Add `-it` (allocate a TTY) and the build asks you, up front, for the **target
-version**, **platforms**, **build type** and **signing**, then shows a confirm
-prompt. The chosen version is written into the game's `build.json` (`version`)
-and its version constant file (auto-detected `bootstrap_version.php` →
-`GAME_VERSION`) before building - one flow for every game.
+version**, **platforms**, **build type**, **variant** (steam / non-steam
+base / both) and **signing**, then shows a confirm prompt. The chosen version
+is written into the game's `build.json` (`version`) and its version constant
+file (auto-detected `bootstrap_version.php` → `GAME_VERSION`) before building -
+one flow for every game. Picking "both" builds the steam and base variants
+sequentially in the same run; a Steam upload (asked next) still only ever
+applies to the steam pass, so a pure "base" choice skips the upload prompt
+entirely.
 
 ```bash
 docker run --rm -it \
@@ -224,7 +228,7 @@ docker run --rm --platform linux/amd64 \
 | `VERSION` | _(keep)_ | version to stamp into `build.json` + the version const file before building |
 | `PLATFORMS` | `all` | `all`, or any subset of `windows-x86_64 linux-x86_64 macos-arm64 macos-x86_64` |
 | `TYPE` | `full` | `full`, any build type from the game's `build.json`, or `all-types` |
-| `VARIANT` | `steam` | any variant the engine supports (e.g. `base`, `steam`) |
+| `VARIANT` | `steam` | any variant the engine supports (e.g. `base`, `steam`), or `both` (builds steam then base, sequentially, in one run; a Steam upload target still only applies to the steam pass) |
 | `SIGN_MAC` | `1` | `1`, `0` |
 | `PHP_VERSION` | `8.5` | micro.sfx runtime PHP version (matches `StaticPhpResolver`) |
 | `SPC_REPO` | `hmennen90/static-php-cli` | static-php-cli releases repo (matches `StaticPhpResolver::GITHUB_REPO`) |
