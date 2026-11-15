@@ -3087,6 +3087,33 @@ otherwise reads no extra keys, draws no extra pixel and sends nothing anywhere.
 - Tests are headless: `tests/UI/Accessibility/RecordingAccessibilitySink` enforces vio's contract (roles, actions,
   unique ids, references). One test runs the mapped tree through the real `vio_a11y_update` of a headless window and
   skips when that is not available; it proves the contract, not what a screen reader says.
+- `Widget::$accessibleRole` overrides the role (any role of `WidgetAccessibilityMapper::ROLES`, unknown names are
+  ignored). A container marked `list`, `list_box`, `menu`, `tree`, `table` reports its rows as `list_item`,
+  `list_box_option`, `menu_item`, `tree_item`, `row` even when a row is a plain layout box (`Repeater` included).
+  `accessibleLabel`, `accessibleDescription`, `accessibleRole`, `accessibleId`, `focusable`, `focusOrder` are on every
+  widget type and round-trip through `WidgetSerializer` and `WidgetCodeGenerator`.
+- A toast like "Research finished" is `$bridge->announce($text)`; it leaves focus alone.
+
+**Text size** (`AccessibilitySettings::$textScale`, 0.75..3.0, default 1.0, saved with the accessibility settings):
+- `WidgetTree::setTextScale($settings->textScale)` multiplies the font size of all widget text (`UIStyle::withTextScale`);
+  widgets that size from their text, wrapped text and the tooltip grow, fixed-size widgets and widgets with their own
+  `styleOverride` do not. At 1.0 the style object is the same and layout and draw calls are identical.
+- It composes with `UIScale` (screen size) rather than replacing it: `ScaledRenderer2D` multiplies the font size it is
+  asked for, which already includes the text factor.
+- A game on a fixed design grid (every rectangle at hard-coded pixel coordinates) cannot reflow: scaling only its text
+  overflows its boxes. For those games `PHPolygon\UI\TextScale` is the API: `fromSettings()`, `->factor`, `font()`,
+  `box()`, `measure()` / `measureBox()` (measure at the scaled size), `capped($max)` for spots with no room, `apply($style)`.
+  Giving the text room is the game's layout work; the engine cannot do it for a fixed grid.
+
+**Rebinding and colour vision**
+- `InputBinding` has `MOD_SHIFT/CONTROL/ALT/SUPER` bits (`InputBinding::key(258, MOD_SHIFT)`): the binding fires while
+  those modifiers are held; 0 ignores modifiers as before. Saved overrides gain a `modifiers` field only when set.
+  `KeyCapture::start(withModifiers: true)` captures them, `KeyLabel` prints `Shift+Tab`. `InputMap::exportOverrides()` /
+  `importOverrides()` already carried the player's rebinds as a plain array (game stores it), with reserved keys,
+  locked actions, conflict policy and a bindable filter.
+- The engine hands colour-vision correction to `$engine->renderer2D` only if it is an `EffectRenderer2DInterface`
+  (`GraphicsSettingsManager::applyToRenderer()`). A game decorator that wraps the renderer must implement it; the
+  `ForwardsEffects` trait does that by forwarding, and after swapping the renderer call `applyToRenderer()` once.
 - Not verified on a real screen reader (Narrator, NVDA, VoiceOver, Orca). Open php-vio wishes: a `live` node property
   (polite / assertive) for `announce()`, `selected` (tabs, list options) and `expanded` (combo box) instead of the
   `checked` stand-in, and node removal (src/vio_a11y.c has none that a grep finds; the bridge only unlinks a gone
