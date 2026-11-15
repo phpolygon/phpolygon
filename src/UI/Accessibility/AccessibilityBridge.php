@@ -94,6 +94,8 @@ final class AccessibilityBridge
      */
     public function invalidate(): void
     {
+        $this->failed = false;
+        $this->lastError = null;
         $this->sent = [];
         $this->sentFocus = null;
         $this->started = false;
@@ -138,8 +140,10 @@ final class AccessibilityBridge
     {
         $nodes = $snapshot->nodes;
         // The live regions hang off the window for the life of the bridge.
-        $nodes[$snapshot->rootId]['children'][] = self::LIVE_POLITE;
-        $nodes[$snapshot->rootId]['children'][] = self::LIVE_ASSERTIVE;
+        $rootNode = $nodes[$snapshot->rootId];
+        $rootChildren = is_array($rootNode['children'] ?? null) ? $rootNode['children'] : [];
+        $rootNode['children'] = [...$rootChildren, self::LIVE_POLITE, self::LIVE_ASSERTIVE];
+        $nodes[$snapshot->rootId] = $rootNode;
         $nodes[self::LIVE_POLITE] = $this->liveNode('polite');
         $nodes[self::LIVE_ASSERTIVE] = $this->liveNode('assertive');
 
@@ -226,7 +230,7 @@ final class AccessibilityBridge
             return;
         }
         if ($ok) {
-            $this->sent[$node['id']] = $node;
+            $this->sent[$polite ? self::LIVE_POLITE : self::LIVE_ASSERTIVE] = $node;
         } else {
             $this->failed = true;
         }

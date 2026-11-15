@@ -73,6 +73,12 @@ final class WidgetAccessibilityMapper
         $root['children'] = $top;
         $nodes = [self::ROOT_ID => $root] + $this->nodes;
 
+        return new AccessibilitySnapshot(self::ROOT_ID, $nodes, $this->targets, $this->focusNodeId($tree));
+    }
+
+    /** The node the tree's focused widget stands for, or null when nothing mapped has focus. */
+    private function focusNodeId(WidgetTree $tree): ?string
+    {
         $focusId = null;
         $focused = $tree->getFocusedWidget();
         if ($focused !== null) {
@@ -87,7 +93,7 @@ final class WidgetAccessibilityMapper
             }
         }
 
-        return new AccessibilitySnapshot(self::ROOT_ID, $nodes, $this->targets, $focusId);
+        return $focusId;
     }
 
     /**

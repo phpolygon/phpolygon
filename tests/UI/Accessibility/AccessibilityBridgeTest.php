@@ -173,6 +173,33 @@ class AccessibilityBridgeTest extends TestCase
         $this->assertCount(4, $this->sink->updates[1]['nodes']);
     }
 
+    public function testInvalidateAlsoClearsAFailure(): void
+    {
+        $sink = new class extends RecordingAccessibilitySink {
+            public bool $fail = true;
+
+            public function update(array $update): bool
+            {
+                if ($this->fail) {
+                    throw new \ValueError('rejected');
+                }
+
+                return parent::update($update);
+            }
+        };
+        $bridge = new AccessibilityBridge($sink);
+        $tree = $this->tree((new VBox())->addChild(new Button('OK')));
+        $bridge->sync($tree);
+        $this->assertFalse($bridge->isAvailable());
+
+        $sink->fail = false;
+        $bridge->invalidate();
+
+        $this->assertTrue($bridge->isAvailable());
+        $this->assertNull($bridge->getLastError());
+        $this->assertTrue($bridge->sync($tree));
+    }
+
     public function testBoundsTransformIsApplied(): void
     {
         $root = (new VBox())->addChild(new Button('OK'));
@@ -381,14 +408,12 @@ class AccessibilityBridgeTest extends TestCase
 
     public function testVioSinkIsUnavailableWithoutTheFunctionOrFeature(): void
     {
-        if (function_exists('vio_a11y_update')) {
-            $ctx = vio_create('null', ['width' => 64, 'height' => 48]);
-            $sink = new VioAccessibilitySink($ctx);
-            $this->assertSame(vio_platform_info()['accessibility'], $sink->isAvailable());
-            vio_destroy($ctx);
-
-            return;
+        if (!function_exists('vio_a11y_update')) {
+            $this->markTestSkipped('php-vio with vio_a11y_update is not loaded');
         }
-        $this->assertFalse((new VioAccessibilitySink(new \stdClass()))->isAvailable());
+        $ctx = vio_create('null', ['width' => 64, 'height' => 48]);
+        $sink = new VioAccessibilitySink($ctx);
+        $this->assertSame(vio_platform_info()['accessibility'], $sink->isAvailable());
+        vio_destroy($ctx);
     }
 }
