@@ -26,6 +26,9 @@ class Slider extends Widget
      */
     public string $valueText = '';
 
+    /** How far one arrow key press moves the value with keyboard navigation; 0 = a twentieth of the range. */
+    public float $keyStep = 0.0;
+
     public function __construct(string $label = '', float $value = 0.0, float $min = 0.0, float $max = 1.0)
     {
         parent::__construct();
@@ -34,6 +37,11 @@ class Slider extends Widget
         $this->min = $min;
         $this->max = $max;
         $this->padding = EdgeInsets::symmetric(horizontal: 4.0, vertical: 4.0);
+    }
+
+    protected function focusableByDefault(): bool
+    {
+        return true;
     }
 
     public function measure(float $availableWidth, float $availableHeight, UIStyle $style): void

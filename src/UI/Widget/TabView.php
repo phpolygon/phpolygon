@@ -67,6 +67,11 @@ class TabView extends Widget
         return $children[$index] ?? null;
     }
 
+    protected function focusableByDefault(): bool
+    {
+        return true;
+    }
+
     public function measure(float $availableWidth, float $availableHeight, UIStyle $style): void
     {
         $style = $this->resolveStyle($style);
@@ -263,6 +268,26 @@ class TabView extends Widget
             $this->selectedIndex = $index;
             $this->emit('change', $index);
         }
+    }
+
+    /** Only the shown tab's content is reachable by keyboard and by a screen reader. */
+    public function getFocusChildren(): array
+    {
+        $selected = $this->selectedChild();
+
+        return $selected !== null ? [$selected] : [];
+    }
+
+    /** The selected tab button: where the focus ring goes. */
+    public function focusRect(): Rect
+    {
+        return $this->getTabRect($this->clampedIndex());
+    }
+
+    /** @return list<string> Resolved tab titles (explicit, then child titles, then "Tab N"). */
+    public function getTabTitles(): array
+    {
+        return $this->tabTitles();
     }
 
     /** @return list<string> Resolved tab titles (explicit, then child titles, then "Tab N"). */
