@@ -9,6 +9,7 @@ use PHPolygon\Math\Rect;
 use PHPolygon\Math\Vec2;
 use PHPolygon\Rendering\Effect2D\Effect2DRegistry;
 use PHPolygon\Rendering\Effect2D\EffectRenderer2DInterface;
+use PHPolygon\Rendering\Effect2D\ForwardsEffects;
 use PHPolygon\UI\UIScale;
 
 /**
@@ -29,6 +30,9 @@ use PHPolygon\UI\UIScale;
  */
 final class ScaledRenderer2D implements Renderer2DInterface, EffectRenderer2DInterface, SdfFontRenderer2DInterface, GpuImageRenderer2DInterface
 {
+    // effectAvailable() and applyEffectSettings() forward; drawEffect() below scales the padding first.
+    use ForwardsEffects;
+
     public function __construct(
         private readonly Renderer2DInterface $inner,
         private readonly UIScale $scale,
@@ -307,18 +311,10 @@ final class ScaledRenderer2D implements Renderer2DInterface, EffectRenderer2DInt
         $this->inner->drawGpuImage($texture, $srcW, $srcH, $x, $y, $w, $h, $opacity);
     }
 
-    public function effectAvailable(string $name): bool
+    protected function effectTarget(): Renderer2DInterface
     {
-        return $this->inner instanceof EffectRenderer2DInterface && $this->inner->effectAvailable($name);
+        return $this->inner;
     }
-
-    public function applyEffectSettings(GraphicsSettings $settings): void
-    {
-        if ($this->inner instanceof EffectRenderer2DInterface) {
-            $this->inner->applyEffectSettings($settings);
-        }
-    }
-
     public function endOffscreenFrame(): void
     {
         $this->inner->endOffscreenFrame();
