@@ -42,7 +42,8 @@ final class VioAccessibilitySink implements AccessibilitySink
             return false;
         }
 
-        return vio_a11y_update($this->context, $update);
+        // Cast: CI's vio stubs predate vio_a11y_update (declared mixed there).
+        return (bool) vio_a11y_update($this->context, $update);
     }
 
     public function setActionHandler(callable $handler): void
