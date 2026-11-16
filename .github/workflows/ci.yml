@@ -70,11 +70,14 @@ jobs:
           git clone https://github.com/mario-deluna/php-glfw
           cd php-glfw
           sudo phpize
-          ./configure --enable-glfw LIBS="-lstdc++"
-          make -j"$(nproc)"
+          ./configure --enable-glfw
+          # php-glfw has C++ sources but PHP's link line only carries GLFW_SHARED_LIBADD (-lglfw), no libstdc++:
+          # on the ubuntu-26.04 runner the extension then fails to load ('undefined symbol: __gxx_personality_v0').
+          make -j"$(nproc)" GLFW_SHARED_LIBADD="-lglfw -lstdc++"
           sudo make install
           cd ..
           echo 'extension=glfw.so' | sudo tee -a "$(php -r 'echo php_ini_loaded_file();')"
+          php -m 2>/dev/null | grep -qix glfw || { echo "glfw did not load" >&2; php -m >&2; exit 1; }
 
       - name: Install Composer dependencies
         run: composer install --no-interaction --ignore-platform-reqs
@@ -169,11 +172,14 @@ jobs:
           git clone https://github.com/mario-deluna/php-glfw
           cd php-glfw
           sudo phpize
-          ./configure --enable-glfw LIBS="-lstdc++"
-          make -j"$(nproc)"
+          ./configure --enable-glfw
+          # php-glfw has C++ sources but PHP's link line only carries GLFW_SHARED_LIBADD (-lglfw), no libstdc++:
+          # on the ubuntu-26.04 runner the extension then fails to load ('undefined symbol: __gxx_personality_v0').
+          make -j"$(nproc)" GLFW_SHARED_LIBADD="-lglfw -lstdc++"
           sudo make install
           cd ..
           echo 'extension=glfw.so' | sudo tee -a "$(php -r 'echo php_ini_loaded_file();')"
+          php -m 2>/dev/null | grep -qix glfw || { echo "glfw did not load" >&2; php -m >&2; exit 1; }
 
       - name: Install Composer dependencies
         run: composer install --no-interaction --ignore-platform-reqs
@@ -231,11 +237,14 @@ jobs:
           git clone https://github.com/mario-deluna/php-glfw
           cd php-glfw
           sudo phpize
-          ./configure --enable-glfw LIBS="-lstdc++"
-          make -j"$(nproc)"
+          ./configure --enable-glfw
+          # php-glfw has C++ sources but PHP's link line only carries GLFW_SHARED_LIBADD (-lglfw), no libstdc++:
+          # on the ubuntu-26.04 runner the extension then fails to load ('undefined symbol: __gxx_personality_v0').
+          make -j"$(nproc)" GLFW_SHARED_LIBADD="-lglfw -lstdc++"
           sudo make install
           cd ..
           echo 'extension=glfw.so' | sudo tee -a "$(php -r 'echo php_ini_loaded_file();')"
+          php -m 2>/dev/null | grep -qix glfw || { echo "glfw did not load" >&2; php -m >&2; exit 1; }
 
       - name: Install Composer dependencies
         run: composer install --no-interaction --ignore-platform-reqs
