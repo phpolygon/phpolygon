@@ -34,7 +34,11 @@ class UIContext
 {
     private Renderer2DInterface $renderer;
     private InputInterface $input;
+    /** The style every widget reads: {@see $baseStyle} with the text scale applied (the same object at 1.0). */
     private UIStyle $style;
+    /** The style as the game set it, before the text scale. */
+    private UIStyle $baseStyle;
+    private float $textScale = 1.0;
 
     /** Layout cursor — auto-advances after each widget */
     private float $cursorX = 0.0;
@@ -200,7 +204,7 @@ class UIContext
     ) {
         $this->renderer = $renderer;
         $this->input = $input;
-        $this->style = $style ?? UIStyle::dark();
+        $this->style = $this->baseStyle = $style ?? UIStyle::dark();
         $system = $input instanceof VioInput;
         $this->clipboard = $clipboard ?? ($system ? new VioClipboard() : new MemoryClipboard());
         $this->keyboardLayout = $keyboardLayout ?? ($system ? new VioKeyboardLayout() : new UsKeyboardLayout());
@@ -233,14 +237,81 @@ class UIContext
         return $this->input;
     }
 
+    /**
+     * The style the widgets draw with: with a text scale set, its fontSize is
+     * already scaled. Read this for hand-drawn text next to the widgets; do not
+     * pass it back to {@see setStyle()} (that takes the unscaled style).
+     */
     public function getStyle(): UIStyle
     {
         return $this->style;
     }
 
+    /** The style as set by the game, without the text scale. */
+    public function getBaseStyle(): UIStyle
+    {
+        return $this->baseStyle;
+    }
+
+    /** Set the (unscaled) style; the current text scale is applied on top of it. */
     public function setStyle(UIStyle $style): void
     {
-        $this->style = $style;
+        $this->baseStyle = $style;
+        $this->style = $style->withTextScale($this->textScale);
+    }
+
+    /**
+     * Opt-in text size for the immediate-mode widgets (the player's
+     * AccessibilitySettings::$textScale), clamped to 0.75..3.0. Every font size the
+     * widgets use is multiplied by it, and so is everything they derive from text:
+     * row and button heights, auto-sized label and button widths, text field and
+     * text area line heights. Paddings, borders and region widths stay.
+     *
+     * A control with a fixed width (a button or dropdown given a width, or one that
+     * fills the region) keeps that width: its text is shrunk to fit but never below
+     * the unscaled size, so at the limit it overflows exactly as it would at 1.0
+     * instead of getting smaller than designed. Sizes a caller passes in explicitly
+     * (wrapButton's $fontSize, text drawn by hand) are used as given: scale those
+     * with {@see textScale()}.
+     *
+     * 1.0 (the default) leaves $style the very same object and every draw call
+     * unchanged.
+     */
+    public function setTextScale(float $factor): void
+    {
+        $this->textScale = (new TextScale($factor))->factor;
+        $this->style = $this->baseStyle->withTextScale($this->textScale);
+    }
+
+    /** The effective text scale factor (1.0 when none is set). */
+    public function getTextScale(): float
+    {
+        return $this->textScale;
+    }
+
+    /** The text scale as a {@see TextScale}, for the game's own text: font(), measure(), box(). */
+    public function textScale(): TextScale
+    {
+        return new TextScale($this->textScale);
+    }
+
+    /**
+     * Font size for $text inside $availableWidth: the scaled size, shrunk so the text
+     * fits, but not below the unscaled size. At scale 1.0, or when the text fits,
+     * the style's size untouched.
+     */
+    private function fitFontSize(string $text, float $availableWidth): float
+    {
+        $size = $this->style->fontSize;
+        if ($this->textScale === 1.0 || $text === '' || $availableWidth <= 0.0) {
+            return $size;
+        }
+        $measured = $this->renderer->measureText($text, $size)->width;
+        if ($measured <= $availableWidth || $measured <= 0.0) {
+            return $size;
+        }
+
+        return max($this->baseStyle->fontSize, $size * $availableWidth / $measured);
     }
 
     /**
@@ -522,7 +593,10 @@ class UIContext
 
         $rect = new Rect($this->cursorX, $this->cursorY, $w, $h);
         [$clicked, $textColor] = $this->buttonBody($id, $rect, $disabled);
-        $this->renderer->drawTextCentered($label, $rect->x + $w * 0.5, $rect->y + $h * 0.5, $s->fontSize, $textColor);
+        // A fixed width (given, or the region's) keeps its width under a text scale: the label shrinks to fit.
+        $fixedWidth = $width > 0.0 || $this->flow !== 'horizontal';
+        $size = $fixedWidth ? $this->fitFontSize($label, $w - $s->buttonPaddingH * 2) : $s->fontSize;
+        $this->renderer->drawTextCentered($label, $rect->x + $w * 0.5, $rect->y + $h * 0.5, $size, $textColor);
 
         if ($clicked && Log::$hooks) {
             Log::ui('click', [$id, $label]);
@@ -1950,7 +2024,8 @@ class UIContext
         $this->renderer->drawRectOutline($fieldRect->x, $fieldRect->y, $w, $h, $s->borderColor, $s->borderWidth);
 
         $selected = $options[$selectedIndex] ?? '';
-        $this->renderer->drawText($selected, $fieldRect->x + $s->padding, $fieldRect->y + $s->padding, $s->fontSize, $s->textColor);
+        // The field keeps its width under a text scale: the text shrinks to fit beside the arrow.
+        $this->renderer->drawText($selected, $fieldRect->x + $s->padding, $fieldRect->y + $s->padding, $this->fitFontSize($selected, $w - $s->padding * 2 - $s->fontSize), $s->textColor);
 
         $arrow = $isOpen ? '▲' : '▼';
         $this->renderer->drawText($arrow, $fieldRect->right() - $s->fontSize - $s->padding, $fieldRect->y + $s->padding, $s->fontSize * 0.75, $s->textColor);
@@ -2052,7 +2127,7 @@ class UIContext
                         $this->renderer->drawRoundedRect($fieldRect->x, $optY, $w, $rowH, $s->borderRadius, $s->accentColor->withAlpha(0.25));
                     }
 
-                    $this->renderer->drawText($options[$i], $fieldRect->x + $s->padding, $optY + $s->padding, $s->fontSize, $s->textColor);
+                    $this->renderer->drawText($options[$i], $fieldRect->x + $s->padding, $optY + $s->padding, $this->fitFontSize($options[$i], $w - $s->padding * 2), $s->textColor);
                 }
 
                 if ($scrollable && $maxOffset > 0) {
