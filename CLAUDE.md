@@ -3084,7 +3084,7 @@ otherwise reads no extra keys, draws no extra pixel and sends nothing anywhere.
 - `announce(string $text, bool $polite = true)`: two permanent children of the window, a `status` node (polite) and an
   `alert` node (assertive), whose label is the message; a repeat flips a trailing zero-width space. vio has no `live`
   property, so whether a platform speaks the change by itself is unverified (see below).
-- Tests are headless: `tests/UI/Accessibility/RecordingAccessibilitySink` enforces vio's contract (roles, actions,
+- Tests are headless: `PHPolygon\Testing\RecordingAccessibilitySink` enforces vio's contract (roles, actions,
   unique ids, references). One test runs the mapped tree through the real `vio_a11y_update` of a headless window and
   skips when that is not available; it proves the contract, not what a screen reader says.
 - `Widget::$accessibleRole` overrides the role (any role of `WidgetAccessibilityMapper::ROLES`, unknown names are
@@ -3093,6 +3093,49 @@ otherwise reads no extra keys, draws no extra pixel and sends nothing anywhere.
   `accessibleLabel`, `accessibleDescription`, `accessibleRole`, `accessibleId`, `focusable`, `focusOrder` are on every
   widget type and round-trip through `WidgetSerializer` and `WidgetCodeGenerator`.
 - A toast like "Research finished" is `$bridge->announce($text)`; it leaves focus alone.
+
+**Several trees per window (layers)** — opt-in, `sync(WidgetTree)` stays the one-tree case with unchanged ids:
+- `$bridge->syncLayers([new AccessibilityLayer($tree, 'panel'), new AccessibilityLayer($dialog, 'dialog', modal: true,
+  label: 'Settings'), ...])`, lowest layer first. `AccessibilityLayer(WidgetTree $tree, string $name, bool $modal = false,
+  ?callable $boundsTransform = null, string $label = '')`; a bare `WidgetTree` in the list is named `layerN` by position
+  (not stable when layers come and go: name them).
+- One window root, one subtree per layer under a node `layer:<name>` (role `pane`, `dialog` when modal); every widget id
+  in it is prefixed `layer:<name>/`. Ids therefore depend on the layer name only, not on position or on the other layers:
+  a layer appearing, vanishing or moving in the order resends the root's child list (plus that layer's nodes when new).
+  Reuse the same name for the same logical layer every frame, also when the tree object is rebuilt. Two layers with one
+  name get `#2`.
+- Modal: every layer below the topmost modal layer is left out of the window's children. This is "not referencing" rather
+  than `disabled`, because vio's update has no way to hide or disable a subtree and a disabled subtree would still be
+  walked by a screen reader. Focus is the focused widget of the topmost visible layer that has one (else the window);
+  requests for nodes of a hidden layer are dropped; requests for a visible node go to that layer's own tree.
+- `boundsTransform` of a layer maps its tree into the space of the bridge's transform; the bridge's transform is applied
+  after it. `announce()` stays global (two children of the window root).
+- Limit: php-vio's update adds and replaces nodes but has no removal (src/vio_a11y.c, checked 2026-11). A removed or hidden
+  layer is detached from the root's children, so assistive technology cannot reach it, but its nodes stay allocated in
+  vio's table for the life of the window (a returning layer reuses them). Layer names should come from a bounded set.
+- Verified headlessly with `RecordingAccessibilitySink` only (`tests/UI/Accessibility/AccessibilityLayersTest`).
+
+**Test doubles a game can use** (in `src/Testing`, so they are vendored; the engine's `tests/` are not):
+`PHPolygon\Testing\RecordingAccessibilitySink` (records `updates`, keeps the merged `tree`/`root`/`focus`, enforces vio's
+contract, `refuse = true` makes `update()` answer false, `request($id, $action, $value)` plays an action from assistive
+technology, `sentIds($i)`) and `PHPolygon\Testing\ScriptedInput` (non-final `InputInterface`: `press`, `release`, `hold`,
+`repeat`, `type`, `setMouse`, `clickMouse`, `setScroll`, `endFrame()` clears the one-frame state).
+
+**Text size in the immediate-mode `UIContext`** — opt-in, `$ui->setTextScale($settings->textScale)`:
+- Clamped 0.75..3.0 (like `AccessibilitySettings`). `getStyle()` then returns the style with the scaled `fontSize`
+  (`getBaseStyle()` the unscaled one; `setStyle()` takes the unscaled one and re-applies the scale). Everything the widgets
+  derive from `fontSize` scales with it: label/button/checkbox/dropdown/text field/slider/progress/panel heights, auto-sized
+  label and horizontal-button widths, text area line height and wheel steps. Paddings, borders and region widths stay.
+- Fixed width rule: a button (given a width, or filling a vertical region) and a dropdown keep their width; their text
+  shrinks to fit (shrink-to-fit by measuring) but never below the unscaled size, so at the limit it overflows exactly as it
+  does at 1.0. Auto-sized horizontal buttons grow instead. Text fields clip as before. Sizes the caller passes explicitly
+  (`wrapButton($fontSize)`, `fitButtonLabels($minFontSize)`, hand-drawn text) are used as given.
+- `getTextScale(): float` and `textScale(): TextScale` give the game the effective factor for its own text
+  (`font()`, `measure()`, `box()`). At 1.0 (default) `getStyle()` is the same object and the draw calls are identical to
+  the code before the option existed (md5 of a recorded scene compared on the old code, 2026-11-16).
+- A game that lays out on hard-coded rectangles still has to give the grown text room itself (see Text size above).
+- RTL: the engine has no mirroring renderer (only `UIContext::$rtlMirrorWidth` for hit-tests); a game's own mirroring
+  decorator using `ForwardsEffects` must mirror `drawEffect()` itself by overriding it.
 
 **Text size** (`AccessibilitySettings::$textScale`, 0.75..3.0, default 1.0, saved with the accessibility settings):
 - `WidgetTree::setTextScale($settings->textScale)` multiplies the font size of all widget text (`UIStyle::withTextScale`);

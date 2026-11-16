@@ -59,79 +59,132 @@ class RecordingAccessibilitySink implements AccessibilitySink
         if (!$this->available || $this->refuse) {
             return false;
         }
+        $rawNodes = $update['nodes'] ?? [];
+        if (!is_array($rawNodes)) {
+            throw new \TypeError('"nodes" must be a list of nodes');
+        }
+
         $seen = [];
-        foreach ($update['nodes'] ?? [] as $node) {
-            $id = $node['id'] ?? null;
-            if (!is_string($id) || $id === '') {
-                throw new \ValueError('node needs a non-empty string "id"');
+        $nodes = [];
+        foreach ($rawNodes as $node) {
+            if (!is_array($node)) {
+                throw new \TypeError('a node must be an array');
             }
-            if (isset($seen[$id])) {
-                throw new \ValueError("node id \"$id\" appears twice");
-            }
-            $seen[$id] = true;
-            if (!in_array($node['role'] ?? null, self::ROLES, true)) {
-                throw new \ValueError("node \"$id\" needs a known \"role\"");
-            }
-            foreach (['label', 'description'] as $stringKey) {
-                if (isset($node[$stringKey]) && !is_string($node[$stringKey])) {
-                    throw new \TypeError("node option \"$stringKey\" must be a string");
-                }
-            }
-            if (isset($node['value']) && !is_string($node['value']) && !is_int($node['value']) && !is_float($node['value'])) {
-                throw new \TypeError("node \"$id\" \"value\" must be a string or a number");
-            }
-            foreach ($node['actions'] ?? [] as $action) {
-                if (!in_array($action, self::ACTIONS, true)) {
-                    throw new \ValueError("node \"$id\" has an unknown action");
-                }
-            }
-            if (isset($node['bounds'])) {
-                $b = $node['bounds'];
-                if (!is_array($b) || count($b) !== 4) {
-                    throw new \ValueError("node \"$id\" \"bounds\" must be [x, y, width, height]");
-                }
-                if ($b[2] < 0 || $b[3] < 0) {
-                    throw new \ValueError("node \"$id\" \"bounds\" must not have a negative size");
-                }
-            }
-            if (isset($node['range']) && (!is_array($node['range']) || count($node['range']) !== 2)) {
-                throw new \ValueError("node \"$id\" \"range\" must be [min, max]");
-            }
-            foreach ($node['children'] ?? [] as $child) {
-                if (!is_string($child)) {
-                    throw new \TypeError("node \"$id\" \"children\" must be a list of ids");
-                }
-            }
+            $nodes[] = $this->validated($node, $seen);
         }
 
         $merged = $this->tree;
-        foreach ($update['nodes'] ?? [] as $node) {
-            $merged[$node['id']] = $node;
+        foreach ($nodes as $node) {
+            $merged[$this->idOf($node)] = $node;
         }
-        if ($this->root === null && !isset($update['nodes'][0])) {
+        if ($this->root === null && !isset($nodes[0])) {
             throw new \ValueError('the first update needs the nodes');
         }
-        $root = $update['root'] ?? $this->root ?? ($update['nodes'][0]['id'] ?? null);
-        if ($root === null || !isset($merged[$root])) {
+        $root = $update['root'] ?? $this->root ?? (isset($nodes[0]) ? $this->idOf($nodes[0]) : null);
+        if (!is_string($root) || !isset($merged[$root])) {
             throw new \ValueError('root is not a node of the tree');
         }
         foreach ($merged as $id => $node) {
-            foreach ($node['children'] ?? [] as $child) {
+            foreach ($this->childrenOf($node) as $child) {
                 if (!isset($merged[$child])) {
                     throw new \ValueError("node \"$id\" has the child \"$child\", which is not a node");
                 }
             }
         }
-        if (isset($update['focus']) && !isset($merged[$update['focus']])) {
+        $focus = $update['focus'] ?? null;
+        if ($focus !== null && (!is_string($focus) || !isset($merged[$focus]))) {
             throw new \ValueError('focus is not a node of the tree');
         }
 
         $this->tree = $merged;
         $this->root = $root;
-        $this->focus = $update['focus'] ?? $this->focus;
+        $this->focus = $focus ?? $this->focus;
         $this->updates[] = $update;
 
         return true;
+    }
+
+    /**
+     * Check one node against vio's contract and return it.
+     *
+     * @param array<mixed> $node
+     * @param array<string, true> $seen ids already used by this update
+     * @return array<string, mixed>
+     */
+    private function validated(array $node, array &$seen): array
+    {
+        $id = $node['id'] ?? null;
+        if (!is_string($id) || $id === '') {
+            throw new \ValueError('node needs a non-empty string "id"');
+        }
+        if (isset($seen[$id])) {
+            throw new \ValueError("node id \"$id\" appears twice");
+        }
+        $seen[$id] = true;
+        if (!in_array($node['role'] ?? null, self::ROLES, true)) {
+            throw new \ValueError("node \"$id\" needs a known \"role\"");
+        }
+        foreach (['label', 'description'] as $stringKey) {
+            if (isset($node[$stringKey]) && !is_string($node[$stringKey])) {
+                throw new \TypeError("node option \"$stringKey\" must be a string");
+            }
+        }
+        if (isset($node['value']) && !is_string($node['value']) && !is_int($node['value']) && !is_float($node['value'])) {
+            throw new \TypeError("node \"$id\" \"value\" must be a string or a number");
+        }
+        $actions = $node['actions'] ?? [];
+        foreach (is_array($actions) ? $actions : [] as $action) {
+            if (!in_array($action, self::ACTIONS, true)) {
+                throw new \ValueError("node \"$id\" has an unknown action");
+            }
+        }
+        if (isset($node['bounds'])) {
+            $b = $node['bounds'];
+            if (!is_array($b) || count($b) !== 4) {
+                throw new \ValueError("node \"$id\" \"bounds\" must be [x, y, width, height]");
+            }
+            if ($b[2] < 0 || $b[3] < 0) {
+                throw new \ValueError("node \"$id\" \"bounds\" must not have a negative size");
+            }
+        }
+        if (isset($node['range']) && (!is_array($node['range']) || count($node['range']) !== 2)) {
+            throw new \ValueError("node \"$id\" \"range\" must be [min, max]");
+        }
+        foreach ($this->childrenOf($node) as $_) {
+            // childrenOf() throws on a non-string child
+        }
+
+        /** @var array<string, mixed> $node */
+        return $node;
+    }
+
+    /**
+     * @param array<mixed> $node
+     * @return list<string>
+     */
+    private function childrenOf(array $node): array
+    {
+        $children = $node['children'] ?? [];
+        if (!is_array($children)) {
+            throw new \TypeError('"children" must be a list of ids');
+        }
+        $ids = [];
+        foreach ($children as $child) {
+            if (!is_string($child)) {
+                throw new \TypeError('"children" must be a list of ids');
+            }
+            $ids[] = $child;
+        }
+
+        return $ids;
+    }
+
+    /** @param array<string, mixed> $node */
+    private function idOf(array $node): string
+    {
+        $id = $node['id'] ?? '';
+
+        return is_string($id) ? $id : '';
     }
 
     public function setActionHandler(callable $handler): void
@@ -142,12 +195,22 @@ class RecordingAccessibilitySink implements AccessibilitySink
     /** Pretend assistive technology asked for an action. */
     public function request(string $id, string $action, mixed $value = null): void
     {
-        ($this->handler)($id, $action, $value);
+        if ($this->handler !== null) {
+            ($this->handler)($id, $action, $value);
+        }
     }
 
     /** @return list<string> ids of the nodes in update number $index */
     public function sentIds(int $index): array
     {
-        return array_map(static fn (array $n): string => $n['id'], $this->updates[$index]['nodes'] ?? []);
+        $nodes = $this->updates[$index]['nodes'] ?? [];
+        $ids = [];
+        foreach (is_array($nodes) ? $nodes : [] as $node) {
+            if (is_array($node) && is_string($node['id'] ?? null)) {
+                $ids[] = $node['id'];
+            }
+        }
+
+        return $ids;
     }
 }
