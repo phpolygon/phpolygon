@@ -2,11 +2,15 @@
 
 declare(strict_types=1);
 
-namespace PHPolygon\Tests\UI\Accessibility;
+namespace PHPolygon\Testing;
 
 use PHPolygon\UI\Accessibility\AccessibilitySink;
 
 /**
+ * Test double a game can use for its own accessibility tests (it lives in src/,
+ * unlike the engine's tests, so it is vendored). Public surface: updates, tree,
+ * root, focus, handler, refuse, request(), sentIds().
+ *
  * Headless stand-in for vio_a11y_update(): records every update and enforces the
  * same contract php-vio does (role and action names from src/vio_a11y.c, unique
  * ids per update, string labels, 4 non-negative bounds, children and focus must
@@ -40,6 +44,9 @@ class RecordingAccessibilitySink implements AccessibilitySink
     /** @var (callable(string, string, mixed): void)|null */
     public $handler = null;
 
+    /** While true, update() answers false without recording (a platform that rejects the update). */
+    public bool $refuse = false;
+
     public function __construct(private readonly bool $available = true) {}
 
     public function isAvailable(): bool
@@ -49,7 +56,7 @@ class RecordingAccessibilitySink implements AccessibilitySink
 
     public function update(array $update): bool
     {
-        if (!$this->available) {
+        if (!$this->available || $this->refuse) {
             return false;
         }
         $seen = [];

@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace PHPolygon\Tests\UI\Accessibility;
 
 use PHPUnit\Framework\TestCase;
+use PHPolygon\Testing\RecordingAccessibilitySink;
 use PHPolygon\Math\Rect;
 use PHPolygon\Runtime\Input;
 use PHPolygon\Tests\UI\Widget\WidgetTestHelper;
