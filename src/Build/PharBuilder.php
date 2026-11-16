@@ -253,7 +253,11 @@ class PharBuilder
         if ($constants === []) {
             return;
         }
-        $base = 'phar://' . str_replace('\\', '/', $targetPhar);
+        // Read the bootstrap files from the SOURCE, never from the copy that is about to be rewritten:
+        // an entry read through phar:// on the target (compressed, not changed) is left with stale
+        // offsets when the archive is rewritten afterwards, and the derived PHAR then dies with
+        // "zlib: data error ... actual filesize mismatch" on the first file the game requires.
+        $base = 'phar://' . str_replace('\\', '/', $sourcePhar);
         $work = sys_get_temp_dir() . '/phpolygon-derive-' . getmypid() . '-' . bin2hex(random_bytes(4));
         mkdir($work, 0755, true);
         try {
