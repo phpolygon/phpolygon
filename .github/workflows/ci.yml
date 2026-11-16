@@ -70,7 +70,7 @@ jobs:
           git clone https://github.com/mario-deluna/php-glfw
           cd php-glfw
           sudo phpize
-          ./configure --enable-glfw
+          ./configure --enable-glfw LIBS="-lstdc++"
           make -j"$(nproc)"
           sudo make install
           cd ..
@@ -169,7 +169,7 @@ jobs:
           git clone https://github.com/mario-deluna/php-glfw
           cd php-glfw
           sudo phpize
-          ./configure --enable-glfw
+          ./configure --enable-glfw LIBS="-lstdc++"
           make -j"$(nproc)"
           sudo make install
           cd ..
@@ -231,7 +231,7 @@ jobs:
           git clone https://github.com/mario-deluna/php-glfw
           cd php-glfw
           sudo phpize
-          ./configure --enable-glfw
+          ./configure --enable-glfw LIBS="-lstdc++"
           make -j"$(nproc)"
           sudo make install
           cd ..
