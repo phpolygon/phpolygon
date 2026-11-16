@@ -136,6 +136,47 @@ final class AccessibilityBridge
         return $this->send($snapshot);
     }
 
+    /**
+     * {@see sync()} for a window that draws several trees per frame, given in
+     * z-order, lowest first. Each tree may be a bare {@see WidgetTree} (named by its
+     * position, which is not stable when layers come and go) or an
+     * {@see AccessibilityLayer} (named, optionally modal).
+     *
+     * The window root then holds one subtree per layer ('layer:<name>', its widget
+     * ids prefixed with that), so a layer appearing, disappearing or moving in the
+     * order changes only the root's child list plus the layer's own nodes. A modal
+     * layer hides every layer below it. Focus comes from the topmost visible layer
+     * with a focused widget. Requests from assistive technology are applied to the
+     * tree the node belongs to.
+     *
+     * Limit: php-vio's update can add and replace nodes but not delete them. A
+     * removed or hidden layer is detached from the root's children, so it is
+     * unreachable for assistive technology, but its nodes stay allocated in vio's
+     * table until the window goes (a layer that comes back reuses them).
+     *
+     * @param list<WidgetTree|AccessibilityLayer> $layers
+     */
+    public function syncLayers(array $layers): bool
+    {
+        if (!$this->isAvailable()) {
+            $this->pendingActions = [];
+
+            return false;
+        }
+
+        $named = [];
+        foreach ($layers as $index => $layer) {
+            $named[] = $layer instanceof AccessibilityLayer ? $layer : new AccessibilityLayer($layer, 'layer' . $index);
+        }
+
+        $snapshot = $this->mapper->mapLayers($named, $this->windowLabel, $this->boundsTransform);
+        if ($this->pendingActions !== [] && $this->applyActions(null, $snapshot)) {
+            $snapshot = $this->mapper->mapLayers($named, $this->windowLabel, $this->boundsTransform);
+        }
+
+        return $this->send($snapshot);
+    }
+
     private function send(AccessibilitySnapshot $snapshot): bool
     {
         $nodes = $snapshot->nodes;
@@ -251,7 +292,7 @@ final class AccessibilityBridge
     }
 
     /** @return bool whether any action changed the tree */
-    private function applyActions(WidgetTree $tree, AccessibilitySnapshot $snapshot): bool
+    private function applyActions(?WidgetTree $default, AccessibilitySnapshot $snapshot): bool
     {
         $queue = $this->pendingActions;
         $this->pendingActions = [];
@@ -259,7 +300,8 @@ final class AccessibilityBridge
 
         foreach ($queue as [$id, $action, $value]) {
             $target = $snapshot->targets[$id] ?? null;
-            if ($target === null) {
+            $tree = $snapshot->trees[$id] ?? $default;
+            if ($target === null || $tree === null) {
                 continue; // the node is gone: nothing to act on
             }
             [$widget, $part, $index] = $target;

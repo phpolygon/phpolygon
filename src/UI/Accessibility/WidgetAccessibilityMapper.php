@@ -70,6 +70,9 @@ final class WidgetAccessibilityMapper
 
     private WidgetTree $tree;
 
+    /** Prefix of the ids of the layer being mapped ('' for the one-tree case). */
+    private string $prefix = '';
+
     /** @var (callable(Rect): Rect)|null */
     private $transform = null;
 
@@ -82,6 +85,7 @@ final class WidgetAccessibilityMapper
     {
         $this->tree = $tree;
         $this->transform = $boundsTransform;
+        $this->prefix = '';
         $this->nodes = [];
         $this->targets = [];
         $this->usedIds = [self::ROOT_ID => true];
@@ -96,6 +100,80 @@ final class WidgetAccessibilityMapper
         $nodes = [self::ROOT_ID => $root] + $this->nodes;
 
         return new AccessibilitySnapshot(self::ROOT_ID, $nodes, $this->targets, $this->focusNodeId($tree));
+    }
+
+    /**
+     * Map several trees drawn into one window: one window root, one subtree per
+     * layer in z-order (lowest first). A layer's subtree hangs under a node
+     * 'layer:<name>' (role 'dialog' for a modal layer, else 'pane') and all its ids
+     * carry that node's id as a prefix, so they do not depend on the other layers
+     * or on the layer's position. Layers below the topmost modal layer are left
+     * out of the window's children (php-vio has no way to hide a subtree other than
+     * not referencing it). Focus is the focused widget of the topmost visible layer
+     * that has one.
+     *
+     * @param list<AccessibilityLayer> $layers
+     * @param (callable(Rect): Rect)|null $boundsTransform applied after each layer's own transform
+     */
+    public function mapLayers(array $layers, string $windowLabel = '', ?callable $boundsTransform = null): AccessibilitySnapshot
+    {
+        $this->nodes = [];
+        $this->targets = [];
+        $this->usedIds = [self::ROOT_ID => true];
+
+        $firstVisible = 0;
+        foreach ($layers as $index => $layer) {
+            if ($layer->modal) {
+                $firstVisible = $index;
+            }
+        }
+
+        $trees = [];
+        $layerIds = [];
+        $focusId = null;
+        foreach ($layers as $index => $layer) {
+            if ($index < $firstVisible) {
+                continue;
+            }
+            $layerId = $this->unique('layer:' . $layer->name);
+            $this->tree = $layer->tree;
+            $this->prefix = $layerId . '/';
+            $own = $layer->boundsTransform;
+            $outer = $boundsTransform === null ? null : \Closure::fromCallable($boundsTransform);
+            $this->transform = match (true) {
+                $own !== null && $outer !== null => static fn (Rect $r): Rect => $outer($own($r)),
+                $own !== null => $own,
+                default => $outer,
+            };
+
+            $before = count($this->targets);
+            $top = $this->walk($layer->tree->getRoot());
+            foreach (array_slice($this->targets, $before, null, true) as $id => $_) {
+                $trees[$id] = $layer->tree;
+            }
+
+            $node = ['id' => $layerId, 'role' => $layer->modal ? 'dialog' : 'pane'];
+            if ($layer->label !== '') {
+                $node['label'] = $layer->label;
+            }
+            $node['children'] = $top;
+            $this->nodes[$layerId] = $node;
+            $layerIds[] = $layerId;
+
+            $focus = $this->focusNodeId($layer->tree);
+            if ($focus !== null) {
+                $focusId = $focus; // a higher layer overrides a lower one
+            }
+        }
+        $this->prefix = '';
+
+        $root = ['id' => self::ROOT_ID, 'role' => 'window'];
+        if ($windowLabel !== '') {
+            $root['label'] = $windowLabel;
+        }
+        $root['children'] = $layerIds;
+
+        return new AccessibilitySnapshot(self::ROOT_ID, [self::ROOT_ID => $root] + $this->nodes, $this->targets, $focusId, $trees);
     }
 
     /** The node the tree's focused widget stands for, or null when nothing mapped has focus. */
@@ -363,7 +441,7 @@ final class WidgetAccessibilityMapper
             $key = 'obj:' . spl_object_id($widget);
         }
 
-        return $this->unique($key);
+        return $this->unique($this->prefix . $key);
     }
 
     /** vio rejects a repeated id: a second use of one (an explicit accessibleId twice) gets a suffix. */
