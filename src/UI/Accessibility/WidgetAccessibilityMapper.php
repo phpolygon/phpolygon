@@ -70,6 +70,9 @@ final class WidgetAccessibilityMapper
 
     private WidgetTree $tree;
 
+    /** @var array<string, WidgetTree> node id => the tree of the layer it was mapped in (layered mapping only) */
+    private array $trees = [];
+
     /** Prefix of the ids of the layer being mapped ('' for the one-tree case). */
     private string $prefix = '';
 
@@ -86,6 +89,7 @@ final class WidgetAccessibilityMapper
         $this->tree = $tree;
         $this->transform = $boundsTransform;
         $this->prefix = '';
+        $this->trees = [];
         $this->nodes = [];
         $this->targets = [];
         $this->usedIds = [self::ROOT_ID => true];
@@ -128,7 +132,7 @@ final class WidgetAccessibilityMapper
             }
         }
 
-        $trees = [];
+        $this->trees = [];
         $layerIds = [];
         $focusId = null;
         foreach ($layers as $index => $layer) {
@@ -146,11 +150,7 @@ final class WidgetAccessibilityMapper
                 default => $outer,
             };
 
-            $known = count($this->targets);
             $top = $this->walk($layer->tree->getRoot());
-            foreach (array_slice(array_keys($this->targets), $known) as $id) {
-                $trees[$id] = $layer->tree;
-            }
 
             $node = ['id' => $layerId, 'role' => $layer->modal ? 'dialog' : 'pane'];
             if ($layer->label !== '') {
@@ -173,7 +173,7 @@ final class WidgetAccessibilityMapper
         }
         $root['children'] = $layerIds;
 
-        return new AccessibilitySnapshot(self::ROOT_ID, [self::ROOT_ID => $root] + $this->nodes, $this->targets, $focusId, $trees);
+        return new AccessibilitySnapshot(self::ROOT_ID, [self::ROOT_ID => $root] + $this->nodes, $this->targets, $focusId, $this->trees);
     }
 
     /** The node the tree's focused widget stands for, or null when nothing mapped has focus. */
@@ -235,7 +235,7 @@ final class WidgetAccessibilityMapper
             $own['children'] = $childIds;
         }
         $this->nodes[$id] = $own;
-        $this->targets[$id] = [$widget, 'widget', 0];
+        $this->target($id, $widget, 'widget', 0);
 
         return [$id];
     }
@@ -386,7 +386,7 @@ final class WidgetAccessibilityMapper
                 'checked' => $index === $view->selectedIndex,
                 'actions' => ['click'],
             ];
-            $this->targets[$tabId] = [$view, 'tab', $index];
+            $this->target($tabId, $view, 'tab', $index);
             $tabIds[] = $tabId;
         }
         $this->nodes[$listId] = ['id' => $listId, 'role' => 'tab_list', 'children' => $tabIds];
@@ -399,7 +399,7 @@ final class WidgetAccessibilityMapper
         $group = $this->base($id, 'group', $view->accessibleLabel, $view);
         $group['children'] = [$listId, ...$content];
         $this->nodes[$id] = $group;
-        $this->targets[$id] = [$view, 'widget', 0];
+        $this->target($id, $view, 'widget', 0);
 
         return $id;
     }
@@ -426,11 +426,19 @@ final class WidgetAccessibilityMapper
                 'checked' => $index === $dropdown->selectedIndex,
                 'actions' => ['click'],
             ];
-            $this->targets[$optionId] = [$dropdown, 'option', $index];
+            $this->target($optionId, $dropdown, 'option', $index);
             $ids[] = $optionId;
         }
 
         return $ids;
+    }
+
+    private function target(string $id, Widget $widget, string $part, int $index): void
+    {
+        $this->targets[$id] = [$widget, $part, $index];
+        if ($this->prefix !== '') {
+            $this->trees[$id] = $this->tree;
+        }
     }
 
     private function idFor(Widget $widget): string
