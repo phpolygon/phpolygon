@@ -146,9 +146,9 @@ final class WidgetAccessibilityMapper
                 default => $outer,
             };
 
-            $before = count($this->targets);
+            $known = count($this->targets);
             $top = $this->walk($layer->tree->getRoot());
-            foreach (array_slice($this->targets, $before, null, true) as $id => $_) {
+            foreach (array_slice(array_keys($this->targets), $known) as $id) {
                 $trees[$id] = $layer->tree;
             }
 
