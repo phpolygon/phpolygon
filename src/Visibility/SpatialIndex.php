@@ -86,6 +86,15 @@ final class SpatialIndex
     private array $cellBounds = [];
 
     /**
+     * Grid coordinates of every occupied cell, kept beside $cells so classify() -
+     * which runs against several volumes per frame - does not parse them back out
+     * of the "cx,cz" key (an explode and an array_map per cell, every pass).
+     *
+     * @var array<string, array{0: int, 1: int}>
+     */
+    private array $cellCoords = [];
+
+    /**
      * Handles whose world extent isn't known (registered with $unbounded -
      * typically a mesh id not yet in MeshRegistry). Excluded from $cells /
      * $cellBounds entirely so they can never inflate a cell's test bounds;
@@ -163,6 +172,7 @@ final class SpatialIndex
             return;
         }
         $this->cells[$cellKey][$handle] = true;
+        $this->cellCoords[$cellKey] ??= [(int) floor($x / self::CELL_SIZE), (int) floor($z / self::CELL_SIZE)];
         $this->growCellBounds($cellKey, $y, $radius);
     }
 
@@ -206,7 +216,7 @@ final class SpatialIndex
         }
         unset($this->cells[$cellKey][$handle]);
         if ($this->cells[$cellKey] === []) {
-            unset($this->cells[$cellKey], $this->cellBounds[$cellKey]);
+            unset($this->cells[$cellKey], $this->cellBounds[$cellKey], $this->cellCoords[$cellKey]);
             return;
         }
         // The removed entry may have been the one defining the cell's Y
@@ -279,8 +289,7 @@ final class SpatialIndex
     {
         $inside = [];
         $intersected = [];
-        foreach ($this->cells as $cellKey => $_) {
-            [$cx, $cz] = array_map('intval', explode(',', $cellKey));
+        foreach ($this->cellCoords as $cellKey => [$cx, $cz]) {
             $bounds = $this->cellBounds[$cellKey];
             $pad = $bounds['maxRadius'];
             $lx = $cx * self::CELL_SIZE - $pad;

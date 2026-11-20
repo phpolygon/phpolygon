@@ -121,7 +121,26 @@ final class VisibilityServicePhase3Test extends TestCase
         self::assertSame($after1['viewHits'] + 1, $after2['viewHits']);
     }
 
-    public function testADifferentCameraInstanceIsAMiss(): void
+    public function testADifferentCameraInstanceWithTheSameValuesIsAHit(): void
+    {
+        $world = new World();
+        $service = VisibilityService::forWorld($world);
+
+        $a = self::camera();
+        $service->beginFrame($a->viewMatrix, $a->projectionMatrix);
+        $before = $service->memoStats();
+
+        // Same values in new Mat4 instances - a SetCamera re-emitted later in the
+        // frame. The classification depends on the values, so this is a hit; an
+        // identity-only memo classified the whole index twice per frame.
+        $b = self::camera();
+        $service->beginFrame($b->viewMatrix, $b->projectionMatrix);
+        $after = $service->memoStats();
+        self::assertSame($before['viewMisses'], $after['viewMisses']);
+        self::assertSame($before['viewHits'] + 1, $after['viewHits']);
+    }
+
+    public function testADifferentCameraIsStillAMiss(): void
     {
         $world = new World();
         $service = VisibilityService::forWorld($world);
@@ -130,10 +149,7 @@ final class VisibilityServicePhase3Test extends TestCase
         $service->beginFrame($a->viewMatrix, $a->projectionMatrix);
         $missesAfterA = $service->memoStats()['viewMisses'];
 
-        // Same values, but new Mat4 instances - by the engine's own identity
-        // convention (Transform3D worldMatrix, Renderer3DSystem's draw-matrix
-        // cache) this must count as a change, not be value-compared away.
-        $b = self::camera();
+        $b = self::camera(new Vec3(0.0, 0.0, -0.5));
         $service->beginFrame($b->viewMatrix, $b->projectionMatrix);
         self::assertSame($missesAfterA + 1, $service->memoStats()['viewMisses']);
     }
@@ -166,10 +182,12 @@ final class VisibilityServicePhase3Test extends TestCase
         $camera = self::camera();
 
         $service->beginFrame($camera->viewMatrix, $camera->projectionMatrix, new Vec3(0.0, -1.0, 0.0));
+        $service->shadowOnlyEntities(); // the casters are classified when they are read
         $before = $service->memoStats();
         // Same camera instances (the view part should hit its memo), only the
         // light direction differs - the caster part alone must recompute.
         $service->beginFrame($camera->viewMatrix, $camera->projectionMatrix, new Vec3(0.0, -1.0, 0.1));
+        $service->shadowOnlyEntities();
         $after = $service->memoStats();
 
         self::assertSame($before['viewMisses'], $after['viewMisses'], 'the view classification itself did not need to change');
