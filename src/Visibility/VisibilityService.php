@@ -118,11 +118,49 @@ final class VisibilityService
     private bool $hasViewMemo = false;
     private ?Mat4 $memoView = null;
     private ?Mat4 $memoProjection = null;
+    /** @var array<float>|null the memoized view's values: a new Mat4 instance with the same values is still a hit */
+    private ?array $memoViewValues = null;
+    /** @var array<float>|null */
+    private ?array $memoProjectionValues = null;
     private bool $memoNoCull = false;
+    /** The fog cap $visibleSet was derived with. It is NOT part of the view memo: a fog change only re-filters, see applyFogCap(). */
     private ?float $memoFogFar = null;
     private int $memoViewIndexVersion = -1;
     private int $viewMemoHits = 0;
     private int $viewMemoMisses = 0;
+    private int $fogRefilters = 0;
+
+    /**
+     * The memoized view's visible set BEFORE the fog cap (occlusion applied), or
+     * null when nothing is culled. The fog cap is a per-handle distance test on
+     * top of it, so a fog change costs one pass over this set instead of a new
+     * classification of the whole index.
+     *
+     * @var array<int, true>|null
+     */
+    private ?array $geometryVisible = null;
+
+    /**
+     * Handles the fog cap never applies to (always visible by flag).
+     *
+     * @var array<int, true>
+     */
+    private array $fogExempt = [];
+
+    /**
+     * Entity-kind shadow casters of the memoized sun prism that pass every
+     * eligibility test except "not already in $visibleSet" (which follows the fog
+     * cap). Null when there is no sun or nothing is culled.
+     *
+     * @var array<int, true>|null
+     */
+    private ?array $casterCandidates = null;
+
+    /** A caster classification was requested by beginFrame() and not run yet - see resolveCasters(). */
+    private bool $casterPending = false;
+    private ?Vec3 $pendingLightDir = null;
+    private float $pendingCasterOrthoSize = 0.0;
+    private int $pendingCasterResolution = 0;
 
     // --- Caster memo: additionally invalidated whenever the view memo missed, since caster eligibility reads $visibleSet ---
     private bool $hasCasterMemo = false;
@@ -172,21 +210,35 @@ final class VisibilityService
             $indexVersion = $this->index->version();
             $noCull = getenv('PHPOLYGON_NO_CULL') === '1';
 
+            // The classification depends on the camera's VALUES, not on which
+            // Mat4 instances carry them: the frame's later callers get copies of
+            // the same camera (a SetCamera re-emitted further down the pipeline),
+            // and an identity-only memo then classified the whole index twice per
+            // frame. The fog cap is not an input of the classification at all.
             $viewUnchanged = $this->hasViewMemo
                 && $this->memoNoCull === $noCull
-                && $this->memoView === $view
-                && $this->memoProjection === $projection
-                && $this->memoFogFar === $fogFar
-                && $this->memoViewIndexVersion === $indexVersion;
+                && $this->memoViewIndexVersion === $indexVersion
+                && self::sameMatrix($this->memoView, $this->memoViewValues, $view)
+                && self::sameMatrix($this->memoProjection, $this->memoProjectionValues, $projection);
 
+            $fogChanged = false;
             if ($viewUnchanged) {
                 $this->viewMemoHits++;
+                if ($this->memoFogFar !== $fogFar) {
+                    $this->fogRefilters++;
+                    $this->applyFogCap($fogFar);
+                    $this->memoFogFar = $fogFar;
+                    $fogChanged = true;
+                }
             } else {
                 $this->viewMemoMisses++;
-                $this->classifyView($view, $projection, $noCull, $fogFar);
+                $this->classifyView($view, $projection, $noCull);
+                $this->applyFogCap($fogFar);
                 $this->hasViewMemo = true;
                 $this->memoView = $view;
                 $this->memoProjection = $projection;
+                $this->memoViewValues = $view?->toArray();
+                $this->memoProjectionValues = $projection?->toArray();
                 $this->memoNoCull = $noCull;
                 $this->memoFogFar = $fogFar;
                 $this->memoViewIndexVersion = $indexVersion;
@@ -206,9 +258,21 @@ final class VisibilityService
 
             if ($casterUnchanged) {
                 $this->casterMemoHits++;
+                if ($fogChanged && !$this->casterPending) {
+                    // The prism's candidates stand; which of them the camera's own
+                    // passes already draw follows the fog cap.
+                    $this->deriveShadowOnly();
+                }
             } else {
-                $this->casterMemoMisses++;
-                $this->classifyCasters($lightDir, $casterOrthoSize, $casterResolution);
+                // Not classified here: the set is only read by shadowOnlyEntities(),
+                // and a frame calls beginFrame() several times (the first before
+                // the sun moved for the frame). The last request wins, once.
+                $this->casterPending = true;
+                // A copy: the light may keep moving (in place) before the set is read,
+                // and the memo above compares the values requested here.
+                $this->pendingLightDir = $lightDir === null ? null : new Vec3($lightDir->x, $lightDir->y, $lightDir->z);
+                $this->pendingCasterOrthoSize = $casterOrthoSize;
+                $this->pendingCasterResolution = $casterResolution;
                 $this->hasCasterMemo = true;
                 $this->memoLightX = $lightX;
                 $this->memoLightY = $lightY;
@@ -294,6 +358,17 @@ final class VisibilityService
         return $out;
     }
 
+    /** Classifies the shadow casters of the latest beginFrame() request, if one is waiting. */
+    private function resolveCasters(): void
+    {
+        if (!$this->casterPending) {
+            return;
+        }
+        $this->casterPending = false;
+        $this->casterMemoMisses++;
+        $this->classifyCasters($this->pendingLightDir, $this->pendingCasterOrthoSize, $this->pendingCasterResolution);
+    }
+
     /**
      * Entity-kind handles outside $visibleEntities() (dormant excluded too)
      * that should still cast a sun shadow this frame - see the plan's
@@ -312,6 +387,7 @@ final class VisibilityService
         // report for why this bug would otherwise surface once something
         // starts toggling dormancy during live play - visibleEntities()
         // already does this fresh filter, this method did not).
+        $this->resolveCasters();
         $world = $this->boundWorld;
         if ($world === null) {
             return array_keys($this->shadowOnlySet);
@@ -425,11 +501,14 @@ final class VisibilityService
      * diagnostics and tests confirming registration order no longer costs a
      * repeated classification (see the class docblock).
      *
-     * @return array{viewHits: int, viewMisses: int, casterHits: int, casterMisses: int}
+     * fogRefilters counts the view hits that only needed the fog cap re-applied.
+     *
+     * @return array{viewHits: int, viewMisses: int, casterHits: int, casterMisses: int, fogRefilters: int}
      */
     public function memoStats(): array
     {
         return [
+            'fogRefilters' => $this->fogRefilters,
             'viewHits' => $this->viewMemoHits,
             'viewMisses' => $this->viewMemoMisses,
             'casterHits' => $this->casterMemoHits,
@@ -553,16 +632,32 @@ final class VisibilityService
         );
     }
 
+    /** True when $current carries the memoized matrix: the same instance, or another one with identical values. */
+    /** @param array<float>|null $memoValues */
+    private static function sameMatrix(?Mat4 $memo, ?array $memoValues, ?Mat4 $current): bool
+    {
+        if ($memo === $current) {
+            return true;
+        }
+        if ($memo === null || $current === null) {
+            return false;
+        }
+        return $memoValues === $current->toArray();
+    }
+
     /**
      * The real work beginFrame() memoizes: cell classification against the
-     * camera frustum, the fog-far distance cap, and (gated on $this->occlusion
-     * being set - the common case is not) an occluder test. See the class
-     * docblock on when this actually runs vs. is skipped as a memo hit.
+     * camera frustum and (gated on $this->occlusion being set - the common case
+     * is not) an occluder test, into $geometryVisible. The fog-far cap is applied
+     * on top by {@see applyFogCap()}. See the class docblock on when this
+     * actually runs vs. is skipped as a memo hit.
      */
-    private function classifyView(?Mat4 $view, ?Mat4 $projection, bool $noCull, ?float $fogFar): void
+    private function classifyView(?Mat4 $view, ?Mat4 $projection, bool $noCull): void
     {
         if ($view === null || $projection === null || $noCull) {
             $this->currentVolume = null;
+            $this->geometryVisible = null;
+            $this->fogExempt = [];
             $this->visibleSet = null;
             $this->visibleCellKeys = [];
             return;
@@ -579,14 +674,16 @@ final class VisibilityService
         foreach ($this->index->unboundedHandles() as $handle) {
             $visible[$handle] = true;
         }
+        $exempt = [];
         foreach ($this->index->alwaysVisibleHandles() as $handle) {
             $visible[$handle] = true;
+            $exempt[$handle] = true;
         }
         foreach ($insideCells as $cellKey => $_) {
             foreach ($this->index->handlesInCell($cellKey) as $handle) {
-                if ($fogFar !== null || $this->occlusion !== null) {
+                if ($this->occlusion !== null) {
                     $entry = $this->index->entry($handle);
-                    if ($entry !== null && $this->isCulledByFogOrOcclusion($entry, $eye, $fogFar)) {
+                    if ($entry !== null && $this->isCulledByFogOrOcclusion($entry, $eye, null)) {
                         continue;
                     }
                 }
@@ -599,11 +696,51 @@ final class VisibilityService
                 if ($entry === null || !$this->currentVolume->containsSphere($entry['x'], $entry['y'], $entry['z'], $entry['radius'])) {
                     continue;
                 }
-                if ($this->isCulledByFogOrOcclusion($entry, $eye, $fogFar)) {
+                if ($this->isCulledByFogOrOcclusion($entry, $eye, null)) {
                     continue;
                 }
                 $visible[$handle] = true;
             }
+        }
+        $this->geometryVisible = $visible;
+        $this->fogExempt = $exempt;
+    }
+
+    /**
+     * Derives $visibleSet from the memoized $geometryVisible: drops the bounded
+     * entries whose nearest surface lies beyond $fogFar (null = no cap). The same
+     * distance test, in the same order, the classification itself used to apply
+     * while it walked the cells - so the result is identical, at the price of one
+     * pass over the visible set instead of a new classification.
+     */
+    private function applyFogCap(?float $fogFar): void
+    {
+        $geometry = $this->geometryVisible;
+        if ($geometry === null) {
+            $this->visibleSet = null;
+            return;
+        }
+        $volume = $this->currentVolume;
+        if ($fogFar === null || $volume === null) {
+            $this->visibleSet = $geometry;
+            return;
+        }
+
+        $eye = $volume->cameraPosition;
+        $visible = [];
+        foreach ($geometry as $handle => $_) {
+            if (!isset($this->fogExempt[$handle])) {
+                $entry = $this->index->entry($handle);
+                if ($entry !== null && !$entry['unbounded']) {
+                    $dx = $entry['x'] - $eye->x;
+                    $dy = $entry['y'] - $eye->y;
+                    $dz = $entry['z'] - $eye->z;
+                    if (sqrt($dx * $dx + $dy * $dy + $dz * $dz) - $entry['radius'] > $fogFar) {
+                        continue;
+                    }
+                }
+            }
+            $visible[$handle] = true;
         }
         $this->visibleSet = $visible;
     }
@@ -644,6 +781,7 @@ final class VisibilityService
             // No sun this frame, or nothing is being culled anyway (no
             // camera / NO_CULL) - there is no "off screen but shadow-worthy"
             // distinction to make.
+            $this->casterCandidates = null;
             $this->shadowOnlySet = [];
             return;
         }
@@ -651,6 +789,7 @@ final class VisibilityService
         $shadowCenter = $this->currentVolume?->cameraPosition;
         $planes = SunCasterVolume::planes($lightDir, $shadowCenter, $casterOrthoSize, $casterResolution);
         if ($planes === null) {
+            $this->casterCandidates = null;
             $this->shadowOnlySet = [];
             return;
         }
@@ -672,15 +811,34 @@ final class VisibilityService
                 }
             }
         }
-        $this->shadowOnlySet = $casters;
+        $this->casterCandidates = $casters;
+        $this->deriveShadowOnly();
+    }
+
+    /**
+     * $shadowOnlySet = the memoized caster candidates minus what the camera's own
+     * passes already draw ($visibleSet, which follows the fog cap): an entry
+     * already in the main pass needs no extra shadow-only draw.
+     */
+    private function deriveShadowOnly(): void
+    {
+        $candidates = $this->casterCandidates;
+        if ($candidates === null || $this->visibleSet === null) {
+            $this->shadowOnlySet = [];
+            return;
+        }
+        $out = [];
+        foreach ($candidates as $handle => $_) {
+            if (!isset($this->visibleSet[$handle])) {
+                $out[$handle] = true;
+            }
+        }
+        $this->shadowOnlySet = $out;
     }
 
     /** @param array<int, true> $casters */
     private function collectCasterIfEligible(int $handle, array &$casters): void
     {
-        if (isset($this->visibleSet[$handle])) {
-            return; // already drawn in the main pass - no extra shadow-only draw needed
-        }
         $entry = $this->index->entry($handle);
         if ($entry === null || $entry['kind'] !== EntryKind::Entity || !$entry['castsShadow']) {
             return;

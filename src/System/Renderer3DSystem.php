@@ -472,6 +472,16 @@ class Renderer3DSystem extends AbstractSystem
         $transforms = $world->componentPool(Transform3D::class);
         /** @var array<int, MeshRenderer> $meshes */
         $meshes = $world->componentPool(MeshRenderer::class);
+        // Loop invariants of the screen-size LOD test below.
+        $lodCull = $visibility->frame() !== null && $cameraPos !== null;
+        $camX = $camY = $camZ = 0.0;
+        if ($cameraPos !== null) {
+            $camX = $cameraPos->x;
+            $camY = $cameraPos->y;
+            $camZ = $cameraPos->z;
+        }
+        $lodNearSq = $this->lodNearDistance * $this->lodNearDistance;
+        $minRatioSq = $this->minScreenRatio * $this->minScreenRatio;
         foreach ($visibility->visibleEntities() as $entityId) {
             $mesh = $meshes[$entityId] ?? null;
             $transform = $transforms[$entityId] ?? null;
@@ -493,18 +503,21 @@ class Renderer3DSystem extends AbstractSystem
             // frame() is null exactly when there is no camera this frame or
             // PHPOLYGON_NO_CULL=1 is set - the same two cases the former
             // local $planes variable was null for.
-            if ($visibility->frame() !== null && $cameraPos !== null) {
+            if ($lodCull) {
                 $sphere = self::getMeshSphere($mesh->meshId);
                 if ($sphere !== null) {
+                    // One read of the matrix values: the centre, and the world
+                    // scale below, come out of the same array (no Vec3 / second
+                    // toArray() per entity).
+                    $m = $matrix->toArray();
                     // Fast path: most procedural meshes (Box/Sphere/Cylinder)
                     // are centred at local origin, so the world centre is
                     // just the matrix translation — skips a full
                     // Mat4::transformPoint allocation.
                     if ($sphere['cx'] === 0.0 && $sphere['cy'] === 0.0 && $sphere['cz'] === 0.0) {
-                        $tr = $matrix->getTranslation();
-                        $tx = $tr->x;
-                        $ty = $tr->y;
-                        $tz = $tr->z;
+                        $tx = $m[12];
+                        $ty = $m[13];
+                        $tz = $m[14];
                     } else {
                         $worldCenter = $matrix->transformPoint(
                             new Vec3($sphere['cx'], $sphere['cy'], $sphere['cz']),
@@ -515,18 +528,21 @@ class Renderer3DSystem extends AbstractSystem
                     }
                     // World scale (parents included), not the local Transform3D
                     // scale: a child of a scaled parent must not be culled with
-                    // its unscaled radius.
-                    $worldRadius = $sphere['radius'] * self::maxAxisScale($matrix);
+                    // its unscaled radius. (Same arithmetic as MeshBounds::maxAxisScale(),
+                    // inlined: the matrix values are already in hand.)
+                    $sx = $m[0] * $m[0] + $m[1] * $m[1] + $m[2] * $m[2];
+                    $sy = $m[4] * $m[4] + $m[5] * $m[5] + $m[6] * $m[6];
+                    $sz = $m[8] * $m[8] + $m[9] * $m[9] + $m[10] * $m[10];
+                    $worldRadius = $sphere['radius'] * sqrt($sx > $sy ? ($sx > $sz ? $sx : $sz) : ($sy > $sz ? $sy : $sz));
 
                     // Screen-size LOD: drop far entities that project to a
                     // sub-pixel sliver.
-                    $cdx = $tx - $cameraPos->x;
-                    $cdy = $ty - $cameraPos->y;
-                    $cdz = $tz - $cameraPos->z;
+                    $cdx = $tx - $camX;
+                    $cdy = $ty - $camY;
+                    $cdz = $tz - $camZ;
                     $camDistSq = $cdx * $cdx + $cdy * $cdy + $cdz * $cdz;
-                    if ($camDistSq > $this->lodNearDistance * $this->lodNearDistance
-                        && $worldRadius * $worldRadius
-                            < $this->minScreenRatio * $this->minScreenRatio * $camDistSq) {
+                    if ($camDistSq > $lodNearSq
+                        && $worldRadius * $worldRadius < $minRatioSq * $camDistSq) {
                         continue;
                     }
                 }
@@ -679,20 +695,6 @@ class Renderer3DSystem extends AbstractSystem
         $dz = $pos->z - $cameraPos->z;
         $dist = sqrt($dx * $dx + $dy * $dy + $dz * $dz);
         return [max(0.0, $dist - $r), $dist];
-    }
-
-    /**
-     * Largest axis scale of a world matrix (column lengths of its 3x3 part),
-     * so a bounding sphere scaled by it contains the mesh under any rotation
-     * and any parent scale.
-     */
-    private static function maxAxisScale(Mat4 $matrix): float
-    {
-        $m = $matrix->toArray();
-        $sx = $m[0] * $m[0] + $m[1] * $m[1] + $m[2] * $m[2];
-        $sy = $m[4] * $m[4] + $m[5] * $m[5] + $m[6] * $m[6];
-        $sz = $m[8] * $m[8] + $m[9] * $m[9] + $m[10] * $m[10];
-        return sqrt($sx > $sy ? ($sx > $sz ? $sx : $sz) : ($sy > $sz ? $sy : $sz));
     }
 
     /**

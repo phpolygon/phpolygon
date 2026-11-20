@@ -124,6 +124,8 @@ final class VisibilityServiceDormancyMemoTest extends TestCase
 
         $camera = self::camera();
         $service->beginFrame($camera->viewMatrix, $camera->projectionMatrix, new Vec3(0.0, -1.0, 0.0));
+        // The renderer reads the set every frame; the classification runs on that read.
+        self::assertSame([], $service->shadowOnlyEntities());
 
         $world->setEntityDormant($caster->id, false);
         // No invalidate() this time.
