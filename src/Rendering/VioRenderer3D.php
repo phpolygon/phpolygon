@@ -6499,24 +6499,33 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             $groupMeta = [];
             $this->shadowCasterMatrices[$k] = [];
             $this->shadowCasterMeshIds[$k] = [];
+            // What a material adds to its group (sway, dapple, key suffix): looked up
+            // once per material, not once per caster.
+            $materialGroup = [];
             foreach ($casters as $cmd) {
-                $sway = $this->swaysInShadow($cmd->materialId);
-                $dapple = $this->shadowDappleOf($cmd->materialId);
-                $groupKey = $cmd->meshId . ($sway ? '|sway' : '') . ($dapple > 0.0 ? '|d' . $dapple : '');
-                $groupMeta[$groupKey] = [$cmd->meshId, $sway, $dapple];
+                $info = $materialGroup[$cmd->materialId] ?? null;
+                if ($info === null) {
+                    $sway = $this->swaysInShadow($cmd->materialId);
+                    $dapple = $this->shadowDappleOf($cmd->materialId);
+                    $info = $materialGroup[$cmd->materialId] = [$sway, $dapple, ($sway ? '|sway' : '') . ($dapple > 0.0 ? '|d' . $dapple : '')];
+                }
+                $groupKey = $cmd->meshId . $info[2];
+                $groupMeta[$groupKey] ??= [$cmd->meshId, $info[0], $info[1]];
                 $shadowGroups[$groupKey][] = $cmd->modelMatrix;
                 $this->shadowCasterMatrices[$k][] = $cmd->modelMatrix;
                 $this->shadowCasterMeshIds[$k][] = $cmd->meshId;
             }
             $this->shadowPackedCache[$k] = [];
             foreach ($shadowGroups as $meshId => $mats) {
-                $floats = [];
+                // Matrices are immutable, so the bytes of a matrix object are packed
+                // once for as long as it lives: a moving camera changes WHICH casters
+                // the list holds, rarely the matrices themselves.
+                $packedOf = $this->packedMatrixBytes ??= new \WeakMap();
+                $bytes = '';
                 foreach ($mats as $mm) {
-                    foreach ($mm->toArray() as $f) {
-                        $floats[] = $f;
-                    }
+                    $bytes .= $packedOf[$mm] ??= pack('f16', ...$mm->toArray());
                 }
-                $this->shadowPackedCache[$k][$meshId] = [pack('f*', ...$floats), count($mats), ...$groupMeta[$meshId]];
+                $this->shadowPackedCache[$k][$meshId] = [$bytes, count($mats), ...$groupMeta[$meshId]];
             }
         }
 
@@ -8995,6 +9004,14 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
      * @var \WeakMap<Mat4, array{0: float[], 1: float[]}>|null
      */
     private ?\WeakMap $drawMatrixMemo = null;
+
+    /**
+     * The 64 packed bytes of a matrix (float32, column-major) for the shadow casters' instance
+     * data. Matrices are immutable; weak: entries vanish with their matrix.
+     *
+     * @var \WeakMap<Mat4, string>|null
+     */
+    private ?\WeakMap $packedMatrixBytes = null;
 
     /** @var array<int, list<Mat4>> individual shadow casters of the last frame, in draw order (0 sun, 1 local lights) */
     private array $shadowCasterMatrices = [[], []];
