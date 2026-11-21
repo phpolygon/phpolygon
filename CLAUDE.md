@@ -2006,6 +2006,24 @@ bulge), shoes, bottles, handles; turn it with a transform to loft along X/Z.
 `MeshData::mirrored(axis)` reflects a mesh and reverses the winding — a left part from
 a right one without the mesh turning inside out.
 
+**Faceted solids — `MeshAccumulator`, `PlanarFrame`, `PrismClip`, `EllipsoidShell`, `DiscMesh`.**
+Flat-shaded plates, shafts, pads and shells with exact, parameter-only geometry (no registry,
+no random state). `MeshAccumulator(uvScale = 0.5)` collects faces with their own vertices:
+`quad(a, b, c, d, hint)` / `fan(poly, hint)` wind to face `hint` (flat normal), `fanSmooth(poly,
+normalAt)` winds to the per-vertex normals; planar UVs along the dominant normal axis;
+degenerate triangles are skipped; `build()` → `MeshData`. With a `PlanarFrame(originX, originZ,
+dirX, dirZ)` (a turned XZ frame: `point(u, y, w)`, `local(x, z)`) it also builds axis-aligned
+pieces of a turned object: `rect`, `box`, `walls(..., inward)`, `bevel(top, base)`.
+`PrismClip(frame, half, reach = 30)` cuts a convex polygon against a square prism:
+`outside(poly)` → convex pieces (untouched polygons come back whole, no T-junctions);
+`clipHalfSpace(poly, nx, nz, offset)` is the Sutherland-Hodgman step. `EllipsoidShell(cx, cy,
+cz, radius, height, segments, bands)` is a faceted ellipsoid of panes (`k` azimuth, `b` band,
+upper half `b >= bands / 2`) with smooth gradient normals: `point`, `normal`, `panePolys`,
+`topAtRadius` / `topAt` (smooth height, the faceted panes lie a little under it),
+`upperPaneAt(x, z)`, `build(keep, lowerHalf, pierce)` – `keep` selects panes, `pierce` cuts a
+`PrismClip` hole out of the upper half only. `DiscMesh::generate(cx, cz, radius, segments, top,
+bottom, hole)` is a thick regular disc with an optional prism hole (first vertex towards -Z).
+The frame direction is normalised on construction.
 **Ground-following surfaces — `ConformingSurfaceSet` / `ConformingRegionMesh`.** Paths,
 plazas, yards, borders and inlays that lie ON a terrain (no floating slab, no slab edge seen
 from the side, no gap at joints). `RegionShape` gives outlines as signed distance fields
