@@ -306,17 +306,60 @@ jobs:
           fi
 
   vrt-vio:
-    name: VRT with php-vio (Docker, Mesa software)
-    runs-on: ubuntu-latest
+    name: VRT with php-vio (Mesa software)
+    runs-on: ubuntu-24.04
 
     steps:
       - uses: actions/checkout@v5
 
-      # Builds php-vio from source (Vulkan + OpenGL backends) and runs the suite
-      # against it headlessly on Mesa lavapipe/llvmpipe — the engine's primary
-      # backend, GPU-free. native-gpu + font-vrt are excluded inside the runner.
-      - name: Build php-vio VRT image
-        run: docker build -f .docker/vrt-vio.Dockerfile -t phpolygon-vrt-vio .
+      # The suite runs against the real php-vio backend headlessly on Mesa
+      # llvmpipe/lavapipe, GPU-free. Same route as vio-shaders: setup-php, the
+      # prebuilt vio.so from the php-vio release, Mesa and Xvfb from the runner's
+      # Ubuntu archive. No PPA and no php-vio build (the old Docker image pulled
+      # PHP 8.5 from ppa:ondrej/php, which answers 503 for hours at a time; the
+      # image .docker/vrt-vio.Dockerfile stays for local use).
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.5'
+          extensions: gd, mbstring, dom, xml, zip
+          coverage: none
 
+      - name: Install php-vio runtime dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libglfw3-dev glslang-dev libvulkan-dev \
+            libavcodec-dev libavformat-dev libavutil-dev libswscale-dev \
+            spirv-cross libspirv-cross-c-shared-dev libharfbuzz-dev \
+            xvfb xauth libgl1-mesa-dri libglx-mesa0 mesa-vulkan-drivers vulkan-tools unzip
+
+      - name: Install ext-vio from the latest php-vio release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for tag in $(gh release list --repo phpolygon/php-vio -L 5 --json tagName -q '.[].tagName'); do
+            if gh release download "$tag" --repo phpolygon/php-vio --pattern '*_php8.5-x86_64-linux-glibc.zip' --dir /tmp/vio; then
+              echo "php-vio release: $tag"
+              break
+            fi
+          done
+          ls /tmp/vio/*.zip
+          unzip -o /tmp/vio/*.zip -d /tmp/vio
+          sudo cp /tmp/vio/vio.so "$(php -r 'echo ini_get("extension_dir");')/"
+          echo 'extension=vio.so' | sudo tee -a "$(php -r 'echo php_ini_loaded_file();')"
+          LD_BIND_NOW=1 php -r 'exit((int) !extension_loaded("vio"));'
+          php -r 'echo "vio ", phpversion("vio"), PHP_EOL;'
+
+      - name: Install Composer dependencies
+        run: composer install --no-interaction --ignore-platform-reqs
+
+      # native-gpu (pixel baselines of the target GPU) and font-vrt (FreeType snapshots owned
+      # by the Alpine job) are excluded, as in .docker/vrt-vio-run.sh.
       - name: Run test suite against the vio backend
-        run: docker run --rm -v "$PWD":/app -w /app phpolygon-vrt-vio .docker/vrt-vio-run.sh
+        env:
+          LIBGL_ALWAYS_SOFTWARE: '1'
+          GALLIUM_DRIVER: llvmpipe
+        run: |
+          xvfb-run -a vulkaninfo --summary 2>/dev/null | grep -iE "driverName|deviceName" | head -2 || true
+          xvfb-run -a vendor/bin/phpunit --exclude-group font-vrt --exclude-group native-gpu
