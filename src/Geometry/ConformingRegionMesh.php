@@ -434,6 +434,26 @@ final class ConformingRegionMesh
     }
 
     /**
+     * Height callback of a surface that runs out against a neighbour
+     * ({@see ConformingSurfaceSet::abut()}): the ground at the vertex plus $lift,
+     * the lift fading to 0 (smoothstep) as the carried $field – a signed distance
+     * divided by the lap, negative inside the neighbour – goes from 0 to -1. A
+     * value of 0 or more (outside, or no field stamped) keeps the full lift.
+     * Mesh it with $field in $carry.
+     *
+     * @param callable(float, float): float $ground
+     * @return \Closure(float, float, array<string, float>): float
+     */
+    public static function onGroundRamped(callable $ground, float $lift, string $field): \Closure
+    {
+        return static function (float $x, float $z, array $v) use ($ground, $lift, $field): float {
+            $u = max(0.0, min(1.0, -($v[$field] ?? 0.0)));
+
+            return $ground($x, $z) + $lift * (1.0 - $u * $u * (3.0 - 2.0 * $u));
+        };
+    }
+
+    /**
      * Height callback for a hem: $lift above the ground where $field is 0 (the
      * outline), falling linearly to $sink BELOW the ground where $field reaches
      * $width. Mesh it with $field in the conditions or in $carry.

@@ -2051,6 +2051,27 @@ the ground collider carries the player); merge parts per material for few draws.
 grid (`ConformingRegionMesh`: `covering()` snaps the origin to the cell, `stamp`/`stampShape`
 with min, `derive`, `sample`, `mesh(conditions [field, ±1], height, carry, uvScale, splits)`,
 height helpers `onGround()` / `hem()`) builds other regions on the same corners.
+**Running out against a neighbour — `ConformingSurfaceSet::abut(RegionShape $neighbour, float $lap = 0.3)`.**
+For a path that ends at an imported road, a quay, a floor whose VISIBLE ground the ground function already
+reports (a neighbour missing from the ground leaves a `lift` step). The shapes of the set must reach into the
+neighbour by at least `$lap`. Inside the neighbour, over `$lap`: the lift fades from `lift` to 0 (smoothstep of
+the depth, `onGroundRamped()`); at `$lap` inside, where it has reached 0, the surface ends exactly (a `cut` of
+the neighbour shrunk by `$lap`): a closed flush edge, no bare-ground strip and no 2.5 cm end edge (the old
+`cut()` with a feather left 15 cm of ground and a 25 mm open end, a negative feather closed that but ran kerb
+and hem along the neighbour); and the outline kerb and hem are formed from surfaces + neighbours together
+(`unionx`), so there is no kerb and no hem inside the neighbour and a kerb band opens where a path joins it
+from outside (it wraps round the two corners by its own width). Several `abut()` calls are fine (the nearest
+neighbour rules the ramp). A vertex row sits on the neighbour's edge (split field `nd`), where the fade starts.
+Without `abut()` the build is bit for bit the old one (`ConformingSurfaceSetGoldenTest`); a neighbour outside
+the grid changes nothing. Limits: the side edges of the surface INSIDE the neighbour stay open as a wedge
+that tapers from `lift` to 0 over the lap (no hem there); the neighbour must be a `RegionShape` with exact
+distances (circle, rect, polygon, polyline; a `field()` must be a true distance); the kerb band ends in a
+square cut where it meets the neighbour region; `GroundMemo` works as before. A `MeshSetCache` key must
+contain the neighbour shapes and `$lap` like any other input (the engine stamp covers the code, not the
+parameters). Game use: one `abut()` per import edge a net ends at (avenue, quay, bridge deck), shapes
+overlapping that edge by >= `$lap` instead of a feathered `cut()`; keep the ground function = visible ground.
+Tests: `ConformingSurfaceAbutTest`; numbers: `php examples/conforming_abut.php` (end height 25 mm / 25 mm / 0 mm,
+bare ground 0.15 m / 0 / 0, kerb vertices inside the neighbour 0 / 4 / 0 for feather +0.15 / -0.15 / abut).
 **Cost of a staged family** (one set per district stage, each laying the paving of the stages before it
 again). `mesh()` skips the clip and split work for a cell wholly inside every condition and crossed by no
 split line, rejects pieces on one side of a split line without allocating, and keys vertices by integer:

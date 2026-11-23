@@ -63,6 +63,9 @@ final class ConformingSurfaceSet
     /** @var list<RegionShape> */
     private array $cuts = [];
 
+    /** @var list<array{RegionShape, float}> neighbour, lap */
+    private array $abuts = [];
+
     /** @var array<string, float> */
     private array $uvScales = [];
 
@@ -131,6 +134,38 @@ final class ConformingSurfaceSet
         return $this;
     }
 
+    /**
+     * Let the set end flush against a neighbour surface – an imported road, a
+     * quay, a floor – whose VISIBLE ground the ground function already reports
+     * (the set rises $lift over that ground, so a neighbour that is not in the
+     * ground would leave a $lift step). Shapes of the set should reach into the
+     * neighbour by at least $lap. Inside the neighbour, over $lap:
+     * - the surface's lift fades from $lift to 0 (smoothstep), so there is no
+     *   step and no slab edge at the neighbour's edge;
+     * - at $lap inside, where the lift has reached 0, the surface ends (as a
+     *   {@see cut()} of the neighbour shrunk by $lap): a closed, flush edge, no
+     *   gap and no strip of bare ground (the old feathered cut left one);
+     * - the outline for border() and the hem is formed WITHOUT the stretches
+     *   inside the neighbour: no kerb and no hem along the abutting edge, and a
+     *   kerb band opens where a path joins the neighbour.
+     * Several neighbours may be added; where they overlap the nearest one rules.
+     * Without abut() nothing changes (bit for bit). The shapes' distances must
+     * be exact (circle, rect, polygon, polyline): the ramp is measured with them.
+     *
+     * A MeshSetCache key built for a set with abut() must contain the neighbour
+     * shapes and $lap, like every other input of the build.
+     */
+    public function abut(RegionShape $neighbour, float $lap = 0.3): self
+    {
+        if ($lap <= 0.0) {
+            throw new \InvalidArgumentException('ConformingSurfaceSet::abut: lap must be > 0');
+        }
+        $this->abuts[] = [$neighbour, $lap];
+        $this->grid = null;
+
+        return $this;
+    }
+
     /** Keep the shape free of everything. */
     public function cut(RegionShape $shape): self
     {
@@ -173,10 +208,14 @@ final class ConformingSurfaceSet
         $grid = $this->grid();
         $order = array_keys($this->surfaces);
         $g = $this->ground;
-        $common = $this->cuts !== [] ? [['cut', -1]] : [];
+        $common = $this->cuts !== [] || $this->abuts !== [] ? [['cut', -1]] : [];
         $inlayNames = $this->inlayOrder();
         $notInlay = $inlayNames !== [] ? [['inlay', -1]] : [];
-        $top = ConformingRegionMesh::onGround($g, $this->lift);
+        $abutting = $this->abuts !== [];
+        $top = $abutting
+            ? ConformingRegionMesh::onGroundRamped($g, $this->lift, 'abutn')
+            : ConformingRegionMesh::onGround($g, $this->lift);
+        $topCarry = $abutting ? ['abutn'] : [];
         $jobs = [];
 
         // Surfaces: the union, partitioned by priority (the last one takes the rest).
@@ -192,10 +231,10 @@ final class ConformingSurfaceSet
             $cond = [...$cond, ...$notInlay, ...$common];
             if (isset($this->borders[$s])) {
                 [, $name] = $this->borders[$s];
-                $jobs[$name] = [[...$cond, ['border:' . $s, -1]], $top, []];
+                $jobs[$name] = [[...$cond, ['border:' . $s, -1]], $top, $topCarry];
                 $cond[] = ['border:' . $s, 1];
             }
-            $jobs[$s] = [$cond, $top, []];
+            $jobs[$s] = [$cond, $top, $topCarry];
         }
 
         // Inlays: inside the union, partitioned by layer/order.
@@ -208,14 +247,15 @@ final class ConformingSurfaceSet
             if ($k < $lastInlay) {
                 $cond[] = ['inlay:' . $name, 1];
             }
-            $jobs[$name] = [[...$cond, ...$common], $top, []];
+            $jobs[$name] = [[...$cond, ...$common], $top, $topCarry];
         }
 
         // Hems: outside the union, each point to the nearest surface.
         if ($this->hemWidth > 0.0) {
             $hem = ConformingRegionMesh::hem($g, 'union', $this->lift, $this->hemWidth, $this->hemSink);
             foreach ($order as $k => $s) {
-                $cond = [['hem', 1], ['union', -1]];
+                // Outside the surfaces, and outside the neighbours they abut (no hem along an abutting edge).
+                $cond = [['hem', 1], [$abutting ? 'unionx' : 'union', -1]];
                 if ($last > 0) {
                     for ($h = 0; $h < $k; $h++) {
                         $cond[] = ['near:' . $order[$h], -1];
@@ -236,6 +276,9 @@ final class ConformingSurfaceSet
             foreach ($cond as [$f]) {
                 $splits[$f] = true;
             }
+        }
+        if ($abutting) {
+            $splits['nd'] = true; // a vertex row on the neighbour's edge, where the lift starts to fade
         }
         $splits = array_keys($splits);
         $out = [];
@@ -310,6 +353,27 @@ final class ConformingSurfaceSet
                 }
             }
         }
+        if ($this->abuts !== [] && $dFields !== []) {
+            // nd: signed distance to the nearest neighbour; abutn: the same in laps (the lift ramp);
+            // unionx: surfaces and neighbours together, the outline kerb and hem are formed from.
+            $names = [];
+            $laps = [];
+            foreach ($this->abuts as $i => [$shape, $lap]) {
+                $grid->stampShape('nd:' . $i, $shape, $margin);
+                $names[] = 'nd:' . $i;
+                $laps['nd:' . $i] = $lap;
+            }
+            $grid->derive('nd', $names, self::minOf(...));
+            $grid->derive('abutn', $names, static function (array $v) use ($laps): float {
+                $m = ConformingRegionMesh::FAR;
+                foreach ($v as $name => $d) {
+                    $m = min($m, $d / $laps[$name]);
+                }
+
+                return $m;
+            });
+            $grid->derive('unionx', ['union', 'nd'], self::minOf(...));
+        }
         if ($this->borders !== []) {
             $reach = 0.0;
             foreach ($this->borders as [$width]) {
@@ -317,7 +381,7 @@ final class ConformingSurfaceSet
             }
             // min() of the surfaces is exact outside; inside it would measure to
             // joints between surfaces too – the border needs the outer outline.
-            $grid->redistance('outline', 'union', $reach + $this->cell);
+            $grid->redistance('outline', $this->abuts !== [] ? 'unionx' : 'union', $reach + $this->cell);
             foreach ($this->borders as $s => [$width]) {
                 $grid->derive('border:' . $s, ['outline'], static fn (array $v): float => $v['outline'] + $width);
             }
@@ -334,6 +398,11 @@ final class ConformingSurfaceSet
         }
         foreach ($this->cuts as $shape) {
             $grid->stampShape('cut', $shape, $margin);
+        }
+        foreach ($this->abuts as [$shape, $lap]) {
+            // The neighbour shrunk by its lap: where the lift has faded to 0 the surface ends.
+            [$x0, $z0, $x1, $z1] = $shape->bounds();
+            $grid->stampShape('cut', RegionShape::field($x0, $z0, $x1, $z1, static fn (float $x, float $z): float => $shape->distance($x, $z) + $lap), $margin);
         }
 
         return $this->grid = $grid;
