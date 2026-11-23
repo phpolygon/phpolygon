@@ -136,7 +136,7 @@ class Engine
      * Updated once per render frame; safe to read from PerfOverlay or game code.
      *
      * frameTimesMs is a ring buffer (newest at the end) of the last
-     * self::FRAME_HISTORY render frames in milliseconds – RENDER WORK ONLY, the
+     * self::FRAME_HISTORY render frames in milliseconds â€“ RENDER WORK ONLY, the
      * time inside the render callback (it feeds the thermal and adaptive quality
      * controllers, so it keeps that meaning). It leaves out update ticks, the
      * FPS-cap wait and events: for the whole frame interval use
@@ -1315,7 +1315,7 @@ class Engine
     }
 
     /**
-     * Render work per frame in milliseconds, newest last – the same data as
+     * Render work per frame in milliseconds, newest last â€“ the same data as
      * {@see $frameTimesMs}, under the name that says what it measures.
      *
      * @return list<float>

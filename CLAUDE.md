@@ -393,6 +393,14 @@ not the old one and not nowhere.
   water planes) keeps one unculled draw. The OpenGL backend does the same with `glCullFace`. Winding
   must be CCW-outward for transparent closed meshes; a mesh with flipped winding layers inside out
   (it never disappears).
+- Runs of identical panes: `Renderer3DSystem::$batchTransparentRuns = true` (default false) merges, AFTER the
+  sort, neighbouring transparent `DrawMesh` commands of one flat one-sided mesh + material + shadow flag into one
+  non-static `DrawMeshInstanced` (`TransparentDrawBatcher`; only draws next to each other in the sorted order
+  join, so nothing else is drawn between them and the instances keep their back-to-front order). A draw with a
+  previous matrix (mover), `params`, `excludeFromGbuffer` or `shadowOnly`, a closed mesh (far faces then near
+  faces per draw cannot be one instanced draw), another command or another transparent draw in between all stay
+  separate. `$transparentDrawsSaved` = draws saved by the last render(). Tests: `TransparentDrawBatcherTest`,
+  GPU `VioTransparentBatchTest` (batched = separate pixels, within 1 per byte).
 - The vio mesh shader lights transparent fragments with the viewer-facing normal (a pane's back face
   shades like its front). Clearcoat IBL honours `Material::$useEnvironmentMap` like the base IBL.
 
@@ -2043,12 +2051,37 @@ the ground collider carries the player); merge parts per material for few draws.
 grid (`ConformingRegionMesh`: `covering()` snaps the origin to the cell, `stamp`/`stampShape`
 with min, `derive`, `sample`, `mesh(conditions [field, ±1], height, carry, uvScale, splits)`,
 height helpers `onGround()` / `hem()`) builds other regions on the same corners.
+**Cost of a staged family** (one set per district stage, each laying the paving of the stages before it
+again). `mesh()` skips the clip and split work for a cell wholly inside every condition and crossed by no
+split line, rejects pieces on one side of a split line without allocating, and keys vertices by integer:
+identical meshes (`ConformingSurfaceSetGoldenTest`), 5.9 s -> 4.8 s for a synthetic 5-stage family
+(`php -d memory_limit=-1 benchmarks/conforming-stages.php 5 3`, 265 658 vertices, cheap ground,
+2026-11-23, no OPcache). `GroundMemo` (integer-keyed 0.1 mm memo, `queries()`/`misses()`) passed to
+several sets instead of a plain callable makes them share the ground samples: 198 k -> 74 k ground
+calls in the same benchmark (`shared` mode; a point within 0.1 mm of an earlier one takes its height, so
+the meshes match the unshared build to ~1e-5, not bit for bit – a lone set given a callable is unchanged).
+`MeshSetCache` (below) turns the whole build into one file read on the second start. NOT done: a
+cross-stage cell cache (the fields differ per stage, so a cell is reusable only when all its corner
+values match; estimated gain ~25-30 % of the meshing, not measured).
 `SurfaceFit::measure(mesh, ground)` is the audit: lift max/min (+ position) over corners, edge
 midpoints and centroids, shares above/below thresholds, and the highest OPEN edge above the
 ground (= the visible slab edge; ≤ −hemSink when the hem closes everything). Between two grid
 corners a cell is planar: a convex 3 m hill sags ~6 mm at `cell = 0.5`; small inlays (< 1 m)
 read polygonal at 0.5 m – use a finer cell for them. `examples/conforming_surfaces.php`
 renders a review set.
+
+**Disk cache for procedural meshes — `Geometry\MeshSetCache`.** `remember($name, $key, fn () => $set->build())`
+returns `array<int|string, MeshData>` from `<dir>/<name>.<hash>.meshset` when the caller's content key
+(plus an engine stamp over `src/Geometry/*.php` and the format number) matches, else builds and stores.
+The CALLER's key must change whenever the result can: build it with `MeshSetCache::fingerprint(...strings)` /
+`fingerprintFiles(...paths)` over the terrain/asset files, the parameters and the files of the code that builds
+(the cache cannot see a ground closure). Doubles on disk, so a hit is bit for bit the build; crc32 + length + key
+digest checked on read (damaged, short or foreign file = miss and rebuild; disk errors never reach the caller);
+temp file + rename; a new key retires the old file of that name; `zlibLevel` 0 (default, fastest read) to 9.
+Off with `enabled: false`, `MeshSetCache::disabled()`, no directory, or `PHPOLYGON_MESH_CACHE=0` through
+`MeshSetCache::fromEnvironment($dir)`. Measured (2026-11-23, `benchmarks/conforming-stages.php 5 3 cache`,
+5 stages, 265 658 vertices, 21 MB on disk): cold 4.79 s (includes the write), warm 0.08-0.09 s, identical checksum.
+`hits()`/`misses()` for the log. Tests: `MeshSetCacheTest`.
 
 **Colour spaces — material albedo is LINEAR.** The lit shaders multiply light by
 `Material::$albedo` as a linear value and gamma-encode (ACES, then 1/2.2) at the end.
@@ -3558,6 +3591,12 @@ $menuPlayer->adopt($handoffs[0]);                 // the new owner fades it out 
   on the player's clock (amplitude-linear, separate down/up times) – for code
   that runs where `AudioManager::update()` does not tick yet, or per stem.
   Never duck the same reason in both places.
+- `preload()` loads every stem and, on a backend that opens at the first play (php-vio), warms it:
+  `AudioManager::warm(...$clipIds)` (no ids = every loaded clip) calls
+  `WarmableAudioBackendInterface::warm()`; `VioAudioBackend` then keeps ready `VioSound` instances that the
+  next play consumes (re-loading a clip id drops them; `warm($id, $copies)` for overlapping plays). Before this
+  `load()` only noted the path and every play ran `vio_audio_load` inside the frame (2.1-2.4 ms for a 3 MB,
+  60 s stereo Vorbis file, 2026-11-23, offline engine, warm disk cache). `loadClip()` keeps its signature.
 - `release()` stops silent stems and stops driving the rest; `reset()` starts
   a new run (loaded clips stay). Marks, gains and the composition belong to
   the game.
@@ -4134,6 +4173,7 @@ own thresholds or sink, in any mode (no sink given = `game.log`).
 $config = new EngineConfig(frameSpikes: new FrameSpikeRecorder(
     sink: $myLog->write(...), floorMs: 33.0, medianFactor: 2.5, ringSize: 240,
     warmupFrames: 30, minLineIntervalSeconds: 1.0, maxLines: 1000,
+    alwaysMs: 100.0,   // hard floor, 0 = off (default): judged in warm-up and right after resume()
 ));
 $engine->frameSpikes?->addContext(fn () => ['area' => $area, 'dialog' => $open]); // only runs for a written line
 FrameSpikeRecorder::note('save', 1, $elapsedNs);       // from anywhere; with time it can become the cause
@@ -4141,7 +4181,12 @@ $engine->frameSpikes?->suspend(); /* load */ $engine->frameSpikes?->resume();   
 ```
 
 - A frame = loop start to loop start (`GameLoop` calls `frame()`), so update ticks, render,
-  present, events and the FPS cap all count. `Engine::$frameTimesMs` stays render-only.
+  present, events and the FPS cap all count. `Engine::$frameTimesMs` stays render-only (the thermal
+  and adaptive controllers read it; `renderTimesMs()` is its explicit name). The whole interval is
+  `Engine::frameIntervalsMs()` (last 60, oldest first) / `lastFrameIntervalMs()`, from `GameLoop`.
+- `alwaysMs` (off by default, 0.0): a frame at or over it is judged even during warm-up, and `resume()`
+  (with it set) starts the first frame after a suspend at the resume call instead of dropping it; that
+  partial frame counts only when it reaches `alwaysMs`, its sections/notes restart at the resume call.
 - Spike: ≥ max(`floorMs`, `medianFactor` × median of the ring). The median is computed only
   for frames ≥ the floor and at most every 30 frames. Below `warmupFrames` nothing is judged
   (the summary's `max` still shows it). Above the rate limit spikes only count (`suppressed=` on
@@ -4164,9 +4209,10 @@ $engine->frameSpikes?->suspend(); /* load */ $engine->frameSpikes?->resume();   
   thermal and adaptive ticks, the recorder itself, including last frame's line).
 - `cause`: GC or the largest timed note when it explains at least half of the excess over the
   median, else the largest section. A count-only note appears in the line, never as the cause.
-- Engine notes: `shader` (`VioRenderer3D`, `OpenGLRenderer3D`), `pipeline` (lazy PSO in `VioRenderer3D`; the
-  post-process passes create theirs outside it and are not counted), `audio` (`vio_audio_load` in
-  `VioAudioBackend`), `grass` (cells built in `GrassSystem`). `gpu_ms` trails by 1-2 frames.
+- Engine notes: `shader` (`VioRenderer3D`, `OpenGLRenderer3D`), `pipeline` (lazy PSO in `VioRenderer3D`, every
+  opaque/transparent pipeline goes through `createPipeline()`; the post-process passes create theirs outside it
+  and are not counted), `upload` (a lazy mesh or texture upload in `VioRenderer3D`, also the CPU interleave),
+  `audio` (`vio_audio_load` in `VioAudioBackend`), `grass` (cells built in `GrassSystem`). `gpu_ms` trails by 1-2 frames.
 - Percentiles come from a fixed histogram of every judged frame (0.25 ms to 50 ms, 5 ms to 1 s;
   upper bucket edge). The summary is written by `finish()`, from `Engine::shutdown()` and a
   shutdown function; a killed process leaves none. Sink and context exceptions are swallowed.

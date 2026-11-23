@@ -29,7 +29,7 @@ namespace PHPolygon\Runtime;
  *
  * Hard floor ($alwaysMs, off by default): a frame this long is judged even while
  * the recorder is still warming up, and the first frame after {@see resume()} is
- * measured from the resume call instead of being thrown away – the hitches of
+ * measured from the resume call instead of being thrown away â€“ the hitches of
  * the first seconds after a load screen are the ones a player sees. The partial
  * frame after resume() only counts when it reaches the floor.
  *

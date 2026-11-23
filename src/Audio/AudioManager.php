@@ -170,7 +170,7 @@ class AudioManager
     }
 
     /**
-     * Open loaded clips now – read the file, set up the decoder – so the first
+     * Open loaded clips now â€“ read the file, set up the decoder â€“ so the first
      * play inside a frame only starts a ready sound. Without ids, every loaded
      * clip. Backends that open at load time (or have nothing to open) do
      * nothing.
