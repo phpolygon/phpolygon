@@ -112,9 +112,7 @@ final class StemPlayer
                 $clips[] = $clip;
             }
         }
-        if ($clips !== []) {
-            $this->audio->warm(...$clips); // (no ids would mean every clip of the manager)
-        }
+        $this->audio->warm(...$clips);
     }
 
     /** The arrangement the player follows; fill it as marks are reached. */

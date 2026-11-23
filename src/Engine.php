@@ -1326,8 +1326,11 @@ class Engine
     }
 
     /**
-     * The last whole frame intervals in milliseconds, oldest first (loop start to
-     * loop start: update ticks, render, present, events and the FPS cap).
+     * The last whole frame intervals in milliseconds, oldest first (at most 60),
+     * loop top to loop top: update ticks, render, present, events and the FPS-cap
+     * wait of each frame. The first sample is the loop's own start-up (nearly
+     * zero), a blocking load inside a frame is one long interval (raw, not
+     * clamped), work before run() is in none. See {@see GameLoop::frameIntervalsMs()}.
      *
      * @return list<float>
      */
@@ -1336,7 +1339,11 @@ class Engine
         return $this->gameLoop->frameIntervalsMs();
     }
 
-    /** The newest whole frame interval in milliseconds, 0.0 before the first. */
+    /**
+     * The frame that ended at the latest loop top, in milliseconds (0.0 before
+     * the first iteration). Inside onUpdate/onRender that is the previous frame,
+     * not the running one.
+     */
     public function lastFrameIntervalMs(): float
     {
         return $this->gameLoop->lastFrameIntervalMs();

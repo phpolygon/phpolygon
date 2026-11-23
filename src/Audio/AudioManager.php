@@ -171,9 +171,10 @@ class AudioManager
 
     /**
      * Open loaded clips now – read the file, set up the decoder – so the first
-     * play inside a frame only starts a ready sound. Without ids, every loaded
-     * clip. Backends that open at load time (or have nothing to open) do
-     * nothing.
+     * play inside a frame only starts a ready sound. Without ids it does nothing
+     * (a caller that spreads an empty list must not open every clip: use
+     * {@see warmAll()} for that). Backends that open at load time (or have
+     * nothing to open) do nothing.
      *
      * @return int clips opened (0 on a backend that cannot warm)
      */
@@ -182,14 +183,23 @@ class AudioManager
         if (!$this->backend instanceof WarmableAudioBackendInterface) {
             return 0;
         }
-        $ids = $clipIds !== [] ? $clipIds : array_map('strval', array_keys($this->clips));
         $opened = 0;
-        foreach ($ids as $id) {
+        foreach ($clipIds as $id) {
             if ($this->backend->warmCount($id) === 0 && $this->backend->warm($id)) {
                 $opened++;
             }
         }
         return $opened;
+    }
+
+    /**
+     * {@see warm()} for every clip loaded so far.
+     *
+     * @return int clips opened
+     */
+    public function warmAll(): int
+    {
+        return $this->warm(...array_map('strval', array_keys($this->clips)));
     }
 
     /**

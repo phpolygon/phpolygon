@@ -102,7 +102,9 @@ final class AudioWarmTest extends TestCase
         $audio->warm('b');
         self::assertSame(['b'], $backend->warmCalls);
 
-        self::assertSame(1, $audio->warm(), 'a is new, gone fails, b was ready already');
+        self::assertSame(0, $audio->warm(), 'warm() without ids opens nothing');
+        self::assertSame(['b'], $backend->warmCalls);
+        self::assertSame(1, $audio->warmAll(), 'a is new, gone fails, b was ready already');
         self::assertSame(['b', 'a', 'gone'], $backend->warmCalls);
     }
 
@@ -110,7 +112,7 @@ final class AudioWarmTest extends TestCase
     {
         $audio = new AudioManager(new SpyAudioBackend());
         $audio->loadClip('a', 'a.ogg');
-        self::assertSame(0, $audio->warm());
+        self::assertSame(0, $audio->warmAll());
         self::assertSame(0, $audio->warm('a'));
     }
 

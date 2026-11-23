@@ -2077,7 +2077,11 @@ returns `array<int|string, MeshData>` from `<dir>/<name>.<hash>.meshset` when th
 (plus an engine stamp over `src/Geometry/*.php` and the format number) matches, else builds and stores.
 The CALLER's key must change whenever the result can: build it with `MeshSetCache::fingerprint(...strings)` /
 `fingerprintFiles(...paths)` over the terrain/asset files, the parameters and the files of the code that builds
-(the cache cannot see a ground closure). Doubles on disk, so a hit is bit for bit the build; crc32 + length + key
+(the cache cannot see a ground closure). Those hash ABSOLUTE paths, so a moved install changes the key; for
+a key that survives a move use `fingerprintTree($dir, ['php', 'json'], $extraFiles)` (every file below `$dir`
+by RELATIVE path + content, sorted, listed with scandir so it works under `phar://`; `$extra` = single files
+under `$dir`) and `fingerprintRelative($base, ...$paths)`. File contents are hashed raw (other line endings =
+another key). Doubles on disk, so a hit is bit for bit the build; crc32 + length + key
 digest checked on read (damaged, short or foreign file = miss and rebuild; disk errors never reach the caller);
 temp file + rename; a new key retires the old file of that name; `zlibLevel` 0 (default, fastest read) to 9.
 Off with `enabled: false`, `MeshSetCache::disabled()`, no directory, or `PHPOLYGON_MESH_CACHE=0` through
@@ -3594,7 +3598,8 @@ $menuPlayer->adopt($handoffs[0]);                 // the new owner fades it out 
   that runs where `AudioManager::update()` does not tick yet, or per stem.
   Never duck the same reason in both places.
 - `preload()` loads every stem and, on a backend that opens at the first play (php-vio), warms it:
-  `AudioManager::warm(...$clipIds)` (no ids = every loaded clip) calls
+  `AudioManager::warm(...$clipIds)` (no ids = does nothing, so a spread empty list opens nothing;
+  `warmAll()` = every loaded clip) calls
   `WarmableAudioBackendInterface::warm()`; `VioAudioBackend` then keeps ready `VioSound` instances that the
   next play consumes (re-loading a clip id drops them; `warm($id, $copies)` for overlapping plays). Before this
   `load()` only noted the path and every play ran `vio_audio_load` inside the frame (2.1-2.4 ms for a 3 MB,
@@ -4185,7 +4190,10 @@ $engine->frameSpikes?->suspend(); /* load */ $engine->frameSpikes?->resume();   
 - A frame = loop start to loop start (`GameLoop` calls `frame()`), so update ticks, render,
   present, events and the FPS cap all count. `Engine::$frameTimesMs` stays render-only (the thermal
   and adaptive controllers read it; `renderTimesMs()` is its explicit name). The whole interval is
-  `Engine::frameIntervalsMs()` (last 60, oldest first) / `lastFrameIntervalMs()`, from `GameLoop`.
+  `Engine::frameIntervalsMs()` (last 60, oldest first) / `lastFrameIntervalMs()`, from `GameLoop`: one raw
+  sample per loop top (time since the previous top = the whole previous frame); the first sample is the loop's
+  start-up (about zero), work before `run()` is in none, a blocking load inside a frame is one long interval
+  (the dt clamps do not touch it), and inside onUpdate/onRender "last" is the previous frame.
 - `alwaysMs` (off by default, 0.0): a frame at or over it is judged even during warm-up, and `resume()`
   (with it set) starts the first frame after a suspend at the resume call instead of dropping it; that
   partial frame counts only when it reaches `alwaysMs`, its sections/notes restart at the resume call.

@@ -185,6 +185,108 @@ final class MeshSetCache
     }
 
     /**
+     * Like {@see fingerprintFiles()}, but a file counts under its path RELATIVE to
+     * $base: the same files in another folder (a moved checkout, an install
+     * elsewhere, a PHAR) give the same key. Every path must lie under $base.
+     * Order does not matter (sorted). File contents are hashed as they are, so a
+     * checkout with other line endings is another key.
+     */
+    public static function fingerprintRelative(string $base, string ...$paths): string
+    {
+        $entries = [];
+        foreach ($paths as $path) {
+            $entries[self::relativeTo($base, $path)] = is_file($path) ? (string) hash_file('xxh128', $path) : 'missing';
+        }
+
+        return self::fold($entries);
+    }
+
+    /**
+     * One content key from a directory tree: every file under $dir whose name ends
+     * in one of $extensions (without the dot; none = all files), by RELATIVE path
+     * and content, sorted, so the key does not depend on where the tree lies. Lists
+     * with scandir(), so it works under phar:// too. $extra adds single files
+     * (relative to $dir, as {@see fingerprintRelative()}), e.g. an asset outside the
+     * extension filter. A missing $dir folds in as empty.
+     *
+     * @param list<string> $extensions e.g. ['php', 'json']
+     * @param list<string> $extra paths under $dir
+     */
+    public static function fingerprintTree(string $dir, array $extensions = [], array $extra = []): string
+    {
+        $base = rtrim(str_replace('\\', '/', $dir), '/');
+        $entries = [];
+        foreach (self::listTree($base, '') as $rel) {
+            if (self::hasExtension($rel, $extensions)) {
+                $entries[$rel] = (string) hash_file('xxh128', $base . '/' . $rel);
+            }
+        }
+        foreach ($extra as $path) {
+            $rel = self::relativeTo($base, $path);
+            $entries[$rel] = is_file($path) ? (string) hash_file('xxh128', $path) : 'missing';
+        }
+
+        return self::fold($entries);
+    }
+
+    /** @param array<string, string> $entries relative path => content hash */
+    private static function fold(array $entries): string
+    {
+        ksort($entries, SORT_STRING);
+        $parts = [];
+        foreach ($entries as $rel => $hash) {
+            $parts[] = $rel . ':' . $hash;
+        }
+
+        return self::fingerprint(...$parts);
+    }
+
+    private static function relativeTo(string $base, string $path): string
+    {
+        $b = rtrim(str_replace('\\', '/', $base), '/') . '/';
+        $p = str_replace('\\', '/', $path);
+        if (!str_starts_with($p, $b)) {
+            throw new \InvalidArgumentException("MeshSetCache: '{$path}' is not under '{$base}'");
+        }
+
+        return substr($p, strlen($b));
+    }
+
+    /** @param list<string> $extensions */
+    private static function hasExtension(string $rel, array $extensions): bool
+    {
+        if ($extensions === []) {
+            return true;
+        }
+        foreach ($extensions as $ext) {
+            if (str_ends_with($rel, '.' . ltrim($ext, '.'))) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /** @return list<string> files below $base/$rel as paths relative to $base */
+    private static function listTree(string $base, string $rel): array
+    {
+        $out = [];
+        foreach (@scandir($base . ($rel === '' ? '' : '/' . $rel)) ?: [] as $entry) {
+            if ($entry === '.' || $entry === '..') {
+                continue;
+            }
+            $r = $rel === '' ? $entry : $rel . '/' . $entry;
+            if (is_dir($base . '/' . $r)) {
+                array_push($out, ...self::listTree($base, $r));
+            } else {
+                $out[] = $r;
+            }
+        }
+
+        return $out;
+    }
+
+    /**
      * Stamp of the engine's own geometry sources (contents of src/Geometry/*.php):
      * part of every key, so an engine update invalidates what it may build
      * differently.

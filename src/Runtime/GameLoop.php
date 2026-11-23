@@ -216,10 +216,25 @@ class GameLoop
     }
 
     /**
-     * The last whole frame intervals in milliseconds, oldest first (at most 60):
-     * from one loop start to the next, so update ticks, render, present, events
-     * and the FPS cap are all in it. Unlike {@see Engine::$frameTimesMs}, which
-     * brackets the render callback only.
+     * The last whole frame intervals in milliseconds, oldest first (at most 60).
+     *
+     * When: one sample is taken at the top of every loop iteration, as the time
+     * since the previous iteration's top (the same clock reading the frame spike
+     * recorder gets). So it is the whole previous frame: update ticks, render,
+     * present, events and the FPS-cap wait. Unlike {@see Engine::$frameTimesMs},
+     * which brackets the render callback only.
+     *
+     * First frame: the first sample runs from the start of run() to the first
+     * loop top, which is nearly nothing, not a frame; the second is the first
+     * real one. Work done before run() (world build, loading) is in no sample.
+     *
+     * Load time: blocking work inside a frame (a synchronous asset load, a
+     * world build called from an update) shows up in full as one long interval.
+     * The sample is the raw interval: the clamps that protect the simulation
+     * (spiral-of-death guard, maximum variable step) only limit the dt handed to
+     * update(), not what is recorded here. Intervals are recorded while the
+     * spike recorder is suspended, too, and for frames the engine skips
+     * (minimised window).
      *
      * @return list<float>
      */
@@ -238,7 +253,12 @@ class GameLoop
         return $out;
     }
 
-    /** The newest whole frame interval in milliseconds, 0.0 before the first. */
+    /**
+     * The newest sample of {@see frameIntervalsMs()} in milliseconds (the frame
+     * that just ended, as seen at this iteration's loop top), 0.0 before the
+     * first loop iteration. Read from onUpdate/onRender it is the PREVIOUS frame,
+     * never the one running.
+     */
     public function lastFrameIntervalMs(): float
     {
         $count = count($this->frameTimeSamples);

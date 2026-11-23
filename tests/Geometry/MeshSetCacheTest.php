@@ -188,6 +188,93 @@ final class MeshSetCacheTest extends TestCase
         self::assertCount(3, array_unique([$a, $b, $gone]));
     }
 
+    /** @param array<string, string> $files relative path => content */
+    private static function tree(string $dir, array $files): void
+    {
+        foreach ($files as $rel => $content) {
+            $path = $dir . '/' . $rel;
+            if (!is_dir(dirname($path))) {
+                mkdir(dirname($path), 0o755, true);
+            }
+            file_put_contents($path, $content);
+        }
+    }
+
+    private static function wipe(string $dir): void
+    {
+        foreach (scandir($dir) ?: [] as $e) {
+            if ($e === '.' || $e === '..') {
+                continue;
+            }
+            is_dir("$dir/$e") ? self::wipe("$dir/$e") : unlink("$dir/$e");
+        }
+        rmdir($dir);
+    }
+
+    public function testATreeKeyIgnoresWhereTheTreeLies(): void
+    {
+        $files = ['a.php' => '<?php // a', 'sub/b.php' => '<?php // b', 'sub/deep/c.json' => '{}', 'notes.txt' => 'x'];
+        $one = $this->dir . '-one';
+        $two = $this->dir . '-two/nested/install';
+        self::tree($one, $files);
+        self::tree($two, $files);
+        try {
+            $k1 = MeshSetCache::fingerprintTree($one, ['php', 'json']);
+            self::assertSame($k1, MeshSetCache::fingerprintTree($two, ['php', 'json']), 'same content in another folder: same key');
+            self::assertSame($k1, MeshSetCache::fingerprintTree($one . '/', ['.php', '.json']), 'trailing slash and dotted extensions');
+
+            self::assertSame(
+                MeshSetCache::fingerprintTree($one, ['php']),
+                (static function () use ($one): string {
+                    file_put_contents($one . '/notes.txt', 'changed');
+
+                    return MeshSetCache::fingerprintTree($one, ['php']);
+                })(),
+                'a file outside the extension filter does not count',
+            );
+            self::assertNotSame(MeshSetCache::fingerprintTree($one), MeshSetCache::fingerprintTree($two), 'no filter: notes.txt differs now');
+
+            file_put_contents($two . '/sub/b.php', '<?php // b changed');
+            self::assertNotSame($k1, MeshSetCache::fingerprintTree($two, ['php', 'json']), 'content counts');
+
+            self::tree($two, ['sub/b.php' => '<?php // b']);
+            self::assertSame($k1, MeshSetCache::fingerprintTree($two, ['php', 'json']));
+            rename($two . '/sub/b.php', $two . '/sub/b2.php');
+            self::assertNotSame($k1, MeshSetCache::fingerprintTree($two, ['php', 'json']), 'the relative path counts');
+            self::assertNotSame(MeshSetCache::fingerprintTree($one, ['php']), MeshSetCache::fingerprintTree($one, ['json']));
+            self::assertIsString(MeshSetCache::fingerprintTree($this->dir . '-absent', ['php']), 'a missing folder is just empty');
+        } finally {
+            self::wipe($one);
+            self::wipe($this->dir . '-two');
+        }
+    }
+
+    public function testRelativeFileKeysAndExtraFiles(): void
+    {
+        $one = $this->dir . '-r1';
+        $two = $this->dir . '-r2/x';
+        self::tree($one, ['data/t.bin' => '123', 'src/p.php' => '<?php']);
+        self::tree($two, ['data/t.bin' => '123', 'src/p.php' => '<?php']);
+        try {
+            self::assertSame(
+                MeshSetCache::fingerprintRelative($one, $one . '/src/p.php', $one . '/data/t.bin'),
+                MeshSetCache::fingerprintRelative($two, $two . '/data/t.bin', $two . '/src/p.php'),
+                'moved, reordered: same key',
+            );
+            self::assertNotSame(MeshSetCache::fingerprintFiles($one . '/src/p.php'), MeshSetCache::fingerprintFiles($two . '/src/p.php'), 'the old absolute-path form keeps its behaviour');
+            self::assertSame(
+                MeshSetCache::fingerprintTree($one, ['php'], [$one . '/data/t.bin']),
+                MeshSetCache::fingerprintTree($two, ['php'], [$two . '/data/t.bin']),
+            );
+            self::assertNotSame(MeshSetCache::fingerprintTree($one, ['php']), MeshSetCache::fingerprintTree($one, ['php'], [$one . '/data/t.bin']));
+            $this->expectException(\InvalidArgumentException::class);
+            MeshSetCache::fingerprintRelative($one, $two . '/data/t.bin');
+        } finally {
+            self::wipe($one);
+            self::wipe($this->dir . '-r2');
+        }
+    }
+
     public function testTheEngineStampCoversTheGeometrySources(): void
     {
         $files = MeshSetCache::engineStampFiles();
@@ -211,6 +298,17 @@ final class MeshSetCacheTest extends TestCase
             // glob() finds nothing under phar://, scandir() lists the entries: the reason the stamp uses scandir().
             self::assertSame([], glob('phar://' . $phar . '/src/*.php') ?: []);
             self::assertContains('A.php', scandir('phar://' . $phar . '/src') ?: []);
+            // A tree inside the archive keys like the same tree on disk.
+            $disk = $this->dir . '-pharsame';
+            self::tree($disk, ['src/A.php' => '<?php']);
+            try {
+                self::assertSame(
+                    MeshSetCache::fingerprintTree($disk . '/src', ['php']),
+                    MeshSetCache::fingerprintTree('phar://' . $phar . '/src', ['php']),
+                );
+            } finally {
+                self::wipe($disk);
+            }
         } catch (\UnexpectedValueException) {
             self::markTestSkipped('phar.readonly prevents building a test archive');
         } finally {
