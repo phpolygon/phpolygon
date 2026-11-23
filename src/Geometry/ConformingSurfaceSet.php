@@ -63,7 +63,7 @@ final class ConformingSurfaceSet
     /** @var list<RegionShape> */
     private array $cuts = [];
 
-    /** @var list<array{RegionShape, float}> neighbour, lap */
+    /** @var list<array{RegionShape, float, float}> neighbour, lap, minimum width of a remnant outside it */
     private array $abuts = [];
 
     /** @var array<string, float> */
@@ -152,15 +152,30 @@ final class ConformingSurfaceSet
      * Without abut() nothing changes (bit for bit). The shapes' distances must
      * be exact (circle, rect, polygon, polyline): the ramp is measured with them.
      *
+     * $minWidth (default 0 = off) removes thin remnants: a surface that runs out
+     * tangentially along the neighbour's outer edge (a tapering fillet, a mouth
+     * shape) leaves a strip OUTSIDE the neighbour. Along every line perpendicular
+     * to the neighbour's edge, a surface whose outer outline lies less than
+     * $minWidth beyond the edge is removed there – also its lap zone inside the
+     * neighbour, its kerb and its hem – and the surface that stays fades its lift
+     * to 0 towards the cut over max(0.2, $minWidth / 4), so the cut is flush: no
+     * step, no open slab end. A path that meets the edge head on is not touched
+     * (it is long along the perpendicular), and neither is a surface wider than
+     * $minWidth + that fade. Surfaces between $minWidth and $minWidth + fade wide
+     * beside the neighbour are a little lower where they are that narrow.
+     *
      * A MeshSetCache key built for a set with abut() must contain the neighbour
-     * shapes and $lap, like every other input of the build.
+     * shapes, $lap and $minWidth, like every other input of the build.
      */
-    public function abut(RegionShape $neighbour, float $lap = 0.3): self
+    public function abut(RegionShape $neighbour, float $lap = 0.3, float $minWidth = 0.0): self
     {
         if ($lap <= 0.0) {
             throw new \InvalidArgumentException('ConformingSurfaceSet::abut: lap must be > 0');
         }
-        $this->abuts[] = [$neighbour, $lap];
+        if ($minWidth < 0.0) {
+            throw new \InvalidArgumentException('ConformingSurfaceSet::abut: minWidth must be >= 0');
+        }
+        $this->abuts[] = [$neighbour, $lap, $minWidth];
         $this->grid = null;
 
         return $this;
@@ -209,13 +224,20 @@ final class ConformingSurfaceSet
         $order = array_keys($this->surfaces);
         $g = $this->ground;
         $common = $this->cuts !== [] || $this->abuts !== [] ? [['cut', -1]] : [];
+        $slivers = false;
+        foreach ($this->abuts as [, , $minWidth]) {
+            $slivers = $slivers || $minWidth > 0.0;
+        }
+        if ($slivers) {
+            $common[] = ['sliv', -1];
+        }
         $inlayNames = $this->inlayOrder();
         $notInlay = $inlayNames !== [] ? [['inlay', -1]] : [];
         $abutting = $this->abuts !== [];
         $top = $abutting
-            ? ConformingRegionMesh::onGroundRamped($g, $this->lift, 'abutn')
+            ? ConformingRegionMesh::onGroundRamped($g, $this->lift, 'abutn', $slivers ? 'sliv' : null)
             : ConformingRegionMesh::onGround($g, $this->lift);
-        $topCarry = $abutting ? ['abutn'] : [];
+        $topCarry = $abutting ? ($slivers ? ['abutn', 'sliv'] : ['abutn']) : [];
         $jobs = [];
 
         // Surfaces: the union, partitioned by priority (the last one takes the rest).
@@ -373,6 +395,11 @@ final class ConformingSurfaceSet
                 return $m;
             });
             $grid->derive('unionx', ['union', 'nd'], self::minOf(...));
+            foreach ($this->abuts as $i => [$shape, $lap, $minWidth]) {
+                if ($minWidth > 0.0) {
+                    $this->stampSlivers($grid, $shape, 'nd:' . $i, $lap, $minWidth);
+                }
+            }
         }
         if ($this->borders !== []) {
             $reach = 0.0;
@@ -406,6 +433,58 @@ final class ConformingSurfaceSet
         }
 
         return $this->grid = $grid;
+    }
+
+    /**
+     * The field `sliv` for one neighbour: along the line perpendicular to the
+     * neighbour's edge through each corner near it, how far the surfaces reach
+     * beyond the edge (w, by marching the `union` field). Value
+     * (w - minWidth) / fade where w is known and below minWidth + fade, with a
+     * steep wall far behind the remnant's outer edge (its hem), so negative =
+     * remove this spot, 0 = the cut line, 1 and more = clear of it. Corners not
+     * written keep FAR: nothing to remove.
+     */
+    private function stampSlivers(ConformingRegionMesh $grid, RegionShape $neighbour, string $field, float $lap, float $minWidth): void
+    {
+        $fade = max(0.2, 0.25 * $minWidth);
+        $reach = $minWidth + $fade;
+        $far = $this->hemWidth + $this->cell;
+        $step = $this->cell * 0.25;
+        $h = 1.0e-4;
+        foreach ($grid->corners($field) as [$ix, $iz, $x, $z, $dn]) {
+            if ($dn < -$lap - $this->cell || $dn > $reach + $far + $this->cell) {
+                continue;
+            }
+            $gx = ($neighbour->distance($x + $h, $z) - $neighbour->distance($x - $h, $z)) / (2.0 * $h);
+            $gz = ($neighbour->distance($x, $z + $h) - $neighbour->distance($x, $z - $h)) / (2.0 * $h);
+            $len = hypot($gx, $gz);
+            if ($len < 1.0e-9) {
+                continue;
+            }
+            $gx /= $len;
+            $gz /= $len;
+            // The foot of the perpendicular on the neighbour's edge; the surface has to cover it.
+            $bx = $x - $dn * $gx;
+            $bz = $z - $dn * $gz;
+            $prev = $grid->sample('union', $bx, $bz);
+            if ($prev > 0.0) {
+                continue;
+            }
+            $w = null;
+            for ($d = $step; $d <= $reach + $step; $d += $step) {
+                $u = $grid->sample('union', $bx + $d * $gx, $bz + $d * $gz);
+                if ($u > 0.0) {
+                    $w = $d - $step + $step * $prev / ($prev - $u);
+                    break;
+                }
+                $prev = $u;
+            }
+            if ($w === null) {
+                continue; // wide enough: untouched
+            }
+            $s = max($w - $minWidth, 50.0 * ($dn - ($w + $far)));
+            $grid->merge('sliv', $ix, $iz, $s / $fade);
+        }
     }
 
     /** @param array<string, float> $v */

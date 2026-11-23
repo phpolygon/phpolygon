@@ -164,6 +164,37 @@ final class ConformingRegionMesh
         $this->fields[$field] = $out;
     }
 
+    /**
+     * Every corner that holds a value of $field, with its world position.
+     *
+     * @return list<array{0: int, 1: int, 2: float, 3: float, 4: float}> ix, iz, x, z, value
+     */
+    public function corners(string $field): array
+    {
+        $stride = $this->nx + 1;
+        $out = [];
+        foreach ($this->fields[$field] ?? [] as $k => $value) {
+            $ix = $k % $stride;
+            $iz = intdiv($k, $stride);
+            $out[] = [$ix, $iz, $this->gx($ix), $this->gz($iz), $value];
+        }
+
+        return $out;
+    }
+
+    /** Write min(old, $value) into one corner of a field (for fields computed corner by corner). */
+    public function merge(string $field, int $ix, int $iz, float $value): void
+    {
+        $k = $iz * ($this->nx + 1) + $ix;
+        if ($ix < 0 || $iz < 0 || $ix > $this->nx || $iz > $this->nz) {
+            return;
+        }
+        $old = $this->fields[$field][$k] ?? self::FAR;
+        if ($value < $old) {
+            $this->fields[$field][$k] = $value;
+        }
+    }
+
     /** Value of a field at a grid corner ({@see FAR} where nothing is stamped). */
     public function valueAt(string $field, int $ix, int $iz): float
     {
@@ -441,16 +472,27 @@ final class ConformingRegionMesh
      * value of 0 or more (outside, or no field stamped) keeps the full lift.
      * Mesh it with $field in $carry.
      *
+     * With $slivers (a carried field in units of the fade length, 0 on the
+     * line where a thin remnant is cut away and growing to 1 and more on the
+     * kept side) the lift also fades to 0 towards that line, so the cut leaves
+     * no step. A missing value counts as far from any cut.
+     *
      * @param callable(float, float): float $ground
      * @return \Closure(float, float, array<string, float>): float
      */
-    public static function onGroundRamped(callable $ground, float $lift, string $field): \Closure
+    public static function onGroundRamped(callable $ground, float $lift, string $field, ?string $slivers = null): \Closure
     {
-        return static function (float $x, float $z, array $v) use ($ground, $lift, $field): float {
+        return static function (float $x, float $z, array $v) use ($ground, $lift, $field, $slivers): float {
             $f = $v[$field] ?? 0.0;
             $u = is_float($f) || is_int($f) ? max(0.0, min(1.0, -$f)) : 0.0;
+            $factor = 1.0 - $u * $u * (3.0 - 2.0 * $u);
+            if ($slivers !== null) {
+                $s = $v[$slivers] ?? 1.0;
+                $t = is_float($s) || is_int($s) ? max(0.0, min(1.0, $s)) : 1.0;
+                $factor *= $t * $t * (3.0 - 2.0 * $t);
+            }
 
-            return $ground($x, $z) + $lift * (1.0 - $u * $u * (3.0 - 2.0 * $u));
+            return $ground($x, $z) + $lift * $factor;
         };
     }
 

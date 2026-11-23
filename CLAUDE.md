@@ -2072,6 +2072,24 @@ parameters). Game use: one `abut()` per import edge a net ends at (avenue, quay,
 overlapping that edge by >= `$lap` instead of a feathered `cut()`; keep the ground function = visible ground.
 Tests: `ConformingSurfaceAbutTest`; numbers: `php examples/conforming_abut.php` (end height 25 mm / 25 mm / 0 mm,
 bare ground 0.15 m / 0 / 0, kerb vertices inside the neighbour 0 / 4 / 0 for feather +0.15 / -0.15 / abut).
+**Thin remnants beside a neighbour — `abut($neighbour, $lap, $minWidth)`.** A fillet that runs out TANGENTIALLY
+along the neighbour's outer edge (a `blend()` mouth, a tapering shape) leaves a thin strip outside the neighbour,
+with kerb and hem. `$minWidth` (default 0 = off, bit for bit v0.110.0) removes it: along each line perpendicular
+to the neighbour's edge, the surfaces' reach beyond the edge `w` is measured (marching the `union` field from the
+foot of the perpendicular; field `sliv`); where `w < $minWidth` the surface, its lap zone inside the neighbour, its
+kerb and its hem are cut away (the cut is part of every part's conditions, like `cut()`), and where `w` is between
+`$minWidth` and `$minWidth + fade` the lift fades to 0 towards the cut (fade = max(0.2, `$minWidth` / 4)), so the cut
+is flush: no step, no open slab end. A path that meets the edge head on is untouched (it is long along the
+perpendicular, so its corners stay), as is any surface whose reach is `$minWidth + fade` or more. Side effects: a
+surface that is `$minWidth` to `$minWidth + fade` wide beside the neighbour sits a little lower where it is that
+narrow; the measure uses the neighbour's perpendicular, so on a strongly curved neighbour edge it is approximate;
+a strip separated from the neighbour by bare ground (`union` does not cover the edge) is not seen; with several
+neighbours the nearest removal rules. `$minWidth` belongs into a `MeshSetCache` key with `$lap` and the neighbour
+shapes. Game use: `CityPaths::surfaceSet()` / `AcademyPathsPrefab`: `abut($avenue, lap, minWidth)` with
+`minWidth` about the kerb band plus hem plus a hand (for the 0.9 m strips and 0.5 m corner bands seen, 1.2-1.5 m),
+and never above the half width of the narrowest real path that runs along a neighbour edge (a path 2 m wide
+beside the edge would be removed below 2.0). `examples/conforming_abut.php` prints the strip before/after
+(0.96 m2, 17 kerb / 18 hem vertices, 25 mm -> 0 m2, 0, 0, 0 mm), `ConformingSurfaceSliverTest` checks it.
 **Cost of a staged family** (one set per district stage, each laying the paving of the stages before it
 again). `mesh()` skips the clip and split work for a cell wholly inside every condition and crossed by no
 split line, rejects pieces on one side of a split line without allocating, and keys vertices by integer:
