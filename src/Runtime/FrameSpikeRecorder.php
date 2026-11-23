@@ -21,11 +21,17 @@ namespace PHPolygon\Runtime;
  * steps to 50 ms, 5 ms steps to 1 s), the ring only feeds the median.
  *
  * What the engine reports by itself: sections, update ticks, GC, memory delta,
- * and the notes {@see NOTE_SHADER}, {@see NOTE_PIPELINE}, {@see NOTE_AUDIO},
- * {@see NOTE_GRASS}. A game adds its own notes through {@see note()} and its
+ * and the notes {@see NOTE_SHADER}, {@see NOTE_PIPELINE}, {@see NOTE_UPLOAD},
+ * {@see NOTE_AUDIO}, {@see NOTE_GRASS}. A game adds its own notes through {@see note()} and its
  * state through {@see addContext()}. Context callbacks only run for a written
  * line. Neither a callback nor the sink can break the game loop: their
  * exceptions are swallowed.
+ *
+ * Hard floor ($alwaysMs, off by default): a frame this long is judged even while
+ * the recorder is still warming up, and the first frame after {@see resume()} is
+ * measured from the resume call instead of being thrown away – the hitches of
+ * the first seconds after a load screen are the ones a player sees. The partial
+ * frame after resume() only counts when it reaches the floor.
  *
  * On php-vio `present` is the 2D flush plus vio_end(), which holds the submit,
  * the wait for the GPU and the vsync wait in one call. `wait` is the engine's FPS
@@ -35,6 +41,8 @@ final class FrameSpikeRecorder
 {
     public const NOTE_SHADER = 'shader';
     public const NOTE_PIPELINE = 'pipeline';
+    /** A lazy mesh or texture upload inside a frame. */
+    public const NOTE_UPLOAD = 'upload';
     public const NOTE_AUDIO = 'audio';
     public const NOTE_GRASS = 'grass';
 
@@ -66,6 +74,7 @@ final class FrameSpikeRecorder
     private array $contexts = [];
 
     private int $floorNs;
+    private int $alwaysNs;
     private int $minLineIntervalNs;
 
     /** @var array<int, int> */
@@ -85,6 +94,8 @@ final class FrameSpikeRecorder
     private int $frameStart = 0;
     private int $suspended = 0;
     private bool $skipFrame = false;
+    /** The running frame began at resume(): judged only from the hard floor up. */
+    private bool $partial = false;
     private bool $finished = false;
 
     private int $lastGcRuns = 0;
@@ -125,6 +136,7 @@ final class FrameSpikeRecorder
      * @param int $warmupFrames frames that must be known before a spike can be reported
      * @param float $minLineIntervalSeconds at most one line per interval, the others only count
      * @param int $maxLines lines per session, the summary is not one of them
+     * @param float $alwaysMs hard floor, 0 = off: a frame this long is judged during warm-up and right after resume()
      */
     public function __construct(
         ?callable $sink = null,
@@ -134,6 +146,7 @@ final class FrameSpikeRecorder
         private readonly int $warmupFrames = 30,
         float $minLineIntervalSeconds = 1.0,
         private readonly int $maxLines = 1000,
+        float $alwaysMs = 0.0,
     ) {
         if ($ringSize < 1) {
             throw new \InvalidArgumentException('ringSize must be at least 1');
@@ -144,6 +157,7 @@ final class FrameSpikeRecorder
         }
         $this->sink = $sink === null ? null : $sink(...);
         $this->floorNs = (int) ($floorMs * 1_000_000.0);
+        $this->alwaysNs = (int) ($alwaysMs * 1_000_000.0);
         $this->minLineIntervalNs = (int) ($minLineIntervalSeconds * 1_000_000_000.0);
         $this->ring = array_fill(0, $ringSize, 0);
         $this->histogram = array_fill(0, self::BUCKETS, 0);
@@ -195,17 +209,30 @@ final class FrameSpikeRecorder
 
     /**
      * Stop judging frames, e.g. around a load screen whose long frames are
-     * expected. Calls nest. The next frame after {@see resume()} starts fresh.
+     * expected. Calls nest. The next frame after {@see resume()} starts fresh (with
+     * a hard floor set, it is measured from the resume call and judged from the
+     * floor up).
      */
     public function suspend(): void
     {
         $this->suspended++;
     }
 
-    public function resume(): void
+    /** @param int|null $now clock of {@see frame()}; hrtime(true) when left out */
+    public function resume(?int $now = null): void
     {
         if ($this->suspended > 0 && --$this->suspended === 0) {
-            $this->frameStart = 0;
+            if ($this->alwaysNs <= 0) {
+                $this->frameStart = 0;
+                return;
+            }
+            // The sections and notes gathered so far belong to the suspended work, not to this frame.
+            $section = $this->section;
+            $this->resetFrame();
+            $this->section = $section;
+            $this->frameStart = $now ?? (int) hrtime(true);
+            $this->sectionStart = $this->frameStart;
+            $this->partial = true;
         }
     }
 
@@ -249,7 +276,9 @@ final class FrameSpikeRecorder
         $gc = gc_status();
         $memory = memory_get_usage();
 
-        if ($start === 0 || $this->suspended > 0 || $this->skipFrame) {
+        $partial = $this->partial;
+        $this->partial = false;
+        if ($start === 0 || $this->suspended > 0 || $this->skipFrame || ($partial && $now - $start < $this->alwaysNs)) {
             $this->skipFrame = false;
             if ($this->sessionStart === 0) {
                 $this->sessionStart = $now;
@@ -270,7 +299,7 @@ final class FrameSpikeRecorder
             : self::FINE_BUCKETS + intdiv($ns - self::FINE_LIMIT_NS, self::COARSE_STEP_NS);
         $this->histogram[$bucket < self::BUCKETS ? $bucket : self::BUCKETS - 1]++;
 
-        if ($ns >= $this->floorNs && $this->ringCount >= $this->warmupFrames) {
+        if ($ns >= $this->floorNs && ($this->ringCount >= $this->warmupFrames || ($this->alwaysNs > 0 && $ns >= $this->alwaysNs))) {
             $this->judge($ns, $now, $gc, $memory);
         }
 

@@ -136,7 +136,12 @@ class Engine
      * Updated once per render frame; safe to read from PerfOverlay or game code.
      *
      * frameTimesMs is a ring buffer (newest at the end) of the last
-     * self::FRAME_HISTORY render frames in milliseconds. lastGcDelta is the
+     * self::FRAME_HISTORY render frames in milliseconds – RENDER WORK ONLY, the
+     * time inside the render callback (it feeds the thermal and adaptive quality
+     * controllers, so it keeps that meaning). It leaves out update ticks, the
+     * FPS-cap wait and events: for the whole frame interval use
+     * {@see frameIntervalsMs()} / {@see lastFrameIntervalMs()}, or
+     * {@see renderTimesMs()} for the explicit name of this one. lastGcDelta is the
      * delta of `gc_status()` runs / collected since the previous frame.
      *
      * @var list<float>
@@ -1307,6 +1312,34 @@ class Engine
             return $gpu >= 0.0 ? ['gpu_ms' => round($gpu, 2)] : [];
         });
         return $recorder;
+    }
+
+    /**
+     * Render work per frame in milliseconds, newest last – the same data as
+     * {@see $frameTimesMs}, under the name that says what it measures.
+     *
+     * @return list<float>
+     */
+    public function renderTimesMs(): array
+    {
+        return $this->frameTimesMs;
+    }
+
+    /**
+     * The last whole frame intervals in milliseconds, oldest first (loop start to
+     * loop start: update ticks, render, present, events and the FPS cap).
+     *
+     * @return list<float>
+     */
+    public function frameIntervalsMs(): array
+    {
+        return $this->gameLoop->frameIntervalsMs();
+    }
+
+    /** The newest whole frame interval in milliseconds, 0.0 before the first. */
+    public function lastFrameIntervalMs(): float
+    {
+        return $this->gameLoop->lastFrameIntervalMs();
     }
 
     private function beginFrameStats(): void

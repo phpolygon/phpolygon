@@ -183,6 +183,74 @@ final class FrameSpikeRecorderTest extends TestCase
         $this->assertSame(24, $recorder->frameCount());
     }
 
+    public function testTheHardFloorJudgesFramesDuringWarmup(): void
+    {
+        $recorder = $this->recorder(['warmupFrames' => 20, 'alwaysMs' => 100.0]);
+        $this->frames($recorder, 3, 10.0);
+        $this->frames($recorder, 1, 60.0);   // over the 33 ms floor, under the hard floor: still warming up
+        $this->frames($recorder, 1, 10.0);
+        $this->frames($recorder, 1, 140.0);  // at or over the hard floor: judged
+        $recorder->frame($this->now);
+
+        $this->assertSame(1, $recorder->spikeCount());
+        $this->assertStringContainsString('frame=140.00ms', $this->spikeLines()[0]);
+    }
+
+    public function testTheHardFloorIsOffByDefault(): void
+    {
+        $recorder = $this->recorder(['warmupFrames' => 20]);
+        $this->frames($recorder, 3, 10.0);
+        $this->frames($recorder, 1, 140.0);
+        $recorder->frame($this->now);
+
+        $this->assertSame(0, $recorder->spikeCount());
+    }
+
+    public function testAHitchRightAfterResumeIsLogged(): void
+    {
+        $recorder = $this->recorder(['alwaysMs' => 100.0]);
+        $this->frames($recorder, 20, 10.0);
+        $recorder->suspend();
+        $this->frames($recorder, 5, 500.0);
+        $recorder->resume($this->now);
+        $this->now += 180 * self::MS; // the first frame after the load screen stalls
+        $this->frames($recorder, 5, 10.0);
+        $recorder->frame($this->now);
+
+        $this->assertSame(1, $recorder->spikeCount());
+        $this->assertStringContainsString('frame=180.00ms', $this->spikeLines()[0]);
+        $this->assertSame(19 + 1 + 5, $recorder->frameCount(), '19 before the load, the 180 ms one, five after it');
+    }
+
+    public function testAShortPartialFrameAfterResumeIsNotCounted(): void
+    {
+        $recorder = $this->recorder(['alwaysMs' => 100.0]);
+        $this->frames($recorder, 20, 10.0);
+        $recorder->suspend();
+        $this->frames($recorder, 5, 500.0);
+        $recorder->resume($this->now);
+        $this->now += 4 * self::MS;
+        $this->frames($recorder, 5, 10.0);
+        $recorder->frame($this->now);
+
+        $this->assertSame(0, $recorder->spikeCount());
+        $this->assertSame(19 + 5, $recorder->frameCount(), 'the 4 ms rest of the resume frame is not a frame');
+    }
+
+    public function testResumeKeepsItsOldBehaviourWithoutAHardFloor(): void
+    {
+        $recorder = $this->recorder();
+        $this->frames($recorder, 20, 10.0);
+        $recorder->suspend();
+        $this->frames($recorder, 5, 500.0);
+        $recorder->resume($this->now);
+        $this->now += 180 * self::MS;
+        $this->frames($recorder, 5, 10.0);
+        $recorder->frame($this->now);
+
+        $this->assertSame(0, $recorder->spikeCount());
+    }
+
     public function testSkippedFrameIsLeftOut(): void
     {
         $recorder = $this->recorder();

@@ -8376,6 +8376,8 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             return null;
         }
 
+        // A first use inside a frame: the frame recorder has to be able to name this hitch.
+        $uploadStart = hrtime(true);
         $interleaved = $this->interleaveMeshData($meshData);
 
         $vioMesh = vio_mesh($this->ctx, [
@@ -8394,6 +8396,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
 
         $this->meshCache[$meshId] = $vioMesh;
         $this->meshCacheVersions[$meshId] = $version;
+        FrameSpikeRecorder::note(FrameSpikeRecorder::NOTE_UPLOAD, 1, hrtime(true) - $uploadStart);
         return $vioMesh;
     }
 
@@ -9735,6 +9738,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             return null;
         }
 
+        $uploadStart = hrtime(true);
         if (!$this->textureManager->has($textureId)) {
             try {
                 $this->textureManager->load($textureId);
@@ -9762,6 +9766,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         }
 
         $this->textureCache[$textureId] = $vioTex;
+        FrameSpikeRecorder::note(FrameSpikeRecorder::NOTE_UPLOAD, 1, hrtime(true) - $uploadStart);
         return $vioTex;
     }
 

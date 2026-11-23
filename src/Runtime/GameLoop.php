@@ -216,6 +216,41 @@ class GameLoop
     }
 
     /**
+     * The last whole frame intervals in milliseconds, oldest first (at most 60):
+     * from one loop start to the next, so update ticks, render, present, events
+     * and the FPS cap are all in it. Unlike {@see Engine::$frameTimesMs}, which
+     * brackets the render callback only.
+     *
+     * @return list<float>
+     */
+    public function frameIntervalsMs(): array
+    {
+        $samples = $this->frameTimeSamples;
+        if (count($samples) >= $this->sampleCount) {
+            // Full ring: the oldest sample sits where the next one will be written.
+            $samples = array_merge(array_slice($samples, $this->sampleIndex), array_slice($samples, 0, $this->sampleIndex));
+        }
+        $out = [];
+        foreach ($samples as $seconds) {
+            $out[] = $seconds * 1000.0;
+        }
+
+        return $out;
+    }
+
+    /** The newest whole frame interval in milliseconds, 0.0 before the first. */
+    public function lastFrameIntervalMs(): float
+    {
+        $count = count($this->frameTimeSamples);
+        if ($count === 0) {
+            return 0.0;
+        }
+        $last = $count >= $this->sampleCount ? ($this->sampleIndex + $this->sampleCount - 1) % $this->sampleCount : $count - 1;
+
+        return $this->frameTimeSamples[$last] * 1000.0;
+    }
+
+    /**
      * Pipelined game loop for multithreaded execution.
      *
      * Per frame:
