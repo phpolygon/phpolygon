@@ -2047,6 +2047,21 @@ bulge), shoes, bottles, handles; turn it with a transform to loft along X/Z.
 `MeshData::mirrored(axis)` reflects a mesh and reverses the winding — a left part from
 a right one without the mesh turning inside out.
 
+**Ship hulls — `HullLoftMesh` + `HullStation`.** `EllipseLoftMesh` stacks horizontal rings
+along Y, so it cannot make a hull whose top edge (sheer) rises toward one end, whose keel
+rocks up toward both ends and whose sides flare. `HullLoftMesh::generate(list<HullStation>,
+fromRow, toRow, wall)` lofts transverse sections along Z: each `HullStation(z, points)` lists
+the half-outline `[halfBreadth, y]` from keel to sheer (same point count at every station,
+increasing z, the lowest point on the centre plane x = 0); the mesh mirrors it about x = 0.
+End stations may be knife edges (all half-breadths 0); a lower level that closes on the
+centre line before the upper ones gives a raked stem for free. The shell is smooth-shaded,
+the keel line shares one normal across the centre plane, winding matches `LatheMesh`. The
+top edge stays open (a deck closes it) unless `wall > 0`, which adds the inner skin inset
+by `wall` and a crisp rim over the top edge (a bulwark with real thickness). `fromRow` /
+`toRow` cut a band out of the profile so one loft can be split per paint (antifouling,
+boot-top stripe, topsides) with shared border vertices and no seams. Generate the stations
+from analytic functions of z (dense near the ends) – the mesh does not interpolate.
+
 **Faceted solids — `MeshAccumulator`, `PlanarFrame`, `PrismClip`, `EllipsoidShell`, `DiscMesh`.**
 Flat-shaded plates, shafts, pads and shells with exact, parameter-only geometry (no registry,
 no random state). `MeshAccumulator(uvScale = 0.5)` collects faces with their own vertices:
