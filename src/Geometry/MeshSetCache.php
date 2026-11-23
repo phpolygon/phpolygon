@@ -293,27 +293,23 @@ final class MeshSetCache
      */
     public static function engineStamp(): string
     {
-        if (self::$engineStamp === null) {
-            $names = self::engineStampFiles();
-            $files = array_map(static fn (string $n): string => __DIR__ . '/' . $n, $names);
-            self::$engineStamp = self::fingerprint(implode(',', $names), self::fingerprintFiles(...$files), self::packageReference());
-        }
-
-        return self::$engineStamp;
+        return self::$engineStamp ??= self::stampOfDirectory(__DIR__);
     }
 
-    /** The installed engine's version reference (a git hash or tag), '' when Composer cannot tell. */
-    private static function packageReference(): string
+    /**
+     * The stamp of a directory of engine sources: file names and contents by
+     * RELATIVE path, so the same sources give the same stamp under vendor/, in a
+     * PHAR or in a copy elsewhere. No Composer reference goes in: it can differ
+     * between vendor and PHAR, and the source hash already covers every change.
+     *
+     * @internal exposed for tests
+     */
+    public static function stampOfDirectory(string $dir): string
     {
-        try {
-            if (class_exists(\Composer\InstalledVersions::class)) {
-                return (string) \Composer\InstalledVersions::getReference('phpolygon/phpolygon');
-            }
-        } catch (\Throwable) {
-            // not installed through Composer (a PHAR, a checkout): the file contents above still count
-        }
+        $names = self::phpFilesOf($dir);
+        $files = array_map(static fn (string $n): string => rtrim($dir, '/\\') . '/' . $n, $names);
 
-        return '';
+        return self::fingerprint(implode(',', $names), self::fingerprintRelative($dir, ...$files));
     }
 
     /**
@@ -324,8 +320,14 @@ final class MeshSetCache
      */
     public static function engineStampFiles(): array
     {
+        return self::phpFilesOf(__DIR__);
+    }
+
+    /** @return list<string> */
+    private static function phpFilesOf(string $dir): array
+    {
         $names = [];
-        foreach (scandir(__DIR__) ?: [] as $entry) {
+        foreach (@scandir($dir) ?: [] as $entry) {
             if (str_ends_with($entry, '.php')) {
                 $names[] = $entry;
             }

@@ -285,6 +285,22 @@ final class MeshSetCacheTest extends TestCase
         self::assertMatchesRegularExpression('/^[0-9a-f]{32}$/', MeshSetCache::engineStamp());
     }
 
+    public function testTheStampOfACopiedGeometryDirectoryIsTheSame(): void
+    {
+        $copy = $this->dir . '-geometry-copy/vendor/phpolygon/src/Geometry';
+        mkdir($copy, 0o755, true);
+        foreach (MeshSetCache::engineStampFiles() as $name) {
+            copy(__DIR__ . '/../../src/Geometry/' . $name, $copy . '/' . $name);
+        }
+        try {
+            self::assertSame(MeshSetCache::engineStamp(), MeshSetCache::stampOfDirectory($copy), 'another absolute path, same sources: same stamp');
+            file_put_contents($copy . '/GroundMemo.php', "\n// changed", FILE_APPEND);
+            self::assertNotSame(MeshSetCache::engineStamp(), MeshSetCache::stampOfDirectory($copy), 'a changed source changes it');
+        } finally {
+            self::wipe($this->dir . '-geometry-copy');
+        }
+    }
+
     public function testTheEngineStampListsAPharDirectory(): void
     {
         if (!in_array('phar', stream_get_wrappers(), true)) {
@@ -298,6 +314,11 @@ final class MeshSetCacheTest extends TestCase
             // glob() finds nothing under phar://, scandir() lists the entries: the reason the stamp uses scandir().
             self::assertSame([], glob('phar://' . $phar . '/src/*.php') ?: []);
             self::assertContains('A.php', scandir('phar://' . $phar . '/src') ?: []);
+            // The engine stamp of the sources inside an archive equals the stamp on disk.
+            foreach (MeshSetCache::engineStampFiles() as $name) {
+                $p->addFromString('geometry/' . $name, (string) file_get_contents(__DIR__ . '/../../src/Geometry/' . $name));
+            }
+            self::assertSame(MeshSetCache::engineStamp(), MeshSetCache::stampOfDirectory('phar://' . $phar . '/geometry'));
             // A tree inside the archive keys like the same tree on disk.
             $disk = $this->dir . '-pharsame';
             self::tree($disk, ['src/A.php' => '<?php']);
