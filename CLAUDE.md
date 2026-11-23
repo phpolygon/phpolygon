@@ -2090,6 +2090,17 @@ shapes. Game use: `CityPaths::surfaceSet()` / `AcademyPathsPrefab`: `abut($avenu
 and never above the half width of the narrowest real path that runs along a neighbour edge (a path 2 m wide
 beside the edge would be removed below 2.0). `examples/conforming_abut.php` prints the strip before/after
 (0.96 m2, 17 kerb / 18 hem vertices, 25 mm -> 0 m2, 0, 0, 0 mm), `ConformingSurfaceSliverTest` checks it.
+**Closing the wedge edges — `abut($neighbour, $lap, $minWidth, bool $closeWedge = false)`.** The surface that fades
+inside the neighbour ends on both sides in an open wedge edge (up to `lift` = 25 mm high, as long as the fade, a few
+decimetres). `$closeWedge: true` lets the hem run along those edges too (the hem field leaves out only neighbours
+that do NOT close; `hemRamped()` starts the hem at the FADED lift of the surface and falls to `hemSink` below the
+ground, under the neighbour's own surface). Kerb is not added there; surface and kerb meshes are unchanged, only the
+hem part grows. Default false = v0.110.0 bit for bit (`ConformingSurfaceWedgeTest`). Needs a hem (`hemWidth > 0`);
+works with `$minWidth` (the sliver cut lines are closed the same way: the hem carries the sliver fade). Per
+neighbour: with several `abut()` only those with `closeWedge` get the hem inside them. In the key of a `MeshSetCache`
+put `$closeWedge` with `$lap` and `$minWidth`. Measured (`examples/conforming_abut.php`, synthetic): open edges higher
+than 12 mm 4 (25 mm) -> 0. Game use: pass `true` at every `abut()` of `CityPaths::surfaceSet()` /
+`AcademyPathsPrefab` / the harbour bridges; the audit script's wedge edges should then be gone.
 **Cost of a staged family** (one set per district stage, each laying the paving of the stages before it
 again). `mesh()` skips the clip and split work for a cell wholly inside every condition and crossed by no
 split line, rejects pieces on one side of a split line without allocating, and keys vertices by integer:

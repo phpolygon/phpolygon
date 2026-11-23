@@ -63,7 +63,7 @@ final class ConformingSurfaceSet
     /** @var list<RegionShape> */
     private array $cuts = [];
 
-    /** @var list<array{RegionShape, float, float}> neighbour, lap, minimum width of a remnant outside it */
+    /** @var list<array{RegionShape, float, float, bool}> neighbour, lap, minimum width of a remnant outside it, close the wedge edges */
     private array $abuts = [];
 
     /** @var array<string, float> */
@@ -164,10 +164,17 @@ final class ConformingSurfaceSet
      * $minWidth + that fade. Surfaces between $minWidth and $minWidth + fade wide
      * beside the neighbour are a little lower where they are that narrow.
      *
+     * $closeWedge (default false = as before) closes the two side edges of the wedge
+     * on which the surface fades inside the neighbour (up to $lift high, a few
+     * decimetres long each, open to the side): the hem runs along them too,
+     * starting at the faded lift and falling to $hemSink below the ground, under
+     * the neighbour's own surface. It has no effect without a hem. Kerb is not
+     * added there.
+     *
      * A MeshSetCache key built for a set with abut() must contain the neighbour
-     * shapes, $lap and $minWidth, like every other input of the build.
+     * shapes, $lap, $minWidth and $closeWedge, like every other input of the build.
      */
-    public function abut(RegionShape $neighbour, float $lap = 0.3, float $minWidth = 0.0): self
+    public function abut(RegionShape $neighbour, float $lap = 0.3, float $minWidth = 0.0, bool $closeWedge = false): self
     {
         if ($lap <= 0.0) {
             throw new \InvalidArgumentException('ConformingSurfaceSet::abut: lap must be > 0');
@@ -175,7 +182,7 @@ final class ConformingSurfaceSet
         if ($minWidth < 0.0) {
             throw new \InvalidArgumentException('ConformingSurfaceSet::abut: minWidth must be >= 0');
         }
-        $this->abuts[] = [$neighbour, $lap, $minWidth];
+        $this->abuts[] = [$neighbour, $lap, $minWidth, $closeWedge];
         $this->grid = null;
 
         return $this;
@@ -238,6 +245,14 @@ final class ConformingSurfaceSet
             ? ConformingRegionMesh::onGroundRamped($g, $this->lift, 'abutn', $slivers ? 'sliv' : null)
             : ConformingRegionMesh::onGround($g, $this->lift);
         $topCarry = $abutting ? ($slivers ? ['abutn', 'sliv'] : ['abutn']) : [];
+        // Hem along the wedge edges: some neighbour asks for it. Its hem field then leaves out only the others.
+        $closing = false;
+        $leaving = false;
+        foreach ($this->abuts as [, , , $close]) {
+            $closing = $closing || $close;
+            $leaving = $leaving || !$close;
+        }
+        $hemOutside = !$abutting ? 'union' : (!$closing ? 'unionx' : ($leaving ? 'unionh' : 'union'));
         $jobs = [];
 
         // Surfaces: the union, partitioned by priority (the last one takes the rest).
@@ -274,10 +289,13 @@ final class ConformingSurfaceSet
 
         // Hems: outside the union, each point to the nearest surface.
         if ($this->hemWidth > 0.0) {
-            $hem = ConformingRegionMesh::hem($g, 'union', $this->lift, $this->hemWidth, $this->hemSink);
+            $hem = $closing
+                ? ConformingRegionMesh::hemRamped($g, 'union', $this->lift, $this->hemWidth, $this->hemSink, 'abutn', $slivers ? 'sliv' : null)
+                : ConformingRegionMesh::hem($g, 'union', $this->lift, $this->hemWidth, $this->hemSink);
+            $hemCarry = $closing ? ($slivers ? ['union', 'abutn', 'sliv'] : ['union', 'abutn']) : ['union'];
             foreach ($order as $k => $s) {
                 // Outside the surfaces, and outside the neighbours they abut (no hem along an abutting edge).
-                $cond = [['hem', 1], [$abutting ? 'unionx' : 'union', -1]];
+                $cond = [['hem', 1], [$hemOutside, -1]];
                 if ($last > 0) {
                     for ($h = 0; $h < $k; $h++) {
                         $cond[] = ['near:' . $order[$h], -1];
@@ -287,7 +305,7 @@ final class ConformingSurfaceSet
                     }
                 }
                 $key = self::hemOf($s);
-                $jobs[$key] = [[...$cond, ...$common], $hem, ['union']];
+                $jobs[$key] = [[...$cond, ...$common], $hem, $hemCarry];
             }
         }
 
@@ -395,6 +413,17 @@ final class ConformingSurfaceSet
                 return $m;
             });
             $grid->derive('unionx', ['union', 'nd'], self::minOf(...));
+            $others = [];
+            foreach ($this->abuts as $i => [, , , $close]) {
+                if (!$close) {
+                    $others[] = 'nd:' . $i;
+                }
+            }
+            if ($others !== [] && $others !== $names) {
+                // The hem leaves out only the neighbours that do not close their wedge edges.
+                $grid->derive('ndh', $others, self::minOf(...));
+                $grid->derive('unionh', ['union', 'ndh'], self::minOf(...));
+            }
             foreach ($this->abuts as $i => [$shape, $lap, $minWidth]) {
                 if ($minWidth > 0.0) {
                     $this->stampSlivers($grid, $shape, 'nd:' . $i, $lap, $minWidth);

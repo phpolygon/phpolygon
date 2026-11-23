@@ -482,18 +482,50 @@ final class ConformingRegionMesh
      */
     public static function onGroundRamped(callable $ground, float $lift, string $field, ?string $slivers = null): \Closure
     {
-        return static function (float $x, float $z, array $v) use ($ground, $lift, $field, $slivers): float {
-            $f = $v[$field] ?? 0.0;
-            $u = is_float($f) || is_int($f) ? max(0.0, min(1.0, -$f)) : 0.0;
-            $factor = 1.0 - $u * $u * (3.0 - 2.0 * $u);
-            if ($slivers !== null) {
-                $s = $v[$slivers] ?? 1.0;
-                $t = is_float($s) || is_int($s) ? max(0.0, min(1.0, $s)) : 1.0;
-                $factor *= $t * $t * (3.0 - 2.0 * $t);
-            }
+        return static fn (float $x, float $z, array $v): float => $ground($x, $z) + $lift * self::liftFactor($v, $field, $slivers);
+    }
 
-            return $ground($x, $z) + $lift * $factor;
+    /**
+     * Height callback for a hem along a surface whose lift fades
+     * ({@see onGroundRamped()}): it starts at the FADED lift of the surface at its
+     * outline and falls to $sink below the ground like {@see hem()}. Mesh it with
+     * $field and $ramp (and $slivers) in $carry.
+     *
+     * @param callable(float, float): float $ground
+     * @return \Closure(float, float, array<string, float>): float
+     */
+    public static function hemRamped(callable $ground, string $field, float $lift, float $width, float $sink, string $ramp, ?string $slivers = null): \Closure
+    {
+        if ($width <= 0.0) {
+            throw new \InvalidArgumentException('ConformingRegionMesh::hemRamped: width must be > 0');
+        }
+
+        return static function (float $x, float $z, array $v) use ($ground, $field, $lift, $width, $sink, $ramp, $slivers): float {
+            $top = $lift * self::liftFactor($v, $ramp, $slivers);
+
+            return $ground($x, $z) + $top - ($top + $sink) * self::fraction($v, $field, $width);
         };
+    }
+
+    /**
+     * The share of the lift left at a point: smoothstep of the depth into a
+     * neighbour ($ramp: signed distance in laps, negative inside) times the sliver
+     * fade ($slivers), 1 where neither field says otherwise.
+     *
+     * @param array<mixed> $v
+     */
+    private static function liftFactor(array $v, string $ramp, ?string $slivers): float
+    {
+        $f = $v[$ramp] ?? 0.0;
+        $u = is_float($f) || is_int($f) ? max(0.0, min(1.0, -$f)) : 0.0;
+        $factor = 1.0 - $u * $u * (3.0 - 2.0 * $u);
+        if ($slivers !== null) {
+            $s = $v[$slivers] ?? 1.0;
+            $t = is_float($s) || is_int($s) ? max(0.0, min(1.0, $s)) : 1.0;
+            $factor *= $t * $t * (3.0 - 2.0 * $t);
+        }
+
+        return $factor;
     }
 
     /**

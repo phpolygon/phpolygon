@@ -15,6 +15,10 @@ declare(strict_types=1);
  * and the neighbour (m), build time. The ground function here IS the neighbour's
  * visible ground too (continuous across the edge), as abut() expects.
  *
+ * A third table counts the open edges that stand more than 12 mm above the ground
+ * (the side edges of the wedge on which the surface fades inside the neighbour)
+ * without and with abut()'s $closeWedge.
+ *
  * A second table shows abut()'s $minWidth: a fillet that hugs the neighbour's
  * edge and tapers leaves a thin strip OUTSIDE the neighbour; with a minimum width
  * the strip goes, with its kerb and hem, and the surface that stays starts flush.
@@ -133,4 +137,43 @@ foreach ([0.0, 1.2] as $minWidth) {
         }
     }
     printf("%-20s %16.2f %12d %12d %16.1f %8.0f\n", $minWidth > 0.0 ? sprintf('%.1f m', $minWidth) : 'off (default)', $area, $count($parts['kerb'] ?? null), $count($parts['main.hem'] ?? null), $firstLift * 1000.0, $ms);
+}
+
+// ---- open wedge edges: abut(..., closeWedge) ----------------------------------------------------
+echo "\nopen edges higher than 12 mm above the ground (all parts of the set together)\n";
+printf("%-24s %12s %14s\n", 'closeWedge', 'open edges', 'highest (mm)');
+foreach ([false, true] as $close) {
+    $set = new ConformingSurfaceSet($ground, cell: 0.5, lift: LIFT, hemWidth: 0.35, hemSink: 0.05);
+    $set->add('main', RegionShape::polyline([[-12.0, 0.0], [8.0, 0.0]], 1.5))->border('main', 0.3, 'kerb')
+        ->abut($neighbour, LAP, 0.0, $close);
+    $merged = MeshData::merge(...array_values($set->build()));
+    $height = [];
+    $key = static fn (float $x, float $z): string => sprintf('%.5f:%.5f', round($x, 5) + 0.0, round($z, 5) + 0.0);
+    for ($i = 0, $n = count($merged->vertices); $i < $n; $i += 3) {
+        $height[$key($merged->vertices[$i], $merged->vertices[$i + 2])] = $merged->vertices[$i + 1] - $ground($merged->vertices[$i], $merged->vertices[$i + 2]);
+    }
+    $count = [];
+    for ($t = 0, $n = count($merged->indices); $t < $n; $t += 3) {
+        foreach ([[0, 1], [1, 2], [2, 0]] as [$a, $b]) {
+            $ia = $merged->indices[$t + $a] * 3;
+            $ib = $merged->indices[$t + $b] * 3;
+            $ka = $key($merged->vertices[$ia], $merged->vertices[$ia + 2]);
+            $kb = $key($merged->vertices[$ib], $merged->vertices[$ib + 2]);
+            $e = $ka < $kb ? "{$ka}|{$kb}" : "{$kb}|{$ka}";
+            $count[$e] = ($count[$e] ?? 0) + 1;
+        }
+    }
+    $open = 0;
+    $max = 0.0;
+    foreach ($count as $e => $c) {
+        if ($c !== 1) {
+            continue;
+        }
+        $h = max(...array_map(static fn (string $k): float => $height[$k] ?? 0.0, explode('|', (string) $e)));
+        if ($h > 0.012) {
+            $open++;
+        }
+        $max = max($max, $h);
+    }
+    printf("%-24s %12d %14.1f\n", $close ? 'true' : 'false (default)', $open, $max * 1000.0);
 }
