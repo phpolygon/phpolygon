@@ -2058,7 +2058,9 @@ identical meshes (`ConformingSurfaceSetGoldenTest`), 5.9 s -> 4.8 s for a synthe
 (`php -d memory_limit=-1 benchmarks/conforming-stages.php 5 3`, 265 658 vertices, cheap ground,
 2026-11-23, no OPcache). `GroundMemo` (integer-keyed 0.1 mm memo, `queries()`/`misses()`) passed to
 several sets instead of a plain callable makes them share the ground samples: 198 k -> 74 k ground
-calls in the same benchmark (`shared` mode; a point within 0.1 mm of an earlier one takes its height, so
+calls in the same benchmark; with a ground costing ~15 us per query (`... 5 1 plain|shared 300`,
+interleaved A/B on a loaded machine, 2026-11-23, synthetic): before 10.85 / 10.42 s, meshing fast
+paths 9.04 / 9.13 s, plus shared memo 6.89 / 7.14 s (`shared` mode; a point within 0.1 mm of an earlier one takes its height, so
 the meshes match the unshared build to ~1e-5, not bit for bit – a lone set given a callable is unchanged).
 `MeshSetCache` (below) turns the whole build into one file read on the second start. NOT done: a
 cross-stage cell cache (the fields differ per stage, so a cell is reusable only when all its corner
