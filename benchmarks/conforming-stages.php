@@ -11,6 +11,7 @@ declare(strict_types=1);
  * Usage: php -d memory_limit=-1 benchmarks/conforming-stages.php [stages] [runs] [mode]
  *   mode: plain  every set on its own (the behaviour without a shared cache)
  *         shared one GroundMemo for the whole family
+ *         cache  MeshSetCache in E:\ClaudeTemp\phpolygon\meshcache-bench: run 0 builds and stores, later runs read
  */
 
 require __DIR__ . '/../vendor/autoload.php';
@@ -18,6 +19,7 @@ require __DIR__ . '/../vendor/autoload.php';
 use PHPolygon\Geometry\ConformingSurfaceSet;
 use PHPolygon\Geometry\GroundMemo;
 use PHPolygon\Geometry\MeshData;
+use PHPolygon\Geometry\MeshSetCache;
 use PHPolygon\Geometry\RegionShape;
 
 $stages = (int) ($argv[1] ?? 5);
@@ -63,6 +65,8 @@ $ground = static function (float $x, float $z) use (&$queries): float {
     return sin($x * 0.05) * cos($z * 0.04) * 3.0 + sin($x * 0.31 + $z * 0.27) * 0.2;
 };
 
+$diskCache = new MeshSetCache('E:/ClaudeTemp/phpolygon/meshcache-bench');
+
 for ($r = 0; $r < $runs; $r++) {
     $queries = 0;
     $t = hrtime(true);
@@ -81,6 +85,10 @@ for ($r = 0; $r < $runs; $r++) {
         $set->border('main', 0.3, 'kerb');
         if ($stage === count($groups)) {
             $set->inlay('marker', RegionShape::circle(0.0, 0.0, 2.0));
+        }
+        if ($mode === 'cache') {
+            $parts[$stage] = $diskCache->remember('bench_stage' . $stage, MeshSetCache::fingerprint('bench', (string) $stage), static fn (): array => $set->build());
+            continue;
         }
         $g = hrtime(true);
         $set->grid();
