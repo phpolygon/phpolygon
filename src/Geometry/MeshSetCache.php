@@ -192,13 +192,45 @@ final class MeshSetCache
     public static function engineStamp(): string
     {
         if (self::$engineStamp === null) {
-            $files = glob(__DIR__ . '/*.php') ?: [];
-            sort($files);
-            $names = array_map('basename', $files);
-            self::$engineStamp = self::fingerprint(implode(',', $names), self::fingerprintFiles(...$files));
+            $names = self::engineStampFiles();
+            $files = array_map(static fn (string $n): string => __DIR__ . '/' . $n, $names);
+            self::$engineStamp = self::fingerprint(implode(',', $names), self::fingerprintFiles(...$files), self::packageReference());
         }
 
         return self::$engineStamp;
+    }
+
+    /** The installed engine's version reference (a git hash or tag), '' when Composer cannot tell. */
+    private static function packageReference(): string
+    {
+        try {
+            if (class_exists(\Composer\InstalledVersions::class)) {
+                return (string) \Composer\InstalledVersions::getReference('phpolygon/phpolygon');
+            }
+        } catch (\Throwable) {
+            // not installed through Composer (a PHAR, a checkout): the file contents above still count
+        }
+
+        return '';
+    }
+
+    /**
+     * File names the engine stamp covers: the sources of this directory. Listed with
+     * scandir(), not glob(): inside a PHAR they sit under phar://, which glob() does not list.
+     *
+     * @return list<string>
+     */
+    public static function engineStampFiles(): array
+    {
+        $names = [];
+        foreach (scandir(__DIR__) ?: [] as $entry) {
+            if (str_ends_with($entry, '.php')) {
+                $names[] = $entry;
+            }
+        }
+        sort($names);
+
+        return $names;
     }
 
     private static function digest(string $key): string
@@ -241,17 +273,16 @@ final class MeshSetCache
                 return null;
             }
             // (not unpack 'a16': it strips trailing NUL bytes, which a binary digest may end in)
-            $h = unpack('vformat/vflags', $data, 4);
-            $t = unpack('Vcount/Vlength/Vcrc', $data, 24);
-            if ($h === false || $t === false || $h['format'] !== self::FORMAT || substr($data, 8, 16) !== $digest) {
+            $h = self::ints('vformat/vflags', $data, 4);
+            $t = self::ints('Vcount/Vlength/Vcrc', $data, 24);
+            if ($h === null || $t === null || $h['format'] !== self::FORMAT || substr($data, 8, 16) !== $digest) {
                 return null;
             }
-            $h += $t;
-            if (strlen($data) !== self::HEADER + $h['length']) {
+            if (strlen($data) !== self::HEADER + $t['length']) {
                 return null;
             }
             $payload = substr($data, self::HEADER);
-            if (crc32($payload) !== $h['crc']) {
+            if (crc32($payload) !== $t['crc']) {
                 return null;
             }
             if (($h['flags'] & self::FLAG_ZLIB) !== 0) {
@@ -261,7 +292,7 @@ final class MeshSetCache
                 }
             }
 
-            return self::decode($payload, $h['count']);
+            return self::decode($payload, $t['count']);
         } catch (\Throwable) {
             return null;
         }
@@ -340,22 +371,25 @@ final class MeshSetCache
             }
             $kind = ord($p[$o]);
             if ($kind === 0) {
-                $key = unpack('q', $p, $o + 1);
-                $key = $key === false ? null : $key[1];
-                $o += 9;
-            } else {
-                $n = unpack('V', $p, $o + 1);
-                if ($n === false || $o + 5 + $n[1] > $len) {
+                $q = self::ints('qkey', $p, $o + 1);
+                if ($q === null) {
                     return null;
                 }
-                $key = substr($p, $o + 5, $n[1]);
-                $o += 5 + $n[1];
+                $key = $q['key'];
+                $o += 9;
+            } else {
+                $n = self::ints('Vlen', $p, $o + 1);
+                if ($n === null || $o + 5 + $n['len'] > $len) {
+                    return null;
+                }
+                $key = substr($p, $o + 5, $n['len']);
+                $o += 5 + $n['len'];
             }
-            if ($key === null || $o + 21 > $len) {
+            if ($o + 21 > $len) {
                 return null;
             }
-            $c = unpack('Ctan/Vv/Vn/Vuv/Vidx/Vtn', $p, $o);
-            if ($c === false) {
+            $c = self::ints('Ctan/Vv/Vn/Vuv/Vidx/Vtn', $p, $o);
+            if ($c === null) {
                 return null;
             }
             $o += 21;
@@ -367,27 +401,36 @@ final class MeshSetCache
             $normals = self::unpackFloats($p, $o, $c['n']);
             $uvs = self::unpackFloats($p, $o, $c['uv']);
             $tangents = $c['tan'] === 1 ? self::unpackFloats($p, $o, $c['tn']) : null;
-            $indices = [];
-            for ($i = 0; $i < $c['idx']; $i += self::CHUNK) {
-                $m = min(self::CHUNK, $c['idx'] - $i);
-                $part = unpack('V' . $m, $p, $o);
-                if ($part === false) {
-                    return null;
-                }
-                array_push($indices, ...array_values($part));
-                $o += 4 * $m;
-            }
-            /** @var list<float> $vertices */
-            /** @var list<float> $normals */
-            /** @var list<float> $uvs */
-            /** @var list<int> $indices */
+            $indices = self::unpackInts($p, $o, $c['idx']);
             $out[$key] = new MeshData($vertices, $normals, $uvs, $indices, $tangents);
         }
 
         return $o === $len ? $out : null;
     }
 
-    /** @param array<int, float|int> $values */
+    /**
+     * unpack() of integer fields only: every value checked, so the caller does arithmetic on ints.
+     *
+     * @return array<string, int>|null null when the bytes are too short or a field is not an integer
+     */
+    private static function ints(string $format, string $data, int $offset): ?array
+    {
+        $u = @unpack($format, $data, $offset);
+        if ($u === false) {
+            return null;
+        }
+        $out = [];
+        foreach ($u as $name => $v) {
+            if (!is_int($v)) {
+                return null;
+            }
+            $out[(string) $name] = $v;
+        }
+
+        return $out;
+    }
+
+    /** @param array<float|int> $values */
     private static function packFloats(array $values): string
     {
         $out = '';
@@ -398,20 +441,43 @@ final class MeshSetCache
         return $out;
     }
 
-    /** @return list<float> */
+    /**
+     * $count doubles at $o (the caller checked the bytes are there); advances $o.
+     *
+     * @return float[]
+     */
     private static function unpackFloats(string $p, int &$o, int $count): array
     {
-        $out = [];
-        for ($i = 0; $i < $count; $i += self::CHUNK) {
-            $m = min(self::CHUNK, $count - $i);
-            $part = unpack('e' . $m, $p, $o);
-            if ($part === false) {
-                throw new \RuntimeException('truncated mesh cache');
-            }
-            array_push($out, ...array_values($part));
-            $o += 8 * $m;
+        if ($count === 0) {
+            return [];
         }
+        $unpacked = unpack('e' . $count, $p, $o);
+        if ($unpacked === false) {
+            throw new \RuntimeException('truncated mesh cache');
+        }
+        $o += 8 * $count;
 
-        return $out;
+        /** @var float[] */
+        return array_values($unpacked);
+    }
+
+    /**
+     * $count uint32 at $o (the caller checked the bytes are there); advances $o.
+     *
+     * @return int[]
+     */
+    private static function unpackInts(string $p, int &$o, int $count): array
+    {
+        if ($count === 0) {
+            return [];
+        }
+        $unpacked = unpack('V' . $count, $p, $o);
+        if ($unpacked === false) {
+            throw new \RuntimeException('truncated mesh cache');
+        }
+        $o += 4 * $count;
+
+        /** @var int[] */
+        return array_values($unpacked);
     }
 }

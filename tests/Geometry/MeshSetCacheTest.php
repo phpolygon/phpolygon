@@ -188,6 +188,36 @@ final class MeshSetCacheTest extends TestCase
         self::assertCount(3, array_unique([$a, $b, $gone]));
     }
 
+    public function testTheEngineStampCoversTheGeometrySources(): void
+    {
+        $files = MeshSetCache::engineStampFiles();
+        self::assertContains('ConformingSurfaceSet.php', $files);
+        self::assertContains('MeshSetCache.php', $files);
+        self::assertNotContains('Generated', $files);
+        self::assertSame($files, array_values(array_unique($files)));
+        self::assertMatchesRegularExpression('/^[0-9a-f]{32}$/', MeshSetCache::engineStamp());
+    }
+
+    public function testTheEngineStampListsAPharDirectory(): void
+    {
+        if (!in_array('phar', stream_get_wrappers(), true)) {
+            self::markTestSkipped('phar wrapper unavailable');
+        }
+        $phar = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'phpolygon-stamp-' . getmypid() . '.phar';
+        try {
+            $p = new \Phar($phar);
+            $p->addFromString('src/A.php', '<?php');
+            $p->addFromString('src/B.txt', 'x');
+            // glob() finds nothing under phar://, scandir() lists the entries: the reason the stamp uses scandir().
+            self::assertSame([], glob('phar://' . $phar . '/src/*.php') ?: []);
+            self::assertContains('A.php', scandir('phar://' . $phar . '/src') ?: []);
+        } catch (\UnexpectedValueException) {
+            self::markTestSkipped('phar.readonly prevents building a test archive');
+        } finally {
+            @unlink($phar);
+        }
+    }
+
     public function testABuilderThatReturnsNoMeshIsRejected(): void
     {
         $this->expectException(\InvalidArgumentException::class);

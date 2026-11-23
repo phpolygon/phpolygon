@@ -8,7 +8,9 @@ declare(strict_types=1);
  * wall time, ground queries and a checksum of every part, so a faster mode can
  * be checked for the same output.
  *
- * Usage: php -d memory_limit=-1 benchmarks/conforming-stages.php [stages] [runs] [mode]
+ * Usage: php -d memory_limit=-1 benchmarks/conforming-stages.php [stages] [runs] [mode] [ground work]
+ *   ground work: extra loop iterations per ground query (0 = a cheap sin/cos terrain; ~600 costs
+ *   about what a real terrain sampler does, measured 13 us per query in a game)
  *   mode: plain  every set on its own (the behaviour without a shared cache)
  *         shared one GroundMemo for the whole family
  *         cache  MeshSetCache in E:\ClaudeTemp\phpolygon\meshcache-bench: run 0 builds and stores, later runs read
@@ -25,6 +27,7 @@ use PHPolygon\Geometry\RegionShape;
 $stages = (int) ($argv[1] ?? 5);
 $runs = (int) ($argv[2] ?? 3);
 $mode = $argv[3] ?? 'plain';
+$work = (int) ($argv[4] ?? 0);
 
 /**
  * Deterministic pseudo-random network: one group of polylines and discs per stage.
@@ -59,11 +62,22 @@ function network(int $stages): array
 
 $groups = network($stages);
 $queries = 0;
-$ground = static function (float $x, float $z) use (&$queries): float {
+$ground = static function (float $x, float $z) use (&$queries, $work): float {
     $queries++;
+    $h = sin($x * 0.05) * cos($z * 0.04) * 3.0 + sin($x * 0.31 + $z * 0.27) * 0.2;
+    $a = 0.0;
+    for ($i = 0; $i < $work; $i++) {
+        $a += sin($a + $i);
+    }
 
-    return sin($x * 0.05) * cos($z * 0.04) * 3.0 + sin($x * 0.31 + $z * 0.27) * 0.2;
+    return $h + $a * 0.0; // the loop only costs time
 };
+
+$t = hrtime(true);
+for ($i = 0; $i < 2000; $i++) {
+    $ground(0.5 * $i, 0.25 * $i);
+}
+printf("ground query: %.1f us\n", (hrtime(true) - $t) / 2000 / 1e3);
 
 $diskCache = new MeshSetCache('E:/ClaudeTemp/phpolygon/meshcache-bench');
 

@@ -395,72 +395,10 @@ final class ConformingRegionMesh
                 $corners[] = ['x' => $this->gx($ix + $ox), 'z' => $this->gz($iz + $oz), 'v' => $vals];
             }
             // A cell wholly inside every condition and crossed by no split line is its two
-            // triangles as they are: clipping them would return the corners unchanged.
-            $whole = true;
-            foreach ($conditions as [$f, $sign]) {
-                foreach ($corners as $corner) {
-                    if ($sign * $corner['v'][$f] >= self::EPS) {
-                        $whole = false;
-                        break 2;
-                    }
-                }
-            }
-            if ($whole) {
-                foreach ($splits as $f) {
-                    $lo = INF;
-                    $hi = -INF;
-                    foreach ($corners as $corner) {
-                        $val = $corner['v'][$f];
-                        $lo = $val < $lo ? $val : $lo;
-                        $hi = $val > $hi ? $val : $hi;
-                    }
-                    if ($lo <= self::EPS && $hi >= -self::EPS) {
-                        $whole = false;
-                        break;
-                    }
-                }
-            }
+            // triangles as they are: nothing to clip or cut.
+            $whole = self::isWhole($corners, $conditions, $splits);
             foreach (self::halves($ix, $iz, [$corners[0], $corners[1], $corners[2], $corners[3]]) as $poly) {
-                if ($whole) {
-                    $pieces = [$poly];
-                } else {
-                    foreach ($conditions as [$f, $sign]) {
-                        $poly = self::clip($poly, $f, $sign);
-                        if (count($poly) < 3) {
-                            continue 2;
-                        }
-                    }
-                    // Cut (not clip) along the split lines: both sides stay.
-                    $pieces = [$poly];
-                    foreach ($splits as $f) {
-                        $next = [];
-                        foreach ($pieces as $piece) {
-                            // Most pieces lie wholly on one side of a split line: nothing to cut (cheap test
-                            // first; same outcome as the two clips below, which would come out empty).
-                            $lo = INF;
-                            $hi = -INF;
-                            foreach ($piece as $p) {
-                                $val = $p['v'][$f];
-                                $lo = $val < $lo ? $val : $lo;
-                                $hi = $val > $hi ? $val : $hi;
-                            }
-                            if ($lo > self::EPS || $hi < -self::EPS) {
-                                $next[] = $piece;
-                                continue;
-                            }
-                            $a = self::clip($piece, $f, 1);
-                            $b = self::clip($piece, $f, -1);
-                            if (count($a) >= 3 && count($b) >= 3) {
-                                $next[] = $a;
-                                $next[] = $b;
-                            } else {
-                                $next[] = $piece;
-                            }
-                        }
-                        $pieces = $next;
-                    }
-                }
-                foreach ($pieces as $piece) {
+                foreach (self::pieces($poly, $whole ? [] : $conditions, $whole ? [] : $splits) as $piece) {
                     $ids = [];
                     foreach ($piece as $p) {
                         // Integer key of the point rounded to 0.1 mm (|coordinate| < 100 km).
@@ -527,6 +465,91 @@ final class ConformingRegionMesh
         }
 
         return max(0.0, min(1.0, $f / $width));
+    }
+
+    /**
+     * A triangle clipped against every condition, then cut (not clipped) along
+     * every split line, both sides staying: the polygons of one cell and region.
+     * No condition and no split gives the triangle itself.
+     *
+     * @param list<array{x: float, z: float, v: array<string, float>}> $poly
+     * @param list<array{0: string, 1: int}> $conditions
+     * @param list<string> $splits
+     * @return list<list<array{x: float, z: float, v: array<string, float>}>>
+     */
+    private static function pieces(array $poly, array $conditions, array $splits): array
+    {
+        foreach ($conditions as [$field, $sign]) {
+            $poly = self::clip($poly, $field, $sign);
+            if (count($poly) < 3) {
+                return [];
+            }
+        }
+        $pieces = [$poly];
+        foreach ($splits as $field) {
+            $next = [];
+            foreach ($pieces as $piece) {
+                // A piece wholly on one side of the line stays as it is (the two clips would
+                // leave it whole and empty).
+                $a = self::clip($piece, $field, 1);
+                $b = self::clip($piece, $field, -1);
+                if (self::straddles($piece, $field) && count($a) >= 3 && count($b) >= 3) {
+                    $next[] = $a;
+                    $next[] = $b;
+                } else {
+                    $next[] = $piece;
+                }
+            }
+            $pieces = $next;
+        }
+
+        return $pieces;
+    }
+
+    /**
+     * A cell wholly inside every condition and crossed by no split line is its two
+     * triangles as they are: clipping them would return the corners unchanged.
+     *
+     * @param list<array{x: float, z: float, v: array<string, float>}> $corners
+     * @param list<array{0: string, 1: int}> $conditions
+     * @param list<string> $splits
+     */
+    private static function isWhole(array $corners, array $conditions, array $splits): bool
+    {
+        foreach ($conditions as [$field, $sign]) {
+            foreach ($corners as $corner) {
+                if ($sign * $corner['v'][$field] >= self::EPS) {
+                    return false;
+                }
+            }
+        }
+        foreach ($splits as $field) {
+            if (self::straddles($corners, $field)) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /**
+     * Whether the zero line of $field can pass through the polygon: some corner
+     * is not strictly (beyond EPS) on one side. When false, clipping against the
+     * field in either direction would leave the polygon whole or empty.
+     *
+     * @param list<array{x: float, z: float, v: array<string, float>}> $poly
+     */
+    private static function straddles(array $poly, string $field): bool
+    {
+        $lo = INF;
+        $hi = -INF;
+        foreach ($poly as $p) {
+            $val = $p['v'][$field];
+            $lo = $val < $lo ? $val : $lo;
+            $hi = $val > $hi ? $val : $hi;
+        }
+
+        return $lo <= self::EPS && $hi >= -self::EPS;
     }
 
     /**
