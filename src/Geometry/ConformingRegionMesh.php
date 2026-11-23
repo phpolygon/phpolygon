@@ -447,7 +447,8 @@ final class ConformingRegionMesh
     public static function onGroundRamped(callable $ground, float $lift, string $field): \Closure
     {
         return static function (float $x, float $z, array $v) use ($ground, $lift, $field): float {
-            $u = max(0.0, min(1.0, -($v[$field] ?? 0.0)));
+            $f = $v[$field] ?? 0.0;
+            $u = is_float($f) || is_int($f) ? max(0.0, min(1.0, -$f)) : 0.0;
 
             return $ground($x, $z) + $lift * (1.0 - $u * $u * (3.0 - 2.0 * $u));
         };
