@@ -38,6 +38,7 @@ use PHPolygon\Rendering\MaterialRegistry;
 use PHPolygon\Rendering\MeshBounds;
 use PHPolygon\Rendering\RenderCommandList;
 use PHPolygon\Rendering\Renderer3DInterface;
+use PHPolygon\Rendering\TransparentDrawBatcher;
 use PHPolygon\Rendering\TransparentDrawSorter;
 use PHPolygon\Runtime\PerfProfiler;
 use PHPolygon\Visibility\VisibilityService;
@@ -86,6 +87,17 @@ class Renderer3DSystem extends AbstractSystem
 
     /** Seconds the ground takes to dry from soaked once the rain stops. */
     public const float DRY_SECONDS = 150.0;
+
+    /**
+     * Merge runs of identical flat transparent draws (a glazed facade's panes)
+     * into one instanced draw after the back-to-front sort, see
+     * {@see TransparentDrawBatcher}. Off by default: the transparent draws stay
+     * one per entity.
+     */
+    public bool $batchTransparentRuns = false;
+
+    /** Transparent draws the last render() saved by {@see $batchTransparentRuns}. */
+    public int $transparentDrawsSaved = 0;
 
 
     /**
@@ -206,6 +218,9 @@ class Renderer3DSystem extends AbstractSystem
             // this system's meshes and whatever particles / instanced batches
             // other systems appended - keyed by the camera the list renders with.
             TransparentDrawSorter::sortList($this->commandList);
+            $this->transparentDrawsSaved = $this->batchTransparentRuns
+                ? TransparentDrawBatcher::batchList($this->commandList)
+                : 0;
         } finally {
             PerfProfiler::end();
         }
