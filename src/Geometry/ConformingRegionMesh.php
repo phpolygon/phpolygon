@@ -394,33 +394,77 @@ final class ConformingRegionMesh
                 }
                 $corners[] = ['x' => $this->gx($ix + $ox), 'z' => $this->gz($iz + $oz), 'v' => $vals];
             }
-            foreach (self::halves($ix, $iz, [$corners[0], $corners[1], $corners[2], $corners[3]]) as $poly) {
-                foreach ($conditions as [$f, $sign]) {
-                    $poly = self::clip($poly, $f, $sign);
-                    if (count($poly) < 3) {
-                        continue 2;
+            // A cell wholly inside every condition and crossed by no split line is its two
+            // triangles as they are: clipping them would return the corners unchanged.
+            $whole = true;
+            foreach ($conditions as [$f, $sign]) {
+                foreach ($corners as $corner) {
+                    if ($sign * $corner['v'][$f] >= self::EPS) {
+                        $whole = false;
+                        break 2;
                     }
                 }
-                // Cut (not clip) along the split lines: both sides stay.
-                $pieces = [$poly];
+            }
+            if ($whole) {
                 foreach ($splits as $f) {
-                    $next = [];
-                    foreach ($pieces as $piece) {
-                        $a = self::clip($piece, $f, 1);
-                        $b = self::clip($piece, $f, -1);
-                        if (count($a) >= 3 && count($b) >= 3) {
-                            $next[] = $a;
-                            $next[] = $b;
-                        } else {
-                            $next[] = $piece;
+                    $lo = INF;
+                    $hi = -INF;
+                    foreach ($corners as $corner) {
+                        $val = $corner['v'][$f];
+                        $lo = $val < $lo ? $val : $lo;
+                        $hi = $val > $hi ? $val : $hi;
+                    }
+                    if ($lo <= self::EPS && $hi >= -self::EPS) {
+                        $whole = false;
+                        break;
+                    }
+                }
+            }
+            foreach (self::halves($ix, $iz, [$corners[0], $corners[1], $corners[2], $corners[3]]) as $poly) {
+                if ($whole) {
+                    $pieces = [$poly];
+                } else {
+                    foreach ($conditions as [$f, $sign]) {
+                        $poly = self::clip($poly, $f, $sign);
+                        if (count($poly) < 3) {
+                            continue 2;
                         }
                     }
-                    $pieces = $next;
+                    // Cut (not clip) along the split lines: both sides stay.
+                    $pieces = [$poly];
+                    foreach ($splits as $f) {
+                        $next = [];
+                        foreach ($pieces as $piece) {
+                            // Most pieces lie wholly on one side of a split line: nothing to cut (cheap test
+                            // first; same outcome as the two clips below, which would come out empty).
+                            $lo = INF;
+                            $hi = -INF;
+                            foreach ($piece as $p) {
+                                $val = $p['v'][$f];
+                                $lo = $val < $lo ? $val : $lo;
+                                $hi = $val > $hi ? $val : $hi;
+                            }
+                            if ($lo > self::EPS || $hi < -self::EPS) {
+                                $next[] = $piece;
+                                continue;
+                            }
+                            $a = self::clip($piece, $f, 1);
+                            $b = self::clip($piece, $f, -1);
+                            if (count($a) >= 3 && count($b) >= 3) {
+                                $next[] = $a;
+                                $next[] = $b;
+                            } else {
+                                $next[] = $piece;
+                            }
+                        }
+                        $pieces = $next;
+                    }
                 }
                 foreach ($pieces as $piece) {
                     $ids = [];
                     foreach ($piece as $p) {
-                        $key = (int) round($p['x'] * 1e4) . ':' . (int) round($p['z'] * 1e4);
+                        // Integer key of the point rounded to 0.1 mm (|coordinate| < 100 km).
+                        $key = (int) round($p['x'] * 1e4) * 2147483648 + (int) round($p['z'] * 1e4);
                         if (!isset($index[$key])) {
                             $index[$key] = count($verts);
                             $verts[] = [$p['x'], $p['z']];

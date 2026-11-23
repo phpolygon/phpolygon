@@ -69,7 +69,8 @@ final class ConformingSurfaceSet
     private ?ConformingRegionMesh $grid = null;
 
     /**
-     * @param callable(float, float): float $ground terrain height at (x, z)
+     * @param callable(float, float): float $ground terrain height at (x, z); pass one
+     *        {@see GroundMemo} to several sets (a staged family) and they share the samples
      * @param float $cell grid size (m); smaller follows terrain creases closer, costs more vertices
      * @param float $lift surface height above the ground (m)
      * @param float $hemWidth width of the hem outside the outline (m); 0 = no hem (bare edge)
@@ -87,12 +88,7 @@ final class ConformingSurfaceSet
         if ($cell <= 0.0 || $hemWidth < 0.0 || $hemSink < 0.0) {
             throw new \InvalidArgumentException('ConformingSurfaceSet: cell must be > 0, hem width and sink >= 0');
         }
-        $memo = [];
-        $this->ground = static function (float $x, float $z) use ($ground, &$memo): float {
-            $k = round($x, 4) . '|' . round($z, 4);
-
-            return $memo[$k] ??= (float) $ground($x, $z);
-        };
+        $this->ground = ($ground instanceof GroundMemo ? $ground : new GroundMemo($ground))(...);
     }
 
     /** Key of a surface's hem in {@see build()}. */
