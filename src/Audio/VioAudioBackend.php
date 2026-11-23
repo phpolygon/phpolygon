@@ -42,13 +42,16 @@ use VioSound;
  * louder channel plays at the level the voice was given
  * ({@see directionCompensation()}).
  */
-class VioAudioBackend implements NativeSpatialAudioBackendInterface
+class VioAudioBackend implements NativeSpatialAudioBackendInterface, WarmableAudioBackendInterface
 {
     /** miniaudio's default minSpatializationChannelGain. */
     private const float MIN_CHANNEL_GAIN = 0.2;
 
     /** @var array<string, string> clipId => file path */
     private array $clipPaths = [];
+
+    /** @var array<string, list<VioSound>> clipId => sounds opened ahead by {@see warm()}, not played yet */
+    private array $warmSounds = [];
 
     /** @var array<int, VioSound> playbackId => VioSound */
     private array $activeSounds = [];
@@ -113,7 +116,28 @@ class VioAudioBackend implements NativeSpatialAudioBackendInterface
         // A clip shipped in several formats (e.g. line.opus next to line.flac)
         // plays from the smallest one this php-vio decodes.
         $this->clipPaths[$id] = $this->formats()->resolve($path) ?? $path;
+        unset($this->warmSounds[$id]); // opened from the old path
         return new AudioClip($id, $path);
+    }
+
+    public function warm(string $clipId, int $copies = 1): bool
+    {
+        if (!isset($this->clipPaths[$clipId])) {
+            return false;
+        }
+        for ($have = count($this->warmSounds[$clipId] ?? []); $have < $copies; $have++) {
+            $sound = $this->openSound($clipId);
+            if ($sound === null) {
+                return $have > 0;
+            }
+            $this->warmSounds[$clipId][] = $sound;
+        }
+        return ($this->warmSounds[$clipId] ?? []) !== [];
+    }
+
+    public function warmCount(string $clipId): int
+    {
+        return count($this->warmSounds[$clipId] ?? []);
     }
 
     private function formats(): AudioFormats
@@ -408,6 +432,7 @@ class VioAudioBackend implements NativeSpatialAudioBackendInterface
     public function dispose(): void
     {
         $this->stopAll();
+        $this->warmSounds = [];
     }
 
     /**
@@ -431,7 +456,22 @@ class VioAudioBackend implements NativeSpatialAudioBackendInterface
         return 1.0 / max($left, $right);
     }
 
+    /** A sound ready to start: one opened ahead by {@see warm()}, else a fresh one. */
     private function loadSound(string $clipId): ?VioSound
+    {
+        if (isset($this->warmSounds[$clipId])) {
+            $sound = array_pop($this->warmSounds[$clipId]);
+            if ($this->warmSounds[$clipId] === []) {
+                unset($this->warmSounds[$clipId]);
+            }
+            if ($sound !== null) {
+                return $sound;
+            }
+        }
+        return $this->openSound($clipId);
+    }
+
+    private function openSound(string $clipId): ?VioSound
     {
         $path = $this->clipPaths[$clipId] ?? null;
         if ($path === null || !file_exists($path)) {

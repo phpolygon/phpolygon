@@ -159,13 +159,37 @@ class AudioManager
     }
 
     /**
-     * Load an audio clip from a file path.
+     * Load an audio clip from a file path. On php-vio this only notes the file:
+     * it is opened at the first play: call {@see warm()} to open it now.
      */
     public function loadClip(string $id, string $path): AudioClip
     {
         $clip = $this->backend->load($id, $path);
         $this->clips[$id] = $clip;
         return $clip;
+    }
+
+    /**
+     * Open loaded clips now – read the file, set up the decoder – so the first
+     * play inside a frame only starts a ready sound. Without ids, every loaded
+     * clip. Backends that open at load time (or have nothing to open) do
+     * nothing.
+     *
+     * @return int clips opened (0 on a backend that cannot warm)
+     */
+    public function warm(string ...$clipIds): int
+    {
+        if (!$this->backend instanceof WarmableAudioBackendInterface) {
+            return 0;
+        }
+        $ids = $clipIds !== [] ? $clipIds : array_map('strval', array_keys($this->clips));
+        $opened = 0;
+        foreach ($ids as $id) {
+            if ($this->backend->warmCount($id) === 0 && $this->backend->warm($id)) {
+                $opened++;
+            }
+        }
+        return $opened;
     }
 
     /**

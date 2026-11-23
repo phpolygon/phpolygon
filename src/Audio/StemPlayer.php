@@ -99,11 +99,21 @@ final class StemPlayer
         $this->clipIds[$id] = $clipId ?? 'stem:' . $id;
     }
 
-    /** Load every registered stem now, so no start waits for a decode. */
+    /**
+     * Load every registered stem now and open it on a backend that opens at the
+     * first play (php-vio), so no start waits for the file or the decoder.
+     */
     public function preload(): void
     {
+        $clips = [];
         foreach (array_keys($this->paths) as $stem) {
-            $this->load((string) $stem);
+            $clip = $this->load((string) $stem);
+            if ($clip !== null) {
+                $clips[] = $clip;
+            }
+        }
+        if ($clips !== []) {
+            $this->audio->warm(...$clips); // (no ids would mean every clip of the manager)
         }
     }
 
