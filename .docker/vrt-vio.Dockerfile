@@ -31,7 +31,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
            echo "add-apt-repository failed (try $try), retrying in $((try * 15))s"; \
            sleep $((try * 15)); \
        done \
-    && apt-get update && apt-get install -y --no-install-recommends \
+    && for try in 1 2 3 4 5; do \
+           apt-get update && apt-get install -y --no-install-recommends -o Acquire::Retries=5 \
         php8.5-cli php8.5-dev php8.5-gd php8.5-mbstring php8.5-xml \
         php8.5-zip php8.5-tokenizer \
     # php-vio build toolchain + its libraries (mirrors php-vio's own build.yml).
@@ -44,6 +45,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     # Headless software rendering: Vulkan (lavapipe) + OpenGL (llvmpipe) + Xvfb.
         mesa-vulkan-drivers libgl1-mesa-dri libglx-mesa0 mesa-utils \
         vulkan-tools xvfb xauth \
+           && break; \
+           [ "$try" = 5 ] && exit 1; \
+           echo "apt-get install failed (try $try), retrying in $((try * 20))s"; \
+           sleep $((try * 20)); \
+       done \
     && rm -rf /var/lib/apt/lists/*
 
 # Build + install php-vio (Vulkan + OpenGL backends; Metal/D3D are macOS/Windows).
