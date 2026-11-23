@@ -1873,6 +1873,39 @@ $player->play('work_lift', blend: 0.4);
   0.38 / 0.17 ms, 10 waypoint walkers 0.08 / 0.03 ms. Transform propagation and drawing of the moved
   parts come on top and are not in these numbers.
 
+### Camera flights — cinematic fly-bys (`PHPolygon\Camera`)
+
+Pure, headless-testable path math plus a small state machine; the game owns the camera and applies each
+pose to it (`tests/Camera/CameraFlightTest.php`).
+
+```php
+$flight = CameraFlight::orbitArc($landmark, radius: 60.0, height: 25.0, startAngle: 0.0, sweepAngle: M_PI, duration: 8.0);
+// or CameraFlight::approach($from, $to, $lookAt, 5.0), or new CameraFlight($waypoints, $lookAtOrPerWaypointList, 10.0, CameraEasing::Smoothstep)
+$player = new CameraFlightPlayer($flight, new CameraPose($pos, $yaw, $pitch), blendIn: 0.6, blendOut: 0.6);
+$player->start();
+// per frame:  $pose = $player->advance($dt);  → $pose->position / ->yaw / ->pitch (or ->toQuaternion())
+// Escape:     $player->cancel() (or skip());   → returns origin(), the exact pose the flight started from
+```
+
+- `CameraPose`: position + yaw + pitch in radians, the engine's convention: yaw 0 looks along -Z, positive
+  yaw turns counter-clockwise seen from above, positive pitch looks up; `forward = (-sin yaw·cos pitch,
+  sin pitch, -cos yaw·cos pitch)`, identical to `Quaternion::fromEuler($pitch, $yaw, 0)` applied to (0, 0, -1).
+  `CameraPose::lookingAt($pos, $target)` / `anglesFor($dir)` convert a look target to yaw/pitch.
+  Yaw is not wrapped (a flight circling its target never jumps); compare with `equivalentTo()`.
+- `CameraFlight` (immutable): >= 2 distinct waypoints, one fixed look point or one per waypoint (spline-
+  interpolated), duration, `CameraEasing` (Linear / Smoothstep / EaseInOut, default EaseInOut). Centripetal
+  Catmull-Rom through the waypoints (C1, no loops), flown at constant speed before easing. `evaluate($t)` is
+  a pure function of t in 0..1. Bad input (< 2 waypoints, coincident neighbours, duration <= 0, wrong look
+  count, non-finite) throws `InvalidArgumentException`. `orbitArc()` angle 0 is the +Z side of the centre,
+  positive angles go towards +X; the first/last segment of an arc can dip up to 0.5% inside the radius.
+- `CameraFlightPlayer`: `poseAt($elapsed)` is pure, `advance($dt)` only accumulates time, so 60 and 144 fps
+  agree. Timeline = blendIn + flight + blendOut (smoothstep blends from/to the origin, yaw the short way;
+  0 = cut). Finish, `cancel()` and `skip()` all end exactly at `origin()` (yaw may differ from the last
+  flight frame by whole turns only if the flight turned further than half a turn net). `start()` while
+  running throws. Use EaseInOut or Smoothstep so the flight starts at rest after the blend-in.
+
+---
+
 ### Physics queries — rays and line of sight
 
 `Raycaster3D` answers two kinds of question:
