@@ -3952,6 +3952,69 @@ would otherwise block the main thread for >5 s, so Linux compositors
 startup work (font atlas pre-warming, large content generation, Steam
 runtime handshake, etc.) on slow GPUs (e.g. Intel HD 3000 + Mesa).
 
+### Warm-up tasks (`Runtime\Warmup`)
+
+Start-up work that only makes the game faster later (bake a cache, open audio, warm a pipeline) is registered as
+tasks. The engine runs them **after `onInit`, before `Scheduler::boot()` / the first update**, behind the splash and in
+slices of a time budget, so the splash keeps moving. Nothing here knows a game: ids and label keys are opaque.
+
+```php
+$engine->onInit(function (Engine $e) {
+    $e->addWarmupTask(new CallbackWarmupTask(
+        'paths',
+        static function (): \Generator {          // a generator = work in slices
+            foreach ($regions as $r) { bakePaths($r); yield; }   // yield 0.5; = "half done"
+        },
+        labelKey: 'loading.warm.paths',           // game-side key, null = "Warming up"
+        weight: 3.0,                              // share of the bar, relative to the others
+    ));
+    $e->addWarmupTask(new CallbackWarmupTask('audio', fn() => $e->audio->warm(...$ids), 'loading.warm.audio', 1.0, ['paths']));
+});
+```
+
+- **Contract (`WarmupTask`):** `id()`, `labelKey()`, `weight()` (> 0), `dependsOn()`, `run(): ?\Generator`. A task is a
+  **pure acceleration**: the game must work unchanged when it never runs (opt-out, failure, window closed), so it must not
+  be the only place something is initialised. `CallbackWarmupTask` wraps a closure; a returned generator is sliced, any
+  other return value means done.
+- **`WarmupRunner`** (pull-based like `LoadingSequence`; `Engine::warmup()` is the engine's own instance):
+  `step($budgetSeconds): bool` runs units until the budget is used and **always at least one** (a unit = one atomic task or
+  one slice of a generator; a unit cannot be interrupted, so a longer one overruns the budget and `results()` keeps the
+  longest unit of every task). `fraction()` (0..1, weighted, never backwards, 1.0 only when the work ran to its end),
+  `currentTask()` / `labelKey()` (running or next), `onProgress(fn(float, ?string, ?string))` (once per `step()`),
+  `results()` (status, seconds, longest unit, error/skip reason), `drain()` (to the end, no budget), `cancel()` (destroys
+  the running generator so its `finally` runs, skips the rest). The clock is a `\Closure(): float` for tests.
+  A generator that yields a float reports its own fraction (clamped to [last, 1]); a generator needs one more slice after its
+  last `yield` to end.
+- **Order and failure:** registration order, dependencies first (stable). An exception from `run()` or from a slice is
+  logged (`warmup: task 'x' failed: ...`) and ends that task only; dependents, unknown dependencies and cycles are skipped
+  and logged. Failed and skipped weight counts as passed so the bar reaches its end. A progress listener that throws is
+  dropped. One summary line per run (`warmup: 3 done, 0 failed, 0 skipped in 0.412 s (longest unit 6.1 ms)`). Tasks cannot
+  be added once the first `step()` ran.
+- **Engine drive:** splash path = one `step(EngineConfig::$warmupFrameBudget)` plus one splash frame per loop, the bar
+  runs from where `onInit` left it up to 0.98, the label is `warmupLabelResolver(labelKey)` or "Warming up". The frame
+  budget (default 8 ms) is a chosen value, not measured; the splash draw comes on top. skipSplash / no onInit: `pollEvents()`
+  between slices, no frame; headless: `drain()`. The window closing cancels what is left.
+  The engine always runs what is pending right after `onInit`: a game whose own screen should show the progress drives
+  `Engine::warmup()` from an **`onInit` generator** (one `step()` per `yield`); a screen that is drawn in the game loop
+  finds nothing left. What was finished is not run again, and with no tasks registered (or all done) the engine touches
+  neither splash, log nor clock.
+- **Opt-out:** `EngineConfig::$warmupEnabled = false` or env `PHPOLYGON_WARMUP=0|off|false|no`: no task runs (logged,
+  tasks report `skipped`).
+- **Limits:**
+  - The engine splash loads no CJK font, so a resolved label in CJK shows `.notdef` boxes; such a game draws the label on
+    its own screen from `Engine::warmup()->labelKey()`.
+  - With `setSplashTasks()` the label under the bar is suppressed, so the warm-up label does not show; if
+    `completeSplashTasks()` already filled the bar, it does not move during the warm-up (and "Starting..." sets it to 0.98, as before).
+  - One splash present per `step()`: with vsync that is about one frame of work per frame time, so the warm-up takes
+    roughly twice its raw work time (estimate, not measured).
+  - `addWarmupTask()` after the first step throws `LogicException`: a programming error, deliberately not isolated.
+  - `warmRender()` inside a task warms the 2D side (glyph atlases, textures) only; there is no engine call that warms a
+    game's lazily compiled 3D programs (`$lazy`, proc modes) behind the splash.
+- Tests: `WarmupRunnerTest` (fake clock: budget, isolation, order, monotone bar, cancel), `EngineWarmupTest` (headless
+  engine: no tasks = unchanged, after `onInit`, opt-outs), `SplashWarmupTest` (`native-gpu`: offscreen vio window, the
+  splash drive, one slice per frame, before the first update; vio offscreen window with `offscreenHardware` false, so the
+  software adapter by that setting (adapter name not logged, 2026-11-23). It proves the drive order, not GPU behaviour).
+
 ### Loading screens of a game (`Runtime\LoadingSequence`)
 
 The splash above belongs to `onInit`. For a loading screen of the game's own (entering a level, loading a
