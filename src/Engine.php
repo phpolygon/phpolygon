@@ -9,6 +9,8 @@ use PHPolygon\Audio\AudioManager;
 use PHPolygon\Audio\GLFWAudioBackend;
 use PHPolygon\Audio\VioAudioBackend;
 use PHPolygon\Branding\StudioSplashInterface;
+use PHPolygon\Runtime\Warmup\WarmupRunner;
+use PHPolygon\Runtime\Warmup\WarmupTask;
 use PHPolygon\ECS\World;
 use PHPolygon\Event\EventDispatcher;
 use PHPolygon\Geometry\MeshCache;
@@ -200,12 +202,18 @@ class Engine
      */
     private array $splashTasks = [];
 
+    /** Start-up work the game registered; see {@see addWarmupTask()}. */
+    private readonly WarmupRunner $warmup;
+
     public function __construct(
         private readonly EngineConfig $config = new EngineConfig(),
     ) {
         self::log('Engine init - PHP ' . PHP_VERSION . ', OS: ' . PHP_OS . ' (' . php_uname('r') . ')');
         self::log('Config: ' . $config->width . 'x' . $config->height . ', vsync=' . ($config->vsync ? 'on' : 'off') . ', 3D=' . ($config->is3D ? $config->renderBackend3D : 'off'));
 
+        $this->warmup = new WarmupRunner(null, static function (string $line): void {
+            self::log($line);
+        });
         $this->headless = $config->headless;
         $this->useVio = !$config->headless && extension_loaded('vio');
 
@@ -701,6 +709,30 @@ class Engine
     }
 
     /**
+     * Register start-up work that only speeds the game up later (bake a cache, open
+     * audio, warm a pipeline). The engine runs it after onInit and before the game
+     * starts, in slices of EngineConfig::$warmupFrameBudget behind the splash, and
+     * never fails the start because of it. Call from onInit or before run().
+     * See {@see WarmupTask}.
+     */
+    public function addWarmupTask(WarmupTask $task): self
+    {
+        $this->warmup->add($task);
+        return $this;
+    }
+
+    /**
+     * The warm-up runner: progress, current label key, results. A game with a
+     * screen of its own that shows the progress can drive it ({@see WarmupRunner::step()},
+     * one step per `yield`) from an `onInit` generator; the engine runs whatever is
+     * still pending after `onInit` and never runs a finished task again.
+     */
+    public function warmup(): WarmupRunner
+    {
+        return $this->warmup;
+    }
+
+    /**
      * Update the splash screen progress bar during init.
      * Call from the onInit callback to show loading progress.
      *
@@ -966,6 +998,9 @@ class Engine
             }
             self::log('onInit callback done');
         }
+
+        // The splash path ran the warm-up inside showSplashScreen(); this is then a no-op.
+        $this->runWarmup(false);
 
         // Now that game systems are registered, push the persisted Fieldtracing
         // tier into any Renderer3DSystem so it emits the matching SetFieldtracing
@@ -1782,6 +1817,72 @@ class Engine
     }
 
     /**
+     * Run the registered warm-up tasks, once, after onInit. With nothing registered
+     * (or all of it done already, e.g. by the game's own screen) this does not
+     * touch the splash, the log or the clock.
+     *
+     * @param bool $onSplash draw splash frames between slices; false = no splash
+     *     (skipSplash, or no onInit to run behind it): events are pumped, no frame
+     *     is drawn, and headless runs the work to its end at once
+     */
+    private function runWarmup(bool $onSplash): void
+    {
+        $runner = $this->warmup;
+        if ($runner->finished()) {
+            return;
+        }
+        if (!$this->config->warmupEnabled || self::warmupDisabledByEnv()) {
+            self::log('warmup: disabled, ' . count($runner->results()) . ' task(s) not run');
+            $runner->cancel('warm-up disabled');
+            return;
+        }
+        if ($this->headless) {
+            $runner->drain();
+            return;
+        }
+
+        $budget = max(0.0, $this->config->warmupFrameBudget);
+        $from = $this->splashProgress;
+        $to = max($from, 0.98);
+        while ($runner->step($budget)) {
+            if ($this->window->shouldClose()) {
+                $runner->cancel('window closed');
+                return;
+            }
+            if ($onSplash) {
+                $this->splashProgress = $from + ($to - $from) * $runner->fraction();
+                $this->splashLabel = $this->warmupLabel($runner->labelKey());
+                $this->renderSplashFrame();
+            } else {
+                $this->window->pollEvents();
+            }
+        }
+        if ($onSplash) {
+            $this->splashProgress = $to;
+        }
+    }
+
+    private function warmupLabel(?string $key): string
+    {
+        $resolver = $this->config->warmupLabelResolver;
+        if ($key === null || $resolver === null) {
+            return 'Warming up';
+        }
+        try {
+            $text = $resolver($key);
+        } catch (\Throwable) {
+            return 'Warming up';
+        }
+        return $text !== '' ? $text : 'Warming up';
+    }
+
+    private static function warmupDisabledByEnv(): bool
+    {
+        $env = getenv('PHPOLYGON_WARMUP');
+        return is_string($env) && in_array(strtolower(trim($env)), ['0', 'off', 'false', 'no'], true);
+    }
+
+    /**
      * @param callable|null $initFn  Game init callback to run during the splash screen.
      *                               Executed after the first frame is visible, so the
      *                               splash stays on screen while the game loads.
@@ -1895,6 +1996,8 @@ class Engine
                 }
             }
             self::log('onInit done');
+
+            $this->runWarmup(true);
 
             $this->splashProgress = 0.98;
             $this->splashLabel = 'Starting...';

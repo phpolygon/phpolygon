@@ -228,5 +228,28 @@ class EngineConfig
          * {@see \PHPolygon\Activity\ActivitySystem::DEFAULT_FAR_RADIUS_MULTIPLIER} (2.0).
          */
         public readonly ?float $activityFarRadiusMultiplier = null,
+        /**
+         * Run the warm-up tasks the game registered with Engine::addWarmupTask()
+         * after onInit and before the game starts. False = none runs (the
+         * game must work without them). The env var PHPOLYGON_WARMUP=0 (or
+         * off / false / no) turns it off for one run, whatever this says.
+         */
+        public readonly bool $warmupEnabled = true,
+        /**
+         * Seconds of warm-up work per splash frame, on top of the frame itself.
+         * A chosen value, not measured: 8 ms leaves room for the splash draw
+         * in a 16.7 ms frame. A single unit of work longer than this overruns it.
+         */
+        public readonly float $warmupFrameBudget = 0.008,
+        /**
+         * Turns a warm-up task's label key into the text the engine splash
+         * draws, e.g. through the game's translation catalogue. null (or a
+         * task without a key) shows "Warming up". The engine splash loads no CJK
+         * font: a game that needs one draws the label on a screen of its own
+         * (Engine::warmup()->labelKey()).
+         *
+         * @var (\Closure(string): string)|null
+         */
+        public readonly ?\Closure $warmupLabelResolver = null,
     ) {}
 }
