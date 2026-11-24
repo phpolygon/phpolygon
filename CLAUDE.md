@@ -2170,6 +2170,31 @@ corners a cell is planar: a convex 3 m hill sags ~6 mm at `cell = 0.5`; small in
 read polygonal at 0.5 m – use a finer cell for them. `examples/conforming_surfaces.php`
 renders a review set.
 
+**Terrain ground meshes — `HeightfieldGrid` / `HeightfieldGround` / `HeightfieldHole`.** A height
+function becomes ground meshes: `HeightfieldGrid::sample(minX, minZ, maxX, maxZ, cell, $height)` calls
+the function once per lattice corner (+ one-cell halo) and keeps plain data (`i0, j0, nx, nz, cell,
+heights`; also the constructor, `contentHash()`, `heightAt()` on exactly the meshed surface). Corners sit
+at `index * cell` (absolute index, same snapping as `ConformingRegionMesh::covering`), so tiles of one cell
+size share border positions, heights and normals bit for bit.
+`HeightfieldGround::build($grid, $holes = [], ?\Closure $zone = null, $uvScale = 1.0, $snap = 0.05)` →
+`array<zone name, MeshData>` (default zone `'ground'`; `$zone(x, z)` is asked once per triangle at its
+centroid; result sorted by name). Pure and static: the same plain-data call gives the same bits, in a
+worker too. `HeightfieldGround::contentKey($grid, $holes, $zoneKey, $uvScale, $snap)` folds everything
+into one `MeshSetCache::fingerprint` key (a height or zone FUNCTION cannot be hashed: the grid stands for
+the height function, the caller's `$zoneKey` for the zone function). Holes are plain convex outlines:
+`HeightfieldHole::rect(x, z, width, depth, yaw)`, `circle(x, z, r, segments)`, `convex(points)`; they are
+cut exactly into the triangles they touch (pieces welded with the points the cut leaves on neighbouring
+lattice edges – no T-junctions; open edges remain only on the outer border and the hole outlines). Every
+vertex lies on the grid's triangulated surface, faces are CCW from above, normals come from central
+differences over the grid (zone seams and tile borders shade alike), UV = world XZ x scale. `$snap` (a
+share of the cell, < 0.5): a cut closer than that to a triangle corner moves onto it; the hole outline
+then moves by at most `snap * cell`. Measured on a 40 x 40 m patch at cell 2: smallest triangle angle
+1.7° at the default 0.05 (circle hole), 7° at 0.2 – raise it for fewer slivers at the cost of outline
+accuracy. Cost, measured on a 1400 x 1400 m grid with one hole and two zones: cell 2 m = 980k triangles in
+5–9 s (noisy host) and ~0.4 GB peak; cell 11 m = 33k triangles in ~0.2 s. Bake it and cache with
+`MeshSetCache`. Not covered: radial grids, concave holes (use several convex ones). A
+`HeightmapCollider3D` cannot represent a hole – ground with a shaft needs a mesh collider.
+
 **Disk cache for procedural meshes — `Geometry\MeshSetCache`.** `remember($name, $key, fn () => $set->build())`
 returns `array<int|string, MeshData>` from `<dir>/<name>.<hash>.meshset` when the caller's content key
 (plus an engine stamp over `src/Geometry/*.php` and the format number) matches, else builds and stores.
