@@ -31,6 +31,7 @@ use PHPolygon\Rendering\VioRenderer3D;
  * targets — a SetSky frame produces a bindable cubemap that colours the water
  * reflection.
  */
+#[Group('gpu')]
 final class VioEnvironmentCubemapTest extends TestCase
 {
     private static function sky(float $sunX = 0.3): SetSky

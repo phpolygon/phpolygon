@@ -5,9 +5,11 @@ declare(strict_types=1);
 namespace PHPolygon\Tests\System;
 
 use PHPolygon\System\GpuPartAnimator;
+use PHPUnit\Framework\Attributes\Group;
 use PHPUnit\Framework\TestCase;
 
 /** Shader plan 6.3: rigid-part figures animated on the GPU match the CPU math. */
+#[Group('gpu')]
 final class GpuPartAnimatorTest extends TestCase
 {
     public function testKernelMatchesTheCpuSwing(): void

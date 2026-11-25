@@ -47,6 +47,7 @@ use ReflectionProperty;
  */
 #[RequiresPhpExtension('vio')]
 #[Group('native-gpu')]
+#[Group('gpu')]
 final class VioRtStaticBatchContentSwapTest extends TestCase
 {
     private const SIZE = 32;

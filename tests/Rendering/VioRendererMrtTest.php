@@ -39,6 +39,7 @@ use PHPolygon\Rendering\VioRenderer3D;
  */
 #[RequiresPhpExtension('vio')]
 #[Group('native-gpu')]
+#[Group('gpu')]
 final class VioRendererMrtTest extends TestCase
 {
     private const W = 96;

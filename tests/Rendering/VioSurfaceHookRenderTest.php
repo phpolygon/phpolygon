@@ -37,6 +37,7 @@ use PHPolygon\Rendering\VioRenderer3D;
  */
 #[RequiresPhpExtension('vio')]
 #[Group('native-gpu')]
+#[Group('gpu')]
 final class VioSurfaceHookRenderTest extends TestCase
 {
     private const W = 128;

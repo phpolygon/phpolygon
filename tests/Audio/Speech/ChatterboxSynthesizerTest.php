@@ -9,8 +9,10 @@ use PHPolygon\Audio\Speech\SpeechConfig;
 use PHPolygon\Audio\Speech\SpeechJob;
 use PHPolygon\Audio\Speech\SpeechParams;
 use PHPolygon\Platform\SteamLanguage;
+use PHPUnit\Framework\Attributes\Group;
 use PHPUnit\Framework\TestCase;
 
+#[Group('timing')]
 final class ChatterboxSynthesizerTest extends TestCase
 {
     protected function tearDown(): void

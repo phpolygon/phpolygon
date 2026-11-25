@@ -50,6 +50,7 @@ use PHPolygon\System\SurfaceTextSystem;
  */
 #[RequiresPhpExtension('vio')]
 #[Group('native-gpu')]
+#[Group('gpu')]
 final class VioSurfaceTextRenderTest extends TestCase
 {
     private const int W = 128;

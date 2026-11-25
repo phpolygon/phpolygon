@@ -13,8 +13,10 @@ use PHPolygon\Runtime\Input;
 use PHPolygon\Runtime\ScaledInput;
 use PHPolygon\UI\UIContext;
 use PHPolygon\UI\UIScale;
+use PHPUnit\Framework\Attributes\Group;
 use PHPUnit\Framework\TestCase;
 
+#[Group('gpu')]
 final class ScaledRenderer2DTest extends TestCase
 {
     /** @return NullRenderer2D&object{calls: list<array{0: string, 1: list<mixed>}>} */

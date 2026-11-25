@@ -26,6 +26,7 @@ use PHPolygon\UI\UIScale;
  */
 #[RequiresPhpExtension('vio')]
 #[Group('native-gpu')]
+#[Group('gpu')]
 final class VioRenderer2DColorVisionTest extends TestCase
 {
     private const SIZE = 64;

@@ -37,6 +37,7 @@ use PHPolygon\Rendering\VioRenderer3D;
  */
 #[RequiresPhpExtension('vio')]
 #[Group('native-gpu')]
+#[Group('gpu')]
 final class VioFragmentTimeTest extends TestCase
 {
     private const SIZE = 32;

@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace PHPolygon\Tests\Rendering;
 
+use PHPUnit\Framework\Attributes\Group;
 use PHPUnit\Framework\Attributes\RequiresPhpExtension;
 use PHPUnit\Framework\TestCase;
 use PHPolygon\Rendering\VioRenderer2D;
@@ -15,6 +16,7 @@ use PHPolygon\Rendering\VioTextureManager;
  * may still read it. Runs on php-vio's null backend, no GPU involved.
  */
 #[RequiresPhpExtension('vio')]
+#[Group('gpu')]
 final class VioTextureManagerUnloadTest extends TestCase
 {
     private const int FRAMES_IN_FLIGHT = 8;

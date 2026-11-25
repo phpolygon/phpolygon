@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace PHPolygon\Tests\Rendering;
 
+use PHPolygon\Tests\GpuPolicy;
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\Attributes\Group;
 use PHPUnit\Framework\Attributes\RequiresPhpExtension;
@@ -42,6 +43,7 @@ use PHPolygon\Rendering\VioRenderer3D;
  */
 #[RequiresPhpExtension('vio')]
 #[Group('native-gpu')]
+#[Group('gpu')]
 final class VioNativeUpscalerTest extends TestCase
 {
     private const W = 256;
@@ -104,6 +106,9 @@ final class VioNativeUpscalerTest extends TestCase
             $this->markTestSkipped('no headless D3D12');
         }
         $this->ctx = $ctx;
+        if (GpuPolicy::classOf($ctx) !== 'software') {
+            $this->markTestSkipped('asserts the software adapter, which is only used in CI (PHPOLYGON_TEST_SOFTWARE=1 allows it locally)');
+        }
         $caps = (new VioRenderer3D($ctx, 64, 64))->graphicsCapabilities();
         $this->assertFalse($caps->supportsUpscaler(Upscaler::Fsr3), 'WARP runs no native upscaler');
         $this->assertFalse($caps->supportsUpscaler(Upscaler::Dlss));

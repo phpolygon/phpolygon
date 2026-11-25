@@ -34,6 +34,8 @@ use PHPolygon\Rendering\VioRenderer3D;
  */
 #[RequiresPhpExtension('vio')]
 #[Group('native-gpu')]
+#[Group('gpu')]
+#[Group('timing')]
 final class VioUpscalerProbeTest extends TestCase
 {
     /** Far below the seconds of a first query, far above a file read. */

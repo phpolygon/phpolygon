@@ -35,6 +35,7 @@ use PHPolygon\System\ParticleColor;
  */
 #[RequiresPhpExtension('vio')]
 #[Group('native-gpu')]
+#[Group('gpu')]
 final class VioParticleTintRenderTest extends TestCase
 {
     private const W = 160;

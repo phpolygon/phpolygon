@@ -5,9 +5,11 @@ declare(strict_types=1);
 namespace PHPolygon\Tests\System;
 
 use PHPolygon\System\GpuInstanceCuller;
+use PHPUnit\Framework\Attributes\Group;
 use PHPUnit\Framework\TestCase;
 
 /** Shader plan 9.1: the cull kernel keeps exactly the instances inside the frustum. */
+#[Group('gpu')]
 final class GpuInstanceCullerTest extends TestCase
 {
     public function testKernelCompactsTheVisibleInstances(): void

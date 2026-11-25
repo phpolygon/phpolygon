@@ -34,6 +34,7 @@ use PHPolygon\Rendering\RenderCommandList;
  */
 #[RequiresPhpExtension('vio')]
 #[Group('native-gpu')]
+#[Group('gpu')]
 final class VioEngineFrameOrderTest extends TestCase
 {
     private const W = 320;
@@ -49,6 +50,9 @@ final class VioEngineFrameOrderTest extends TestCase
     private const V092 = [
         'd3d12|Microsoft Basic Render Driver' => '391ff42377944bc705de666b3239d2b6',
         'd3d12|NVIDIA GeForce RTX 2080' => '63c9a9c698f20b1f9eaf6d07fd1892e9',
+        // Measured 2026-11-25 (php-vio 2.45.0): the same frame as the RTX one by eye (2D rect on top, the blue
+        // box through the offscreen target); 2432 of 57600 pixels differ, at most 15 per channel.
+        'd3d12|Intel(R) UHD Graphics 630' => 'aff98121207664a3120168f26ee8848f',
     ];
 
     /** @return array{0: string, 1: string, 2: string} rgba, backend, adapter */

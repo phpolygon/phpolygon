@@ -34,6 +34,7 @@ use PHPolygon\Rendering\VioTextureManager;
  */
 #[RequiresPhpExtension('vio')]
 #[Group('native-gpu')]
+#[Group('gpu')]
 final class VioSplatTest extends TestCase
 {
     private const SIZE = 64;

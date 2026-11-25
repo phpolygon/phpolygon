@@ -48,6 +48,7 @@ use PHPolygon\UI\UIScale;
  */
 #[RequiresPhpExtension('vio')]
 #[Group('native-gpu')]
+#[Group('gpu')]
 final class VioEffect2DTest extends TestCase
 {
     private const SIZE = 64;

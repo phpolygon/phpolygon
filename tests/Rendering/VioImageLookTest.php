@@ -41,6 +41,7 @@ use PHPolygon\Rendering\VioRenderer3D;
  */
 #[RequiresPhpExtension('vio')]
 #[Group('native-gpu')]
+#[Group('gpu')]
 final class VioImageLookTest extends TestCase
 {
     private const SIZE = 96;

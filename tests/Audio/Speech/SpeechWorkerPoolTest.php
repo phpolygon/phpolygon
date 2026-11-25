@@ -6,8 +6,10 @@ namespace PHPolygon\Tests\Audio\Speech;
 
 use PHPolygon\Audio\Speech\SpeechJob;
 use PHPolygon\Audio\Speech\SpeechWorkerPool;
+use PHPUnit\Framework\Attributes\Group;
 use PHPUnit\Framework\TestCase;
 
+#[Group('timing')]
 final class SpeechWorkerPoolTest extends TestCase
 {
     private const string FAKE = __DIR__ . '/fake-worker/chatterbox_worker.py';

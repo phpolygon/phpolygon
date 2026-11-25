@@ -4349,6 +4349,71 @@ class MyGameTest extends TestCase {
 than pixel-comparing (no GPU in CI). Update snapshots with
 `PHPOLYGON_UPDATE_SNAPSHOTS=1 vendor/bin/phpunit`.
 
+### Running the tests
+
+`scripts/test.ps1` (Windows; run it with `pwsh -ExecutionPolicy Bypass -File` where scripts are
+restricted) / `scripts/test.sh` (POSIX) run the whole suite in three parts and return one exit code:
+1. everything except the groups `gpu` and `timing` in parallel with ParaTest (`-Processes`, default 6),
+2. the `gpu` group (without `timing`) in parallel on the hardware GPU (`-GpuProcesses`, default 6), the
+   GPU lock `D:\PhpstormProjects\.gpu.lock` (`PHPOLYGON_GPU_LOCK`) taken once around the whole part,
+3. the `timing` group alone in one PHPUnit process.
+
+```
+scripts/test.ps1                              # full run
+scripts/test.ps1 -GpuProcesses 2 -Filter Geometry
+scripts/test.ps1 -Adapter all                 # gpu part on the RTX, then on the Intel iGPU
+scripts/test.ps1 -NoGpu                       # without the gpu part
+scripts/test.ps1 -RequireGpu                  # fail instead of skipping when there is no hardware adapter
+PROCESSES=4 GPU_PROCESSES=2 FILTER=Geometry scripts/test.sh   # POSIX
+```
+
+- **Render tests never run on a software adapter locally** (WARP, 'Microsoft Basic Render Driver',
+  llvmpipe). `tests/bootstrap.php` sets `VIO_D3D_HEADLESS_HARDWARE=1` (every headless D3D context, also the
+  ones tests open with `vio_create()` themselves, stays off WARP); `VioTestContext::create()` skips when it
+  nevertheless got a software context; the scripts probe the adapter first and skip the gpu part with a
+  message (`-RequireGpu` / `REQUIRE_GPU=1`: fail). With `CI` / `GITHUB_ACTIONS` set the software adapter is used
+  as before (`-SoftwareGpu` is only honoured there). `PHPOLYGON_TEST_SOFTWARE=1` lifts the rule for a
+  deliberate local run. `PHPOLYGON_TEST_VIO_ADAPTER=<name part or index>` picks the adapter for EVERY
+  `vio_create()` call of the run, the tests' own included: `tests/bootstrap.php` loads
+  `tests/vio_adapter_shim.php`, which defines a `vio_create()` per test namespace (and the src namespaces that
+  open contexts) that adds the `adapter` option when a call sets none (php-vio has no environment variable for
+  it). A new namespace that calls `vio_create()` unqualified has to be added to the shim.
+- **Adapter option.** `scripts/test.ps1 -Adapter nvidia|intel|all` (`ADAPTER=` in `test.sh`; default `nvidia` =
+  the machine's preferred discrete adapter): `intel` runs the gpu part on the Intel iGPU, `all` runs it once per
+  hardware adapter, one after the other under one GPU lock each, and reports per adapter. The timing group
+  always runs once, on the default adapter.
+- **Intel UHD 630** (measured 2026-11-25, php-vio 2.45.0, D3D12, 511 tests, all green, 52 skipped): 2 workers
+  8:00, 4 workers 5:58 twice, 6 workers 2:53 and 2:40, 8 workers 2:46 (the first runs also filled the shader
+  cache; `VioAutomaticOmissionTest` alone took 267 s cold, `VioNativeUpscalerTest` ~110 s warm). What the iGPU
+  lacks, each skipped by a capability probe with a message: mesh shaders (`VioMeshShaderPathTest`,
+  `VioBindlessMaterialsTest` mesh path), inline ray tracing (`VioRayTraced*`, `VioRt*`), DLSS (NVIDIA only),
+  work graphs (`GpuParticleBurstTest`). The layered point-shadow target (`VioMultiPointShadowTest`) runs and
+  passes. Its frame of `VioEngineFrameOrderTest` differs from the RTX one in 2432 of 57600 pixels by at most 15
+  per channel (checked by eye, same image) and has its own md5 in the adapter table.
+- **References per adapter class.** The GPU tests hold no reference images: they assert measured numbers
+  (columns, jump counts, brightness) with margins, and these hold on the RTX 2080 and on the CI software
+  adapter alike. A number that differs by adapter goes into a table keyed by `GpuPolicy::adapterClass()`
+  (`software`, `hardware-nvidia`, `hardware-amd`, `hardware-intel`, `hardware-apple`, `hardware-other`) and is
+  read with `GpuPolicy::reference($table)` (`default` entry as fallback; no entry = no reference: skip or mark
+  incomplete, never create one blindly). Tests that assert software-adapter behaviour
+  (`VioNativeUpscalerTest` WARP note, `VioRendererUpscalerFallbackTest`,
+  `OffscreenWindowTest::testTheSoftwareAdapterStaysAvailable`) skip locally and run in CI.
+- GPU part measured 2026-11-25 (RTX 2080, php-vio 2.45.0, D3D12 hardware, 507 tests): 1 process 16:49, 6 processes
+  5:03 and 5:06; 8 processes 5:04 (no gain, one timing assertion failed). The longest class
+  (`VioNativeUpscalerTest`, ~210-256 s) bounds the part. Runs with 2 and 4 processes landed at 9-11 min only
+  because other jobs were using the machine at the same time: take the GPU lock for timing runs.
+  Full `scripts/test.ps1`: 8:45-9:06 (against ~48 min serial on the software adapter).
+- `#[Group('gpu')]` – every test class that opens a vio context or a window. Each ParaTest worker opens its
+  own headless contexts. New render tests get the group; plain `vendor/bin/phpunit` still runs everything.
+- `#[Group('timing')]` – tests with wall-clock limits or child-process liveness; they fail under full
+  CPU load (16 processes broke them). A class in both groups runs in the serial part. Tag a new test of that
+  kind the same way.
+- `native-gpu` and `font-vrt` keep their meaning (pixel baselines of the target GPU, FreeType snapshots).
+- Parallel safety: no fixed file, port or temp path shared between tests (use `sys_get_temp_dir()` plus a
+  random suffix, as `LogTest` does) and no helper class that lives in another test's file (autoload it
+  from its own file under `tests/`). A test that cannot follow that goes into a serial group.
+- CI still calls `vendor/bin/phpunit` directly: the workflows were not switched to ParaTest.
+
 ### Anti-patterns
 
 - **Do not** add VRT tests for legitimately animated content. Mask the

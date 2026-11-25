@@ -43,6 +43,7 @@ use PHPolygon\Runtime\PerfProfiler;
 #[RequiresPhpExtension('vio')]
 #[Group('native-gpu')]
 #[RunTestsInSeparateProcesses]
+#[Group('gpu')]
 final class VioRendererGpuPassTimingTest extends TestCase
 {
     private const int W = 96;

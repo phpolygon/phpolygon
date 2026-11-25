@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace PHPolygon\Tests\Rendering;
 
 use PHPolygon\Rendering\VioRenderer2D;
+use PHPUnit\Framework\Attributes\Group;
 use PHPUnit\Framework\TestCase;
 use ReflectionMethod;
 
@@ -22,6 +23,7 @@ use ReflectionMethod;
  * The clamp / key-folding tests are pure and run everywhere; the metric-invariance
  * test needs a live vio context + a system font and is skipped where unavailable.
  */
+#[Group('gpu')]
 final class VioRenderer2DFontScaleTest extends TestCase
 {
     private const FONT_CANDIDATES = [

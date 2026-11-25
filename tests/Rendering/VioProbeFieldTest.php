@@ -36,6 +36,7 @@ use PHPolygon\Rendering\VioRenderer3D;
  */
 #[RequiresPhpExtension('vio')]
 #[Group('native-gpu')]
+#[Group('gpu')]
 final class VioProbeFieldTest extends TestCase
 {
     private const SIZE = 32;
