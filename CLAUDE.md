@@ -4382,6 +4382,11 @@ PROCESSES=4 GPU_PROCESSES=2 FILTER=Geometry scripts/test.sh   # POSIX
   incomplete, never create one blindly). Tests that assert software-adapter behaviour
   (`VioNativeUpscalerTest` WARP note, `VioRendererUpscalerFallbackTest`,
   `OffscreenWindowTest::testTheSoftwareAdapterStaysAvailable`) skip locally and run in CI.
+- GPU part measured 2026-11-25 (RTX 2080, php-vio 2.45.0, D3D12 hardware, 507 tests): 1 process 16:49, 6 processes
+  5:03 and 5:06; 8 processes 5:04 (no gain, one timing assertion failed). The longest class
+  (`VioNativeUpscalerTest`, ~210-256 s) bounds the part. Runs with 2 and 4 processes landed at 9-11 min only
+  because other jobs were using the machine at the same time: take the GPU lock for timing runs.
+  Full `scripts/test.ps1`: 8:45-9:06 (against ~48 min serial on the software adapter).
 - `#[Group('gpu')]` – every test class that opens a vio context or a window. Each ParaTest worker opens its
   own headless contexts. New render tests get the group; plain `vendor/bin/phpunit` still runs everything.
 - `#[Group('timing')]` – tests with wall-clock limits or child-process liveness; they fail under full
