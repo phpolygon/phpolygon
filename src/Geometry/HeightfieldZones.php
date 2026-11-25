@@ -63,12 +63,15 @@ final class HeightfieldZones
         return \ord($this->zones[$cj * $this->width + $ci]);
     }
 
-    /** Zone of triangle `$which` of cell (ia, ja): {@see VOID} unless all three corners have ground. */
-    public function triangleZone(int $ia, int $ja, int $which): int
+    /**
+     * Zone of triangle `$which` of cell (ia, ja): {@see VOID} unless all three corners have ground. `$rising` = the cell's
+     * diagonal when the grid does not use the chessboard ({@see HeightfieldGrid::risingAt()}); null = the chessboard.
+     */
+    public function triangleZone(int $ia, int $ja, int $which, ?bool $rising = null): int
     {
         $first = null;
         $same = true;
-        foreach (HeightfieldGrid::triangleCorners($ia, $ja, $which) as [$i, $j]) {
+        foreach (HeightfieldGrid::triangleCorners($ia, $ja, $which, $rising) as [$i, $j]) {
             $z = $this->zone($i, $j);
             if ($z === self::VOID) {
                 return self::VOID;
@@ -79,6 +82,7 @@ final class HeightfieldZones
         if ($same) {
             return (int) $first;
         }
+        // One zone object serves one grid, so the cell's diagonal is the same at every call: the memo needs no key for it.
         $key = ($ja << 33) ^ ($ia << 2) ^ $which;
         if (isset($this->mixed[$key])) {
             return $this->mixed[$key];
@@ -110,17 +114,19 @@ final class HeightfieldZones
      * Asked for a void triangle (which a masked grid never builds) it returns the name of zone 0, or '' without one.
      *
      * @param array<int, string> $names zone number => name (a number without a name is called 'zone<N>')
+     * @param HeightfieldGrid|null $grid the grid that is built, when it picks its diagonals by best fit
      * @return \Closure(float, float): string
      */
-    public function closure(float $cell, array $names): \Closure
+    public function closure(float $cell, array $names, ?HeightfieldGrid $grid = null): \Closure
     {
-        return function (float $x, float $z) use ($cell, $names): string {
+        return function (float $x, float $z) use ($cell, $names, $grid): string {
             $ia = (int) floor($x / $cell);
             $ja = (int) floor($z / $cell);
             $u = $x / $cell - $ia;
             $v = $z / $cell - $ja;
-            $which = HeightfieldGrid::diagonalRising($ia, $ja) ? ($v >= $u ? 0 : 1) : ($u + $v <= 1.0 ? 0 : 1);
-            $zone = $this->triangleZone($ia, $ja, $which);
+            $rising = $grid?->risingAt($ia, $ja) ?? HeightfieldGrid::diagonalRising($ia, $ja);
+            $which = $rising ? ($v >= $u ? 0 : 1) : ($u + $v <= 1.0 ? 0 : 1);
+            $zone = $this->triangleZone($ia, $ja, $which, $rising);
 
             return $names[$zone] ?? ($zone === self::VOID ? '' : 'zone' . $zone);
         };

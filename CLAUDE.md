@@ -2206,6 +2206,25 @@ accuracy. Cost, measured on a 1400 x 1400 m grid with one hole and two zones: ce
 5–9 s (noisy host) and ~0.4 GB peak; cell 11 m = 33k triangles in ~0.2 s. Bake it and cache with
 `MeshSetCache`. Not covered: radial grids, concave holes (use several convex ones). A
 `HeightmapCollider3D` cannot represent a hole – ground with a shaft needs a mesh collider.
+*Flat blocks (opt-in).* `HeightfieldGround::build(..., $snap, $flatBlock = 0, $flatTolerance = 1e-6)`: with
+`$flatBlock = B >= 2`, a square block of B x B cells (on absolute lattice multiples of B, so tiles agree)
+whose corners all lie on one plane (within `$flatTolerance` m), have ground, share one zone and sit a cell
+clear of every hole becomes ONE polygon fanned from its centre – 4 B triangles instead of 2 B^2 – with
+EVERY lattice corner of its border kept as a vertex (collinear points included), so borders stay
+watertight against blocks and single cells alike; interior corners are dropped (the surface inside
+deviates from the grid by at most the tolerance, not at all for an exactly flat block). Tested: same open
+edges as the cell-by-cell build, no edge in more than two triangles, shared tile borders carry the same
+vertices. Measured 2026-11-25 on one 1.4 km field of a consuming game (2 m cell, grass/sand zones, 466 178
+triangles): B = 8 (16 m) -25.3 %, B = 16 (32 m) -25.1 %, B = 16 with 2 cm tolerance -29.2 %; build time
+unchanged (~3.7 s). `contentKey()` takes the two options (only when used). *Best-fit diagonals (opt-in).*
+`HeightfieldGrid::sample(..., $height, $bestFitDiagonal = true)` evaluates the function once more at every
+cell centre (one halo ring of cells included) and keeps, per cell, the diagonal whose centre height (mean of
+its two end corners) is closer to it – a crease along a diagonal is followed by the edge instead of cut
+across (a kerb wave where a conforming path surface of finer cells meets a coarse crease). Stored in the
+grid (`$diagonals`, one byte per cell, in the content hash), asked through `risingAt(i, j)`; the mesh,
+`heightAt()`, `groundHeightAt()`, `triangleHasGround()` and `HeightfieldZones::closure($cell, $names,
+$grid)` all follow it, tiles sampling the same function pick alike on shared borders. Ties and cells
+without ground keep the chessboard. Tested: never worse than the chessboard at any cell centre.
 *Masked ground (coasts, voids).* The height function given to `HeightfieldGrid::sample()` may return `null`
 for a corner without ground: the grid then carries `$ground` (one byte per height, `isMasked()`,
 `hasGround(i, j)`), and **a triangle exists only if all three corners have ground**

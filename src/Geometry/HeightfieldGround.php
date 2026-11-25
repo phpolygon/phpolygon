@@ -75,6 +75,8 @@ final class HeightfieldGround
         private readonly ?\Closure $zone,
         private readonly float $uvScale,
         private readonly float $snapLength,
+        private readonly int $flatBlock = 0,
+        private readonly float $flatTolerance = 1.0e-6,
     ) {
         $this->cell = $grid->cell;
         $this->inv = 1.0 / $grid->cell;
@@ -90,15 +92,27 @@ final class HeightfieldGround
      * @param (\Closure(float, float): (string|int))|null $zone zone name at a point; null = one mesh named {@see DEFAULT_ZONE}
      * @param float $uvScale UV = world XZ x this
      * @param float $snap a cut closer than `$snap` x cell to a triangle corner moves onto it (0 = never; below 0.5)
+     * @param int $flatBlock FLAT BLOCKS (0 = off, else >= 2): a square block of `$flatBlock` x `$flatBlock` cells whose
+     *                       corners all lie on one plane (within `$flatTolerance` metres), have ground, belong to one
+     *                       zone and are a cell clear of every hole is emitted as ONE polygon fanned from its centre
+     *                       (4 x `$flatBlock` triangles instead of 2 x `$flatBlock`^2) instead of cell by cell. Blocks sit
+     *                       on absolute lattice multiples of `$flatBlock` (neighbouring tiles agree) and keep EVERY
+     *                       lattice corner of their border as a vertex, so the border stays watertight against blocks and
+     *                       single cells alike. Interior corners are dropped: the surface inside deviates from the grid
+     *                       by at most `$flatTolerance` (not at all for an exactly flat block).
+     * @param float $flatTolerance largest distance (m) of a block corner from the block's plane
      * @return array<string, MeshData> zone name => mesh, sorted by name; a zone without triangles is absent
      */
-    public static function build(HeightfieldGrid $grid, array $holes = [], ?\Closure $zone = null, float $uvScale = 1.0, float $snap = 0.05): array
+    public static function build(HeightfieldGrid $grid, array $holes = [], ?\Closure $zone = null, float $uvScale = 1.0, float $snap = 0.05, int $flatBlock = 0, float $flatTolerance = 1.0e-6): array
     {
         if ($snap < 0.0 || $snap >= 0.5) {
             throw new \InvalidArgumentException('HeightfieldGround: snap must be in [0, 0.5)');
         }
+        if ($flatBlock === 1 || $flatBlock < 0 || $flatTolerance < 0.0) {
+            throw new \InvalidArgumentException('HeightfieldGround: flatBlock must be 0 or >= 2 and flatTolerance >= 0');
+        }
 
-        return (new self($grid, $holes, $zone, $uvScale, $snap * $grid->cell))->run();
+        return (new self($grid, $holes, $zone, $uvScale, $snap * $grid->cell, $flatBlock, $flatTolerance))->run();
     }
 
     /**
@@ -108,8 +122,11 @@ final class HeightfieldGround
      * @param list<HeightfieldHole> $holes
      * @param string $zoneKey a string that changes whenever the zone function does (e.g. 'zones-v3' plus a hash of its data)
      */
-    public static function contentKey(HeightfieldGrid $grid, array $holes = [], string $zoneKey = '', float $uvScale = 1.0, float $snap = 0.05): string
+    public static function contentKey(HeightfieldGrid $grid, array $holes = [], string $zoneKey = '', float $uvScale = 1.0, float $snap = 0.05, int $flatBlock = 0, float $flatTolerance = 1.0e-6): string
     {
+        // The flat-block options only enter the key when used, so keys of builds without them stay as they were.
+        $flat = $flatBlock > 0 ? ['flat' . $flatBlock . ':' . $flatTolerance] : [];
+
         return MeshSetCache::fingerprint(
             'heightfield-ground',
             (string) self::FORMAT,
@@ -117,6 +134,7 @@ final class HeightfieldGround
             implode(',', array_map(static fn (HeightfieldHole $h): string => $h->fingerprint(), $holes)),
             $zoneKey,
             pack('ee', $uvScale, $snap),
+            ...$flat,
         );
     }
 
@@ -149,10 +167,17 @@ final class HeightfieldGround
             }
         }
 
-        // Pass 2: emit. Cells away from every hole are plain triangles.
+        // Pass 2: emit. Cells away from every hole are plain triangles (or part of a flat block).
+        [$blockOrigins, $blockCells] = $this->flatBlock > 1 ? $this->flatBlocks($special) : [[], []];
         for ($ja = $this->j0; $ja < $this->j0 + $this->nz; $ja++) {
             for ($ia = $this->i0; $ia < $this->i0 + $this->nx; $ia++) {
                 $id = $this->cellId($ia, $ja);
+                if (isset($blockCells[$id])) {
+                    if (array_key_exists($id, $blockOrigins)) {
+                        $this->emitBlock($ia, $ja, $blockOrigins[$id]);
+                    }
+                    continue;
+                }
                 if (!isset($special[$id])) {
                     foreach ($this->cellTriangles($ia, $ja) as [$a, $b, $c]) {
                         $this->emit($a, $b, $c);
@@ -185,6 +210,123 @@ final class HeightfieldGround
         ksort($out, SORT_STRING);
 
         return $out;
+    }
+
+    /**
+     * The flat blocks of the grid ({@see build()}, `$flatBlock`): origin cell id => zone name (null without a zone
+     * function), and the set of all cell ids they cover.
+     *
+     * @param array<int, array{0: int, 1: int}> $special cells touched by holes (and the ring round them)
+     * @return array{0: array<int, string|null>, 1: array<int, true>}
+     */
+    private function flatBlocks(array $special): array
+    {
+        $b = $this->flatBlock;
+        $origins = [];
+        $covered = [];
+        $iStart = (int) (ceil($this->i0 / $b) * $b);
+        $jStart = (int) (ceil($this->j0 / $b) * $b);
+        for ($ja = $jStart; $ja + $b <= $this->j0 + $this->nz; $ja += $b) {
+            for ($ia = $iStart; $ia + $b <= $this->i0 + $this->nx; $ia += $b) {
+                $name = $this->flatBlockZone($ia, $ja, $special);
+                if ($name === false) {
+                    continue;
+                }
+                $origins[$this->cellId($ia, $ja)] = $name;
+                for ($dj = 0; $dj < $b; $dj++) {
+                    for ($di = 0; $di < $b; $di++) {
+                        $covered[$this->cellId($ia + $di, $ja + $dj)] = true;
+                    }
+                }
+            }
+        }
+
+        return [$origins, $covered];
+    }
+
+    /**
+     * The zone name of the block at cell (ia, ja) when it can be emitted as one polygon (null = no zone function), false
+     * when not: all its corners have ground and lie on one plane, no hole cell within a cell of it, one zone for every
+     * triangle.
+     *
+     * @param array<int, array{0: int, 1: int}> $special
+     */
+    private function flatBlockZone(int $ia, int $ja, array $special): string|false|null
+    {
+        $b = $this->flatBlock;
+        for ($dj = -1; $dj <= $b; $dj++) {
+            for ($di = -1; $di <= $b; $di++) {
+                if (isset($special[$this->cellId($ia + $di, $ja + $dj)])) {
+                    return false;
+                }
+            }
+        }
+        $g = $this->grid;
+        $h00 = $g->cornerHeight($ia, $ja);
+        $dx = ($g->cornerHeight($ia + $b, $ja) - $h00) / $b;
+        $dz = ($g->cornerHeight($ia, $ja + $b) - $h00) / $b;
+        for ($dj = 0; $dj <= $b; $dj++) {
+            for ($di = 0; $di <= $b; $di++) {
+                if (!$g->hasGround($ia + $di, $ja + $dj)
+                    || abs($g->cornerHeight($ia + $di, $ja + $dj) - ($h00 + $dx * $di + $dz * $dj)) > $this->flatTolerance) {
+                    return false;
+                }
+            }
+        }
+        if ($this->zone === null) {
+            return null;
+        }
+        $name = null;
+        for ($dj = 0; $dj < $b; $dj++) {
+            for ($di = 0; $di < $b; $di++) {
+                foreach ($this->cellTriangles($ia + $di, $ja + $dj) as [$p, $q, $r]) {
+                    $n = (string) ($this->zone)(($p[0] + $q[0] + $r[0]) / 3.0, ($p[1] + $q[1] + $r[1]) / 3.0);
+                    if ($name !== null && $n !== $name) {
+                        return false;
+                    }
+                    $name = $n;
+                }
+            }
+        }
+
+        return $name;
+    }
+
+    /**
+     * One flat block as a fan from its centre over every lattice corner of its border (the collinear border points stay
+     * vertices, so neighbours that keep their single cells meet it without a T-junction).
+     */
+    private function emitBlock(int $ia, int $ja, ?string $name): void
+    {
+        $b = $this->flatBlock;
+        $g = $this->grid;
+        $ring = [];
+        for ($k = 0; $k < $b; $k++) {
+            $ring[] = [$ia + $k, $ja];
+        }
+        for ($k = 0; $k < $b; $k++) {
+            $ring[] = [$ia + $b, $ja + $k];
+        }
+        for ($k = $b; $k > 0; $k--) {
+            $ring[] = [$ia + $k, $ja + $b];
+        }
+        for ($k = $b; $k > 0; $k--) {
+            $ring[] = [$ia, $ja + $k];
+        }
+        $pts = [];
+        foreach ($ring as [$i, $j]) {
+            $pts[] = [$i * $this->cell, $j * $this->cell, $g->cornerHeight($i, $j)];
+        }
+        $h00 = $g->cornerHeight($ia, $ja);
+        $centre = [
+            ($ia + $b * 0.5) * $this->cell,
+            ($ja + $b * 0.5) * $this->cell,
+            $h00 + 0.5 * ($g->cornerHeight($ia + $b, $ja) - $h00) + 0.5 * ($g->cornerHeight($ia, $ja + $b) - $h00),
+        ];
+        $n = count($pts);
+        for ($k = 0; $k < $n; $k++) {
+            $this->emit($centre, $pts[$k], $pts[($k + 1) % $n], $name);
+        }
     }
 
     private function cellId(int $ia, int $ja): int
@@ -236,7 +378,7 @@ final class HeightfieldGround
         $p11 = [$xb, $zb, $this->grid->cornerHeight($ia + 1, $ja + 1)];
         $p01 = [$xa, $zb, $this->grid->cornerHeight($ia, $ja + 1)];
 
-        $tris = HeightfieldGrid::diagonalRising($ia, $ja)
+        $tris = $this->grid->risingAt($ia, $ja)
             ? [[$p00, $p01, $p11], [$p00, $p11, $p10]]
             : [[$p00, $p01, $p10], [$p10, $p01, $p11]];
         if ($this->grid->isMasked()) {
@@ -263,7 +405,7 @@ final class HeightfieldGround
         $xb = ($ia + 1) * $this->cell;
         $za = $ja * $this->cell;
         $zb = ($ja + 1) * $this->cell;
-        $rising = HeightfieldGrid::diagonalRising($ia, $ja);
+        $rising = $this->grid->risingAt($ia, $ja);
 
         return [
             ['h' . $ia . ':' . $ja, [$xa, $za], [$xb, $za]],
@@ -570,8 +712,9 @@ final class HeightfieldGround
      * @param array{0: float, 1: float, 2: float} $a
      * @param array{0: float, 1: float, 2: float} $b
      * @param array{0: float, 1: float, 2: float} $c
+     * @param string|null $zoneName zone of the triangle when the caller knows it (a flat block); null = ask the zone function
      */
-    private function emit(array $a, array $b, array $c): void
+    private function emit(array $a, array $b, array $c, ?string $zoneName = null): void
     {
         $cross = ($b[1] - $a[1]) * ($c[0] - $a[0]) - ($b[0] - $a[0]) * ($c[1] - $a[1]);
         if (abs($cross) < 2.0 * self::MIN_AREA) {
@@ -581,7 +724,9 @@ final class HeightfieldGround
             [$b, $c] = [$c, $b];
         }
         $name = self::DEFAULT_ZONE;
-        if ($this->zone !== null) {
+        if ($zoneName !== null) {
+            $name = $zoneName;
+        } elseif ($this->zone !== null) {
             $name = (string) ($this->zone)(($a[0] + $b[0] + $c[0]) / 3.0, ($a[1] + $b[1] + $c[1]) / 3.0);
         }
         if (!isset($this->zones[$name])) {

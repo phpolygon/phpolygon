@@ -50,6 +50,8 @@ final class HeightfieldGrid
      * @param int $nz cells along Z
      * @param list<float> $heights (nx + 3) * (nz + 3) heights, row-major, starting one corner before ($i0, $j0)
      * @param string|null $ground one byte per height, same layout: "\x01" ground, "\x00" none; null = ground everywhere
+     * @param string|null $diagonals best-fit diagonals, one byte per cell in the layout of the heights (cell (i, j) at the index of
+     *                               corner (i, j)): "\x01" = from (i, j) to (i + 1, j + 1), "\x00" = the other one; null = the chessboard
      */
     public function __construct(
         public readonly int $i0,
@@ -59,6 +61,7 @@ final class HeightfieldGrid
         public readonly float $cell,
         public readonly array $heights,
         public readonly ?string $ground = null,
+        public readonly ?string $diagonals = null,
     ) {
         if ($cell <= 0.0 || $nx < 1 || $nz < 1) {
             throw new \InvalidArgumentException('HeightfieldGrid: needs cell > 0 and at least one cell');
@@ -68,6 +71,9 @@ final class HeightfieldGrid
         }
         if ($ground !== null && strlen($ground) !== count($heights)) {
             throw new \InvalidArgumentException('HeightfieldGrid: the ground mask needs one byte per height');
+        }
+        if ($diagonals !== null && strlen($diagonals) !== count($heights)) {
+            throw new \InvalidArgumentException('HeightfieldGrid: the diagonals need one byte per height position');
         }
     }
 
@@ -79,9 +85,13 @@ final class HeightfieldGrid
      * ring, up to {@see FILL_RINGS}; corners beyond the grid's halo are asked from `$height` too, so two tiles
      * fill a shared border alike), 0 when there is none.
      *
+     * `$bestFitDiagonal` picks the diagonal of every cell by the smaller height error against the function at the
+     * cell centre (see {@see risingAt()}); that costs one more call per cell (and one ring of halo cells), made after
+     * the corners, in row order.
+     *
      * @param callable(float, float): (float|null) $height
      */
-    public static function sample(float $minX, float $minZ, float $maxX, float $maxZ, float $cell, callable $height): self
+    public static function sample(float $minX, float $minZ, float $maxX, float $maxZ, float $cell, callable $height, bool $bestFitDiagonal = false): self
     {
         if ($cell <= 0.0 || $maxX <= $minX || $maxZ <= $minZ) {
             throw new \InvalidArgumentException('HeightfieldGrid::sample: empty bounds or cell <= 0');
@@ -108,7 +118,7 @@ final class HeightfieldGrid
             }
         }
         if ($void === []) {
-            return new self($i0, $j0, $nx, $nz, $cell, $heights);
+            return new self($i0, $j0, $nx, $nz, $cell, $heights, null, $bestFitDiagonal ? self::fitDiagonals($i0, $j0, $nx, $nz, $cell, $heights, null, $height) : null);
         }
 
         // Raw ground height of any corner, inside the array or (cached) from the function.
@@ -158,7 +168,9 @@ final class HeightfieldGrid
             }
         }
 
-        return new self($i0, $j0, $nx, $nz, $cell, array_values($filled), $mask);
+        $filled = array_values($filled);
+
+        return new self($i0, $j0, $nx, $nz, $cell, $filled, $mask, $bestFitDiagonal ? self::fitDiagonals($i0, $j0, $nx, $nz, $cell, $filled, $mask, $height) : null);
     }
 
     /**
@@ -191,6 +203,45 @@ final class HeightfieldGrid
                 return $corners[$j * $w + $i];
             },
         );
+    }
+
+    /**
+     * The best-fit diagonal of every cell from (i0 - 1, j0 - 1) to (i0 + nx, j0 + nz): the one whose centre height
+     * (mean of its two end corners) lies closer to the function at the cell centre; a tie, a cell without ground
+     * or a cell outside the function's ground keeps the chessboard.
+     *
+     * @param list<float> $heights
+     * @param callable(float, float): (float|null) $height
+     */
+    private static function fitDiagonals(int $i0, int $j0, int $nx, int $nz, float $cell, array $heights, ?string $mask, callable $height): string
+    {
+        $width = $nx + 3;
+        $out = '';
+        for ($cj = 0; $cj < $nz + 3; $cj++) {
+            for ($ci = 0; $ci < $width; $ci++) {
+                $i = $i0 - 1 + $ci;
+                $j = $j0 - 1 + $cj;
+                $rising = self::diagonalRising($i, $j);
+                if ($ci < $width - 1 && $cj < $nz + 2) {
+                    $k00 = $cj * $width + $ci;
+                    $k11 = $k00 + $width + 1;
+                    $k10 = $k00 + 1;
+                    $k01 = $k00 + $width;
+                    $ground = $mask === null || ($mask[$k00] === "\x01" && $mask[$k10] === "\x01" && $mask[$k01] === "\x01" && $mask[$k11] === "\x01");
+                    $truth = $ground ? $height(($i + 0.5) * $cell, ($j + 0.5) * $cell) : null;
+                    if ($truth !== null) {
+                        $e1 = abs(($heights[$k00] + $heights[$k11]) * 0.5 - $truth);
+                        $e2 = abs(($heights[$k10] + $heights[$k01]) * 0.5 - $truth);
+                        if (abs($e1 - $e2) > 1.0e-9) {
+                            $rising = $e1 < $e2;
+                        }
+                    }
+                }
+                $out .= $rising ? "\x01" : "\x00";
+            }
+        }
+
+        return $out;
     }
 
     /** World X of the first / last corner column. */
@@ -240,7 +291,7 @@ final class HeightfieldGrid
         if ($this->ground === null) {
             return true;
         }
-        foreach (self::triangleCorners($i, $j, $which) as [$ci, $cj]) {
+        foreach (self::triangleCorners($i, $j, $which, $this->risingAt($i, $j)) as [$ci, $cj]) {
             if (!$this->hasGround($ci, $cj)) {
                 return false;
             }
@@ -259,18 +310,36 @@ final class HeightfieldGrid
     }
 
     /**
+     * Whether the cell with lower corner (i, j) of THIS grid runs its diagonal from (i, j) to (i + 1, j + 1). Without
+     * best-fit diagonals that is the chessboard ({@see diagonalRising()}). With them ({@see sample()}) each cell keeps the
+     * diagonal whose triangulation lies closer to the real surface at the cell centre, so a crease that runs along a
+     * diagonal is followed by the edge and not cut across by it (a kerb wave where a path conforms to the ground over a
+     * crease). Stored per cell in the grid, so tiles of one cell size that sample the same function pick alike on a
+     * shared border, and the mesh, {@see heightAt()} and {@see groundHeightAt()} all agree.
+     */
+    public function risingAt(int $i, int $j): bool
+    {
+        if ($this->diagonals === null) {
+            return self::diagonalRising($i, $j);
+        }
+
+        return $this->diagonals[($j - $this->j0 + 1) * ($this->nx + 3) + ($i - $this->i0 + 1)] === "\x01";
+    }
+
+    /**
      * The three corners of triangle `$which` (0 or 1) of cell (i, j) as `[[i, j], ...]`, counter-clockwise
-     * seen from above: the triangles of {@see HeightfieldGround}, in the same order.
+     * seen from above: the triangles of {@see HeightfieldGround}, in the same order. `$rising` = the cell's
+     * diagonal ({@see risingAt()}); null = the chessboard.
      *
      * @return list<array{0: int, 1: int}>
      */
-    public static function triangleCorners(int $i, int $j, int $which): array
+    public static function triangleCorners(int $i, int $j, int $which, ?bool $rising = null): array
     {
         $p00 = [$i, $j];
         $p10 = [$i + 1, $j];
         $p11 = [$i + 1, $j + 1];
         $p01 = [$i, $j + 1];
-        if (self::diagonalRising($i, $j)) {
+        if ($rising ?? self::diagonalRising($i, $j)) {
             return $which === 0 ? [$p00, $p01, $p11] : [$p00, $p11, $p10];
         }
 
@@ -282,7 +351,7 @@ final class HeightfieldGrid
     {
         $u = $x / $this->cell - $i;
         $v = $z / $this->cell - $j;
-        if (self::diagonalRising($i, $j)) {
+        if ($this->risingAt($i, $j)) {
             return $v >= $u ? 0 : 1;
         }
 
@@ -307,7 +376,7 @@ final class HeightfieldGrid
         $h10 = $this->cornerHeight($i + 1, $j);
         $h01 = $this->cornerHeight($i, $j + 1);
         $h11 = $this->cornerHeight($i + 1, $j + 1);
-        if (self::diagonalRising($i, $j)) {
+        if ($this->risingAt($i, $j)) {
             return $fx >= $fz
                 ? $h00 + ($h10 - $h00) * $fx + ($h11 - $h10) * $fz
                 : $h00 + ($h11 - $h01) * $fx + ($h01 - $h00) * $fz;
@@ -345,7 +414,7 @@ final class HeightfieldGrid
                     if (!$this->triangleHasGround($ia, $ja, $which)) {
                         continue;
                     }
-                    [$a, $b, $d] = self::triangleCorners($ia, $ja, $which);
+                    [$a, $b, $d] = self::triangleCorners($ia, $ja, $which, $this->risingAt($ia, $ja));
                     $ax = $a[0] * $c;
                     $az = $a[1] * $c;
                     $bx = $b[0] * $c;
@@ -387,6 +456,10 @@ final class HeightfieldGrid
         if ($this->ground !== null) {
             hash_update($h, 'ground');
             hash_update($h, $this->ground);
+        }
+        if ($this->diagonals !== null) {
+            hash_update($h, 'diagonals');
+            hash_update($h, $this->diagonals);
         }
 
         return hash_final($h);
