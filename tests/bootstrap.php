@@ -4,6 +4,12 @@ declare(strict_types=1);
 
 require __DIR__ . '/../vendor/autoload.php';
 
+// PHPOLYGON_TEST_VIO_ADAPTER (an adapter name or index) reaches every vio_create() call, also the ones
+// the tests make themselves: see tests/vio_adapter_shim.php.
+if (function_exists('vio_create') && (string) getenv('PHPOLYGON_TEST_VIO_ADAPTER') !== '') {
+    require __DIR__ . '/vio_adapter_shim.php';
+}
+
 // Locally the render tests run on the hardware GPU, never on a software adapter. php-vio's D3D
 // backends read VIO_D3D_HEADLESS_HARDWARE from the process environment at start-up (putenv() from PHP
 // does not reach them), and with it set every headless D3D11 / D3D12 context stays off WARP, also the

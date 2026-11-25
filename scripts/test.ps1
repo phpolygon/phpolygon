@@ -26,6 +26,11 @@
 .PARAMETER GpuProcesses
   ParaTest workers of the gpu part (default 6: bounded by the longest test class, see CLAUDE.md "Running the tests").
 
+.PARAMETER Adapter
+  Which hardware adapter runs the gpu part: nvidia (default: the machine's preferred discrete adapter), intel
+  (the Intel iGPU, 2 workers by default) or all (both, one after the other, each under its own GPU lock,
+  reported per adapter). With all, an adapter that is not there is reported and skipped.
+
 .PARAMETER Filter
   Optional PHPUnit --filter pattern, applied to every part.
 
@@ -48,7 +53,8 @@
 #>
 param(
     [int]$Processes = 6,
-    [int]$GpuProcesses = 6,
+    [int]$GpuProcesses = 0,
+    [ValidateSet('nvidia', 'intel', 'all')][string]$Adapter = 'nvidia',
     [string]$Filter = '',
     [switch]$NoGpu,
     [switch]$RequireGpu,
@@ -111,33 +117,55 @@ function Enter-GpuLock {
 Write-Host "== parallel run ($Processes processes, without groups gpu, timing, $ExcludeGroup)"
 $parallel = Invoke-ParaTest $Processes @('--exclude-group', 'gpu', '--exclude-group', 'timing')
 
-# 2. render tests in parallel on the GPU
+# 2. render tests in parallel on the GPU, once per adapter asked for (one after the other, one lock each)
 $gpu = 0
 $gpuNote = ''
+$adapterReport = @()
 if (-not $NoGpu) {
     if (-not $SoftwareGpu) {
         $env:VIO_D3D_HEADLESS_HARDWARE = '1'
     }
-    $class = (& php -r 'require "vendor/autoload.php"; echo PHPolygon\Tests\GpuPolicy::adapterClass();')
-    Write-Host "== adapter class: $class"
-    $env:PHPOLYGON_TEST_ADAPTER_CLASS = $class
-    if (($class -eq 'software' -or $class -eq 'none') -and -not $SoftwareGpu) {
-        if ($RequireGpu) {
-            Write-Host "FAILED: -RequireGpu, but no hardware adapter is available (adapter class '$class')"
-            $gpu = 1
-        } else {
-            $gpuNote = "gpu part SKIPPED: no hardware adapter (adapter class '$class'); render tests never run on software locally"
-            Write-Host "== $gpuNote"
+    $adapterNames = @{ nvidia = ''; intel = 'Intel' }
+    $selected = if ($Adapter -eq 'all') { @('nvidia', 'intel') } else { @($Adapter) }
+    $savedAdapter = $env:PHPOLYGON_TEST_VIO_ADAPTER
+    foreach ($which in $selected) {
+        # nvidia = the machine's preferred (discrete) adapter, no explicit choice
+        $env:PHPOLYGON_TEST_VIO_ADAPTER = if ($savedAdapter -and $Adapter -ne 'all') { $savedAdapter } else { $adapterNames[$which] }
+        $env:PHPOLYGON_TEST_ADAPTER_CLASS = ''
+        $class = (& php -r 'require "vendor/autoload.php"; echo PHPolygon\Tests\GpuPolicy::adapterClass();')
+        $env:PHPOLYGON_TEST_ADAPTER_CLASS = $class
+        Write-Host "== adapter $which -> class: $class"
+        $expected = if ($which -eq 'nvidia') { 'hardware-nvidia' } else { "hardware-$which" }
+        if (-not $SoftwareGpu -and ($class -eq 'software' -or $class -eq 'none' -or ($Adapter -eq 'all' -and $class -ne $expected))) {
+            if ($RequireGpu -or $Adapter -ne 'all') {
+                if ($RequireGpu) {
+                    Write-Host "FAILED: -RequireGpu, but adapter '$which' is not available as hardware (adapter class '$class')"
+                    $gpu = 1
+                } else {
+                    $gpuNote = "gpu part SKIPPED: no hardware adapter (adapter class '$class'); render tests never run on software locally"
+                    Write-Host "== $gpuNote"
+                }
+            } else {
+                Write-Host "== adapter $which not available here (class '$class'), skipped"
+                $adapterReport += "$which : not available"
+            }
+            continue
         }
-    } else {
+        $workers = if ($GpuProcesses -gt 0) { $GpuProcesses } else { 6 }
         $lock = Enter-GpuLock
+        $began = Get-Date
         try {
-            Write-Host "== gpu run ($GpuProcesses processes, group gpu without timing)"
-            $gpu = Invoke-ParaTest $GpuProcesses @('--group', 'gpu', '--exclude-group', 'timing')
+            Write-Host "== gpu run on $which ($workers processes, group gpu without timing)"
+            $exit = Invoke-ParaTest $workers @('--group', 'gpu', '--exclude-group', 'timing')
         } finally {
             if ($lock) { Remove-Item $lock -ErrorAction SilentlyContinue }
         }
+        if ($exit -ne 0) { $gpu = 1 }
+        $adapterReport += ('{0} : exit {1}, {2:mm\:ss}' -f $which, $exit, ((Get-Date) - $began))
     }
+    $env:PHPOLYGON_TEST_VIO_ADAPTER = $savedAdapter
+    $env:PHPOLYGON_TEST_ADAPTER_CLASS = ''
+    foreach ($line in $adapterReport) { Write-Host "== gpu report: $line" }
 }
 
 # 3. timing tests alone

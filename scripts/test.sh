@@ -12,7 +12,8 @@
 #
 # Options (environment variables):
 #   PROCESSES=6        ParaTest workers of the plain part
-#   GPU_PROCESSES=6    ParaTest workers of the gpu part
+#   GPU_PROCESSES=6    ParaTest workers of the gpu part (default 6)
+#   ADAPTER=nvidia     nvidia | intel | all: the hardware adapter(s) of the gpu part, one after the other
 #   FILTER=<pattern>   PHPUnit --filter pattern, applied to every part
 #   NO_GPU=1           skip the gpu part
 #   REQUIRE_GPU=1      fail when no hardware adapter is available
@@ -51,19 +52,46 @@ parallel=$?
 
 gpu=0
 gpu_note=""
+adapter_report=()
 if [ "${NO_GPU:-0}" != "1" ]; then
-    class="$(php -r 'require "vendor/autoload.php"; echo PHPolygon\Tests\GpuPolicy::adapterClass();')"
-    echo "== adapter class: $class"
-    export PHPOLYGON_TEST_ADAPTER_CLASS="$class"
-    if { [ "$class" = "software" ] || [ "$class" = "none" ]; } && [ "$in_ci" = "0" ]; then
-        if [ "${REQUIRE_GPU:-0}" = "1" ]; then
-            echo "FAILED: REQUIRE_GPU=1, but no hardware adapter is available (adapter class '$class')"
-            gpu=1
+    adapter="${ADAPTER:-nvidia}"
+    case "$adapter" in
+        all) selected=(nvidia intel) ;;
+        nvidia|intel) selected=("$adapter") ;;
+        *) echo "FAILED: ADAPTER must be nvidia, intel or all"; exit 1 ;;
+    esac
+    saved_adapter="${PHPOLYGON_TEST_VIO_ADAPTER:-}"
+    for which in "${selected[@]}"; do
+        # nvidia = the machine's preferred (discrete) adapter, no explicit choice
+        if [ "$adapter" != "all" ] && [ -n "$saved_adapter" ]; then
+            export PHPOLYGON_TEST_VIO_ADAPTER="$saved_adapter"
+        elif [ "$which" = "intel" ]; then
+            export PHPOLYGON_TEST_VIO_ADAPTER="Intel"
         else
-            gpu_note="gpu part SKIPPED: no hardware adapter (adapter class '$class'); render tests never run on software locally"
-            echo "== $gpu_note"
+            unset PHPOLYGON_TEST_VIO_ADAPTER
         fi
-    else
+        unset PHPOLYGON_TEST_ADAPTER_CLASS
+        class="$(php -r 'require "vendor/autoload.php"; echo PHPolygon\Tests\GpuPolicy::adapterClass();')"
+        export PHPOLYGON_TEST_ADAPTER_CLASS="$class"
+        echo "== adapter $which -> class: $class"
+        if [ "$in_ci" = "0" ] && { [ "$class" = "software" ] || [ "$class" = "none" ] \
+            || { [ "$adapter" = "all" ] && [ "$class" != "hardware-$which" ]; }; }; then
+            if [ "${REQUIRE_GPU:-0}" = "1" ]; then
+                echo "FAILED: REQUIRE_GPU=1, but adapter '$which' is not available as hardware (adapter class '$class')"
+                gpu=1
+            elif [ "$adapter" = "all" ]; then
+                echo "== adapter $which not available here (class '$class'), skipped"
+                adapter_report+=("$which : not available")
+            else
+                gpu_note="gpu part SKIPPED: no hardware adapter (adapter class '$class'); render tests never run on software locally"
+                echo "== $gpu_note"
+            fi
+            continue
+        fi
+        workers="${GPU_PROCESSES:-}"
+        if [ -z "$workers" ]; then
+            workers=6
+        fi
         lock="${PHPOLYGON_GPU_LOCK:-}"
         if [ -n "$lock" ]; then
             while ! ( set -o noclobber; echo "$$" > "$lock" ) 2>/dev/null; do
@@ -76,14 +104,20 @@ if [ "${NO_GPU:-0}" != "1" ]; then
                 sleep 15
             done
         fi
-        echo "== gpu run ($gpu_processes processes, group gpu without timing)"
-        php -d memory_limit=-1 vendor/bin/paratest --processes="$gpu_processes" --passthru-php="-d memory_limit=-1" \
+        began=$SECONDS
+        echo "== gpu run on $which ($workers processes, group gpu without timing)"
+        php -d memory_limit=-1 vendor/bin/paratest --processes="$workers" --passthru-php="-d memory_limit=-1" \
             --no-progress --group gpu --exclude-group timing "${exclude_args[@]}" "${filter_args[@]}"
-        gpu=$?
+        exit_code=$?
         if [ -n "$lock" ]; then
             rm -f "$lock"
         fi
-    fi
+        if [ "$exit_code" -ne 0 ]; then gpu=1; fi
+        adapter_report+=("$which : exit $exit_code, $((SECONDS - began)) s")
+    done
+    for line in "${adapter_report[@]}"; do
+        echo "== gpu report: $line"
+    done
 fi
 
 echo "== serial run (group timing)"
