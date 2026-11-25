@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace PHPolygon\Tests\Runtime;
 
+use PHPolygon\Tests\GpuPolicy;
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\Attributes\Group;
 use PHPUnit\Framework\Attributes\RequiresPhpExtension;
@@ -137,6 +138,9 @@ final class OffscreenWindowTest extends TestCase
     public function testTheSoftwareAdapterStaysAvailable(): void
     {
         $this->requireD3d12();
+        if (!GpuPolicy::softwareAllowed()) {
+            $this->markTestSkipped('asserts the software adapter, which is only used in CI (PHPOLYGON_TEST_SOFTWARE=1 allows it locally)');
+        }
 
         $window = new VioMainWindow(64, 64, 'test', backend: 'd3d12', offscreen: true, offscreenHardware: false);
         $window->initialize(new Input());

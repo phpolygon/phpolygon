@@ -4351,22 +4351,42 @@ than pixel-comparing (no GPU in CI). Update snapshots with
 
 ### Running the tests
 
-`scripts/test.ps1` (Windows) / `scripts/test.sh` (POSIX) run the whole suite in two parts and
-return one exit code: first everything except the groups `gpu` and `timing` in parallel with
-ParaTest (default 6 processes), then those two groups serially with PHPUnit.
+`scripts/test.ps1` (Windows; run it with `pwsh -ExecutionPolicy Bypass -File` where scripts are
+restricted) / `scripts/test.sh` (POSIX) run the whole suite in three parts and return one exit code:
+1. everything except the groups `gpu` and `timing` in parallel with ParaTest (`-Processes`, default 6),
+2. the `gpu` group (without `timing`) in parallel on the hardware GPU (`-GpuProcesses`, default 6), the
+   GPU lock `D:\PhpstormProjects\.gpu.lock` (`PHPOLYGON_GPU_LOCK`) taken once around the whole part,
+3. the `timing` group alone in one PHPUnit process.
 
 ```
 scripts/test.ps1                              # full run
-scripts/test.ps1 -Processes 4 -Filter Geometry
-scripts/test.ps1 -NoGpu                       # without the serial gpu group
-PROCESSES=4 FILTER=Geometry scripts/test.sh   # POSIX
+scripts/test.ps1 -GpuProcesses 2 -Filter Geometry
+scripts/test.ps1 -NoGpu                       # without the gpu part
+scripts/test.ps1 -RequireGpu                  # fail instead of skipping when there is no hardware adapter
+PROCESSES=4 GPU_PROCESSES=2 FILTER=Geometry scripts/test.sh   # POSIX
 ```
 
-- `#[Group('gpu')]` – every test class that opens a vio context or a window (one GPU: serial; the
-  D3D12 exact-hash tests stay as they are). New render tests get the group, plain `vendor/bin/phpunit`
-  still runs everything.
+- **Render tests never run on a software adapter locally** (WARP, 'Microsoft Basic Render Driver',
+  llvmpipe). `tests/bootstrap.php` sets `VIO_D3D_HEADLESS_HARDWARE=1` (every headless D3D context, also the
+  ones tests open with `vio_create()` themselves, stays off WARP); `VioTestContext::create()` skips when it
+  nevertheless got a software context; the scripts probe the adapter first and skip the gpu part with a
+  message (`-RequireGpu` / `REQUIRE_GPU=1`: fail). With `CI` / `GITHUB_ACTIONS` set the software adapter is used
+  as before (`-SoftwareGpu` is only honoured there). `PHPOLYGON_TEST_SOFTWARE=1` lifts the rule for a
+  deliberate local run. `PHPOLYGON_TEST_VIO_ADAPTER=Intel` picks another hardware adapter for the tests that
+  go through `VioTestContext`.
+- **References per adapter class.** The GPU tests hold no reference images: they assert measured numbers
+  (columns, jump counts, brightness) with margins, and these hold on the RTX 2080 and on the CI software
+  adapter alike. A number that differs by adapter goes into a table keyed by `GpuPolicy::adapterClass()`
+  (`software`, `hardware-nvidia`, `hardware-amd`, `hardware-intel`, `hardware-apple`, `hardware-other`) and is
+  read with `GpuPolicy::reference($table)` (`default` entry as fallback; no entry = no reference: skip or mark
+  incomplete, never create one blindly). Tests that assert software-adapter behaviour
+  (`VioNativeUpscalerTest` WARP note, `VioRendererUpscalerFallbackTest`,
+  `OffscreenWindowTest::testTheSoftwareAdapterStaysAvailable`) skip locally and run in CI.
+- `#[Group('gpu')]` – every test class that opens a vio context or a window. Each ParaTest worker opens its
+  own headless contexts. New render tests get the group; plain `vendor/bin/phpunit` still runs everything.
 - `#[Group('timing')]` – tests with wall-clock limits or child-process liveness; they fail under full
-  CPU load (16 processes broke them). Tag a new test of that kind the same way.
+  CPU load (16 processes broke them). A class in both groups runs in the serial part. Tag a new test of that
+  kind the same way.
 - `native-gpu` and `font-vrt` keep their meaning (pixel baselines of the target GPU, FreeType snapshots).
 - Parallel safety: no fixed file, port or temp path shared between tests (use `sys_get_temp_dir()` plus a
   random suffix, as `LogTest` does) and no helper class that lives in another test's file (autoload it

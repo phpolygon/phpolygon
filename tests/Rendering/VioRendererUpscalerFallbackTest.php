@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace PHPolygon\Tests\Rendering;
 
+use PHPolygon\Tests\GpuPolicy;
 use PHPUnit\Framework\Attributes\Group;
 use PHPUnit\Framework\Attributes\RequiresPhpExtension;
 use PHPUnit\Framework\TestCase;
@@ -36,6 +37,9 @@ final class VioRendererUpscalerFallbackTest extends TestCase
     {
         $ctx = $this->context();
         try {
+            if (GpuPolicy::classOf($ctx) !== 'software') {
+                $this->markTestSkipped('asserts the software adapter (no native upscaler), which is only used in CI (PHPOLYGON_TEST_SOFTWARE=1 allows it locally)');
+            }
             $temporal = defined('VIO_FEATURE_RENDER_TARGET_DEPTH_SAMPLE')
                 && vio_supports_feature($ctx, (int) constant('VIO_FEATURE_RENDER_TARGET_DEPTH_SAMPLE'))
                 && defined('VIO_FEATURE_MRT') && vio_supports_feature($ctx, VIO_FEATURE_MRT);
