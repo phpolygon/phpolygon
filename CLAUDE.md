@@ -2080,6 +2080,19 @@ upper half `b >= bands / 2`) with smooth gradient normals: `point`, `normal`, `p
 `PrismClip` hole out of the upper half only. `DiscMesh::generate(cx, cz, radius, segments, top,
 bottom, hole)` is a thick regular disc with an optional prism hole (first vertex towards -Z).
 The frame direction is normalised on construction.
+`CircularHole(centreU, centreV, radius, sides = 24, axis = 'y')` is the round counterpart of `PrismClip`
+(regular n-gon; `axis` 'y' = a vertical hole with centre (x, z), 'x' = centre (y, z), 'z' = centre (x, y);
+corner k at angle 2 pi k / sides from the first in-plane axis towards the second): `outside(poly)` → convex
+wedge pieces (piece k = beyond side k inside the wedge between the rays through its two corners, so
+neighbours share a whole ray and the rim has no T-junction; a polygon that does not reach the circle
+comes back whole), `contains(x, z)`, `reaches(poly)`, `cutMesh(MeshData)` (untouched triangles are copied,
+cut ones become flat pieces with the triangles' mean vertex normal) and `addWall(acc, y0, y1)` (the
+rim wall facing the axis, to keep a cut plate closed).
+`RectCut::pieces([u0, u1, v0, v1], $holes, $minSize = 1e-3)` is "rectangle minus holes" for wall boxes
+around doors and windows: a pure function returning non-overlapping `[u0, u1, v0, v1]` rectangles sorted
+by u then v that cover exactly the rectangle minus the union of the holes (holes may overlap each other
+or stick out; slabs with identical cover are merged, pieces thinner than `$minSize` dropped). Property
+tests: area conservation, no overlap, holes uncovered. `RectCut::area($rects)` sums rectangles.
 **Ground-following surfaces — `ConformingSurfaceSet` / `ConformingRegionMesh`.** Paths,
 plazas, yards, borders and inlays that lie ON a terrain (no floating slab, no slab edge seen
 from the side, no gap at joints). `RegionShape` gives outlines as signed distance fields
@@ -2194,6 +2207,66 @@ accuracy. Cost, measured on a 1400 x 1400 m grid with one hole and two zones: ce
 5–9 s (noisy host) and ~0.4 GB peak; cell 11 m = 33k triangles in ~0.2 s. Bake it and cache with
 `MeshSetCache`. Not covered: radial grids, concave holes (use several convex ones). A
 `HeightmapCollider3D` cannot represent a hole – ground with a shaft needs a mesh collider.
+*Flat blocks (opt-in).* `HeightfieldGround::build(..., $snap, $flatBlock = 0, $flatTolerance = 1e-6)`: with
+`$flatBlock = B >= 2`, a square block of B x B cells (on absolute lattice multiples of B, so tiles agree)
+whose corners all lie on one plane (within `$flatTolerance` m), have ground, share one zone and sit a cell
+clear of every hole becomes ONE polygon fanned from its centre – 4 B triangles instead of 2 B^2 – with
+EVERY lattice corner of its border kept as a vertex (collinear points included), so borders stay
+watertight against blocks and single cells alike; interior corners are dropped (the surface inside
+deviates from the grid by at most the tolerance, not at all for an exactly flat block). Tested: same open
+edges as the cell-by-cell build, no edge in more than two triangles, shared tile borders carry the same
+vertices. Measured 2026-11-25 on one 1.4 km field of a consuming game (2 m cell, grass/sand zones, 466 178
+triangles): B = 8 (16 m) -25.3 %, B = 16 (32 m) -25.1 %, B = 16 with 2 cm tolerance -29.2 %; build time
+unchanged (about 3.7 s, one run per variant). `contentKey()` takes the two options (only when used). *Best-fit diagonals (opt-in).*
+`HeightfieldGrid::sample(..., $height, $bestFitDiagonal = true)` evaluates the function once more at every
+cell centre (one halo ring of cells included) and keeps, per cell, the diagonal whose centre height (mean of
+its two end corners) is closer to it – a crease along a diagonal is followed by the edge instead of cut
+across (a kerb wave where a conforming path surface of finer cells meets a coarse crease). Stored in the
+grid (`$diagonals`, one byte per cell, in the content hash), asked through `risingAt(i, j)`; the mesh,
+`heightAt()`, `groundHeightAt()`, `triangleHasGround()` and `HeightfieldZones::closure($cell, $names,
+$grid)` all follow it, tiles sampling the same function pick alike on shared borders. Ties and cells
+without ground keep the chessboard. Tested: never worse than the chessboard at any cell centre. Stored corners alone cannot say which diagonal
+fits the real surface (a symmetric crease ties on the four corners): derive the bytes once from the real
+function with `HeightfieldGrid::bestFitDiagonals(minX, minZ, maxX, maxZ, cell, $height)` (one byte per cell,
+row-major), keep them beside the corners (`LatticeCodec::packBytes`) and pass them as the last argument of
+`fromCorners(...)`. `fromCorners` is for ONE grid: two tiles cut from a stored lattice with it fill their halo
+corners from different neighbours and shade a shared border differently – for tiles call `sample()` with a
+function that looks into the whole lattice.
+*Masked ground (coasts, voids).* The height function given to `HeightfieldGrid::sample()` may return `null`
+for a corner without ground: the grid then carries `$ground` (one byte per height, `isMasked()`,
+`hasGround(i, j)`), and **a triangle exists only if all three corners have ground**
+(`triangleHasGround(i, j, which)`; `HeightfieldGround` leaves the others out, hole cutting works as before).
+A groundless corner stores a FILL height (mean of the nearest ground corners, ring by ring up to
+`FILL_RINGS = 4`, corners beyond the halo asked from the function so tiles fill a shared border alike; 0 when
+none), so normals along the edge of the ground follow the land and not a made-up cliff. `fromCorners(i0, j0,
+nx, nz, cell, list<?float>)` builds a grid from stored corners. `groundHeightAt(x, z, $holes = [])` is the
+point query on exactly the meshed triangles (`?float`: null outside, over a void triangle or strictly inside
+a hole; a point on a cell edge counts for both sides, highest wins); `triangleCorners(i, j, which)` /
+`triangleAt(i, j, x, z)` expose the chessboard triangulation. A grid without nulls has no mask and hashes and
+meshes as before (`heightAt()` stays the clamped total function). `HeightfieldZones(i0, j0, width, height,
+bytes)` holds one zone number per corner (0 = void): `triangleZone(ia, ja, which)` = void if a corner is
+void, the zone if the three agree, else the most frequent zone in the 6 x 6 corner window round the cell
+(ties to the lower number) – a straight border stays straight, a plain 3-corner majority saws it into
+teeth; `closure($cell, [1 => 'grass', 2 => 'sand'])` is the `$zone` function for `build()`. `LatticeCodec`
+stores such lattices as text: `packHeights(list<?float>, width, offset, scale = 10000)` (uint16 per corner,
+0.1 mm, 0xFFFF = void, row delta to the previous ground corner, zlib, base64), `unpackHeights`,
+`unpackQuantised` + `quantisedAt` (2 bytes per corner, no PHP array), `packBytes` / `unpackBytes` (zone bytes).
+
+**Design note (not built): stair and ramp collider primitive.** A consuming game builds straight, L, U
+and spiral stairs as one `BoxCollider3D` per tread plus one invisible sloped walk collider per flight, so
+that the character glides while every single rise stays under `stepHeight`. A generic primitive would
+cover this without a box per tread: `StairCollider3D` / `RampCollider3D` components (data only: `kind`
+straight | spiral, `width`, `rise`, `going`, `risers`, spiral: `innerRadius`, `outerRadius`, `turn` in
+radians, `clockwise`; ramp: `length`, `width`, `height`) that the physics step answers as ONE support
+surface: the ground query for a capsule returns the height of the surface under the capsule centre
+(piecewise linear along the walk line, `heightAt(u, w)` in the primitive's frame, null outside it), the
+controller treats it like a slope up to a configured maximum angle (no step-up probing, no `StepAssist`
+body test per tread), and the sides and the underside stay solid through the usual box colliders of the
+walls. Open points before building: a spiral's support height depends on the angle, so the broadphase
+needs the primitive's AABB plus an exact per-point query (the same interface `HeightmapCollider3D`
+already has); a head-clearance check (`minHeadroom`) belongs to the planner in the game, not the
+engine; the landing between flights stays a plain box. Not implemented; decide together with the
+`CharacterController3D` ground-query refactor.
 
 **Disk cache for procedural meshes — `Geometry\MeshSetCache`.** `remember($name, $key, fn () => $set->build())`
 returns `array<int|string, MeshData>` from `<dir>/<name>.<hash>.meshset` when the caller's content key
