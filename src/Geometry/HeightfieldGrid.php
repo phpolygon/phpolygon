@@ -20,11 +20,28 @@ namespace PHPolygon\Geometry;
  *
  * Between corners the surface is two planar triangles per cell, the diagonal alternating like a
  * chessboard (no direction is preferred); {@see heightAt()} answers on exactly that surface.
+ *
+ * MASK. A grid may say that some corners have no ground (a coast, a void): `$ground` holds one byte per
+ * corner (1 = ground, 0 = none; null = ground everywhere). A triangle exists only if all three of its
+ * corners have ground ({@see triangleHasGround()}), so no triangle puts ground on a lattice point that
+ * has none. The stored height of a groundless corner is a FILL (the mean of the nearest ground corners,
+ * see {@see sample()}), so normals along the edge of the ground come from the slope of the land and not
+ * from a made-up cliff; {@see groundHeightAt()} answers null where the surface has no triangle. A grid
+ * without a mask behaves exactly as it always did.
  */
 final class HeightfieldGrid
 {
     /** Bump when the sampling or the layout of the data changes. */
     public const int FORMAT = 1;
+
+    /** Rings of corners searched for the fill height of a groundless corner. */
+    public const int FILL_RINGS = 4;
+
+    /** Reach (m) around a query point inside which neighbouring cells are tested too (a point on an edge belongs to both sides). */
+    private const float EDGE_PAD = 1.0e-4;
+
+    /** Barycentric tolerance of {@see groundHeightAt()}. */
+    private const float BARY_TOLERANCE = 1.0e-6;
 
     /**
      * @param int $i0 lattice index of the first corner column (corner x = $i0 * $cell)
@@ -32,6 +49,7 @@ final class HeightfieldGrid
      * @param int $nx cells along X (corners: $nx + 1, plus the halo)
      * @param int $nz cells along Z
      * @param list<float> $heights (nx + 3) * (nz + 3) heights, row-major, starting one corner before ($i0, $j0)
+     * @param string|null $ground one byte per height, same layout: "\x01" ground, "\x00" none; null = ground everywhere
      */
     public function __construct(
         public readonly int $i0,
@@ -40,6 +58,7 @@ final class HeightfieldGrid
         public readonly int $nz,
         public readonly float $cell,
         public readonly array $heights,
+        public readonly ?string $ground = null,
     ) {
         if ($cell <= 0.0 || $nx < 1 || $nz < 1) {
             throw new \InvalidArgumentException('HeightfieldGrid: needs cell > 0 and at least one cell');
@@ -47,14 +66,20 @@ final class HeightfieldGrid
         if (count($heights) !== ($nx + 3) * ($nz + 3)) {
             throw new \InvalidArgumentException('HeightfieldGrid: expected ' . (($nx + 3) * ($nz + 3)) . ' heights, got ' . count($heights));
         }
+        if ($ground !== null && strlen($ground) !== count($heights)) {
+            throw new \InvalidArgumentException('HeightfieldGrid: the ground mask needs one byte per height');
+        }
     }
 
     /**
      * Sample $height over the bounds, grown to whole cells (the origin snaps to a multiple of $cell,
      * the same rule as {@see ConformingRegionMesh::covering()}). Calls $height once per corner,
-     * halo included, in a fixed order.
+     * halo included, in a fixed order. The function may return null for a corner without ground: the grid
+     * then carries a mask, and the corner's stored height is the mean of the nearest ground corners (ring by
+     * ring, up to {@see FILL_RINGS}; corners beyond the grid's halo are asked from `$height` too, so two tiles
+     * fill a shared border alike), 0 when there is none.
      *
-     * @param callable(float, float): float $height
+     * @param callable(float, float): (float|null) $height
      */
     public static function sample(float $minX, float $minZ, float $maxX, float $maxZ, float $cell, callable $height): self
     {
@@ -66,14 +91,106 @@ final class HeightfieldGrid
         $nx = max(1, (int) ceil($maxX / $cell - 1e-9) - $i0);
         $nz = max(1, (int) ceil($maxZ / $cell - 1e-9) - $j0);
         $heights = [];
+        $void = [];
+        $width = $nx + 3;
+        $k = 0;
         for ($j = $j0 - 1; $j <= $j0 + $nz + 1; $j++) {
             $z = $j * $cell;
             for ($i = $i0 - 1; $i <= $i0 + $nx + 1; $i++) {
-                $heights[] = (float) $height($i * $cell, $z);
+                $h = $height($i * $cell, $z);
+                if ($h === null) {
+                    $void[$k] = true;
+                    $heights[] = 0.0;
+                } else {
+                    $heights[] = (float) $h;
+                }
+                $k++;
+            }
+        }
+        if ($void === []) {
+            return new self($i0, $j0, $nx, $nz, $cell, $heights);
+        }
+
+        // Raw ground height of any corner, inside the array or (cached) from the function.
+        $outside = [];
+        $raw = static function (int $i, int $j) use ($i0, $j0, $nz, $width, &$heights, &$void, &$outside, $height, $cell): ?float {
+            $ci = $i - $i0 + 1;
+            $cj = $j - $j0 + 1;
+            if ($ci >= 0 && $cj >= 0 && $ci < $width && $cj < $nz + 3) {
+                $idx = $cj * $width + $ci;
+
+                return isset($void[$idx]) ? null : $heights[$idx];
+            }
+            $key = $j . ':' . $i;
+            if (!array_key_exists($key, $outside)) {
+                $v = $height($i * $cell, $j * $cell);
+                $outside[$key] = $v === null ? null : (float) $v;
+            }
+
+            return $outside[$key];
+        };
+        $filled = $heights;
+        $mask = str_repeat("\x01", count($heights));
+        foreach (array_keys($void) as $idx) {
+            $mask[$idx] = "\x00";
+            $i = $i0 - 1 + $idx % $width;
+            $j = $j0 - 1 + intdiv($idx, $width);
+            $filled[$idx] = 0.0;
+            for ($r = 1; $r <= self::FILL_RINGS; $r++) {
+                $sum = 0.0;
+                $n = 0;
+                for ($dj = -$r; $dj <= $r; $dj++) {
+                    for ($di = -$r; $di <= $r; $di++) {
+                        if (max(abs($di), abs($dj)) !== $r) {
+                            continue;
+                        }
+                        $q = $raw($i + $di, $j + $dj);
+                        if ($q !== null) {
+                            $sum += $q;
+                            $n++;
+                        }
+                    }
+                }
+                if ($n > 0) {
+                    $filled[$idx] = $sum / $n;
+                    break;
+                }
             }
         }
 
-        return new self($i0, $j0, $nx, $nz, $cell, $heights);
+        return new self($i0, $j0, $nx, $nz, $cell, array_values($filled), $mask);
+    }
+
+    /**
+     * A grid from the corners of the grid itself (no halo given): `$corners` is (nx + 1) * (nz + 1) heights,
+     * row-major from ($i0, $j0), null = no ground. The halo is made like {@see sample()} makes it, from the
+     * corners inside the array only (so a tile cut from stored data fills its border from what it holds).
+     *
+     * @param list<float|null> $corners
+     */
+    public static function fromCorners(int $i0, int $j0, int $nx, int $nz, float $cell, array $corners): self
+    {
+        $w = $nx + 1;
+        if (count($corners) !== $w * ($nz + 1)) {
+            throw new \InvalidArgumentException('HeightfieldGrid::fromCorners: expected ' . ($w * ($nz + 1)) . ' corners, got ' . count($corners));
+        }
+
+        return self::sample(
+            $i0 * $cell,
+            $j0 * $cell,
+            ($i0 + $nx) * $cell,
+            ($j0 + $nz) * $cell,
+            $cell,
+            static function (float $x, float $z) use ($corners, $i0, $j0, $nx, $nz, $w, $cell): ?float {
+                $i = (int) round($x / $cell) - $i0;
+                $j = (int) round($z / $cell) - $j0;
+                if ($i < 0 || $j < 0 || $i > $nx || $j > $nz) {
+                    return null;
+                }
+
+                return $corners[$j * $w + $i];
+            },
+        );
     }
 
     /** World X of the first / last corner column. */
@@ -97,10 +214,39 @@ final class HeightfieldGrid
         return ($this->j0 + $this->nz) * $this->cell;
     }
 
-    /** Height of the lattice corner (absolute indices; one corner of halo around the grid is valid). */
+    /** Height of the lattice corner (absolute indices; one corner of halo around the grid is valid). A groundless corner gives its fill. */
     public function cornerHeight(int $i, int $j): float
     {
         return $this->heights[($j - $this->j0 + 1) * ($this->nx + 3) + ($i - $this->i0 + 1)];
+    }
+
+    /** Whether the grid carries a ground mask. */
+    public function isMasked(): bool
+    {
+        return $this->ground !== null;
+    }
+
+    /** Whether corner (i, j) has ground (always true on a grid without a mask). */
+    public function hasGround(int $i, int $j): bool
+    {
+        return $this->ground === null || $this->ground[($j - $this->j0 + 1) * ($this->nx + 3) + ($i - $this->i0 + 1)] === "\x01";
+    }
+
+    /**
+     * Whether triangle `$which` (0 or 1) of cell (i, j) exists: all three corners have ground.
+     */
+    public function triangleHasGround(int $i, int $j, int $which): bool
+    {
+        if ($this->ground === null) {
+            return true;
+        }
+        foreach (self::triangleCorners($i, $j, $which) as [$ci, $cj]) {
+            if (!$this->hasGround($ci, $cj)) {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     /**
@@ -113,9 +259,41 @@ final class HeightfieldGrid
     }
 
     /**
+     * The three corners of triangle `$which` (0 or 1) of cell (i, j) as `[[i, j], ...]`, counter-clockwise
+     * seen from above: the triangles of {@see HeightfieldGround}, in the same order.
+     *
+     * @return list<array{0: int, 1: int}>
+     */
+    public static function triangleCorners(int $i, int $j, int $which): array
+    {
+        $p00 = [$i, $j];
+        $p10 = [$i + 1, $j];
+        $p11 = [$i + 1, $j + 1];
+        $p01 = [$i, $j + 1];
+        if (self::diagonalRising($i, $j)) {
+            return $which === 0 ? [$p00, $p01, $p11] : [$p00, $p11, $p10];
+        }
+
+        return $which === 0 ? [$p00, $p01, $p10] : [$p10, $p01, $p11];
+    }
+
+    /** Which triangle (0 or 1) of cell (i, j) the point (x, z) lies in (on the diagonal: the first). */
+    public function triangleAt(int $i, int $j, float $x, float $z): int
+    {
+        $u = $x / $this->cell - $i;
+        $v = $z / $this->cell - $j;
+        if (self::diagonalRising($i, $j)) {
+            return $v >= $u ? 0 : 1;
+        }
+
+        return $u + $v <= 1.0 ? 0 : 1;
+    }
+
+    /**
      * Height of the triangulated surface at (x, z); clamped to the grid bounds. The mesh from
      * {@see HeightfieldGround::build()} lies on exactly this surface (a hole removes area, it moves
-     * nothing).
+     * nothing). On a masked grid this is the surface through the FILL heights too; ask
+     * {@see groundHeightAt()} where ground may be missing.
      */
     public function heightAt(float $x, float $z): float
     {
@@ -141,8 +319,63 @@ final class HeightfieldGrid
     }
 
     /**
+     * Height of the ground at (x, z), null where the mesh has none: outside the grid, in a triangle with a
+     * groundless corner, or (with `$holes`) strictly inside a hole (a point on the outline still has ground).
+     * A point within a hair of a cell edge counts for the triangles on both sides, the highest hit wins, so a
+     * query on a shared edge does not fall through.
+     *
+     * @param list<HeightfieldHole> $holes
+     */
+    public function groundHeightAt(float $x, float $z, array $holes = []): ?float
+    {
+        foreach ($holes as $hole) {
+            if ($hole->signedDistance($x, $z) < 0.0) {
+                return null;
+            }
+        }
+        $c = $this->cell;
+        $ia0 = max($this->i0, (int) floor(($x - self::EDGE_PAD) / $c));
+        $ia1 = min($this->i0 + $this->nx - 1, (int) floor(($x + self::EDGE_PAD) / $c));
+        $ja0 = max($this->j0, (int) floor(($z - self::EDGE_PAD) / $c));
+        $ja1 = min($this->j0 + $this->nz - 1, (int) floor(($z + self::EDGE_PAD) / $c));
+        $best = null;
+        for ($ja = $ja0; $ja <= $ja1; $ja++) {
+            for ($ia = $ia0; $ia <= $ia1; $ia++) {
+                for ($which = 0; $which < 2; $which++) {
+                    if (!$this->triangleHasGround($ia, $ja, $which)) {
+                        continue;
+                    }
+                    [$a, $b, $d] = self::triangleCorners($ia, $ja, $which);
+                    $ax = $a[0] * $c;
+                    $az = $a[1] * $c;
+                    $bx = $b[0] * $c;
+                    $bz = $b[1] * $c;
+                    $dx = $d[0] * $c;
+                    $dz = $d[1] * $c;
+                    $den = ($bz - $dz) * ($ax - $dx) + ($dx - $bx) * ($az - $dz);
+                    if (abs($den) < 1e-12) {
+                        continue;
+                    }
+                    $w1 = (($bz - $dz) * ($x - $dx) + ($dx - $bx) * ($z - $dz)) / $den;
+                    $w2 = (($dz - $az) * ($x - $dx) + ($ax - $dx) * ($z - $dz)) / $den;
+                    $w3 = 1.0 - $w1 - $w2;
+                    if ($w1 < -self::BARY_TOLERANCE || $w2 < -self::BARY_TOLERANCE || $w3 < -self::BARY_TOLERANCE) {
+                        continue;
+                    }
+                    $y = $w1 * $this->cornerHeight($a[0], $a[1]) + $w2 * $this->cornerHeight($b[0], $b[1]) + $w3 * $this->cornerHeight($d[0], $d[1]);
+                    if ($best === null || $y > $best) {
+                        $best = $y;
+                    }
+                }
+            }
+        }
+
+        return $best;
+    }
+
+    /**
      * Content hash of the lattice (xxh128 hex): format, origin, size, cell and every height as a
-     * little-endian double. Equal heights give the same hash on every platform.
+     * little-endian double, plus the ground mask when there is one (a grid without a mask hashes as before).
      */
     public function contentHash(): string
     {
@@ -150,6 +383,10 @@ final class HeightfieldGrid
         hash_update($h, pack('VqqVVe', self::FORMAT, $this->i0, $this->j0, $this->nx, $this->nz, $this->cell));
         for ($i = 0, $n = count($this->heights); $i < $n; $i += 4096) {
             hash_update($h, pack('e*', ...array_slice($this->heights, $i, 4096)));
+        }
+        if ($this->ground !== null) {
+            hash_update($h, 'ground');
+            hash_update($h, $this->ground);
         }
 
         return hash_final($h);

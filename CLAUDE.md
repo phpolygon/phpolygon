@@ -2206,6 +2206,25 @@ accuracy. Cost, measured on a 1400 x 1400 m grid with one hole and two zones: ce
 5–9 s (noisy host) and ~0.4 GB peak; cell 11 m = 33k triangles in ~0.2 s. Bake it and cache with
 `MeshSetCache`. Not covered: radial grids, concave holes (use several convex ones). A
 `HeightmapCollider3D` cannot represent a hole – ground with a shaft needs a mesh collider.
+*Masked ground (coasts, voids).* The height function given to `HeightfieldGrid::sample()` may return `null`
+for a corner without ground: the grid then carries `$ground` (one byte per height, `isMasked()`,
+`hasGround(i, j)`), and **a triangle exists only if all three corners have ground**
+(`triangleHasGround(i, j, which)`; `HeightfieldGround` leaves the others out, hole cutting works as before).
+A groundless corner stores a FILL height (mean of the nearest ground corners, ring by ring up to
+`FILL_RINGS = 4`, corners beyond the halo asked from the function so tiles fill a shared border alike; 0 when
+none), so normals along the edge of the ground follow the land and not a made-up cliff. `fromCorners(i0, j0,
+nx, nz, cell, list<?float>)` builds a grid from stored corners. `groundHeightAt(x, z, $holes = [])` is the
+point query on exactly the meshed triangles (`?float`: null outside, over a void triangle or strictly inside
+a hole; a point on a cell edge counts for both sides, highest wins); `triangleCorners(i, j, which)` /
+`triangleAt(i, j, x, z)` expose the chessboard triangulation. A grid without nulls has no mask and hashes and
+meshes as before (`heightAt()` stays the clamped total function). `HeightfieldZones(i0, j0, width, height,
+bytes)` holds one zone number per corner (0 = void): `triangleZone(ia, ja, which)` = void if a corner is
+void, the zone if the three agree, else the most frequent zone in the 6 x 6 corner window round the cell
+(ties to the lower number) – a straight border stays straight, a plain 3-corner majority saws it into
+teeth; `closure($cell, [1 => 'grass', 2 => 'sand'])` is the `$zone` function for `build()`. `LatticeCodec`
+stores such lattices as text: `packHeights(list<?float>, width, offset, scale = 10000)` (uint16 per corner,
+0.1 mm, 0xFFFF = void, row delta to the previous ground corner, zlib, base64), `unpackHeights`,
+`unpackQuantised` + `quantisedAt` (2 bytes per corner, no PHP array), `packBytes` / `unpackBytes` (zone bytes).
 
 **Disk cache for procedural meshes — `Geometry\MeshSetCache`.** `remember($name, $key, fn () => $set->build())`
 returns `array<int|string, MeshData>` from `<dir>/<name>.<hash>.meshset` when the caller's content key

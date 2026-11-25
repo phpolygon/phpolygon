@@ -220,9 +220,10 @@ final class HeightfieldGround
     }
 
     /**
-     * The two triangles of a cell, counter-clockwise seen from above; points are [x, z, height].
+     * The two triangles of a cell, counter-clockwise seen from above; points are [x, z, height]. On a masked
+     * grid the triangles with a groundless corner are left out.
      *
-     * @return array{0: list<array{0: float, 1: float, 2: float}>, 1: list<array{0: float, 1: float, 2: float}>}
+     * @return list<list<array{0: float, 1: float, 2: float}>>
      */
     private function cellTriangles(int $ia, int $ja): array
     {
@@ -235,9 +236,20 @@ final class HeightfieldGround
         $p11 = [$xb, $zb, $this->grid->cornerHeight($ia + 1, $ja + 1)];
         $p01 = [$xa, $zb, $this->grid->cornerHeight($ia, $ja + 1)];
 
-        return HeightfieldGrid::diagonalRising($ia, $ja)
+        $tris = HeightfieldGrid::diagonalRising($ia, $ja)
             ? [[$p00, $p01, $p11], [$p00, $p11, $p10]]
             : [[$p00, $p01, $p10], [$p10, $p01, $p11]];
+        if ($this->grid->isMasked()) {
+            // Void-corner rule: a triangle exists only if all three corners have ground.
+            foreach ([1, 0] as $which) {
+                if (!$this->grid->triangleHasGround($ia, $ja, $which)) {
+                    unset($tris[$which]);
+                }
+            }
+            $tris = array_values($tris);
+        }
+
+        return $tris;
     }
 
     /**
