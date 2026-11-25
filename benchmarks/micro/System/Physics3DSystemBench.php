@@ -16,10 +16,12 @@ use PHPolygon\Math\Vec3;
 use PHPolygon\System\Physics3DSystem;
 
 /**
- * Physics3DSystem collects every box and mesh collider each tick before it
- * resolves the characters. In a built world the colliders are static and the
- * characters few, so the steady-state cost is the collection pass - one world
- * matrix check per collider - plus the per-character query over all BVHs.
+ * Physics3DSystem keeps its box colliders in a persistent index (only changed
+ * colliders are re-read) and still collects the mesh colliders each tick. In a
+ * built world the colliders are static and the characters few, so the
+ * steady-state cost is one world matrix check per mesh collider plus the
+ * per-character query over their BVHs. The box-heavy case is
+ * benchmarks/physics-static-colliders.php.
  *
  * Run:
  *   vendor/bin/phpbench run benchmarks/micro/System/Physics3DSystemBench.php --report=aggregate

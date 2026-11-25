@@ -6,7 +6,7 @@ declare(strict_types=1);
  * Synthetic Physics3DSystem benchmark: a big static box world, one walking and one standing
  * character, and a stage-style flip of many colliders between trigger and solid.
  *
- *   php benchmarks/physics-static-colliders.php [--boxes=8500] [--meshes=0] [--flip=1500] [--ticks=300] [--seed=7]
+ *   php benchmarks/physics-static-colliders.php [--boxes=8500] [--meshes=0] [--flip=1500] [--ticks=300] [--seed=7] [--rotated=8]
  *
  * Prints, per phase, the mean physics.collect and physics.tick time per tick (PerfProfiler
  * sections, so the numbers are what a game's profile shows) and the worst single tick.
@@ -31,7 +31,7 @@ require __DIR__ . '/../vendor/autoload.php';
 putenv('PHPOLYGON_PROFILE=1');
 PerfProfiler::reset();
 
-$options = ['boxes' => 8500, 'meshes' => 0, 'flip' => 1500, 'ticks' => 300, 'seed' => 7];
+$options = ['boxes' => 8500, 'meshes' => 0, 'flip' => 1500, 'ticks' => 300, 'seed' => 7, 'rotated' => 8];
 foreach (array_slice($argv, 1) as $arg) {
     if (preg_match('/^--(\w+)=(\d+)$/', $arg, $m) === 1 && isset($options[$m[1]])) {
         $options[$m[1]] = (int) $m[2];
@@ -58,7 +58,7 @@ for ($i = 0; $i < $options['boxes']; $i++) {
     if (abs($position->z) < 3.0 && abs($position->x) < 60.0) {
         $position = new Vec3($position->x, $position->y, $position->z + 8.0);
     }
-    $rotation = mt_rand(0, 99) < 8
+    $rotation = mt_rand(0, 99) < $options['rotated']
         ? Quaternion::fromAxisAngle(new Vec3(0.0, 1.0, 0.0), mt_rand(5, 300) / 100.0)
         : Quaternion::identity();
     $entity = $world->createEntity();
@@ -121,7 +121,7 @@ $phase = static function (string $label, int $ticks, callable $before) use ($tic
     );
 };
 
-printf("boxes %d (+1 floor), meshes %d, flip set %d, php %s\n", $options['boxes'], $options['meshes'], count($flippable), PHP_VERSION);
+printf("boxes %d (+1 floor, %d%% turned), meshes %d, flip set %d, php %s\n", $options['boxes'], $options['rotated'], $options['meshes'], count($flippable), PHP_VERSION);
 
 // Cold first tick: every cache is built here.
 $phase('cold first tick', 1, static function (): void {});

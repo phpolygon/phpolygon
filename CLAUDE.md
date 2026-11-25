@@ -2010,6 +2010,44 @@ How `Physics3DSystem` moves a `CharacterController3D` (`Physics3DBoxCollisionTes
   crowd at rest costs one comparison each.
   A wrapper calling `update()` several times per frame is fine: every call sees its own part.
 
+### Box-collider index – what `Physics3DSystem` costs per tick
+
+`Physics3DSystem` no longer scans every `BoxCollider3D` each tick. `Physics\BoxColliderIndex`
+(`BoxColliderIndexTest`, bench `benchmarks/physics-static-colliders.php`) keeps the collision data of every
+box (aligned: AABB; turned: `OrientedBox`, plus the 12-triangle BVH for `Raycaster3D::segmentBlocked()`) and an
+XZ grid over it (cell 8 m, `BoxColliderIndex::CELL_SIZE`). Per tick `physics.collect` is `sync()`: drain
+the changes, nothing else. A character asks the index for the boxes near it (`boxesIn()` / `rotatedIn()`:
+footprint touching an XZ rectangle), and so does every `StepAssist` probe.
+
+- **What counts as a change:** an assignment of `Transform3D::$worldMatrix` (it has a set hook that marks the
+  entity in a sink, `Transform3D::watchWorldMatrix()`, bound by the index for collider entities only: the
+  matrix is the identity the old cache keyed on, and `Transform3DSystem`, doors, `StepAssist` and games all
+  write it by assignment, with or without a `Transform3DSystem`); attach/detach of a `BoxCollider3D` or a
+  `Transform3D` (through `World::observe()`, so destroy and `clear()` count); dormancy
+  (`World::dormancyVersion()`, bumped by `setEntityDormant()`): that rebuilds the index once, because it fires no
+  attach and a woken entity lands at the END of the pool.
+- **`isTrigger` is not a change.** Triggers stay in the index with their caches built; the flag is read per
+  candidate at query time. Flipping 1,500 colliders between trigger and solid costs nothing and needs no
+  prewarm in a game. The price: the caches (and BVHs of turned boxes) of triggers are built in the first
+  tick, not at the flip.
+- **Order is behaviour.** Resolution is sequential (each push moves the capsule for the next box), so queries
+  return candidates in pool order (attach order, a woken entity last). The AABB loop in `resolveCharacters()`
+  queries the area `radius + QUERY_REACH` (2 m) around the character and repeats the query from the new spot,
+  continuing after the box just handled, when a push carried it further than `QUERY_REACH` (a thick box is
+  pushed out of the whole way): the result is that of testing every box.
+- **Oversized boxes** (more than `MAX_CELLS` = 64 grid cells: a floor slab) are not put into the grid but
+  returned by every query.
+- **`new Physics3DSystem(broadphase: false)`** makes every character test every box, in the same order: the
+  behaviour before the index. For comparing results (the equivalence test runs random worlds both ways and
+  asserts identical positions, velocities, `isGrounded` and `groundEntityId`) and for ruling the grid out.
+- **Not covered:** `MeshCollider3D`s are still collected per tick (one matrix-identity check each), and
+  `Raycaster3D::segmentBlocked()` still walks the whole box pool per call (1.6 ms at 8,500 boxes, 2026-11-25).
+- **Measured** (2026-11-25, PHP 8.5.12 CLI, `benchmarks/physics-static-colliders.php`, 8,500 boxes, 8 % turned,
+  1 walking + 1 standing character, 3 runs each, no GPU): tick 7.6-8.6 ms -> 0.045 ms
+  (`physics.collect` 2.9-3.2 ms -> 0.001 ms, `physics.resolve` 4.4-5.1 ms -> 0.04 ms); one tick flipping
+  1,500 colliders to solid 46-60 ms -> 0.06-0.12 ms; first tick 150-270 ms -> 185-205 ms (it now also builds
+  the caches of the 1,500 triggers). With 40 % turned boxes the flip took 83-87 ms before and 0.06 ms after.
+
 ### Procedural geometry — code-driven worlds
 
 **PHPolygon does not use external 3D model files.** All geometry is generated
