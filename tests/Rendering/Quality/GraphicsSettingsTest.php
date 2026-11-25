@@ -125,6 +125,21 @@ final class GraphicsSettingsTest extends TestCase
         $this->assertSame($defaults->shadowQuality, $rebuilt->shadowQuality);
     }
 
+    public function testPointShadowLightsDefaultsToOneClampsAndRoundTrips(): void
+    {
+        $s = new GraphicsSettings();
+        $this->assertSame(1, $s->pointShadowLights);
+        $this->assertArrayNotHasKey('pointShadowLights', $s->toJson(), 'the default stays out of the file');
+
+        $many = $s->with(pointShadowLights: 5);
+        $this->assertSame(5, $many->pointShadowLights);
+        $this->assertSame(5, GraphicsSettings::fromJson($many->toJson())->pointShadowLights);
+        $this->assertSame(GraphicsSettings::POINT_SHADOW_LIGHTS_MAX, $s->with(pointShadowLights: 99)->pointShadowLights);
+        $this->assertSame(0, $s->with(pointShadowLights: -3)->pointShadowLights);
+        $this->assertSame(GraphicsSettings::POINT_SHADOW_LIGHTS_MAX, GraphicsSettings::fromJson(['pointShadowLights' => 40])->pointShadowLights);
+        $this->assertSame(1, GraphicsSettings::fromJson(['pointShadowLights' => 'many'])->pointShadowLights);
+    }
+
     public function testFromJsonHandlesEmptyArray(): void
     {
         $rebuilt = GraphicsSettings::fromJson([]);

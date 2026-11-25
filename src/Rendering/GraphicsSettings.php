@@ -198,7 +198,24 @@ final class GraphicsSettings
          * wins where its tier runs. Needs the G-buffer (builds it when nothing else does).
          */
         public readonly bool $bakedLight = false,
+        /**
+         * Point lights with a shadow (PointLight::$castsShadow) drawn per frame, 0..
+         * {@see self::POINT_SHADOW_LIGHTS_MAX}. 1 (the default) is the single depth cube
+         * with its own sampler; more render one cube per ranked light into a layered
+         * depth target, re-rendered only when the light or a caster in its sphere changed.
+         * 0 switches point shadows off. Without a layered depth target on the backend the
+         * renderer stays at one light.
+         */
+        public readonly int $pointShadowLights = 1,
     ) {
+    }
+
+    /** Shadowed point lights at most: six layers each in one 2D array target (64 layers). */
+    public const POINT_SHADOW_LIGHTS_MAX = 8;
+
+    private static function clampPointShadowLights(int $v): int
+    {
+        return max(0, min(self::POINT_SHADOW_LIGHTS_MAX, $v));
     }
 
     public function effectEnabled(string $name, bool $default = true): bool
@@ -265,6 +282,7 @@ final class GraphicsSettings
         ?bool $microShadows = null,
         ?bool $screenSpaceSss = null,
         ?bool $bakedLight = null,
+        ?int $pointShadowLights = null,
     ): self {
         $nextUpscaler = $upscaler ?? $this->upscaler;
         // Leaving a temporal upscaler re-clamps a sub-half render scale.
@@ -323,6 +341,7 @@ final class GraphicsSettings
             microShadows: $microShadows ?? $this->microShadows,
             screenSpaceSss: $screenSpaceSss ?? $this->screenSpaceSss,
             bakedLight: $bakedLight ?? $this->bakedLight,
+            pointShadowLights: $pointShadowLights !== null ? self::clampPointShadowLights($pointShadowLights) : $this->pointShadowLights,
         );
     }
 
@@ -390,6 +409,9 @@ final class GraphicsSettings
         if ($this->gpu !== '') {
             $json['gpu'] = $this->gpu;
         }
+        if ($this->pointShadowLights !== 1) {
+            $json['pointShadowLights'] = $this->pointShadowLights;
+        }
         return $json;
     }
 
@@ -452,6 +474,7 @@ final class GraphicsSettings
             microShadows: self::asBool($data['microShadows'] ?? null) ?? $defaults->microShadows,
             screenSpaceSss: self::asBool($data['screenSpaceSss'] ?? null) ?? $defaults->screenSpaceSss,
             bakedLight: self::asBool($data['bakedLight'] ?? null) ?? $defaults->bakedLight,
+            pointShadowLights: ($v = self::asInt($data['pointShadowLights'] ?? null)) !== null ? self::clampPointShadowLights($v) : $defaults->pointShadowLights,
         );
     }
 

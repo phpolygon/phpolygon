@@ -289,10 +289,22 @@ uniform int u_spot_shadow_index;
 // u_point_shadow_range = (near, far, 1 / face size). The light is found by its
 // position, in the eight uniforms and in the light grid alike.
 #ifdef PHPOLYGON_POINT_SHADOW
+#ifdef PHPOLYGON_POINT_SHADOW_ARRAY
+// Several shadowed point lights (GraphicsSettings::$pointShadowLights > 1): the cubes of all
+// of them are the layers of one depth 2D array, light k at layers 6k..6k+5 in the order
+// +X -X +Y -Y +Z -Z. One sampler either way, which is why the single cube below is the
+// program of the default. u_point_shadow_pos[k] = (light, far plane),
+// u_point_shadow_info[k] = (face size / layer size, 1 / face size, first layer, near plane).
+uniform sampler2DArray u_point_shadow_array;
+uniform int u_point_shadow_count;
+uniform vec4 u_point_shadow_pos[8];
+uniform vec4 u_point_shadow_info[8];
+#else
 uniform samplerCube u_point_shadow_map;
 uniform float u_point_shadow_on;
 uniform vec3 u_point_shadow_pos;
 uniform vec3 u_point_shadow_range;
+#endif
 #endif
 
 // Texture
@@ -669,6 +681,68 @@ float spotShadow(vec3 worldPos, vec3 N, vec3 L, float dist) {
 }
 
 #ifdef PHPOLYGON_POINT_SHADOW
+#ifdef PHPOLYGON_POINT_SHADOW_ARRAY
+// Face and 0..1 face coordinates of a direction (the cube-map convention: the face of the
+// major axis, s and t as the specification lists them, t running down the stored rows).
+vec3 pointCubeFaceUV(vec3 d) {
+    vec3 a = abs(d);
+    float face;
+    float ma;
+    vec2 sc;
+    if (a.x >= a.y && a.x >= a.z) {
+        face = d.x > 0.0 ? 0.0 : 1.0;
+        ma = a.x;
+        sc = vec2(d.x > 0.0 ? -d.z : d.z, -d.y);
+    } else if (a.y >= a.z) {
+        face = d.y > 0.0 ? 2.0 : 3.0;
+        ma = a.y;
+        sc = vec2(d.x, d.y > 0.0 ? d.z : -d.z);
+    } else {
+        face = d.z > 0.0 ? 4.0 : 5.0;
+        ma = a.z;
+        sc = vec2(d.z > 0.0 ? d.x : -d.x, -d.y);
+    }
+    return vec3(0.5 * (sc / max(ma, 1e-6) + 1.0), face);
+}
+
+float pointShadowSlot(int s, vec3 worldPos, vec3 N, vec3 L, float dist) {
+    vec4 posFar = u_point_shadow_pos[s];
+    vec4 info = u_point_shadow_info[s];
+    if (dist >= posFar.w) return 1.0;
+    float n = info.w;
+    float f = posFar.w;
+    float NdotL = max(dot(N, L), 0.0);
+    float texel = 2.0 * dist * info.y;
+    vec3 d = worldPos + N * (texel * 1.5 + 0.01) * (1.5 - NdotL) - posFar.xyz;
+    float za = max(max(abs(d.x), abs(d.y)), abs(d.z));
+    float ref = ((f + n) / (f - n) - 2.0 * f * n / ((f - n) * max(za, 1e-4))) * 0.5 + 0.5 - 0.0004;
+    vec3 ad = normalize(d);
+    vec3 t = normalize(cross(abs(ad.y) < 0.99 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0), ad));
+    vec3 b = cross(ad, t);
+    float a = 6.2831853 * fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))));
+    float ca = cos(a), sa = sin(a);
+    float acc = 0.0;
+    for (int i = 0; i < 6; i++) {
+        vec2 o = vec2(ca * SHADOW_DISC[i].x - sa * SHADOW_DISC[i].y, sa * SHADOW_DISC[i].x + ca * SHADOW_DISC[i].y) * texel * 1.5;
+        vec3 fuv = pointCubeFaceUV(d + t * o.x + b * o.y);
+        vec2 uv = clamp(fuv.xy, 0.0, 1.0) * info.x;
+        acc += textureLod(u_point_shadow_array, vec3(uv, info.z + fuv.z), 0.0).r >= ref ? 1.0 : 0.0;
+    }
+    return acc / 6.0;
+}
+
+// The point shadow for a light at lightPos: 1 unless it holds a cube this frame.
+float pointShadowFor(vec3 lightPos, vec3 worldPos, vec3 N, vec3 L, float dist) {
+    int slot = -1;
+    for (int i = 0; i < 8; i++) {
+        if (i >= u_point_shadow_count) break;
+        vec3 dp = lightPos - u_point_shadow_pos[i].xyz;
+        if (slot < 0 && dot(dp, dp) < 1e-4) slot = i;
+    }
+    if (slot < 0) return 1.0;
+    return pointShadowSlot(slot, worldPos, N, L, dist);
+}
+#else
 // The depth a face of the point cube stored for a direction d from the light: the
 // face's perspective depth of the major axis, mapped to 0..1 like the cascades.
 float pointCubeDepth(vec3 d) {
@@ -703,6 +777,7 @@ float pointShadowFor(vec3 lightPos, vec3 worldPos, vec3 N, vec3 L, float dist) {
     if (u_point_shadow_on < 0.5 || distance(lightPos, u_point_shadow_pos) >= 0.01) return 1.0;
     return pointShadow(worldPos, N, L, dist);
 }
+#endif // PHPOLYGON_POINT_SHADOW_ARRAY
 #else
 float pointShadowFor(vec3 lightPos, vec3 worldPos, vec3 N, vec3 L, float dist) { return 1.0; }
 #endif

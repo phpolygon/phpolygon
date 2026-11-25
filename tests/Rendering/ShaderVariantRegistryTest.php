@@ -27,8 +27,11 @@ final class ShaderVariantRegistryTest extends TestCase
      * program is a decision: update this hash in the commit that makes it and say why.
      * Changed for emission behind the albedo texture's alpha (u_emission_mask, glowing
      * text on surfaces): off by default, the frames of other materials stay the same.
+     * Changed for the point shadow depth array (PHPOLYGON_POINT_SHADOW_ARRAY): the lines
+     * are nested in the PHPOLYGON_POINT_SHADOW guard, the single cube branch is unchanged,
+     * so the program built with one shadowed point light (the default) stays the same.
      */
-    private const VIO_FRAG_RELEASE = '2974807e5f0f50b1a5779abbf870e137953f289f28c5afacb9663433dbe6eb4b';
+    private const VIO_FRAG_RELEASE = 'a5850678c9aa1eabd69bfe189302919429e3149bbeeb7c904e9901459ebb3fed';
 
     protected function setUp(): void
     {

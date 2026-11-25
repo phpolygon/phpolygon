@@ -152,6 +152,7 @@ stored by their lower-case value.
 | `microShadows` | `false` | Direct light at a grazing angle does not reach into occluded cavities; sky light there comes from the cavity's opening. |
 | `screenSpaceSss` | `false` | Screen-space subsurface scattering for materials with subsurface (MRT path). |
 | `screenSpaceGi` | `false` | Screen-space radiosity: one bounce of the direct light between neighbouring pixels (MRT path). |
+| `pointShadowLights` | `1` | Point lights with a shadow (`PointLight::$castsShadow`) drawn per frame, 0..8. 1 is the single depth cube; more share one layered depth target, cost grows with the lights whose cube is redrawn (see "Shadowed point lights" in `CLAUDE.md`). 0 = no point shadows. Needs `VIO_FEATURE_RENDER_TARGET_LAYERED`, else it stays at one. |
 | `bakedLight` | `false` | Sky and sun visibility baked once from the SDF, looked up per pixel where a light volume was provided (`SetBakedLight`). |
 | `rayTracedShadows`, `rayTracedReflections`, `rayTracedProbes`, `rayTracedGi` | `false` | Ray-traced sun shadows, reflections on smooth surfaces, probe-field update and one-bounce diffuse light. Need `VIO_FEATURE_RAY_QUERY`. |
 | `meshShaders` | `false` | Instanced opaque batches as frustum-culled meshlets (`VIO_FEATURE_MESH_SHADER`). |

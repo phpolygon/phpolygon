@@ -905,7 +905,7 @@ Components follow the same ECS discipline as 2D. 3D-specific components:
 | `Camera3DComponent` | `fov: float`, `near: float`, `far: float`, projection type |
 | `MeshRenderer` | `meshId: string`, `materialId: string`, `castShadows: bool` |
 | `DirectionalLight` | `direction: Vec3`, `color: Color`, `intensity: float` |
-| `PointLight` | `color: Color`, `intensity: float`, `radius: float` |
+| `PointLight` | `color: Color`, `intensity: float`, `radius: float`, `castsShadow`, `shadowPriority`, `shadowResolution` (see "Shadowed point lights") |
 | `CharacterController3D` | Capsule collision, gravity, slope detection, `stepHeight` (on every collider, see "Character collision"); `groundEntityId` names what it stands on (see "Physics queries") |
 | `Outline` | `enabled`, `color`, `widthPx`, `includeChildren` — outline this entity's mesh (and its children's) |
 | `SurfaceText` | Text fixed on a surface in world space, by literal or translation key (see "Text on surfaces") |
@@ -2469,6 +2469,52 @@ uploads, no extra passes. All are documented in
 | Particle render modes and shapes | `ParticleEmitter::$renderMode` (`ParticleRenderMode`): `Billboard` (default, camera-facing), `Stretched` (velocity-aligned streak: local +Y along the velocity, `size + speed × $stretch` long, turned about that axis towards the camera, head at the particle, trail behind; billboard at rest or along the view ray – rain, sparks, water jets) and `WorldAligned` (world axes × size – a flat ring mesh with normal +Y as an expanding ripple). Flat particle meshes for Billboard/Stretched lie in local XY facing +Z; closed meshes work everywhere. One matrix source: `ParticleOrientation::write()` (CPU) and `GpuParticleBaker::MATRIX_GLSL`, spliced into the step and billboard kernels (step params 64 bytes, billboard input 8 floats/particle) – `GpuParticleBakerTest` compares both per mode. Spawn shapes: `$radialSpeed` (horizontal outward speed in a random azimuth about world Y – umbrellas, crowns; `$radialSpokes` > 0 snaps that azimuth to N evenly spaced spokes, the first along +X – separate fountain arcs, starburst rays, same single draw), `$spawnRadius` ± `$spawnRadiusJitter` (start on a horizontal circle/band, same azimuth); they draw one `mt_rand` (azimuth) plus one for the radius jitter after x, y, z, only when set – default emitters keep the RNG order. `$activeDistance` > 0: no spawning while the last rendered camera is further away (live particles run out, no burst on return; before the first frame the emitter spawns). Colour and alpha over lifetime: `colorOverLife` packs RGBA6 into one float per particle (`ParticleColor::pack()`), the instance carries it as `particleTint`; unpack with `floor(v + 0.25)` (never `+ 0.5`: from 2^23 up a float has no fraction bits and the half would round odd values up into the next channel). |
 | `ScreenSpaceReflections` | Quality enum (Off/Low/High). On OpenGL the `OpenGLSsrPass` runs a 24-step world-space ray-march from the resolved depth buffer (via `OpenGLOffscreenTarget::depthTextureId()`); on Vio the ray-marched pass runs on D3D, Vulkan and Metal; without it (tier Off, OpenGL) `u_ssr_intensity` scales the wetness IBL lobe. |
 | `AntiAliasing::Taa` | Temporal AA. OpenGL ships a real `OpenGLTaaPass` with per-frame Halton jitter on the projection matrix, neighbourhood-clamped composite, and a private history color target. Vio/Metal still fall back to FXAA via `AntiAliasing::fallback()` until their post-process chains are migrated. |
+
+### Shadowed point lights (`GraphicsSettings::$pointShadowLights`)
+
+`PointLight::$castsShadow` lights draw a depth cube around the light. How many per frame is
+`GraphicsSettings::$pointShadowLights` (0..`POINT_SHADOW_LIGHTS_MAX` = 8, default **1**, saved in
+graphics.json only when it is not 1). With 1 nothing changed: one `samplerCube`, the best-ranked
+light only. A light the budget leaves out is lit without a shadow.
+
+- **Ranking** (`Rendering\Shadow\PointShadowPlanner`, pure PHP): `PointLight::$shadowPriority`
+  (higher first), then the nearer influence sphere to the camera (0 inside it), then the nearer
+  centre. Lights outside the view frustum never reach the renderer (`Renderer3DSystem` drops them
+  before the light slots). `PointShadowPlanner::rank()` is the one ranking: the single cube (budget 1,
+  and the fallback without layered targets) takes its first entry, so `shadowPriority` works there too;
+  with equal priorities the winner is chosen by sphere distance, no longer by centre distance alone.
+  `shadowResolution` only applies with several lights. A light keeps its slot while it stays inside the
+  budget (the ranking of the others may change); lights are told apart by position, so a moving light
+  is a new light each frame.
+- **Storage**: more than one light switches the scene programs (define `PHPOLYGON_POINT_SHADOW_ARRAY`,
+  decided when they are built and latched there, so `applySettings()` mid-frame only takes effect at the
+  next frame boundary; a change of the budget between 1 and more rebuilds them) from the cube
+  to ONE depth 2D array with six layers per light (`+X -X +Y -Y +Z -Z`) on the same sampler unit 5, so
+  the sampler budget (12 registers) is unchanged. The shader maps a direction to face and uv itself
+  (cube-map convention), the same depth compare, bias and 6-tap rotated PCF as the cube. php-vio has no
+  cube-map array; without `VIO_FEATURE_RENDER_TARGET_LAYERED` (or when the target cannot be created) the
+  budget is ignored and the single cube remains. Face size: the tier's cube size (shadow resolution / 4,
+  at least 128) capped at 512; `PointLight::$shadowResolution` (or `AddPointLight::$shadowResolution`)
+  lowers it per light to a power of two, down to 64 (small rooms), rendered into the corner of the layer.
+- **Casters**: only the casters whose bounding sphere touches the light's sphere are drawn into a cube
+  (`ShadowCasterGrid` over the frame's individual casters, `InstancedBatchCuller` for batches). The
+  same light-emitting-surface exclusion as the single cube applies.
+- **Cache**: a cube is redrawn only when its light (position, radius, face size) or the set or matrices of
+  the casters inside its sphere changed; the signature is a hash of those. Rooms are static, so a warm
+  frame costs the query, the hash and one sampler fetch set, no depth pass; one moved piece of furniture
+  redraws only the cubes whose sphere contains it. The matrices of individual casters are compared by
+  object identity first (the same `Mat4` objects as last frame keep the grid), instanced batches by the
+  CRC of their packed matrices. `VioRenderer3D::pointShadowStats()` = lights / cubes drawn / cubes kept.
+- **Relative cost** (internal measurement 2026-11-25: synthetic row of 8 rooms with 40 casters each, one
+  RTX 2080, D3D12 and Vulkan, three runs per backend, median frame including readback, unshadowed frame =
+  100 %; the scene is small, so a fixed per-frame cost dominates and these are not scene-independent):
+  the single cube is within a few percent; with the cache warm 4 lights cost about +15 % and 8 lights about
+  +15-25 % (the per-pixel lookups and the per-frame planner/caster query, no depth pass); with every cube
+  redrawn every frame 4 lights cost about +55-65 % and 8 lights about +75-85 %. The cache is what keeps several
+  lights affordable: static rooms should stay warm, and the number of simultaneously MOVING casters inside
+  light spheres is what costs.
+- **Not done**: spot lights still have one shadow map (`renderSpotShadowPass`); a spot array needs the same
+  slot/cache machinery with a perspective map per light and is the follow-up.
 
 ### Weather darkness (`Weather::lightDarkness()`)
 

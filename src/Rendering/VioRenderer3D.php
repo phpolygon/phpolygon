@@ -40,6 +40,9 @@ use PHPolygon\Rendering\PostProcess\VioShadowDebugPass;
 use PHPolygon\Rendering\PostProcess\VioTaaPass;
 use PHPolygon\Rendering\Quality\AntiAliasing;
 use PHPolygon\Rendering\Quality\UpscalerDispatch;
+use PHPolygon\Rendering\Shadow\PointShadowPlanner;
+use PHPolygon\Rendering\Shadow\PointShadowSlot;
+use PHPolygon\Rendering\Shadow\ShadowCasterGrid;
 use VioContext;
 use VioCubemap;
 use VioMesh;
@@ -520,6 +523,39 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
     private const SHADOW_ORTHO_SIZE = 60.0;
 
     /**
+     * Several shadowed point lights (GraphicsSettings::$pointShadowLights > 1): one depth
+     * 2D-array target, six layers per light, on the same unit 5 as the single cube (the
+     * program is built for one or the other, see pointShadowArrayMode()). Largest face size
+     * of the array; a light's own hint may lower it.
+     */
+    private const POINT_SHADOW_ARRAY_MAX_FACE = 512;
+    private ?PointShadowPlanner $pointShadowPlanner = null;
+    private ?VioRenderTarget $pointShadowArray = null;
+    private int $pointShadowArrayFace = 0;
+    private int $pointShadowArrayLayers = 0;
+    private bool $pointShadowArrayFailed = false;
+    private ?bool $pointShadowArrayFeature = null;
+    /** Whether the built scene programs read the depth array (null until they are built). */
+    private ?bool $pointShadowProgramArray = null;
+    /** The array target is released at the next frame boundary (budget or tier changed). */
+    private bool $pointShadowArrayDirty = false;
+    /** @var list<PointShadowSlot> The lights holding a cube this frame (array mode). */
+    private array $pointShadowSlots = [];
+    /** Cubes rendered / reused in the last frame (array mode), for tests and the profiler. */
+    private int $pointShadowRendered = 0;
+    private int $pointShadowReused = 0;
+    /**
+     * The frame's individual local-light casters, kept while the same matrices come again:
+     * [mesh id, matrix, sway, dapple, token] per caster and the grid over their spheres.
+     *
+     * @var list<array{0: string, 1: Mat4, 2: bool, 3: float, 4: string}>
+     */
+    private array $pointCasterRecords = [];
+    private ?ShadowCasterGrid $pointCasterGrid = null;
+    /** @var \WeakMap<Mat4, string>|null */
+    private ?\WeakMap $matrixTokens = null;
+
+    /**
      * Visibility of whole instanced batches: out-of-view batches leave the
      * colour passes, batches that cannot reach a shadow map leave the shadow
      * passes - one sphere test per batch and pass, before anything is resolved.
@@ -801,8 +837,15 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
                 || $previous->occlusionCulling !== $settings->occlusionCulling
                 || $previous->rayTracedShadows !== $settings->rayTracedShadows
                 || $previous->rayTracedReflections !== $settings->rayTracedReflections
-                || $previous->rayTracedGi !== $settings->rayTracedGi)) {
+                || $previous->rayTracedGi !== $settings->rayTracedGi
+                || ($previous->pointShadowLights > 1) !== ($settings->pointShadowLights > 1))) {
             $this->shaderRebuild = true;
+        }
+        if ($previous->shadowQuality !== $settings->shadowQuality || $previous->pointShadowLights !== $settings->pointShadowLights) {
+            // The slots live in a target sized for the tier and the budget: released at the
+            // next frame boundary (applyDeferredSettings), the slots forgotten with it.
+            $this->pointShadowArrayDirty = true;
+            $this->pointShadowPlanner?->invalidate();
         }
 
         // Effects switched off are compiled out of the mesh programs (EffectSwitches).
@@ -1607,6 +1650,13 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
      */
     private function applyDeferredSettings(): void
     {
+        if ($this->pointShadowArrayDirty) {
+            $this->pointShadowArrayDirty = false;
+            $this->pointShadowArray = null;
+            $this->pointShadowArrayFace = 0;
+            $this->pointShadowArrayLayers = 0;
+            $this->pointShadowPlanner?->invalidate();
+        }
         if ($this->shaderRebuild) {
             // A setting compiled into the programs changed (bindless materials, ray
             // query): drop every program and pipeline and compile anew. The lazily
@@ -4978,6 +5028,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             return;
         }
         $this->shadersWarmed = true;
+        $this->pointShadowProgramArray = $this->wantsPointShadowArray();
         try {
             $this->initShaders($onProgress === null ? null : $onProgress(...));
             $failure = $this->warmProgress?->failure();
@@ -5277,6 +5328,9 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         }
         if (ProcModeShaderRegistry::pointShadowAvailable()) {
             $source = self::withDefine($source, 'PHPOLYGON_POINT_SHADOW');
+            if ($this->pointShadowArrayMode()) {
+                $source = self::withDefine($source, 'PHPOLYGON_POINT_SHADOW_ARRAY');
+            }
         }
         if (ProcModeShaderRegistry::cloudShadowMapAvailable()) {
             $source = self::withDefine($source, 'PHPOLYGON_CLOUD_SHADOW_MAP');
@@ -7556,24 +7610,23 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
     private function renderPointShadowPass(RenderCommandList $commandList, array $pointLights): void
     {
         $this->pointShadowPos = null;
+        $this->pointShadowSlots = [];
+        if ($this->pointShadowArrayMode()) {
+            $this->renderPointShadowPassMulti($commandList, $pointLights);
+
+            return;
+        }
+        if ($this->settings->pointShadowLights < 1) {
+            return;
+        }
         if ($this->pointShadowUnsupported || !ProcModeShaderRegistry::pointShadowAvailable()
             || $this->settings->shadowQuality === \PHPolygon\Rendering\Quality\ShadowQuality::Off) {
             return;
         }
-        // The shadow-casting light nearest to the camera gets the cube.
+        // The best-ranked shadow-casting light gets the cube (priority, then the nearest
+        // sphere): the same ranking as the budgeted path, so a fallback keeps its choice.
         $eye = $this->currentViewMatrix?->inverse()->getTranslation() ?? new Vec3(0.0, 0.0, 0.0);
-        $light = null;
-        $best = INF;
-        foreach ($pointLights as $pl) {
-            if (!$pl->castsShadow || $pl->radius <= 0.2 || $pl->intensity <= 0.001) {
-                continue;
-            }
-            $d = $pl->position->sub($eye)->length();
-            if ($d < $best) {
-                $best = $d;
-                $light = $pl;
-            }
-        }
+        $light = PointShadowPlanner::rank($pointLights, $eye)[0] ?? null;
         if ($light === null) {
             return;
         }
@@ -7631,10 +7684,305 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         $this->pointShadowFar = $light->radius;
     }
 
+    /**
+     * Whether the scene programs read the shadowed point lights from one depth 2D array
+     * (several lights) instead of the single cube: more than one light asked for, the
+     * sampler exists and the backend has layered depth targets. Decided when the programs
+     * are built; a failed allocation clears it and rebuilds them.
+     */
+    private function pointShadowArrayMode(): bool
+    {
+        // Latched when the programs are built (warmShaders(), meshFragmentSource()): the
+        // pass and the uniform upload follow the programs, never a setting applied mid-frame
+        // that only reaches them at the next frame boundary.
+        return $this->pointShadowProgramArray ??= $this->wantsPointShadowArray();
+    }
+
+    private function wantsPointShadowArray(): bool
+    {
+        if ($this->settings->pointShadowLights <= 1 || $this->pointShadowArrayFailed
+            || !ProcModeShaderRegistry::pointShadowAvailable()) {
+            return false;
+        }
+
+        return $this->pointShadowArrayFeature ??= function_exists('vio_render_target')
+            && defined('VIO_FEATURE_RENDER_TARGET_LAYERED')
+            && vio_supports_feature($this->ctx, \VIO_FEATURE_RENDER_TARGET_LAYERED);
+    }
+
+    /** The depth array of the shadowed point lights: `$budget` cubes of `$face` texels. */
+    private function ensurePointShadowArray(int $budget, int $face): bool
+    {
+        $layers = $budget * 6;
+        if ($this->pointShadowArray !== null && $this->pointShadowArrayFace === $face && $this->pointShadowArrayLayers === $layers) {
+            return true;
+        }
+        if ($this->pointShadowArrayFailed) {
+            return false;
+        }
+        $rt = vio_render_target($this->ctx, ['width' => $face, 'height' => $face, 'layers' => $layers, 'depth_only' => true]);
+        if ($rt === false) {
+            $this->pointShadowArray = null;
+            $this->pointShadowArrayFailed = true;
+            $this->shaderRebuild = true;
+
+            return false;
+        }
+        $this->pointShadowArray = $rt;
+        $this->pointShadowArrayFace = $face;
+        $this->pointShadowArrayLayers = $layers;
+        $this->pointShadowPlanner?->invalidate();
+
+        return true;
+    }
+
+    /** @return list<array{0: Vec3, 1: Vec3}> forward and up of the six cube faces, +X -X +Y -Y +Z -Z */
+    private static function pointShadowFaces(): array
+    {
+        /** @var list<array{0: Vec3, 1: Vec3}>|null $faces */
+        static $faces = null;
+
+        return $faces ??= [
+            [new Vec3(1.0, 0.0, 0.0), new Vec3(0.0, -1.0, 0.0)],
+            [new Vec3(-1.0, 0.0, 0.0), new Vec3(0.0, -1.0, 0.0)],
+            [new Vec3(0.0, 1.0, 0.0), new Vec3(0.0, 0.0, 1.0)],
+            [new Vec3(0.0, -1.0, 0.0), new Vec3(0.0, 0.0, -1.0)],
+            [new Vec3(0.0, 0.0, 1.0), new Vec3(0.0, -1.0, 0.0)],
+            [new Vec3(0.0, 0.0, -1.0), new Vec3(0.0, -1.0, 0.0)],
+        ];
+    }
+
+    /**
+     * Several shadowed point lights: the best-ranked ones (PointShadowPlanner) get a cube
+     * in the layers of the depth array, each rendered from the casters inside its sphere
+     * only and only when the light, its size or one of those casters changed since the
+     * cube was drawn. Everything else about a cube is as in the single-cube pass.
+     *
+     * @param list<AddPointLight> $pointLights
+     */
+    private function renderPointShadowPassMulti(RenderCommandList $commandList, array $pointLights): void
+    {
+        $this->pointShadowRendered = 0;
+        $this->pointShadowReused = 0;
+        $off = $this->settings->shadowQuality === \PHPolygon\Rendering\Quality\ShadowQuality::Off;
+        $budget = max(2, min(GraphicsSettings::POINT_SHADOW_LIGHTS_MAX, $this->settings->pointShadowLights));
+        $planner = $this->pointShadowPlanner ??= new PointShadowPlanner($budget);
+        $planner->setBudget($budget);
+        $full = $this->settings->shadowQuality->resolution();
+        $face = $off ? 128 : min(self::POINT_SHADOW_ARRAY_MAX_FACE, max(128, intdiv($full > 0 ? $full : self::SHADOW_MAP_RESOLUTION, 4)));
+        // Allocated even with shadows off: the program samples a valid array either way.
+        if (!$this->ensurePointShadowArray($budget, $face) || $off) {
+            return;
+        }
+        $target = $this->pointShadowArray;
+        if ($target === null) {
+            return;
+        }
+        $eye = $this->currentViewMatrix?->inverse()->getTranslation() ?? new Vec3(0.0, 0.0, 0.0);
+        $slots = $planner->plan($pointLights, $eye, $face);
+        if ($slots === []) {
+            return;
+        }
+        $this->pointShadowSlots = $slots;
+
+        $batches = $this->collectPointCasters($commandList);
+        $grid = $this->pointCasterGrid;
+        $batchTokens = [];
+        PerfProfiler::begin('render3d.shadow.point');
+        foreach ($slots as $slot) {
+            $pos = $slot->light->position;
+            $radius = $slot->light->radius;
+            $indices = $grid?->query($pos->x, $pos->y, $pos->z, $radius) ?? [];
+            $tokens = '';
+            foreach ($indices as $i) {
+                $tokens .= $this->pointCasterRecords[$i][4] . ';';
+            }
+            $sphere = [[$pos->x, $pos->y, $pos->z, $radius]];
+            $inSphere = [];
+            foreach ($batches as $bi => [$cmd, $mat]) {
+                if (!$this->batchCuller->reachesSpheres($cmd, $sphere)) {
+                    continue;
+                }
+                [$packed, $count] = $this->resolveInstanceData($cmd->meshId, $mat, $cmd);
+                $batchTokens[$bi] ??= $cmd->meshId . ':' . $count . ':' . crc32($packed) . ';';
+                $tokens .= $batchTokens[$bi];
+                $inSphere[] = [$cmd, $mat, $packed, $count];
+            }
+            $signature = md5(sprintf('%s|%.3f|%d|%d|', $slot->key, $radius, $slot->size, $face) . $tokens);
+            if ($planner->isCurrent($slot->slot, $signature)) {
+                $this->pointShadowReused++;
+                continue;
+            }
+
+            $draws = $this->pointShadowDraws($indices, $inSphere);
+            $p = Mat4::perspective(M_PI / 2.0, 1.0, self::POINT_SHADOW_NEAR, $radius)->toArray();
+            if ($this->conventions()->flipRenderTargetClipY()) {
+                $p[5] = -$p[5];
+            }
+            $proj = new Mat4($p);
+            foreach (self::pointShadowFaces() as $faceIndex => [$forward, $up]) {
+                vio_bind_render_target($this->ctx, $target, $slot->slot * 6 + $faceIndex);
+                vio_viewport($this->ctx, 0, 0, $slot->size, $slot->size);
+                vio_clear($this->ctx, 1.0, 1.0, 1.0, 1.0);
+                $this->bindShadowPipeline();
+                vio_set_uniform($this->ctx, 'u_view', Mat4::lookAt($pos, $pos->add($forward), $up)->toArray());
+                vio_set_uniform($this->ctx, 'u_projection', $proj->toArray());
+                vio_set_uniform($this->ctx, 'u_use_instancing', 1);
+                $this->drawShadowList($draws);
+            }
+            $planner->markRendered($slot->slot, $signature);
+            $this->pointShadowRendered++;
+        }
+        vio_unbind_render_target($this->ctx);
+        PerfProfiler::end();
+    }
+
+    /**
+     * The local-light casters of this frame for the point cubes: the individual draws as
+     * records with a grid over their bounding spheres (kept while the very same matrices
+     * come again), and the instanced batches, returned as [command, material] pairs.
+     *
+     * @return list<array{0: DrawMeshInstanced, 1: Material}>
+     */
+    private function collectPointCasters(RenderCommandList $commandList): array
+    {
+        PerfProfiler::begin('render3d.shadow.collect');
+        $this->matrixTokens ??= new \WeakMap();
+        $records = [];
+        $batches = [];
+        $same = $this->pointCasterGrid !== null;
+        $n = 0;
+        foreach ($commandList->getCommands() as $cmd) {
+            if ($cmd instanceof DrawMesh) {
+                if (!$cmd->castShadows) {
+                    continue;
+                }
+                $mat = MaterialRegistry::get($cmd->materialId);
+                if ($mat === null || $mat->alpha < 0.9 || $mat->vatTexture !== null || !$this->castsShadow($cmd->materialId) || self::emitsLight($mat)) {
+                    continue;
+                }
+                if ($same) {
+                    $old = $this->pointCasterRecords[$n] ?? null;
+                    if ($old === null || $old[1] !== $cmd->modelMatrix || $old[0] !== $cmd->meshId) {
+                        $same = false;
+                    }
+                }
+                $n++;
+                $records[] = $cmd;
+            } elseif ($cmd instanceof DrawMeshInstanced) {
+                if ($cmd->storageBuffer !== null || !$cmd->castShadows) {
+                    continue;
+                }
+                $mat = MaterialRegistry::get($cmd->materialId);
+                if ($mat === null || $mat->alpha < 0.9 || !$this->castsShadow($cmd->materialId) || self::emitsLight($mat)) {
+                    continue;
+                }
+                if (!$this->batchCuller->reachesSpheres($cmd, $this->localCasterSpheres)) {
+                    continue;
+                }
+                $batches[] = [$cmd, $mat];
+            }
+        }
+        if (!$same || count($records) !== count($this->pointCasterRecords)) {
+            $grid = new ShadowCasterGrid();
+            $built = [];
+            foreach ($records as $i => $cmd) {
+                $sway = $this->swaysInShadow($cmd->materialId);
+                $dapple = $this->shadowDappleOf($cmd->materialId);
+                $token = $this->matrixTokens[$cmd->modelMatrix] ??= dechex(crc32(pack('f*', ...$cmd->modelMatrix->toArray())));
+                $built[] = [$cmd->meshId, $cmd->modelMatrix, $sway, $dapple, $cmd->meshId . ($sway ? '|s' : '') . ($dapple > 0.0 ? '|d' . $dapple : '') . '@' . $token];
+                $sphere = MeshBounds::worldSphere($cmd->meshId, $cmd->modelMatrix);
+                if ($sphere === null) {
+                    $grid->add($i, INF, 0.0, 0.0, INF);
+                } else {
+                    $grid->add($i, $sphere['cx'], $sphere['cy'], $sphere['cz'], $sphere['radius']);
+                }
+            }
+            $this->pointCasterRecords = $built;
+            $this->pointCasterGrid = $grid;
+        }
+        PerfProfiler::end();
+
+        return $batches;
+    }
+
+    /**
+     * Depth-only draws of one light's casters: the individual ones grouped per mesh into
+     * one instanced draw each, then the batches that reach it.
+     *
+     * @param list<int> $indices into $pointCasterRecords
+     * @param list<array{0: DrawMeshInstanced, 1: Material, 2: string, 3: int}> $batches
+     * @return list<array{0: \VioMesh, 1: string, 2: int, 3?: bool, 4?: float}>
+     */
+    private function pointShadowDraws(array $indices, array $batches): array
+    {
+        $groups = [];
+        foreach ($indices as $i) {
+            [$meshId, $matrix, $sway, $dapple] = $this->pointCasterRecords[$i];
+            $key = $meshId . ($sway ? '|s' : '') . ($dapple > 0.0 ? '|d' . $dapple : '');
+            $groups[$key] ??= [$meshId, $sway, $dapple, []];
+            foreach ($matrix->toArray() as $f) {
+                $groups[$key][3][] = $f;
+            }
+        }
+        $draws = [];
+        foreach ($groups as [$meshId, $sway, $dapple, $floats]) {
+            $mesh = $this->uploadMesh($meshId);
+            if ($mesh !== null) {
+                $draws[] = [$mesh, pack('f*', ...$floats), intdiv(count($floats), 16), $sway, $dapple];
+            }
+        }
+        foreach ($batches as [$cmd, $mat, $packed, $count]) {
+            $mesh = $this->uploadMesh($cmd->meshId);
+            if ($mesh !== null) {
+                $draws[] = [$mesh, $packed, $count, $mat->foliageWind, max(0.0, min(1.0, $mat->shadowDapple))];
+            }
+        }
+
+        return $draws;
+    }
+
+    /**
+     * What the point shadow pass did in the last frame in array mode: lights holding a
+     * cube, cubes drawn, cubes kept from earlier frames. For tests and diagnostics.
+     *
+     * @return array{lights: int, rendered: int, reused: int}
+     */
+    public function pointShadowStats(): array
+    {
+        return ['lights' => count($this->pointShadowSlots), 'rendered' => $this->pointShadowRendered, 'reused' => $this->pointShadowReused];
+    }
+
+    /** The shadowed point lights' cubes on their unit and the slot data (count 0 = none this frame). */
+    private function uploadPointShadowArrayUniforms(): void
+    {
+        $slots = $this->pointShadowArray !== null ? $this->pointShadowSlots : [];
+        if ($this->pointShadowArray !== null) {
+            vio_bind_texture($this->ctx, vio_render_target_texture($this->pointShadowArray), self::POINT_SHADOW_UNIT);
+        }
+        vio_set_uniform($this->ctx, 'u_point_shadow_array', self::POINT_SHADOW_UNIT);
+        vio_set_uniform($this->ctx, 'u_point_shadow_count', count($slots));
+        foreach ($slots as $k => $slot) {
+            $p = $slot->light->position;
+            vio_set_uniform($this->ctx, "u_point_shadow_pos[{$k}]", [$p->x, $p->y, $p->z, $slot->light->radius]);
+            vio_set_uniform($this->ctx, "u_point_shadow_info[{$k}]", [
+                $slot->size / max(1, $this->pointShadowArrayFace),
+                1.0 / max(1, $slot->size),
+                (float) ($slot->slot * 6),
+                self::POINT_SHADOW_NEAR,
+            ]);
+        }
+    }
+
     /** The point shadow cube on its unit (u_point_shadow_on 0 with a 1x1 white cube otherwise). */
     private function uploadPointShadowUniforms(): void
     {
         if (!ProcModeShaderRegistry::pointShadowAvailable()) {
+            return;
+        }
+        if ($this->pointShadowArrayMode()) {
+            $this->uploadPointShadowArrayUniforms();
+
             return;
         }
         $on = $this->pointShadowPos !== null && $this->pointShadowCube !== null;
