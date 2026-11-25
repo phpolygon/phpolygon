@@ -2087,6 +2087,11 @@ neighbours share a whole ray and the rim has no T-junction; a polygon that does 
 comes back whole), `contains(x, z)`, `reaches(poly)`, `cutMesh(MeshData)` (untouched triangles are copied,
 cut ones become flat pieces with the triangles' mean vertex normal) and `addWall(acc, y0, y1)` (the
 rim wall facing the axis, to keep a cut plate closed). Another axis: swizzle the coordinates.
+`RectCut::pieces([u0, u1, v0, v1], $holes, $minSize = 1e-3)` is "rectangle minus holes" for wall boxes
+around doors and windows: a pure function returning non-overlapping `[u0, u1, v0, v1]` rectangles sorted
+by u then v that cover exactly the rectangle minus the union of the holes (holes may overlap each other
+or stick out; slabs with identical cover are merged, pieces thinner than `$minSize` dropped). Property
+tests: area conservation, no overlap, holes uncovered. `RectCut::area($rects)` sums rectangles.
 **Ground-following surfaces — `ConformingSurfaceSet` / `ConformingRegionMesh`.** Paths,
 plazas, yards, borders and inlays that lie ON a terrain (no floating slab, no slab edge seen
 from the side, no gap at joints). `RegionShape` gives outlines as signed distance fields
