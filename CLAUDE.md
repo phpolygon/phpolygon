@@ -2470,6 +2470,12 @@ uploads, no extra passes. All are documented in
 | `ScreenSpaceReflections` | Quality enum (Off/Low/High). On OpenGL the `OpenGLSsrPass` runs a 24-step world-space ray-march from the resolved depth buffer (via `OpenGLOffscreenTarget::depthTextureId()`); on Vio the ray-marched pass runs on D3D, Vulkan and Metal; without it (tier Off, OpenGL) `u_ssr_intensity` scales the wetness IBL lobe. |
 | `AntiAliasing::Taa` | Temporal AA. OpenGL ships a real `OpenGLTaaPass` with per-frame Halton jitter on the projection matrix, neighbourhood-clamped composite, and a private history color target. Vio/Metal still fall back to FXAA via `AntiAliasing::fallback()` until their post-process chains are migrated. |
 
+### Weather darkness (`Weather::lightDarkness()`)
+
+`Weather::lightDarkness()` (0..1) = max(clamp((cloudCoverage - 0.5) / 0.5) * 0.75, rainIntensity,
+snowIntensity, stormIntensity, fogDensity), clamped: how much the weather darkens the day, for gating
+artificial light (room lamps that switch on when it gets dark enough) independent of the time of day.
+
 ### Anti-patterns
 
 - **Do not** mutate `GraphicsSettings` fields directly - use `with(...)` and

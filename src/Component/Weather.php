@@ -155,6 +155,19 @@ class Weather extends AbstractComponent
         return $this->rainIntensity > 0.05 || $this->snowIntensity > 0.05;
     }
 
+    /**
+     * How much the weather darkens the day, 0 (clear) .. 1 (storm): the strongest of
+     * overcast cloud (0.5 coverage and below counts for nothing, full cover for 0.75),
+     * rain, snow, storm and fog. For gating artificial light (room lamps that switch on
+     * when it gets dark enough) independent of the time of day.
+     */
+    public function lightDarkness(): float
+    {
+        $cloud = max(0.0, min(1.0, ($this->cloudCoverage - 0.5) / 0.5)) * 0.75;
+
+        return max(0.0, min(1.0, max($cloud, $this->rainIntensity, $this->snowIntensity, $this->stormIntensity, $this->fogDensity)));
+    }
+
     /** Whether it's snowing (temperature-dependent) */
     public function isSnowing(): bool
     {
