@@ -225,4 +225,35 @@ final class HeightfieldFlatBlockTest extends TestCase
             }
         }
     }
+
+    public function testStoredCornersTakeDerivedDiagonalsThatMatchTheSampledOnes(): void
+    {
+        $f = static fn (float $x, float $z): float => 0.5 * abs($x + $z - 6.0) + 0.1 * sin($x);
+        $sampled = HeightfieldGrid::sample(0.0, 0.0, 16.0, 12.0, 2.0, $f, true);
+        $bytes = HeightfieldGrid::bestFitDiagonals(0.0, 0.0, 16.0, 12.0, 2.0, $f);
+        self::assertSame(8 * 6, strlen($bytes));
+        $corners = [];
+        for ($j = 0; $j <= 6; $j++) {
+            for ($i = 0; $i <= 8; $i++) {
+                $corners[] = $f($i * 2.0, $j * 2.0);
+            }
+        }
+        $stored = HeightfieldGrid::fromCorners(0, 0, 8, 6, 2.0, $corners, $bytes);
+        $chess = HeightfieldGrid::fromCorners(0, 0, 8, 6, 2.0, $corners);
+        $differs = 0;
+        for ($j = 0; $j < 6; $j++) {
+            for ($i = 0; $i < 8; $i++) {
+                self::assertSame($sampled->risingAt($i, $j), $stored->risingAt($i, $j), "cell ($i, $j)");
+                $differs += $stored->risingAt($i, $j) !== $chess->risingAt($i, $j) ? 1 : 0;
+            }
+        }
+        self::assertGreaterThan(0, $differs, 'the fit changes some cells');
+        self::assertEqualsWithDelta($sampled->heightAt(3.0, 3.0), $stored->heightAt(3.0, 3.0), 1e-12);
+    }
+
+    public function testWrongDiagonalLengthThrows(): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+        HeightfieldGrid::fromCorners(0, 0, 2, 2, 1.0, array_fill(0, 9, 0.0), 'x');
+    }
 }

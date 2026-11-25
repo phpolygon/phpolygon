@@ -176,18 +176,30 @@ final class HeightfieldGrid
     /**
      * A grid from the corners of the grid itself (no halo given): `$corners` is (nx + 1) * (nz + 1) heights,
      * row-major from ($i0, $j0), null = no ground. The halo is made like {@see sample()} makes it, from the
-     * corners inside the array only (so a tile cut from stored data fills its border from what it holds).
+     * corners inside the array only.
+     *
+     * For ONE grid (or tiles that do not need to shade their shared border alike). Two tiles cut from one stored
+     * lattice this way fill their halo corners from different neighbours and compute different border normals: for
+     * tiles call {@see sample()} with a function that looks into the whole lattice (it answers the halo and the fill
+     * rings from real data).
+     *
+     * `$diagonals` = the best-fit diagonals of the cells of this grid (one byte per cell, row-major from ($i0, $j0),
+     * "\x01" = from (i, j) to (i + 1, j + 1), "\x00" = the other one), e.g. from {@see bestFitDiagonals()} at derive time
+     * and stored with {@see LatticeCodec::packBytes()}: stored corners alone cannot say which diagonal fits the real
+     * surface. Cells outside the grid (the halo ring) keep the chessboard.
      *
      * @param list<float|null> $corners
      */
-    public static function fromCorners(int $i0, int $j0, int $nx, int $nz, float $cell, array $corners): self
+    public static function fromCorners(int $i0, int $j0, int $nx, int $nz, float $cell, array $corners, ?string $diagonals = null): self
     {
         $w = $nx + 1;
         if (count($corners) !== $w * ($nz + 1)) {
             throw new \InvalidArgumentException('HeightfieldGrid::fromCorners: expected ' . ($w * ($nz + 1)) . ' corners, got ' . count($corners));
         }
-
-        return self::sample(
+        if ($diagonals !== null && strlen($diagonals) !== $nx * $nz) {
+            throw new \InvalidArgumentException('HeightfieldGrid::fromCorners: expected ' . ($nx * $nz) . ' diagonal bytes, got ' . strlen($diagonals));
+        }
+        $grid = self::sample(
             $i0 * $cell,
             $j0 * $cell,
             ($i0 + $nx) * $cell,
@@ -203,6 +215,60 @@ final class HeightfieldGrid
                 return $corners[$j * $w + $i];
             },
         );
+        if ($diagonals === null) {
+            return $grid;
+        }
+        $width = $nx + 3;
+        $all = '';
+        for ($cj = 0; $cj < $nz + 3; $cj++) {
+            for ($ci = 0; $ci < $width; $ci++) {
+                $i = $ci - 1;
+                $j = $cj - 1;
+                $all .= ($i >= 0 && $j >= 0 && $i < $nx && $j < $nz)
+                    ? $diagonals[$j * $nx + $i]
+                    : (self::diagonalRising($i0 + $i, $j0 + $j) ? "\x01" : "\x00");
+            }
+        }
+
+        return new self($grid->i0, $grid->j0, $grid->nx, $grid->nz, $cell, $grid->heights, $grid->ground, $all);
+    }
+
+    /**
+     * The best-fit diagonal of every cell of a grid with the given bounds, from the REAL height function, as one byte per
+     * cell, row-major from the grid's first cell ("\x01" = from (i, j) to (i + 1, j + 1)): for the derive step of a stored
+     * lattice, to be stored beside the corners and handed to {@see fromCorners()}. The rule is the one of
+     * {@see sample()} with `$bestFitDiagonal` (the diagonal whose centre height is closer to the function at the cell
+     * centre; ties and cells without ground follow the chessboard). Needs the function at the corners and centres.
+     *
+     * @param callable(float, float): (float|null) $height
+     */
+    public static function bestFitDiagonals(float $minX, float $minZ, float $maxX, float $maxZ, float $cell, callable $height): string
+    {
+        $i0 = (int) floor($minX / $cell + 1e-9);
+        $j0 = (int) floor($minZ / $cell + 1e-9);
+        $nx = max(1, (int) ceil($maxX / $cell - 1e-9) - $i0);
+        $nz = max(1, (int) ceil($maxZ / $cell - 1e-9) - $j0);
+        $out = '';
+        for ($j = $j0; $j < $j0 + $nz; $j++) {
+            for ($i = $i0; $i < $i0 + $nx; $i++) {
+                $rising = self::diagonalRising($i, $j);
+                $h00 = $height($i * $cell, $j * $cell);
+                $h10 = $height(($i + 1) * $cell, $j * $cell);
+                $h01 = $height($i * $cell, ($j + 1) * $cell);
+                $h11 = $height(($i + 1) * $cell, ($j + 1) * $cell);
+                $truth = $h00 === null || $h10 === null || $h01 === null || $h11 === null ? null : $height(($i + 0.5) * $cell, ($j + 0.5) * $cell);
+                if ($truth !== null) {
+                    $e1 = abs(($h00 + $h11) * 0.5 - $truth);
+                    $e2 = abs(($h10 + $h01) * 0.5 - $truth);
+                    if (abs($e1 - $e2) > 1.0e-9) {
+                        $rising = $e1 < $e2;
+                    }
+                }
+                $out .= $rising ? "\x01" : "\x00";
+            }
+        }
+
+        return $out;
     }
 
     /**
