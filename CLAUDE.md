@@ -2245,6 +2245,22 @@ stores such lattices as text: `packHeights(list<?float>, width, offset, scale = 
 0.1 mm, 0xFFFF = void, row delta to the previous ground corner, zlib, base64), `unpackHeights`,
 `unpackQuantised` + `quantisedAt` (2 bytes per corner, no PHP array), `packBytes` / `unpackBytes` (zone bytes).
 
+**Design note (not built): stair and ramp collider primitive.** A consuming game builds straight, L, U
+and spiral stairs as one `BoxCollider3D` per tread plus one invisible sloped walk collider per flight, so
+that the character glides while every single rise stays under `stepHeight`. A generic primitive would
+cover this without a box per tread: `StairCollider3D` / `RampCollider3D` components (data only: `kind`
+straight | spiral, `width`, `rise`, `going`, `risers`, spiral: `innerRadius`, `outerRadius`, `turn` in
+radians, `clockwise`; ramp: `length`, `width`, `height`) that the physics step answers as ONE support
+surface: the ground query for a capsule returns the height of the surface under the capsule centre
+(piecewise linear along the walk line, `heightAt(u, w)` in the primitive's frame, null outside it), the
+controller treats it like a slope up to a configured maximum angle (no step-up probing, no `StepAssist`
+body test per tread), and the sides and the underside stay solid through the usual box colliders of the
+walls. Open points before building: a spiral's support height depends on the angle, so the broadphase
+needs the primitive's AABB plus an exact per-point query (the same interface `HeightmapCollider3D`
+already has); a head-clearance check (`minHeadroom`) belongs to the planner in the game, not the
+engine; the landing between flights stays a plain box. Not implemented; decide together with the
+`CharacterController3D` ground-query refactor.
+
 **Disk cache for procedural meshes — `Geometry\MeshSetCache`.** `remember($name, $key, fn () => $set->build())`
 returns `array<int|string, MeshData>` from `<dir>/<name>.<hash>.meshset` when the caller's content key
 (plus an engine stamp over `src/Geometry/*.php` and the format number) matches, else builds and stores.
