@@ -87,14 +87,12 @@ final class StepAssist
     private const float AHEAD_SHARE = 0.5;
 
     /**
-     * @param list<array{entityId: int, min: Vec3, max: Vec3}> $boxes unrotated solid boxes
+     * @param BoxColliderIndex $colliders solid boxes, aligned and turned: each method asks for the ones near the spot it looks at
      * @param list<array{entityId: int, bvh: BVH}> $meshes solid meshes
-     * @param list<array{entityId: int, box: OrientedBox}> $rotatedBoxes solid rotated boxes
      */
     public function __construct(
-        private readonly array $boxes,
+        private readonly BoxColliderIndex $colliders,
         private readonly array $meshes,
-        private readonly array $rotatedBoxes,
     ) {}
 
     /**
@@ -118,7 +116,7 @@ final class StepAssist
 
         $min = new Vec3($x - $radius, $fromY, $z - $radius);
         $max = new Vec3($x + $radius, $headY, $z + $radius);
-        foreach ($this->boxes as $box) {
+        foreach ($this->colliders->boxesIn($min->x, $min->z, $max->x, $max->z) as $box) {
             if ($box['entityId'] === $selfId || $box['entityId'] === $stepEntityId) {
                 continue;
             }
@@ -142,7 +140,7 @@ final class StepAssist
                 }
             }
         }
-        foreach ($this->rotatedBoxes as $rotated) {
+        foreach ($this->colliders->rotatedIn($min->x, $min->z, $max->x, $max->z) as $rotated) {
             if ($rotated['entityId'] === $selfId || $rotated['entityId'] === $stepEntityId) {
                 continue;
             }
@@ -388,7 +386,7 @@ final class StepAssist
             }
         }
 
-        foreach ($this->rotatedBoxes as $rotated) {
+        foreach ($this->colliders->rotatedIn($x, $z, $x, $z) as $rotated) {
             if ($rotated['entityId'] === $selfId) {
                 continue;
             }
@@ -398,7 +396,7 @@ final class StepAssist
             }
         }
 
-        foreach ($this->boxes as $box) {
+        foreach ($this->colliders->boxesIn($x, $z, $x, $z) as $box) {
             $top = $box['max']->y;
             if ($box['entityId'] !== $selfId
                 && $top >= $lowest && $top <= $feetY && ($best === null || $top > $best)
@@ -439,7 +437,7 @@ final class StepAssist
 
         /** @var list<OrientedBox> $rotated */
         $rotated = [];
-        foreach ($this->rotatedBoxes as $candidate) {
+        foreach ($this->colliders->rotatedIn($min->x, $min->z, $max->x, $max->z) as $candidate) {
             $box = $candidate['box'];
             if ($candidate['entityId'] !== $selfId
                 && $box->max->x > $min->x && $box->min->x < $max->x
@@ -452,7 +450,7 @@ final class StepAssist
 
         /** @var list<array{entityId: int, min: Vec3, max: Vec3}> $boxes */
         $boxes = [];
-        foreach ($this->boxes as $box) {
+        foreach ($this->colliders->boxesIn($min->x, $min->z, $max->x, $max->z) as $box) {
             if ($box['entityId'] !== $selfId
                 && $box['max']->x > $min->x && $box['min']->x < $max->x
                 && $box['max']->y > $min->y && $box['min']->y < $max->y
@@ -524,7 +522,7 @@ final class StepAssist
             }
         }
 
-        foreach ($this->boxes as $box) {
+        foreach ($this->colliders->boxesIn($x, $z, $x, $z) as $box) {
             if ($box['entityId'] !== $selfId
                 && $x >= $box['min']->x && $x <= $box['max']->x
                 && $z >= $box['min']->z && $z <= $box['max']->z

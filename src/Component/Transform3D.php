@@ -67,8 +67,24 @@ class Transform3D extends AbstractComponent
     #[Property]
     public array $childEntityIds = [];
 
+    /**
+     * Assigning a new matrix (Transform3DSystem, a door, the physics step writing a character back) marks
+     * the entity in the {@see watchWorldMatrix()} sink. Mat4 is immutable, so the assignment is the only
+     * way a world matrix changes: a consumer that caches something per entity (the physics collider
+     * index) learns about exactly the entities that moved, without comparing every one each tick.
+     */
     #[Hidden]
-    public Mat4 $worldMatrix;
+    public Mat4 $worldMatrix {
+        set {
+            $this->worldMatrix = $value;
+            $this->matrixWatch?->mark($this->watchedEntityId);
+        }
+    }
+
+    /** Sink told about every world-matrix assignment, see {@see watchWorldMatrix()}. Null while unwatched. */
+    private ?TransformDirtyQueue $matrixWatch = null;
+
+    private int $watchedEntityId = 0;
 
     public function __construct(
         ?Vec3 $position = null,
@@ -95,6 +111,23 @@ class Transform3D extends AbstractComponent
     {
         $this->dirtyQueue = null;
         $this->boundEntityId = 0;
+        $this->matrixWatch = null;
+        $this->watchedEntityId = 0;
+    }
+
+    /**
+     * Report every later assignment of {@see $worldMatrix} to $sink under $entityId. One sink per
+     * transform (the latest caller wins); not for game code, a system that indexes the world calls it.
+     */
+    public function watchWorldMatrix(int $entityId, TransformDirtyQueue $sink): void
+    {
+        $this->watchedEntityId = $entityId;
+        $this->matrixWatch = $sink;
+    }
+
+    public function unwatchWorldMatrix(): void
+    {
+        $this->matrixWatch = null;
     }
 
     /**

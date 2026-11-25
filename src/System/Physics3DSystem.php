@@ -15,6 +15,7 @@ use PHPolygon\Geometry\MeshData;
 use PHPolygon\Geometry\MeshRegistry;
 use PHPolygon\Math\Mat4;
 use PHPolygon\Math\Vec3;
+use PHPolygon\Physics\BoxColliderIndex;
 use PHPolygon\Physics\BVH;
 use PHPolygon\Physics\CollisionMath;
 use PHPolygon\Physics\OrientedBox;
@@ -73,10 +74,27 @@ class Physics3DSystem extends AbstractSystem
      */
     private array $wedged = [];
 
-    public function __construct(?Vec3 $gravity = null, float $groundPlaneY = 0.0)
+    /**
+     * How far (m) a character may be pushed from where its box candidates were queried before the query
+     * is repeated from the new spot. See resolveCharacters().
+     */
+    private const float QUERY_REACH = 2.0;
+
+    /** Slack (m) on the XZ rectangles of the oriented-box queries: the exact tests decide, the query only has to be a superset. */
+    private const float QUERY_SLACK = 0.01;
+
+    /** Persistent box-collider index: per-tick cost is the colliders that changed, not all of them. */
+    private BoxColliderIndex $colliders;
+
+    /**
+     * @param bool $broadphase false makes every character test every box, in the same order: the behaviour of
+     *                         before the collider index, kept for comparing results and for ruling the grid out.
+     */
+    public function __construct(?Vec3 $gravity = null, float $groundPlaneY = 0.0, bool $broadphase = true)
     {
         $this->gravity = $gravity ?? new Vec3(0.0, -9.81, 0.0);
         $this->groundPlaneY = $groundPlaneY;
+        $this->colliders = new BoxColliderIndex($broadphase);
     }
 
     public function setGravity(Vec3 $gravity): void
@@ -101,18 +119,17 @@ class Physics3DSystem extends AbstractSystem
 
     private function step(World $world, float $dt): void
     {
-        // Collect all box colliders once per frame (static + dynamic)
+        // Box colliders live in a persistent index that only re-reads what changed since the last tick;
+        // characters ask it for the boxes near them. Mesh colliders are still collected per tick.
         PerfProfiler::begin('physics.collect');
         try {
-            $boxData = $this->collectBoxColliders($world);
-            $staticColliders = $boxData['aabbs'];
+            $this->colliders->sync($world);
             $meshColliders = $this->collectMeshColliders($world);
-            $rotatedBoxes = $boxData['rotated'];
         } finally {
             PerfProfiler::end();
         }
 
-        $assist = new StepAssist($staticColliders, $meshColliders, $rotatedBoxes);
+        $assist = new StepAssist($this->colliders, $meshColliders);
         $walkers = $this->walkers($world, $dt);
         $this->wedged = [];
 
@@ -122,7 +139,7 @@ class Physics3DSystem extends AbstractSystem
         try {
             [$steps, $stepDt] = self::substeps($dt);
             for ($i = 0; $i < $steps; $i++) {
-                $this->resolveCharacters($world, $stepDt, $staticColliders, $meshColliders, $rotatedBoxes, $assist);
+                $this->resolveCharacters($world, $stepDt, $meshColliders, $assist);
             }
             foreach ($walkers as $walker) {
                 $controller = $walker['controller'];
@@ -214,11 +231,9 @@ class Physics3DSystem extends AbstractSystem
     }
 
     /**
-     * @param list<array{entityId: int, min: Vec3, max: Vec3}> $staticColliders
      * @param list<array{entityId: int, bvh: BVH}> $meshColliders
-     * @param list<array{entityId: int, box: OrientedBox}> $rotatedBoxes
      */
-    private function resolveCharacters(World $world, float $dt, array $staticColliders, array $meshColliders, array $rotatedBoxes, StepAssist $assist): void
+    private function resolveCharacters(World $world, float $dt, array $meshColliders, StepAssist $assist): void
     {
         foreach ($world->query(CharacterController3D::class, Transform3D::class) as $entity) {
             $controller = $entity->get(CharacterController3D::class);
@@ -278,9 +293,7 @@ class Physics3DSystem extends AbstractSystem
                     $newPos->y - $halfHeight - ($probe ? self::SWEEP_SKIN : 0.0),
                     $radius,
                     $entity->id,
-                    $staticColliders,
                     $meshColliders,
-                    $rotatedBoxes,
                     $supportEntityId,
                 );
                 if ($support !== null) {
@@ -293,8 +306,19 @@ class Physics3DSystem extends AbstractSystem
                 }
             }
 
-            // Resolve AABB collisions against box colliders with step-climbing
-            foreach ($staticColliders as $collider) {
+            // Resolve AABB collisions against box colliders with step-climbing. Only the boxes near the
+            // capsule are candidates; they come in pool order, as the full list did, because every push
+            // moves the capsule for the next box. A push can carry the capsule further than the query
+            // reached (the whole way out of a thick box), so once it has moved more than QUERY_REACH
+            // from where the candidates were asked for, they are asked for again from the new spot,
+            // continuing after the box just handled: the result is that of testing every box.
+            $queryX = $newPos->x;
+            $queryZ = $newPos->z;
+            $reach = $radius + self::QUERY_REACH;
+            $candidates = $this->colliders->boxesIn($queryX - $reach, $queryZ - $reach, $queryX + $reach, $queryZ + $reach);
+            $candidateCount = count($candidates);
+            for ($ci = 0; $ci < $candidateCount; $ci++) {
+                $collider = $candidates[$ci];
                 if ($collider['entityId'] === $entity->id) {
                     continue;
                 }
@@ -349,18 +373,31 @@ class Physics3DSystem extends AbstractSystem
                 // Update AABB for next collision test
                 $charMin = new Vec3($newPos->x - $radius, $newPos->y - $halfHeight, $newPos->z - $radius);
                 $charMax = new Vec3($newPos->x + $radius, $newPos->y + $halfHeight, $newPos->z + $radius);
+
+                if (abs($newPos->x - $queryX) > self::QUERY_REACH || abs($newPos->z - $queryZ) > self::QUERY_REACH) {
+                    $queryX = $newPos->x;
+                    $queryZ = $newPos->z;
+                    $seq = $collider['seq'];
+                    $candidates = [];
+                    foreach ($this->colliders->boxesIn($queryX - $reach, $queryZ - $reach, $queryX + $reach, $queryZ + $reach) as $next) {
+                        if ($next['seq'] > $seq) {
+                            $candidates[] = $next;
+                        }
+                    }
+                    $candidateCount = count($candidates);
+                    $ci = -1;
+                }
             }
 
             // Resolve mesh collider collisions (BVH-accelerated triangle tests)
             // Also pass box collider data for step-climbing on rotated boxes.
-            if ($meshColliders !== [] || $rotatedBoxes !== []) {
+            if ($meshColliders !== [] || $this->colliders->hasRotated()) {
                 $newPos = $this->resolveMeshCollisions(
                     $newPos,
                     $controller,
                     $halfHeight,
                     $radius,
                     $meshColliders,
-                    $rotatedBoxes,
                     $entity->id,
                     $assist,
                 );
@@ -442,9 +479,7 @@ class Physics3DSystem extends AbstractSystem
      * is ignored (|normal.y|) — a walker coming down onto a horizontal face is
      * landing on it whichever way the face was authored.
      *
-     * @param list<array{entityId: int, min: Vec3, max: Vec3}> $staticColliders
      * @param list<array{entityId: int, bvh: BVH}> $meshColliders
-     * @param list<array{entityId: int, box: OrientedBox}> $rotatedBoxes
      * @param-out int|null $supportEntityId owner of the returned surface
      */
     private function sweptSupportY(
@@ -453,16 +488,14 @@ class Physics3DSystem extends AbstractSystem
         float $lowerY,
         float $radius,
         int $selfId,
-        array $staticColliders,
         array $meshColliders,
-        array $rotatedBoxes,
         ?int &$supportEntityId,
     ): ?float {
         $upper = $prevFeetY + self::SWEEP_SKIN;
         $best = null;
         $supportEntityId = null;
 
-        foreach ($staticColliders as $collider) {
+        foreach ($this->colliders->boxesIn($pos->x - $radius, $pos->z - $radius, $pos->x + $radius, $pos->z + $radius) as $collider) {
             if ($collider['entityId'] === $selfId) {
                 continue;
             }
@@ -479,7 +512,7 @@ class Physics3DSystem extends AbstractSystem
             $supportEntityId = $collider['entityId'];
         }
 
-        foreach ($rotatedBoxes as $rotated) {
+        foreach ($this->colliders->rotatedIn($pos->x, $pos->z, $pos->x, $pos->z) as $rotated) {
             $box = $rotated['box'];
             if ($rotated['entityId'] === $selfId
                 || $pos->x < $box->min->x || $pos->x > $box->max->x
@@ -591,148 +624,6 @@ class Physics3DSystem extends AbstractSystem
     }
 
     /**
-     * Collect all BoxCollider3D as world-space data.
-     * Non-rotated boxes return AABBs for fast axis-aligned resolution.
-     * Rotated boxes return their solid form; their triangles stay cached for
-     * {@see \PHPolygon\Physics\Raycaster3D::segmentBlocked()}.
-     *
-     * @return array{aabbs: list<array{entityId: int, min: Vec3, max: Vec3}>, rotated: list<array{entityId: int, box: OrientedBox}>}
-     */
-    private function collectBoxColliders(World $world): array
-    {
-        $aabbs = [];
-        $rotated = [];
-
-        // Direct pool iteration (not query()): this runs every fixed-timestep
-        // tick over every box collider in the world (~thousands on the star
-        // island), so the generator resume + Entity wrap + get() indirection is
-        // a measurable steady-state cost. Same pattern Transform3DSystem uses.
-        /** @var array<int, BoxCollider3D> $pool */
-        $pool = $world->componentPool(BoxCollider3D::class);
-        foreach ($pool as $entityId => $collider) {
-            if ($collider->isTrigger) {
-                continue;
-            }
-
-            $transform = $world->tryGetComponent($entityId, Transform3D::class);
-            if (!$transform instanceof Transform3D) {
-                continue;
-            }
-            $worldMatrix = $transform->getWorldMatrix();
-
-            // Same (immutable) Mat4 object as when the cache was built: the box did
-            // not move. That is the steady state of a built world, so skip the
-            // rotation probe, the matrix copy and the 16-value compare.
-            $cachedAabb = $collider->cachedWorldAabb;
-            if ($worldMatrix === $collider->lastWorldMatrix && $cachedAabb !== null) {
-                if (!$collider->cachedRotated) {
-                    $aabbs[] = ['entityId' => $entityId, 'min' => $cachedAabb['min'], 'max' => $cachedAabb['max']];
-                    continue;
-                }
-                if ($collider->cachedOriented !== null) {
-                    $rotated[] = ['entityId' => $entityId, 'box' => $collider->cachedOriented];
-                    continue;
-                }
-            }
-
-            // Check if entity has meaningful rotation (non-identity). The vector
-            // part alone decides: |w| stays within 0.001 of 1 up to 5 degrees, and
-            // a long box turned that little has a hull metres deeper than itself.
-            $rot = $transform->rotation;
-            $isRotated = abs($rot->x) > 0.001 || abs($rot->y) > 0.001 || abs($rot->z) > 0.001;
-
-            // Cache BVH / AABB on the collider keyed by world-matrix snapshot.
-            // Without this every box rebuilds geometry every frame (8 corner
-            // transforms for AABB, 12 triangles + BVH build for rotated). At
-            // 400+ box colliders that dominates CPU in PHP.
-            $worldMatrixArr = $worldMatrix->toArray();
-            $matrixChanged = $collider->lastWorldMatrixArr === null
-                || !self::matrixArrayEquals($worldMatrixArr, $collider->lastWorldMatrixArr);
-
-            if ($isRotated) {
-                if ($matrixChanged || $collider->bvh === null || $collider->cachedWorldAabb === null || $collider->cachedOriented === null) {
-                    $triangles = self::boxToWorldTriangles($collider, $worldMatrix);
-                    $collider->bvh = BVH::build($triangles);
-                    $collider->cachedWorldAabb = $collider->getWorldAABB($worldMatrix);
-                    $collider->cachedOriented = OrientedBox::fromCollider($collider, $worldMatrix);
-                    $collider->lastWorldMatrixArr = $worldMatrixArr;
-                }
-
-                $rotated[] = ['entityId' => $entityId, 'box' => $collider->cachedOriented];
-            } else {
-                if ($matrixChanged || $collider->cachedWorldAabb === null) {
-                    $collider->cachedWorldAabb = $collider->getWorldAABB($worldMatrix);
-                    $collider->lastWorldMatrixArr = $worldMatrixArr;
-                }
-                $aabbs[] = [
-                    'entityId' => $entityId,
-                    'min' => $collider->cachedWorldAabb['min'],
-                    'max' => $collider->cachedWorldAabb['max'],
-                ];
-            }
-            $collider->lastWorldMatrix = $worldMatrix;
-            $collider->cachedRotated = $isRotated;
-        }
-
-        return ['aabbs' => $aabbs, 'rotated' => $rotated];
-    }
-
-    /**
-     * Convert a BoxCollider3D into 12 world-space triangles (6 faces × 2 tris).
-     *
-     * @return Triangle[]
-     */
-    private static function boxToWorldTriangles(BoxCollider3D $collider, Mat4 $worldMatrix): array
-    {
-        $hx = $collider->size->x * 0.5;
-        $hy = $collider->size->y * 0.5;
-        $hz = $collider->size->z * 0.5;
-        $off = $collider->offset;
-
-        // 8 corners in local space
-        $corners = [];
-        foreach ([[-1,1], [1,1], [1,-1], [-1,-1]] as [$sx, $sz]) {
-            foreach ([-1, 1] as $sy) {
-                $corners["{$sx}_{$sy}_{$sz}"] = $worldMatrix->transformPoint(new Vec3(
-                    $off->x + $sx * $hx,
-                    $off->y + $sy * $hy,
-                    $off->z + $sz * $hz,
-                ));
-            }
-        }
-
-        // Helper to get corners by sign indices
-        $c = fn(int $sx, int $sy, int $sz) => $corners["{$sx}_{$sy}_{$sz}"];
-
-        $triangles = [];
-        // 6 faces, each as 2 triangles, wound clockwise seen from outside: the
-        // normals point into the box. Only double-sided queries read them.
-        $faces = [
-            // +X face
-            [$c(1,-1,1), $c(1,1,1), $c(1,1,-1), $c(1,-1,-1)],
-            // -X face
-            [$c(-1,-1,-1), $c(-1,1,-1), $c(-1,1,1), $c(-1,-1,1)],
-            // +Y face
-            [$c(-1,1,1), $c(-1,1,-1), $c(1,1,-1), $c(1,1,1)],
-            // -Y face
-            [$c(-1,-1,-1), $c(-1,-1,1), $c(1,-1,1), $c(1,-1,-1)],
-            // +Z face
-            [$c(-1,-1,1), $c(-1,1,1), $c(1,1,1), $c(1,-1,1)],
-            // -Z face
-            [$c(1,-1,-1), $c(1,1,-1), $c(-1,1,-1), $c(-1,-1,-1)],
-        ];
-
-        foreach ($faces as [$v0, $v1, $v2, $v3]) {
-            $t1 = new Triangle($v0, $v1, $v2);
-            $t2 = new Triangle($v0, $v2, $v3);
-            if (!$t1->isDegenerate()) $triangles[] = $t1;
-            if (!$t2->isDegenerate()) $triangles[] = $t2;
-        }
-
-        return $triangles;
-    }
-
-    /**
      * Collect all MeshCollider3D components, lazily building BVH as needed.
      * Returns world-space BVH data for each mesh collider entity.
      *
@@ -791,7 +682,6 @@ class Physics3DSystem extends AbstractSystem
      * Iterates up to MESH_ITERATIONS times for convergence.
      *
      * @param list<array{entityId: int, bvh: BVH}> $meshColliders
-     * @param list<array{entityId: int, box: OrientedBox}> $rotatedBoxes
      */
     private function resolveMeshCollisions(
         Vec3 $pos,
@@ -799,7 +689,6 @@ class Physics3DSystem extends AbstractSystem
         float $halfHeight,
         float $radius,
         array $meshColliders,
-        array $rotatedBoxes,
         int $characterEntityId,
         StepAssist $assist,
     ): Vec3 {
@@ -849,13 +738,16 @@ class Physics3DSystem extends AbstractSystem
                     }
                 }
             }
-            foreach ($rotatedBoxes as $rotated) {
+            // Turned boxes the capsule can touch: its AABB (plus slack) against their hull.
+            $slack = $radius + self::QUERY_SLACK;
+            foreach ($this->colliders->rotatedIn($pos->x - $slack, $pos->z - $slack, $pos->x + $slack, $pos->z + $slack) as $rotated) {
+                $box = $rotated['box'];
                 if ($rotated['entityId'] === $characterEntityId) {
                     continue;
                 }
-                $resolution = $rotated['box']->capsulePush($segA, $segB, $radius);
+                $resolution = $box->capsulePush($segA, $segB, $radius);
                 if ($resolution !== null) {
-                    $shapes[] = $rotated['box'];
+                    $shapes[] = $box;
                     $owners[] = $rotated['entityId'];
                     $pushes[] = $resolution;
                     $depths[] = $resolution->dot($resolution);
@@ -1049,10 +941,12 @@ class Physics3DSystem extends AbstractSystem
     /**
      * Compare two column-major matrix float arrays for equality.
      *
+     * @internal Shared with {@see BoxColliderIndex}.
+     *
      * @param float[] $a
      * @param float[] $b
      */
-    private static function matrixArrayEquals(array $a, array $b): bool
+    public static function matrixArrayEquals(array $a, array $b): bool
     {
         if (count($a) !== count($b)) {
             return false;

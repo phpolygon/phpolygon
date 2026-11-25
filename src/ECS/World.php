@@ -83,6 +83,9 @@ class World
     /** Bumped on every structural change (create/destroy/attach/detach). */
     private int $structuralVersion = 0;
 
+    /** Bumped whenever an entity really changes between awake and dormant (its components move between the pools). */
+    private int $dormancyVersion = 0;
+
     /**
      * Attach/detach observers per component class, registered through
      * {@see observe()}. Lets a system maintain an incremental index (a
@@ -218,6 +221,16 @@ class World
     public function version(): int
     {
         return $this->structuralVersion;
+    }
+
+    /**
+     * Bumped each time an entity goes dormant or wakes. A cached index over a component pool (which only
+     * holds awake entities, in insertion order) has to rebuild when it changes: dormancy fires no
+     * attach/detach notification, and a woken entity lands at the END of the pool.
+     */
+    public function dormancyVersion(): int
+    {
+        return $this->dormancyVersion;
     }
 
     // --- Component operations ---
@@ -395,6 +408,7 @@ class World
         if ($dormant === $isDormant) {
             return;
         }
+        $this->dormancyVersion++;
 
         if ($dormant) {
             foreach ($this->entityComponents[$entityId] as $class => $component) {
