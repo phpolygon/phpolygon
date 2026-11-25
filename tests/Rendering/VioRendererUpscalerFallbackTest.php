@@ -24,6 +24,7 @@ use PHPolygon\Rendering\VioRenderer3D;
  */
 #[RequiresPhpExtension('vio')]
 #[Group('native-gpu')]
+#[Group('gpu')]
 final class VioRendererUpscalerFallbackTest extends TestCase
 {
     protected function tearDown(): void

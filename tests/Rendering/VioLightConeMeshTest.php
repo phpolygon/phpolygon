@@ -42,6 +42,7 @@ use PHPolygon\System\LightConeSystem;
  */
 #[RequiresPhpExtension('vio')]
 #[Group('native-gpu')]
+#[Group('gpu')]
 final class VioLightConeMeshTest extends TestCase
 {
     private const W = 160;

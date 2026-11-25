@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace PHPolygon\Tests\Rendering\Shader;
 
 use PHPolygon\Testing\Shader\HeadlessShaderHarness;
+use PHPUnit\Framework\Attributes\Group;
 use PHPUnit\Framework\Attributes\RequiresPhpExtension;
 use PHPUnit\Framework\TestCase;
 
@@ -32,6 +33,7 @@ use PHPUnit\Framework\TestCase;
  * available.
  */
 #[RequiresPhpExtension('vio')]
+#[Group('gpu')]
 class MeshShaderHeadlessTest extends TestCase
 {
     private ?HeadlessShaderHarness $h = null;

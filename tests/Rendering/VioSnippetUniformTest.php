@@ -37,6 +37,7 @@ use PHPolygon\Rendering\VioTextureManager;
  */
 #[RequiresPhpExtension('vio')]
 #[Group('native-gpu')]
+#[Group('gpu')]
 final class VioSnippetUniformTest extends TestCase
 {
     private const SIZE = 32;

@@ -41,6 +41,7 @@ use PHPolygon\Runtime\PerfProfiler;
  */
 #[RequiresPhpExtension('vio')]
 #[Group('native-gpu')]
+#[Group('gpu')]
 final class VioSdfAoTest extends TestCase
 {
     private const W = 160;

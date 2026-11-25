@@ -31,6 +31,7 @@ use PHPolygon\Rendering\VioRenderer3D;
  * hanging strands stay lit by a light from above instead of going dark like a
  * surface whose normal points down.
  */
+#[Group('gpu')]
 final class VioHairTest extends TestCase
 {
     public function testStrandsGrowFromTheScalpAndHangDown(): void

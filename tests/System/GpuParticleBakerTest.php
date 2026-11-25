@@ -11,6 +11,7 @@ use PHPolygon\System\GpuParticleBaker;
 use PHPolygon\System\GpuParticleState;
 use PHPolygon\System\ParticleOrientation;
 use PHPUnit\Framework\Attributes\DataProvider;
+use PHPUnit\Framework\Attributes\Group;
 use PHPUnit\Framework\Attributes\RequiresPhpExtension;
 use PHPUnit\Framework\TestCase;
 
@@ -23,6 +24,7 @@ use PHPUnit\Framework\TestCase;
  * never fail the suite — this test only runs where the GPU path is exercisable.
  */
 #[RequiresPhpExtension('vio')]
+#[Group('gpu')]
 class GpuParticleBakerTest extends TestCase
 {
     private ?\VioContext $ctx = null;

@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace PHPolygon\Tests\Rendering;
 
 use PHPolygon\Rendering\VioRenderer2D;
+use PHPUnit\Framework\Attributes\Group;
 use PHPUnit\Framework\TestCase;
 use ReflectionMethod;
 use ReflectionProperty;
@@ -24,6 +25,7 @@ use ReflectionProperty;
  * Gated on the vio extension + the async font API; skipped where unavailable
  * (the API is no-op-safe in production, see testAsyncRegistrationIsGraceful).
  */
+#[Group('gpu')]
 final class VioRenderer2DAsyncFontTest extends TestCase
 {
     private const FONT_CANDIDATES = [

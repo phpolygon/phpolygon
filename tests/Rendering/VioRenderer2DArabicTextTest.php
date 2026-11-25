@@ -25,6 +25,7 @@ use PHPolygon\Rendering\VioRenderer2D;
  */
 #[RequiresPhpExtension('vio')]
 #[Group('native-gpu')]
+#[Group('gpu')]
 final class VioRenderer2DArabicTextTest extends TestCase
 {
     private const int W = 520;

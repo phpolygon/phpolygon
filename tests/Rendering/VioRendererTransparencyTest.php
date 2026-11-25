@@ -37,6 +37,7 @@ use PHPolygon\Rendering\VioTextureManager;
  */
 #[RequiresPhpExtension('vio')]
 #[Group('native-gpu')]
+#[Group('gpu')]
 final class VioRendererTransparencyTest extends TestCase
 {
     private const int W = 96;

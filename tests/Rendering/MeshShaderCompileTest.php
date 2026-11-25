@@ -19,6 +19,7 @@ use PHPUnit\Framework\TestCase;
  * image (which runs on lavapipe) excludes this group.
  */
 #[Group('native-gpu')]
+#[Group('gpu')]
 final class MeshShaderCompileTest extends TestCase
 {
     public function testVioMeshShaderCompiles(): void

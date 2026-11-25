@@ -18,6 +18,7 @@ use PHPolygon\Tests\Rendering\VioTestContext;
  */
 #[RequiresPhpExtension('vio')]
 #[Group('native-gpu')]
+#[Group('gpu')]
 final class GpuParticleBurstTest extends TestCase
 {
     public function testBurstsSpawnInsideTheirRangesAndWrapTheRing(): void

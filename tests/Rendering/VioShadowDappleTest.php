@@ -34,6 +34,7 @@ use PHPolygon\Rendering\VioRenderer3D;
  */
 #[RequiresPhpExtension('vio')]
 #[Group('native-gpu')]
+#[Group('gpu')]
 final class VioShadowDappleTest extends TestCase
 {
     private const W = 160;

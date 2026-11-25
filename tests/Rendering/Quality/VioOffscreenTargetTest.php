@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace PHPolygon\Tests\Rendering\Quality;
 
 use PHPolygon\Rendering\VioOffscreenTarget;
+use PHPUnit\Framework\Attributes\Group;
 use PHPUnit\Framework\TestCase;
 
 /**
@@ -16,6 +17,7 @@ use PHPUnit\Framework\TestCase;
  * without the vio extension the test is skipped. Local runs with vio
  * loaded exercise allocation, MSAA fallback, and idempotent resize.
  */
+#[Group('gpu')]
 final class VioOffscreenTargetTest extends TestCase
 {
     protected function setUp(): void

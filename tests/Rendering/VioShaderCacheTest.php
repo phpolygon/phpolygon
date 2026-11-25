@@ -19,6 +19,7 @@ use PHPolygon\Rendering\VioRenderer3D;
  */
 #[RequiresPhpExtension('vio')]
 #[Group('native-gpu')]
+#[Group('gpu')]
 final class VioShaderCacheTest extends TestCase
 {
     public function testDefaultCachePathLivesNextToTheSaves(): void

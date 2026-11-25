@@ -17,6 +17,7 @@ use PHPolygon\Rendering\VioRenderer3D;
  */
 #[RequiresPhpExtension('vio')]
 #[Group('native-gpu')]
+#[Group('gpu')]
 final class VioShaderWarmProgressTest extends TestCase
 {
     public function testProgressCallsMatchTheTotal(): void

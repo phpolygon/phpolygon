@@ -34,6 +34,7 @@ use PHPolygon\Rendering\RenderCommandList;
  */
 #[RequiresPhpExtension('vio')]
 #[Group('native-gpu')]
+#[Group('gpu')]
 final class VioEngineFrameOrderTest extends TestCase
 {
     private const W = 320;

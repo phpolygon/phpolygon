@@ -6,9 +6,11 @@ namespace PHPolygon\Tests\System;
 
 use PHPolygon\Component\Swarm;
 use PHPolygon\System\SwarmSystem;
+use PHPUnit\Framework\Attributes\Group;
 use PHPUnit\Framework\TestCase;
 
 /** Shader plan 7.2: GPU flocks and schools, CPU steering as the reference. */
+#[Group('gpu')]
 final class SwarmSystemTest extends TestCase
 {
     public function testAgentsCircleTheirLoopAndStayFinite(): void

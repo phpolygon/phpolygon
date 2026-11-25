@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace PHPolygon\Tests\Rendering\Shader;
 
 use PHPolygon\Testing\Shader\HeadlessShaderHarness;
+use PHPUnit\Framework\Attributes\Group;
 use PHPUnit\Framework\Attributes\RequiresPhpExtension;
 use PHPUnit\Framework\TestCase;
 
@@ -23,6 +24,7 @@ use PHPUnit\Framework\TestCase;
  * context, or a backend without multiple render targets.
  */
 #[RequiresPhpExtension('vio')]
+#[Group('gpu')]
 class MrtMeshShaderHeadlessTest extends TestCase
 {
     /** 8-bit read-back of FP16 data: allow a few LSB per channel (+ rounding of a 3-term sum). */

@@ -23,6 +23,7 @@ use PHPUnit\Framework\TestCase;
  */
 #[RequiresPhpExtension('vio')]
 #[Group('native-gpu')]
+#[Group('gpu')]
 final class GpuParticleColorTest extends TestCase
 {
     private ?\VioContext $ctx = null;

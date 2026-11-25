@@ -21,6 +21,7 @@ use PHPolygon\Rendering\VioTextureManager;
  */
 #[RequiresPhpExtension('vio')]
 #[Group('native-gpu')]
+#[Group('gpu')]
 final class VioTextureManagerKtx2Test extends TestCase
 {
     private string $dir = '';

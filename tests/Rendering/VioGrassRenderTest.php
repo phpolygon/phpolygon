@@ -40,6 +40,7 @@ use PHPolygon\Vegetation\GrassTuftMesh;
  */
 #[RequiresPhpExtension('vio')]
 #[Group('native-gpu')]
+#[Group('gpu')]
 final class VioGrassRenderTest extends TestCase
 {
     private const int W = 96;

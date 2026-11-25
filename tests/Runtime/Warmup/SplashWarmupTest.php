@@ -18,6 +18,7 @@ use PHPUnit\Framework\TestCase;
  */
 #[RequiresPhpExtension('vio')]
 #[Group('native-gpu')]
+#[Group('gpu')]
 final class SplashWarmupTest extends TestCase
 {
     #[RunInSeparateProcess]

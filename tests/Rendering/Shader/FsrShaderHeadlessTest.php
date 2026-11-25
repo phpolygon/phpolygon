@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace PHPolygon\Tests\Rendering\Shader;
 
 use PHPolygon\Testing\Shader\HeadlessShaderHarness;
+use PHPUnit\Framework\Attributes\Group;
 use PHPUnit\Framework\Attributes\RequiresPhpExtension;
 use PHPUnit\Framework\TestCase;
 
@@ -15,6 +16,7 @@ use PHPUnit\Framework\TestCase;
  * orientation of the read-back.
  */
 #[RequiresPhpExtension('vio')]
+#[Group('gpu')]
 final class FsrShaderHeadlessTest extends TestCase
 {
     private const float DARK = 0.2;

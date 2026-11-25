@@ -39,6 +39,7 @@ use PHPolygon\Rendering\VioRenderer3D;
  * corner offsets in floats), D3D12 RTX 2080 60 / 0, D3D12 UHD 630 0 / 0, D3D11 both 0 / 0 with
  * the plain and the pinned frame byte for byte the same.
  */
+#[Group('gpu')]
 final class VioPreciseHashTest extends TestCase
 {
     private const SIZE = 128;

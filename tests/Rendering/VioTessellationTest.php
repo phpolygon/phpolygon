@@ -35,6 +35,7 @@ use PHPolygon\Rendering\VioRenderer3D;
  */
 #[RequiresPhpExtension('vio')]
 #[Group('native-gpu')]
+#[Group('gpu')]
 final class VioTessellationTest extends TestCase
 {
     public function testTessellationBringsTheWavesToACoarseSurface(): void

@@ -31,6 +31,7 @@ use PHPolygon\Rendering\VioRenderer3D;
  * fields; a surface with Material::$oceanTexture is displaced and shaded by it - it
  * moves over time and repeats exactly after one loop.
  */
+#[Group('gpu')]
 final class VioOceanTest extends TestCase
 {
     public function testTheBakedSequenceLoopsAndTiles(): void

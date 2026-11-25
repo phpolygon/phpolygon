@@ -7,6 +7,7 @@ namespace PHPolygon\Tests\Rendering;
 use PHPolygon\Rendering\Color;
 use PHPolygon\Rendering\TextAlign;
 use PHPolygon\Rendering\VioRenderer2D;
+use PHPUnit\Framework\Attributes\Group;
 use PHPUnit\Framework\TestCase;
 
 /**
@@ -21,6 +22,7 @@ use PHPUnit\Framework\TestCase;
  *
  * Needs a live (hidden) vio context, a system font and vio_save_screenshot().
  */
+#[Group('gpu')]
 final class VioRenderer2DBaselineTest extends TestCase
 {
     private const FONT_CANDIDATES = [

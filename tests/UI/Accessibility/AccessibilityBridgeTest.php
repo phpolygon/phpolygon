@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace PHPolygon\Tests\UI\Accessibility;
 
+use PHPUnit\Framework\Attributes\Group;
 use PHPUnit\Framework\TestCase;
 use PHPolygon\Testing\RecordingAccessibilitySink;
 use PHPolygon\Math\Rect;
@@ -23,6 +24,7 @@ use PHPolygon\UI\Widget\VBox;
 use PHPolygon\UI\Widget\Widget;
 use PHPolygon\UI\Widget\WidgetTree;
 
+#[Group('gpu')]
 class AccessibilityBridgeTest extends TestCase
 {
     private RecordingAccessibilitySink $sink;

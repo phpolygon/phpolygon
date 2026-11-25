@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace PHPolygon\Tests\Rendering;
 
+use PHPUnit\Framework\Attributes\Group;
 use PHPUnit\Framework\TestCase;
 use PHPolygon\Geometry\BoxMesh;
 use PHPolygon\Geometry\MeshRegistry;
@@ -30,6 +31,7 @@ use PHPolygon\Rendering\VioRenderer3D;
  * path no registered material needs; each path can be left out alone and still
  * compiles and draws; a material registered later brings its path back.
  */
+#[Group('gpu')]
 final class VioAutomaticOmissionTest extends TestCase
 {
     private const W = 64;

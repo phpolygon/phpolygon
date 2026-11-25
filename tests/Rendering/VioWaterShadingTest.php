@@ -40,6 +40,7 @@ use PHPolygon\Terrain\CoastTexture;
  */
 #[RequiresPhpExtension('vio')]
 #[Group('native-gpu')]
+#[Group('gpu')]
 final class VioWaterShadingTest extends TestCase
 {
     private const SIZE = 64;

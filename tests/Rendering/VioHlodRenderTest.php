@@ -32,6 +32,7 @@ use PHPolygon\Rendering\VioRenderer3D;
  */
 #[RequiresPhpExtension('vio')]
 #[Group('native-gpu')]
+#[Group('gpu')]
 final class VioHlodRenderTest extends TestCase
 {
     public function testTheProxiesLookLikeTheBlockFromAfar(): void

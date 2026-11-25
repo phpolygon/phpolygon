@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace PHPolygon\Tests\Thread;
 
+use PHPUnit\Framework\Attributes\Group;
 use PHPUnit\Framework\TestCase;
 use PHPolygon\ECS\World;
 use PHPolygon\Log\Log;
@@ -25,6 +26,7 @@ use PHPolygon\Thread\ThreadScheduler;
  * configuration where {@see ThreadScheduler} (rather than its single-threaded
  * fallback {@see NullThreadScheduler}) is used at all.
  */
+#[Group('timing')]
 class ThreadSchedulerHardeningTest extends TestCase
 {
     /**

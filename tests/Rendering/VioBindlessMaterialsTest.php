@@ -33,6 +33,7 @@ use PHPolygon\Rendering\VioTextureManager;
  */
 #[RequiresPhpExtension('vio')]
 #[Group('native-gpu')]
+#[Group('gpu')]
 final class VioBindlessMaterialsTest extends TestCase
 {
     private const W = 96;

@@ -22,6 +22,7 @@ use PHPolygon\UI\UIScale;
  */
 #[RequiresPhpExtension('vio')]
 #[Group('native-gpu')]
+#[Group('gpu')]
 final class VioRenderer2DSdfFontTest extends TestCase
 {
     private const W = 256;

@@ -50,6 +50,7 @@ use PHPolygon\Rendering\VioRenderer3D;
  */
 #[RequiresPhpExtension('vio')]
 #[Group('native-gpu')]
+#[Group('gpu')]
 final class VioMrtEarlyReturnAlphaTest extends TestCase
 {
     private const W = 96;

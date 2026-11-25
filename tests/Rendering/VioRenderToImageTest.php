@@ -34,6 +34,7 @@ use PHPolygon\Rendering\VioRenderer3D;
  */
 #[RequiresPhpExtension('vio')]
 #[Group('native-gpu')]
+#[Group('gpu')]
 class VioRenderToImageTest extends TestCase
 {
     protected function setUp(): void

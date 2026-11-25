@@ -32,6 +32,7 @@ use PHPolygon\Rendering\VioRenderer3D;
  */
 #[RequiresPhpExtension('vio')]
 #[Group('native-gpu')]
+#[Group('gpu')]
 final class VioAgingTest extends TestCase
 {
     private const SIZE = 64;

@@ -31,6 +31,7 @@ use PHPUnit\Framework\TestCase;
  */
 #[RequiresPhpExtension('vio')]
 #[Group('native-gpu')]
+#[Group('gpu')]
 final class ParticleSystemGpuTest extends TestCase
 {
     private const MESH = 'gpu_particle_test_quad';

@@ -10,10 +10,26 @@ use PHPolygon\Log\LogLevel;
 
 final class LogTest extends TestCase
 {
+    private string $logDir = '';
+
+    protected function setUp(): void
+    {
+        parent::setUp();
+        // A directory of its own per test: parallel test processes must not share one game.log.
+        $this->logDir = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'phpolygon-logtest-' . bin2hex(random_bytes(6));
+        mkdir($this->logDir, 0777, true);
+        Log::reset();
+        Log::setPath($this->logDir . DIRECTORY_SEPARATOR . 'game.log');
+    }
+
     protected function tearDown(): void
     {
         Log::reset();
         Log::setPath(null);
+        foreach (glob($this->logDir . DIRECTORY_SEPARATOR . '*') ?: [] as $file) {
+            @unlink($file);
+        }
+        @rmdir($this->logDir);
         parent::tearDown();
     }
 

@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace PHPolygon\Tests\Runtime;
 
 use PHPUnit\Framework\Attributes\DataProvider;
+use PHPUnit\Framework\Attributes\Group;
 use PHPUnit\Framework\Attributes\RequiresPhpExtension;
 use PHPUnit\Framework\TestCase;
 use PHPolygon\Engine;
@@ -19,6 +20,7 @@ use PHPolygon\Runtime\VioMainWindow;
  * hardware GPU unless the software adapter is asked for: php-vio puts a
  * headless D3D context on WARP otherwise (seconds per frame, no upscalers).
  */
+#[Group('gpu')]
 final class OffscreenWindowTest extends TestCase
 {
     private const SOFTWARE_ADAPTER = 'Microsoft Basic Render Driver';

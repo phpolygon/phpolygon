@@ -35,6 +35,7 @@ use PHPolygon\Rendering\VioTextureManager;
  */
 #[RequiresPhpExtension('vio')]
 #[Group('native-gpu')]
+#[Group('gpu')]
 final class VioMaterialTextureFilterTest extends TestCase
 {
     private const W = 192;

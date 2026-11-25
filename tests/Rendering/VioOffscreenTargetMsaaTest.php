@@ -22,6 +22,7 @@ use PHPolygon\Rendering\VioOffscreenTarget;
  */
 #[RequiresPhpExtension('vio')]
 #[Group('native-gpu')]
+#[Group('gpu')]
 final class VioOffscreenTargetMsaaTest extends TestCase
 {
     private const S = 64;

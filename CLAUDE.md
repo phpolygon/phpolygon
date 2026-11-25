@@ -4349,6 +4349,30 @@ class MyGameTest extends TestCase {
 than pixel-comparing (no GPU in CI). Update snapshots with
 `PHPOLYGON_UPDATE_SNAPSHOTS=1 vendor/bin/phpunit`.
 
+### Running the tests
+
+`scripts/test.ps1` (Windows) / `scripts/test.sh` (POSIX) run the whole suite in two parts and
+return one exit code: first everything except the groups `gpu` and `timing` in parallel with
+ParaTest (default 6 processes), then those two groups serially with PHPUnit.
+
+```
+scripts/test.ps1                              # full run
+scripts/test.ps1 -Processes 4 -Filter Geometry
+scripts/test.ps1 -NoGpu                       # without the serial gpu group
+PROCESSES=4 FILTER=Geometry scripts/test.sh   # POSIX
+```
+
+- `#[Group('gpu')]` – every test class that opens a vio context or a window (one GPU: serial; the
+  D3D12 exact-hash tests stay as they are). New render tests get the group, plain `vendor/bin/phpunit`
+  still runs everything.
+- `#[Group('timing')]` – tests with wall-clock limits or child-process liveness; they fail under full
+  CPU load (16 processes broke them). Tag a new test of that kind the same way.
+- `native-gpu` and `font-vrt` keep their meaning (pixel baselines of the target GPU, FreeType snapshots).
+- Parallel safety: no fixed file, port or temp path shared between tests (use `sys_get_temp_dir()` plus a
+  random suffix, as `LogTest` does) and no helper class that lives in another test's file (autoload it
+  from its own file under `tests/`). A test that cannot follow that goes into a serial group.
+- CI still calls `vendor/bin/phpunit` directly: the workflows were not switched to ParaTest.
+
 ### Anti-patterns
 
 - **Do not** add VRT tests for legitimately animated content. Mask the

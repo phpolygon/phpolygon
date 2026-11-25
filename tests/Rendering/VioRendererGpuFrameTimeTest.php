@@ -29,6 +29,7 @@ use PHPolygon\Runtime\PerfProfiler;
  */
 #[RequiresPhpExtension('vio')]
 #[Group('native-gpu')]
+#[Group('gpu')]
 final class VioRendererGpuFrameTimeTest extends TestCase
 {
     protected function tearDown(): void
