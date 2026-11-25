@@ -2080,6 +2080,13 @@ upper half `b >= bands / 2`) with smooth gradient normals: `point`, `normal`, `p
 `PrismClip` hole out of the upper half only. `DiscMesh::generate(cx, cz, radius, segments, top,
 bottom, hole)` is a thick regular disc with an optional prism hole (first vertex towards -Z).
 The frame direction is normalised on construction.
+`CircularHole(centreX, centreZ, radius, sides = 24)` is the round counterpart of `PrismClip` (regular
+n-gon, vertical axis, corner k at angle 2 pi k / sides from +X towards +Z): `outside(poly)` → convex
+wedge pieces (piece k = beyond side k inside the wedge between the rays through its two corners, so
+neighbours share a whole ray and the rim has no T-junction; a polygon that does not reach the circle
+comes back whole), `contains(x, z)`, `reaches(poly)`, `cutMesh(MeshData)` (untouched triangles are copied,
+cut ones become flat pieces with the triangles' mean vertex normal) and `addWall(acc, y0, y1)` (the
+rim wall facing the axis, to keep a cut plate closed). Another axis: swizzle the coordinates.
 **Ground-following surfaces — `ConformingSurfaceSet` / `ConformingRegionMesh`.** Paths,
 plazas, yards, borders and inlays that lie ON a terrain (no floating slab, no slab edge seen
 from the side, no gap at joints). `RegionShape` gives outlines as signed distance fields
