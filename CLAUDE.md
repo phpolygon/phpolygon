@@ -1931,7 +1931,9 @@ $player->start();
   sight, camera/anchor checks). Tests mesh colliders and boxes (rotated ones
   exactly, via their triangles) against the data `Physics3DSystem` already
   caches on them (`MeshCollider3D::$bvh`, `BoxCollider3D::$cachedWorldAabb` /
-  `$bvh` / `$cachedRotated`) — it never transforms or rebuilds anything.
+  `$bvh` / `$cachedRotated`) — it never transforms or rebuilds anything (a turned box's 12-triangle tree is built by
+  `BoxCollider3D::worldBvh()` on first use, a deferred mesh BVH on first reach). Boxes come from the `BoxColliderIndex` grid
+  when the world has a physics system (see "Box-collider index").
   Triggers never block, a box containing `$from` does not block, touching a
   surface counts, heightmaps are ignored, and a collider the physics system has
   not processed yet is invisible to it.
@@ -2059,7 +2061,17 @@ footprint touching an XZ rectangle), and so does every `StepAssist` probe.
   103-105 us -> 20-22 us (2026-11-26, PHP 8.5.12, no GPU, 3 runs, 2,000 turned boxes moved 10 times each; at
   8,500 boxes with 8 % turned `benchmarks/scenarios/BoxColliderQueries.php` gives 20.7-23.0 us). Read it through
   `worldBvh()`, not `BoxCollider3D::$bvh` (null until asked).
-  `Raycaster3D::segmentBlocked()` still walks the whole box pool per call (1.6 ms at 8,500 boxes, 2026-11-25).
+- **Line of sight uses the index:** `Raycaster3D::segmentBlocked()` finds the index of the world's physics system itself
+  (`BoxColliderIndex::forWorld()`, a weak per-world registration made when the index binds; or pass one as the 4th
+  argument) and asks `segmentCandidates($from, $to)`: the boxes in the grid cells the segment passes through, plus
+  the oversized ones. The tests are the same caches as before (`cachedWorldAabb`, `worldBvh()`), so the answer is
+  identical (`Raycaster3DSegmentBlockedTest` compares it with the full scan on random fields, mutation-checked).
+  The pool is walked as before when no index exists, when it is the `broadphase: false` one, or while it is behind
+  the world (`isCurrentFor()`: an entity went dormant or woke since its last sync). Measured (2026-11-26, PHP 8.5.12,
+  no GPU, 3 runs, `benchmarks/scenarios/BoxColliderQueries.php`, 8,500 boxes, 8 % turned, 2,000 camera-length segments,
+  1,122 blocked either way): 1.22-1.53 ms -> 0.014-0.017 ms per `segmentBlocked()`.
+- **Not covered:** `MeshCollider3D`s are still collected per tick (one matrix-identity check each); mesh colliders in
+  `segmentBlocked()` are still all asked (a root-bounds miss each, 214 of them cost little).
 - **Measured** (2026-11-25, PHP 8.5.12 CLI, `benchmarks/physics-static-colliders.php`, 8,500 boxes, 8 % turned,
   1 walking + 1 standing character, 3 runs each, no GPU): tick 7.6-8.6 ms -> 0.045 ms
   (`physics.collect` 2.9-3.2 ms -> 0.001 ms, `physics.resolve` 4.4-5.1 ms -> 0.04 ms); one tick flipping

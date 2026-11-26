@@ -13,7 +13,9 @@ use PHPolygon\Geometry\BoxMesh;
 use PHPolygon\Geometry\MeshRegistry;
 use PHPolygon\Math\Quaternion;
 use PHPolygon\Math\Vec3;
+use PHPolygon\Physics\BoxColliderIndex;
 use PHPolygon\Physics\BVH;
+use PHPolygon\Physics\CollisionMath;
 use PHPolygon\Physics\Raycaster3D;
 use PHPolygon\Physics\Triangle;
 use PHPolygon\System\Physics3DSystem;
@@ -104,6 +106,134 @@ class Raycaster3DSegmentBlockedTest extends TestCase
         $e->attach(new BoxCollider3D(new Vec3(2, 2, 1)));
 
         self::assertFalse($this->raycaster->segmentBlocked($world, new Vec3(0, 1.5, 0), new Vec3(0, 1.5, -4)));
+    }
+
+    /** @return array{World, list<int>} a field of aligned, turned, trigger and oversized boxes, with the physics system's caches built */
+    private function boxField(int $count, int $seed): array
+    {
+        mt_srand($seed);
+        $world = new World();
+        $world->addSystem(new Physics3DSystem(groundPlaneY: -1000.0));
+        $ids = [];
+        for ($i = 0; $i < $count; $i++) {
+            $e = $world->createEntity();
+            $kind = mt_rand(0, 99);
+            $rotation = $kind < 30 ? Quaternion::fromEuler(mt_rand(0, 100) / 200, mt_rand(0, 314) / 100, mt_rand(0, 100) / 200) : Quaternion::identity();
+            $size = $kind >= 97 ? new Vec3(120.0, 0.5, 90.0) : new Vec3(mt_rand(5, 60) / 10, mt_rand(5, 40) / 10, mt_rand(5, 60) / 10);
+            $e->attach(new Transform3D(new Vec3(mt_rand(-600, 600) / 10, mt_rand(0, 40) / 10, mt_rand(-600, 600) / 10), $rotation));
+            $e->attach(new BoxCollider3D($size, isTrigger: $kind % 11 === 0));
+            $ids[] = $e->id;
+        }
+        $world->update(1 / 60);
+
+        return [$world, $ids];
+    }
+
+    /** @return list<array{Vec3, Vec3}> */
+    private function segments(int $count, int $seed): array
+    {
+        mt_srand($seed);
+        $out = [];
+        for ($k = 0; $k < $count; $k++) {
+            $from = new Vec3(mt_rand(-700, 700) / 10, mt_rand(-10, 60) / 10, mt_rand(-700, 700) / 10);
+            $len = $k % 7 === 0 ? mt_rand(400, 1500) / 10 : mt_rand(0, 120) / 10;
+            $angle = mt_rand(0, 6283) / 1000;
+            $to = match ($k % 5) {
+                0 => new Vec3($from->x, $from->y + $len, $from->z),                  // straight up
+                1 => $from,                                                          // a point
+                2 => new Vec3($from->x + $len, $from->y, $from->z),                  // along x
+                default => new Vec3($from->x + cos($angle) * $len, $from->y + mt_rand(-30, 30) / 10, $from->z + sin($angle) * $len),
+            };
+            $out[] = [$from, $to];
+        }
+
+        return $out;
+    }
+
+    public function testIndexedAnswersEqualTheFullScanOnRandomFields(): void
+    {
+        $brute = new BoxColliderIndex(broadphase: false);   // not usable by segmentBlocked: it walks the pool
+        $blocked = 0;
+        $total = 0;
+        foreach ([[300, 1], [800, 2], [50, 3]] as [$count, $seed]) {
+            [$world] = $this->boxField($count, $seed);
+            self::assertInstanceOf(BoxColliderIndex::class, BoxColliderIndex::forWorld($world), 'the physics system registered its index');
+            foreach ($this->segments(400, $seed + 50) as [$from, $to]) {
+                $expected = $this->raycaster->segmentBlocked($world, $from, $to, $brute);
+                $actual = $this->raycaster->segmentBlocked($world, $from, $to);
+                self::assertSame($expected, $actual, sprintf('field %d, segment (%.2f %.2f %.2f) -> (%.2f %.2f %.2f)', $count, $from->x, $from->y, $from->z, $to->x, $to->y, $to->z));
+                $blocked += $actual ? 1 : 0;
+                $total++;
+            }
+        }
+        self::assertGreaterThan($total * 0.1, $blocked, 'enough segments hit something for the comparison to mean anything');
+        self::assertLessThan($total * 0.95, $blocked, 'and enough pass for it to mean something too');
+    }
+
+    public function testSegmentCandidatesContainEveryBoxTheSegmentCrosses(): void
+    {
+        [$world, $ids] = $this->boxField(500, 7);
+        $index = BoxColliderIndex::forWorld($world);
+        self::assertNotNull($index);
+        foreach ($this->segments(300, 8) as [$from, $to]) {
+            $found = [];
+            foreach ($index->segmentCandidates($from, $to) as $entry) {
+                $found[$entry['entityId']] = true;
+            }
+            foreach ($ids as $id) {
+                $box = $world->getComponent($id, BoxCollider3D::class);
+                $aabb = $box->cachedWorldAabb;
+                if ($box->isTrigger || $aabb === null) {
+                    continue;
+                }
+                if (CollisionMath::segmentIntersectsAabb($from, $to, $aabb['min'], $aabb['max'])) {
+                    self::assertArrayHasKey($id, $found, 'a box the segment passes through is a candidate');
+                }
+            }
+        }
+    }
+
+    public function testDormancyBetweenTicksFallsBackToTheScan(): void
+    {
+        [$world, $ids] = $this->boxField(200, 4);
+        $brute = new BoxColliderIndex(broadphase: false);
+        $index = BoxColliderIndex::forWorld($world);
+        self::assertNotNull($index);
+        self::assertTrue($index->isCurrentFor($world));
+
+        foreach (array_slice($ids, 0, 60) as $id) {
+            $world->setEntityDormant($id, true);
+        }
+        self::assertFalse($index->isCurrentFor($world), 'the index is behind until the next tick');
+        foreach ($this->segments(200, 9) as [$from, $to]) {
+            self::assertSame(
+                $this->raycaster->segmentBlocked($world, $from, $to, $brute),
+                $this->raycaster->segmentBlocked($world, $from, $to),
+            );
+        }
+        $world->update(1 / 60);
+        self::assertTrue($index->isCurrentFor($world));
+        foreach ($this->segments(200, 10) as [$from, $to]) {
+            self::assertSame(
+                $this->raycaster->segmentBlocked($world, $from, $to, $brute),
+                $this->raycaster->segmentBlocked($world, $from, $to),
+            );
+        }
+    }
+
+    public function testNoIndexMeansTheOldScan(): void
+    {
+        $world = new World();
+        $e = $world->createEntity();
+        $e->attach(new Transform3D(new Vec3(0, 1.5, -2)));
+        $box = new BoxCollider3D(new Vec3(2, 2, 1));
+        $e->attach($box);
+        $box = $e->get(BoxCollider3D::class);
+        $box->cachedWorldAabb = $box->getWorldAABB($e->get(Transform3D::class)->getWorldMatrix());
+
+        self::assertNull(BoxColliderIndex::forWorld($world));
+        self::assertTrue($this->raycaster->segmentBlocked($world, new Vec3(0, 1.5, 0), new Vec3(0, 1.5, -4)));
+        self::assertTrue($this->raycaster->segmentBlocked($world, new Vec3(0, 1.5, 0), new Vec3(0, 1.5, -4), new BoxColliderIndex()), 'an index that never saw the world is not consulted');
     }
 
     public function testMovedTurnedBoxDropsItsBvhAndBlocksAtTheNewPlace(): void
