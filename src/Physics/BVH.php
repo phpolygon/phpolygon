@@ -40,8 +40,16 @@ class BVH
     /** Bytes per triangle in {@see $packed}: nine doubles. */
     private const int TRIANGLE_BYTES = 72;
 
-    /** Materialized Triangle objects kept at most; the cache is dropped as a whole when it is full. */
-    private const int CACHE_LIMIT = 65536;
+    /**
+     * Materialized Triangle objects kept at most, summed over ALL trees (about 600 B each, so ~12 MB): when the
+     * budget is spent (checked at the start of a query) every tree empties its cache.
+     */
+    private const int CACHE_LIMIT = 20000;
+
+    private static int $cachedTotal = 0;
+
+    /** @var array<int, \WeakReference<self>> trees that hold cached triangles */
+    private static array $holders = [];
 
     /** @var array<int, float> min x, y, z and max x, y, z per node */
     private array $bounds = [];
@@ -254,8 +262,15 @@ class BVH
         $bounds = $this->bounds;
         $left = $this->left;
         $right = $this->right;
-        if (count($this->cache) > self::CACHE_LIMIT) {
-            $this->cache = [];
+        if (self::$cachedTotal > self::CACHE_LIMIT) {
+            foreach (self::$holders as $holder) {
+                $tree = $holder->get();
+                if ($tree !== null) {
+                    $tree->cache = [];
+                }
+            }
+            self::$holders = [];
+            self::$cachedTotal = 0;
         }
 
         $minX = $queryMin->x;
@@ -306,6 +321,11 @@ class BVH
     {
         /** @var array<int, float> $d */
         $d = unpack('d9', $this->packed, $slot * self::TRIANGLE_BYTES);
+
+        self::$cachedTotal++;
+        if ($this->cache === []) {
+            self::$holders[spl_object_id($this)] = \WeakReference::create($this);
+        }
 
         return $this->cache[$slot] = new Triangle(
             new Vec3($d[1], $d[2], $d[3]),

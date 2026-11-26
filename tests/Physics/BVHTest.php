@@ -363,6 +363,23 @@ class BVHTest extends TestCase
         $this->assertTrue($bvh->isBuilt());
     }
 
+    public function testTriangleCacheBudgetIsGlobalAndResultsSurviveAFlush(): void
+    {
+        $trees = [];
+        for ($i = 0; $i < 4; $i++) {
+            $trees[] = BVH::build(self::soup(9000, 30 + $i));
+        }
+        $min = new Vec3(-100, -20, -100);
+        $max = new Vec3(100, 20, 100);
+        $expected = array_map(fn (BVH $t): array => array_map(self::corners(...), $t->query($min, $max)), $trees);
+        // 36,000 objects were made, over the 20,000 budget: the next queries start a new generation.
+        for ($round = 0; $round < 3; $round++) {
+            foreach ($trees as $i => $tree) {
+                $this->assertSame($expected[$i], array_map(self::corners(...), $tree->query($min, $max)), "tree {$i}, round {$round}");
+            }
+        }
+    }
+
     public function testTheSameTriangleComesBackAsTheSameObject(): void
     {
         $bvh = BVH::build(self::soup(100, 8));

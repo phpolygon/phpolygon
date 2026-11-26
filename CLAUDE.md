@@ -126,7 +126,7 @@ Persistent tracking uses the names `materializeAndRelease()` collects. `SceneBui
 for a builder materialized by hand. The components are still cloned (a component object a scene kept is not the
 one in the world; skipping the clone changed no measured number). `benchmarks/scenarios/SceneLoadMemory.php`
 (90,000 entities, Transform3D + MeshRenderer + BoxCollider3D, every tenth with a child; PHP 8.5.12, 2026-11-26):
-peak +434.8 -> +354.8 MB, heap during `onLoad` +433.4 -> +327.5 MB (the rest is the World itself).
+peak +434.8 -> +331.6 MB, heap during `onLoad` +433.4 -> +327.6 MB (3 runs each, progressive and sync, identical) (the rest is the World itself).
 
 ### Render interface: Layered
 - `RenderContextInterface` — base: `beginFrame()`, `endFrame()`, `clear()`,
@@ -2085,8 +2085,8 @@ triangles as ONE packed string (nine doubles each, leaf order) instead of an obj
 (`Triangle` + 3 `Vec3` + normal = ~600 B). `query()` still returns `Triangle` objects: made on first use from the
 packed doubles (the exact values that went in, so every downstream answer is identical to the old tree; the tests
 compare against a copy of the old class, `tests/Physics/Fixtures/LegacyBvh.php`, for the returned triangles in
-order, segment and capsule tests) and kept in a cache of at most 65,536 objects (dropped as a whole when full, at the
-start of a query; `StepAssist` therefore compares the tread triangle by value, not identity). The build passes id lists
+order, segment and capsule tests) and kept in a cache whose budget is 20,000 objects (~12 MB) summed over ALL trees
+(when it is spent, every tree drops its cache at its next query); `StepAssist` therefore compares the tread triangle by value, not identity). The build passes id lists
 down the recursion instead of splicing one big array: O(n log n) (the old in-place reorder was quadratic: 200k triangles
 took 47-65 s).
 
