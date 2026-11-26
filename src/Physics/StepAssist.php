@@ -512,7 +512,12 @@ final class StepAssist
                 continue;
             }
             foreach ($mesh['bvh']->query($min, $max) as $triangle) {
-                if ($triangle === $treadTriangle) {
+                // The tread itself, by value: a BVH hands out the same triangle as a new object once its cache was dropped.
+                if ($triangle === $treadTriangle || (
+                    $triangle->v0->x === $treadTriangle->v0->x && $triangle->v0->y === $treadTriangle->v0->y && $triangle->v0->z === $treadTriangle->v0->z
+                    && $triangle->v1->x === $treadTriangle->v1->x && $triangle->v1->y === $treadTriangle->v1->y && $triangle->v1->z === $treadTriangle->v1->z
+                    && $triangle->v2->x === $treadTriangle->v2->x && $triangle->v2->y === $treadTriangle->v2->y && $triangle->v2->z === $treadTriangle->v2->z
+                )) {
                     continue;
                 }
                 $y = self::heightOver($triangle, $x, $z);

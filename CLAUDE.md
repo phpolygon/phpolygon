@@ -2061,6 +2061,35 @@ footprint touching an XZ rectangle), and so does every `StepAssist` probe.
   1,500 colliders to solid 46-60 ms -> 0.06-0.12 ms; first tick 150-270 ms -> 185-205 ms (it now also builds
   the caches of the 1,500 triggers). With 40 % turned boxes the flip took 83-87 ms before and 0.06 ms after.
 
+### Collider BVH – packed triangles, lazy build
+
+`Physics\BVH` (`BVHTest`, `Physics3DLazyMeshBvhTest`, bench `benchmarks/scenarios/BvhMemory.php`) keeps its
+triangles as ONE packed string (nine doubles each, leaf order) instead of an object graph per triangle
+(`Triangle` + 3 `Vec3` + normal = ~600 B). `query()` still returns `Triangle` objects: made on first use from the
+packed doubles (the exact values that went in, so every downstream answer is identical to the old tree; the tests
+compare against a copy of the old class, `tests/Physics/Fixtures/LegacyBvh.php`, for the returned triangles in
+order, segment and capsule tests) and kept in a cache of at most 65,536 objects (dropped as a whole when full, at the
+start of a query; `StepAssist` therefore compares the tread triangle by value, not identity). The build passes id lists
+down the recursion instead of splicing one big array: O(n log n) (the old in-place reorder was quadratic: 200k triangles
+took 47-65 s).
+
+- **`BVH::fromMesh($vertices, $indices, ?Mat4 $world = null, bool $dropDegenerate = false)`** builds straight from
+  `MeshData` arrays; with `$world` each vertex is moved once, with `$dropDegenerate` flat triangles are left out (what
+  `Triangle::isDegenerate()` said). `Physics3DSystem` builds mesh colliders this way (no Triangle list in between).
+  `BVH::build(Triangle[])` is unchanged for callers.
+- **`new Physics3DSystem(lazyMeshBvh: true)`** (default false: build in the first tick, as before): a `MeshCollider3D`
+  gets `BVH::deferred()` – the world AABB of the mesh's local bounds, padded – and builds its tree the first time a
+  query reaches that box. A collider nobody comes near costs one bounds pass over its vertices and nothing else
+  (`BVH::isBuilt()` tells). Query results are identical; the build moves to the first approach, one collider at a
+  time (a collider of 2,600 triangles builds in ~12 ms). `Raycaster3D::segmentBlocked()` builds a deferred tree when
+  its segment reaches it.
+- **Measured** (2026-11-26, PHP 8.5.12 CLI, no GPU, 2 runs each): 167 mesh colliders of 2,592 triangles (432,864 in
+  total): old tree build 5.05 s, retained 279.3 MB (677 B/triangle); packed tree 2.0 s, 58.3 MB (141 B/triangle), peak
+  during the build 59.1 MB (old 280.2 MB). One mesh of 200,978 triangles: old 47-65 s / 637 B per triangle retained,
+  packed 1.9-2.0 s / 136 B (`BvhMemory.php 200000 mesh`). 423,200 triangles in one mesh: 3.4-4.0 s, 139 B/triangle.
+  The first 200 character-sized queries on a fresh tree cost 22-37 ms in total (objects made on first touch) against
+  2.3-5.9 ms with the old always-resident objects; repeated queries hit the cache.
+
 ### Procedural geometry — code-driven worlds
 
 **PHPolygon does not use external 3D model files.** All geometry is generated

@@ -171,15 +171,16 @@ class SceneBuilder
     public function materializeAndRelease(World $world, array &$persistentNames = []): array
     {
         $map = [];
-        foreach ($this->declarations as $i => $decl) {
+        // Popped from the end of a reversed copy: each declaration is let go of as it is done, in declaration order.
+        $pending = array_reverse($this->declarations);
+        $this->declarations = [];
+        while (($decl = array_pop($pending)) !== null) {
             $this->materializeDeclaration($decl, $world, null, $map);
             if ($decl->isPersistent()) {
                 $persistentNames[$decl->getName()] = true;
             }
             $decl->dispose();
-            unset($this->declarations[$i]);
         }
-        $this->declarations = [];
 
         return $map;
     }
