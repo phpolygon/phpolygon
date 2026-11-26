@@ -52,11 +52,25 @@ const vec3 KERNEL_SAMPLES[16] = vec3[](
     vec3( 0.2789, -0.4427,  0.6512), vec3(-0.1971,  0.7036,  0.5063)
 );
 
-// Per-pixel rotation noise: a tiled pseudo-random tangent-plane vector. Derived
-// from UV so it needs no noise texture (and adds no sampler to the SRV table).
+// Per-pixel rotation noise: a tangent-plane vector from a 4x4 ordered-dither tile
+// (16 evenly spaced angles, every texel its own). Derived from UV so it needs no
+// noise texture (and adds no sampler to the SRV table). u_noise_scale is the
+// resolution / 4, so uv * scale * 4 is the texel coordinate. The blur averages an
+// aligned 4x4 window, which then holds each of the 16 rotations exactly once and
+// cancels the rotation noise at its source. The earlier hash of floor(uv * scale)
+// gave ONE random angle per 4x4 block: a window saw at most four of them, and the
+// residue was a mottled seam along concave corners, where the kernel hits the
+// second wall.
+const int NOISE_TILE[16] = int[](
+     0,  8,  2, 10,
+    12,  4, 14,  6,
+     3, 11,  1,  9,
+    15,  7, 13,  5
+);
+
 vec3 rotationNoise(vec2 uv) {
-    vec2 p = uv * u_noise_scale;
-    float a = fract(sin(dot(floor(p), vec2(12.9898, 78.233))) * 43758.5453) * 6.2831853 + u_noise_angle;
+    ivec2 t = ivec2(floor(uv * u_noise_scale * 4.0)) & 3;
+    float a = float(NOISE_TILE[t.y * 4 + t.x]) * (6.2831853 / 16.0) + u_noise_angle;
     return vec3(cos(a), sin(a), 0.0);
 }
 
