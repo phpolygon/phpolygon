@@ -2027,7 +2027,7 @@ How `Physics3DSystem` moves a `CharacterController3D` (`Physics3DBoxCollisionTes
 
 `Physics3DSystem` no longer scans every `BoxCollider3D` each tick. `Physics\BoxColliderIndex`
 (`BoxColliderIndexTest`, bench `benchmarks/physics-static-colliders.php`) keeps the collision data of every
-box (aligned: AABB; turned: `OrientedBox`, plus the 12-triangle BVH for `Raycaster3D::segmentBlocked()`) and an
+box (aligned: AABB; turned: `OrientedBox`; the 12-triangle BVH for `Raycaster3D::segmentBlocked()` is built lazily by `BoxCollider3D::worldBvh()`, see below) and an
 XZ grid over it (cell 8 m, `BoxColliderIndex::CELL_SIZE`). Per tick `physics.collect` is `sync()`: drain
 the changes, nothing else. A character asks the index for the boxes near it (`boxesIn()` / `rotatedIn()`:
 footprint touching an XZ rectangle), and so does every `StepAssist` probe.
@@ -2041,7 +2041,7 @@ footprint touching an XZ rectangle), and so does every `StepAssist` probe.
   attach and a woken entity lands at the END of the pool.
 - **`isTrigger` is not a change.** Triggers stay in the index with their caches built; the flag is read per
   candidate at query time. Flipping 1,500 colliders between trigger and solid costs nothing and needs no
-  prewarm in a game. The price: the caches (and BVHs of turned boxes) of triggers are built in the first
+  prewarm in a game. The price: the caches of triggers are built in the first
   tick, not at the flip.
 - **Order is behaviour.** Resolution is sequential (each push moves the capsule for the next box), so queries
   return candidates in pool order (attach order, a woken entity last). The AABB loop in `resolveCharacters()`
@@ -2053,7 +2053,12 @@ footprint touching an XZ rectangle), and so does every `StepAssist` probe.
 - **`new Physics3DSystem(broadphase: false)`** makes every character test every box, in the same order: the
   behaviour before the index. For comparing results (the equivalence test runs random worlds both ways and
   asserts identical positions, velocities, `isGrounded` and `groundEntityId`) and for ruling the grid out.
-- **Not covered:** `MeshCollider3D`s are still collected per tick (one matrix-identity check each), and
+- **The BVH of a turned box is lazy:** `BoxCollider3D::worldBvh()` builds the 12-triangle tree from the world matrix
+  the caches were made from, on the first `segmentBlocked()` that reaches the box; a move drops it (`bvh = null`).
+  Only `Raycaster3D` reads it, so moving a turned box no longer pays for it: index sync per moved turned box
+  103-105 us -> 20-22 us (2026-11-26, PHP 8.5.12, no GPU, 3 runs, 2,000 turned boxes moved 10 times each; at
+  8,500 boxes with 8 % turned `benchmarks/scenarios/BoxColliderQueries.php` gives 20.7-23.0 us). Read it through
+  `worldBvh()`, not `BoxCollider3D::$bvh` (null until asked).
   `Raycaster3D::segmentBlocked()` still walks the whole box pool per call (1.6 ms at 8,500 boxes, 2026-11-25).
 - **Measured** (2026-11-25, PHP 8.5.12 CLI, `benchmarks/physics-static-colliders.php`, 8,500 boxes, 8 % turned,
   1 walking + 1 standing character, 3 runs each, no GPU): tick 7.6-8.6 ms -> 0.045 ms

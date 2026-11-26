@@ -78,8 +78,9 @@ class Raycaster3D
                 && $from->z >= $bMin->z && $from->z <= $bMax->z) {
                 continue;
             }
-            if ($box->cachedRotated && $box->bvh !== null) {
-                foreach ($box->bvh->query($min, $max) as $triangle) {
+            $boxBvh = $box->cachedRotated ? $box->worldBvh() : null;
+            if ($boxBvh !== null) {
+                foreach ($boxBvh->query($min, $max) as $triangle) {
                     if (CollisionMath::segmentIntersectsTriangle($from, $to, $triangle)) {
                         return true;
                     }

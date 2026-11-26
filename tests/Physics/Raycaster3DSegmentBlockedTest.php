@@ -106,6 +106,32 @@ class Raycaster3DSegmentBlockedTest extends TestCase
         self::assertFalse($this->raycaster->segmentBlocked($world, new Vec3(0, 1.5, 0), new Vec3(0, 1.5, -4)));
     }
 
+    public function testMovedTurnedBoxDropsItsBvhAndBlocksAtTheNewPlace(): void
+    {
+        $world = new World();
+        $world->addSystem(new Physics3DSystem(groundPlaneY: -1000.0));
+        $box = $world->createEntity();
+        $box->attach(new Transform3D(new Vec3(0, 1.5, -5), Quaternion::fromAxisAngle(new Vec3(0, 1, 0), M_PI / 4)));
+        $box->attach(new BoxCollider3D(new Vec3(3, 3, 1)));
+        $world->update(1 / 60);
+
+        $eye = new Vec3(0, 1.5, 0);
+        self::assertTrue($this->raycaster->segmentBlocked($world, $eye, new Vec3(0, 1.5, -10)));
+        $collider = $box->get(BoxCollider3D::class);
+        self::assertNotNull($collider->bvh);
+
+        // Move it 10 m to the side (a door, a platform): the stale tree must not answer for the old place.
+        $transform = $box->get(Transform3D::class);
+        $transform->position = new Vec3(10, 1.5, -5);
+        $transform->worldMatrix = $transform->getLocalMatrix();
+        $world->update(1 / 60);
+
+        self::assertNull($collider->bvh, 'a moved box drops its tree');
+        self::assertFalse($this->raycaster->segmentBlocked($world, $eye, new Vec3(0, 1.5, -10)), 'old place is free');
+        self::assertTrue($this->raycaster->segmentBlocked($world, new Vec3(10, 1.5, 0), new Vec3(10, 1.5, -10)), 'new place blocks');
+        self::assertNotNull($collider->bvh, 'rebuilt on that query');
+    }
+
     public function testReadsWhatPhysicsCachedAndRebuildsNothing(): void
     {
         $meshId = 'segment_test_mesh_' . bin2hex(random_bytes(4));
@@ -135,16 +161,17 @@ class Raycaster3DSegmentBlockedTest extends TestCase
         self::assertNotNull($alignedBox->cachedWorldAabb);
         self::assertFalse($alignedBox->cachedRotated);
         self::assertTrue($rotatedBox->cachedRotated);
-        self::assertNotNull($rotatedBox->bvh);
+        self::assertNull($rotatedBox->bvh, 'the 12-triangle BVH of a turned box is built by the first query, not by the tick');
         self::assertNotNull($wallMesh->bvh);
 
         $aabbBefore = $alignedBox->cachedWorldAabb;
-        $rotatedBvhBefore = $rotatedBox->bvh;
         $wallBvhBefore = $wallMesh->bvh;
 
         $eye = new Vec3(0, 1.5, 0);
         self::assertTrue($this->raycaster->segmentBlocked($world, $eye, new Vec3(10, 1.5, 0)), 'aligned box');
         self::assertTrue($this->raycaster->segmentBlocked($world, $eye, new Vec3(-10, 1.5, 0)), 'rotated box');
+        $rotatedBvhBefore = $rotatedBox->bvh;
+        self::assertNotNull($rotatedBvhBefore, 'built on first use');
         self::assertTrue($this->raycaster->segmentBlocked($world, $eye, new Vec3(0, 1.5, -10)), 'mesh wall');
         self::assertFalse($this->raycaster->segmentBlocked($world, $eye, new Vec3(0, 1.5, 10)), 'open side');
         // Inside the rotated box's AABB corner but outside the box itself: the

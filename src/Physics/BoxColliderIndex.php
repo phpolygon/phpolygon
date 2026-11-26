@@ -293,14 +293,17 @@ final class BoxColliderIndex
         $matrixChanged = $collider->lastWorldMatrixArr === null
             || !Physics3DSystem::matrixArrayEquals($worldMatrixArr, $collider->lastWorldMatrixArr);
 
+        // The 12-triangle BVH of a turned box only serves Raycaster3D::segmentBlocked(), so it is not built
+        // here: a moved box drops it, BoxCollider3D::worldBvh() builds it from lastWorldMatrix when asked.
         if ($isRotated) {
-            if ($matrixChanged || $collider->bvh === null || $collider->cachedWorldAabb === null || $collider->cachedOriented === null) {
-                $collider->bvh = BVH::build(self::boxToWorldTriangles($collider, $worldMatrix));
+            if ($matrixChanged || $collider->cachedWorldAabb === null || $collider->cachedOriented === null) {
+                $collider->bvh = null;
                 $collider->cachedWorldAabb = $collider->getWorldAABB($worldMatrix);
                 $collider->cachedOriented = OrientedBox::fromCollider($collider, $worldMatrix);
                 $collider->lastWorldMatrixArr = $worldMatrixArr;
             }
         } elseif ($matrixChanged || $collider->cachedWorldAabb === null) {
+            $collider->bvh = null;
             $collider->cachedWorldAabb = $collider->getWorldAABB($worldMatrix);
             $collider->lastWorldMatrixArr = $worldMatrixArr;
         }
@@ -451,57 +454,5 @@ final class BoxColliderIndex
         }
 
         return $out;
-    }
-
-    /**
-     * Convert a BoxCollider3D into 12 world-space triangles (6 faces x 2 tris).
-     *
-     * @return Triangle[]
-     */
-    private static function boxToWorldTriangles(BoxCollider3D $collider, Mat4 $worldMatrix): array
-    {
-        $hx = $collider->size->x * 0.5;
-        $hy = $collider->size->y * 0.5;
-        $hz = $collider->size->z * 0.5;
-        $off = $collider->offset;
-
-        // 8 corners in local space
-        $corners = [];
-        foreach ([[-1, 1], [1, 1], [1, -1], [-1, -1]] as [$sx, $sz]) {
-            foreach ([-1, 1] as $sy) {
-                $corners["{$sx}_{$sy}_{$sz}"] = $worldMatrix->transformPoint(new Vec3(
-                    $off->x + $sx * $hx,
-                    $off->y + $sy * $hy,
-                    $off->z + $sz * $hz,
-                ));
-            }
-        }
-
-        $c = static fn(int $sx, int $sy, int $sz): Vec3 => $corners["{$sx}_{$sy}_{$sz}"];
-
-        $triangles = [];
-        // 6 faces, each as 2 triangles, wound clockwise seen from outside: the
-        // normals point into the box. Only double-sided queries read them.
-        $faces = [
-            [$c(1, -1, 1), $c(1, 1, 1), $c(1, 1, -1), $c(1, -1, -1)],     // +X
-            [$c(-1, -1, -1), $c(-1, 1, -1), $c(-1, 1, 1), $c(-1, -1, 1)], // -X
-            [$c(-1, 1, 1), $c(-1, 1, -1), $c(1, 1, -1), $c(1, 1, 1)],     // +Y
-            [$c(-1, -1, -1), $c(-1, -1, 1), $c(1, -1, 1), $c(1, -1, -1)], // -Y
-            [$c(-1, -1, 1), $c(-1, 1, 1), $c(1, 1, 1), $c(1, -1, 1)],     // +Z
-            [$c(1, -1, -1), $c(1, 1, -1), $c(-1, 1, -1), $c(-1, -1, -1)], // -Z
-        ];
-
-        foreach ($faces as [$v0, $v1, $v2, $v3]) {
-            $t1 = new Triangle($v0, $v1, $v2);
-            $t2 = new Triangle($v0, $v2, $v3);
-            if (!$t1->isDegenerate()) {
-                $triangles[] = $t1;
-            }
-            if (!$t2->isDegenerate()) {
-                $triangles[] = $t2;
-            }
-        }
-
-        return $triangles;
     }
 }
