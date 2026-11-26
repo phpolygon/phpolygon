@@ -60,6 +60,14 @@ final class BoxColliderIndex
     private const int KIND_AABB = 0;
     private const int KIND_ROTATED = 1;
 
+    /**
+     * The index bound to each world (spl_object_id of the world => weak world, weak index), found by
+     * {@see forWorld()}. Weak on both sides: the physics system owns the index, the engine the world.
+     *
+     * @var array<int, array{\WeakReference<World>, \WeakReference<self>}>
+     */
+    private static array $byWorld = [];
+
     private ?World $world = null;
 
     /** World-matrix assignments and attach/detach since the last sync (entity ids). */
@@ -143,6 +151,118 @@ final class BoxColliderIndex
         return $found;
     }
 
+    /**
+     * Solid boxes (aligned and turned) whose grid cells the segment from → to passes through (cells
+     * touched by its XZ run, padded by a hair), in no particular order: the candidates for a line-of-sight
+     * test, a superset of the boxes whose footprint the segment crosses. With `$broadphase = false`, or a
+     * segment longer than the grid is worth, every solid box.
+     *
+     * @return list<BoxEntry>
+     */
+    public function segmentCandidates(Vec3 $from, Vec3 $to): array
+    {
+        $out = [];
+        $hits = [];
+        $pad = 1.0e-6;
+        $xa = min($from->x, $to->x) - $pad;
+        $xb = max($from->x, $to->x) + $pad;
+        $za = min($from->z, $to->z) - $pad;
+        $zb = max($from->z, $to->z) + $pad;
+        $inv = 1.0 / self::CELL_SIZE;
+
+        $x0 = $x1 = $z0 = $z1 = 0;
+        $everything = !$this->broadphase || !is_finite($xa + $xb + $za + $zb);
+        if (!$everything) {
+            $x0 = (int) floor($xa * $inv);
+            $x1 = (int) floor($xb * $inv);
+            $z0 = (int) floor($za * $inv);
+            $z1 = (int) floor($zb * $inv);
+            $everything = ($x1 - $x0 + 1) + ($z1 - $z0 + 1) > 4096;
+        }
+        if ($everything) {
+            foreach ($this->entries as $entry) {
+                if (!$entry['collider']->isTrigger) {
+                    $out[] = $entry;
+                }
+            }
+
+            return $out;
+        }
+
+        foreach ([self::KIND_AABB, self::KIND_ROTATED] as $kind) {
+            foreach ($this->large[$kind] as $seq => $entry) {
+                $hits[$seq] = $entry;
+            }
+        }
+
+        $dx = $to->x - $from->x;
+        $dz = $to->z - $from->z;
+        for ($cx = $x0; $cx <= $x1; $cx++) {
+            // The part of the segment inside this column of cells: its z run picks the cells.
+            $zLo = $za;
+            $zHi = $zb;
+            if ($x1 > $x0 && abs($dx) > 1.0e-12) {
+                $t1 = max(0.0, min(1.0, (max($xa, $cx * self::CELL_SIZE - $pad) - $from->x) / $dx));
+                $t2 = max(0.0, min(1.0, (min($xb, ($cx + 1) * self::CELL_SIZE + $pad) - $from->x) / $dx));
+                $zs1 = $from->z + $t1 * $dz;
+                $zs2 = $from->z + $t2 * $dz;
+                $zLo = min($zs1, $zs2) - $pad;
+                $zHi = max($zs1, $zs2) + $pad;
+            }
+            $base = $cx * 1048576;
+            for ($cz = (int) floor($zLo * $inv), $czEnd = (int) floor($zHi * $inv); $cz <= $czEnd; $cz++) {
+                foreach ([self::KIND_AABB, self::KIND_ROTATED] as $kind) {
+                    if (isset($this->cells[$kind][$base + $cz])) {
+                        foreach ($this->cells[$kind][$base + $cz] as $seq => $entry) {
+                            $hits[$seq] = $entry;
+                        }
+                    }
+                }
+            }
+        }
+
+        foreach ($hits as $entry) {
+            if (!$entry['collider']->isTrigger) {
+                $out[] = $entry;
+            }
+        }
+
+        return $out;
+    }
+
+    /**
+     * Can this index answer for $world right now: it is the one bound to it, and no entity went dormant or
+     * woke since its last sync (which would leave entries the pool no longer has)?
+     */
+    public function isCurrentFor(World $world): bool
+    {
+        return $this->world === $world && $this->dormancyVersion === $world->dormancyVersion();
+    }
+
+    /**
+     * The index a {@see Physics3DSystem} keeps for $world, or null when no physics system has synced one:
+     * what lets {@see Raycaster3D::segmentBlocked()} answer from the grid without being handed the system.
+     */
+    public static function forWorld(World $world): ?self
+    {
+        $entry = self::$byWorld[spl_object_id($world)] ?? null;
+        if ($entry === null || $entry[0]->get() !== $world) {
+            return null;   // none, or an id a collected world left behind
+        }
+
+        return $entry[1]->get();
+    }
+
+    private static function register(World $world, self $index): void
+    {
+        foreach (self::$byWorld as $id => [$worldRef, $indexRef]) {
+            if ($worldRef->get() === null || $indexRef->get() === null) {
+                unset(self::$byWorld[$id]);
+            }
+        }
+        self::$byWorld[spl_object_id($world)] = [\WeakReference::create($world), \WeakReference::create($index)];
+    }
+
     /** Is there any turned box (solid or trigger)? False lets a caller skip the oriented-box pass. */
     public function hasRotated(): bool
     {
@@ -173,6 +293,7 @@ final class BoxColliderIndex
     {
         $this->world = $world;
         $dirty = $this->dirty;
+        self::register($world, $this);
 
         $world->observe(
             BoxCollider3D::class,
@@ -293,14 +414,17 @@ final class BoxColliderIndex
         $matrixChanged = $collider->lastWorldMatrixArr === null
             || !Physics3DSystem::matrixArrayEquals($worldMatrixArr, $collider->lastWorldMatrixArr);
 
+        // The 12-triangle BVH of a turned box only serves Raycaster3D::segmentBlocked(), so it is not built
+        // here: a moved box drops it, BoxCollider3D::worldBvh() builds it from lastWorldMatrix when asked.
         if ($isRotated) {
-            if ($matrixChanged || $collider->bvh === null || $collider->cachedWorldAabb === null || $collider->cachedOriented === null) {
-                $collider->bvh = BVH::build(self::boxToWorldTriangles($collider, $worldMatrix));
+            if ($matrixChanged || $collider->cachedWorldAabb === null || $collider->cachedOriented === null) {
+                $collider->bvh = null;
                 $collider->cachedWorldAabb = $collider->getWorldAABB($worldMatrix);
                 $collider->cachedOriented = OrientedBox::fromCollider($collider, $worldMatrix);
                 $collider->lastWorldMatrixArr = $worldMatrixArr;
             }
         } elseif ($matrixChanged || $collider->cachedWorldAabb === null) {
+            $collider->bvh = null;
             $collider->cachedWorldAabb = $collider->getWorldAABB($worldMatrix);
             $collider->lastWorldMatrixArr = $worldMatrixArr;
         }
@@ -451,57 +575,5 @@ final class BoxColliderIndex
         }
 
         return $out;
-    }
-
-    /**
-     * Convert a BoxCollider3D into 12 world-space triangles (6 faces x 2 tris).
-     *
-     * @return Triangle[]
-     */
-    private static function boxToWorldTriangles(BoxCollider3D $collider, Mat4 $worldMatrix): array
-    {
-        $hx = $collider->size->x * 0.5;
-        $hy = $collider->size->y * 0.5;
-        $hz = $collider->size->z * 0.5;
-        $off = $collider->offset;
-
-        // 8 corners in local space
-        $corners = [];
-        foreach ([[-1, 1], [1, 1], [1, -1], [-1, -1]] as [$sx, $sz]) {
-            foreach ([-1, 1] as $sy) {
-                $corners["{$sx}_{$sy}_{$sz}"] = $worldMatrix->transformPoint(new Vec3(
-                    $off->x + $sx * $hx,
-                    $off->y + $sy * $hy,
-                    $off->z + $sz * $hz,
-                ));
-            }
-        }
-
-        $c = static fn(int $sx, int $sy, int $sz): Vec3 => $corners["{$sx}_{$sy}_{$sz}"];
-
-        $triangles = [];
-        // 6 faces, each as 2 triangles, wound clockwise seen from outside: the
-        // normals point into the box. Only double-sided queries read them.
-        $faces = [
-            [$c(1, -1, 1), $c(1, 1, 1), $c(1, 1, -1), $c(1, -1, -1)],     // +X
-            [$c(-1, -1, -1), $c(-1, 1, -1), $c(-1, 1, 1), $c(-1, -1, 1)], // -X
-            [$c(-1, 1, 1), $c(-1, 1, -1), $c(1, 1, -1), $c(1, 1, 1)],     // +Y
-            [$c(-1, -1, -1), $c(-1, -1, 1), $c(1, -1, 1), $c(1, -1, -1)], // -Y
-            [$c(-1, -1, 1), $c(-1, 1, 1), $c(1, 1, 1), $c(1, -1, 1)],     // +Z
-            [$c(1, -1, -1), $c(1, 1, -1), $c(-1, 1, -1), $c(-1, -1, -1)], // -Z
-        ];
-
-        foreach ($faces as [$v0, $v1, $v2, $v3]) {
-            $t1 = new Triangle($v0, $v1, $v2);
-            $t2 = new Triangle($v0, $v2, $v3);
-            if (!$t1->isDegenerate()) {
-                $triangles[] = $t1;
-            }
-            if (!$t2->isDegenerate()) {
-                $triangles[] = $t2;
-            }
-        }
-
-        return $triangles;
     }
 }

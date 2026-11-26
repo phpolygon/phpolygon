@@ -11,6 +11,7 @@ use PHPolygon\ECS\Attribute\Property;
 use PHPolygon\ECS\Attribute\Serializable;
 use PHPolygon\Math\Vec3;
 use PHPolygon\Physics\BVH;
+use PHPolygon\Physics\Triangle;
 
 /**
  * Axis-aligned 3D box collider.
@@ -33,11 +34,10 @@ class BoxCollider3D extends AbstractComponent
     public bool $isStatic;
 
     /**
-     * Cached BVH for rotated boxes (Physics3DSystem turns the 12 face
-     * triangles into a BVH for surface-normal collision resolution).
-     * Mirrors the {@see MeshCollider3D::$bvh} pattern so we don't rebuild
-     * the BVH every frame for static rotated colliders — at 100+ rotated
-     * boxes that's the dominant CPU cost in PHP.
+     * BVH of the 12 face triangles of a rotated box, for
+     * {@see \PHPolygon\Physics\Raycaster3D::segmentBlocked()} only. Built lazily
+     * by {@see worldBvh()} and dropped when the box moves; read it through
+     * worldBvh(), not directly.
      */
     #[Hidden]
     public ?BVH $bvh = null;
@@ -83,6 +83,73 @@ class BoxCollider3D extends AbstractComponent
         $this->offset = $offset ?? Vec3::zero();
         $this->isTrigger = $isTrigger;
         $this->isStatic = $isStatic;
+    }
+
+    /**
+     * The world-space BVH of a turned box (its 12 face triangles), built on first use from the world matrix
+     * the caches were made from. Null while the box is not cached as turned or was not cached yet. Only
+     * {@see \PHPolygon\Physics\Raycaster3D::segmentBlocked()} asks: building it with every move of every
+     * turned box would cost more than the physics tick it belongs to.
+     */
+    public function worldBvh(): ?BVH
+    {
+        if ($this->bvh === null && $this->cachedRotated && $this->lastWorldMatrix !== null) {
+            $this->bvh = BVH::build($this->worldTriangles($this->lastWorldMatrix));
+        }
+
+        return $this->bvh;
+    }
+
+    /**
+     * The box as 12 world-space triangles (6 faces x 2), degenerate ones left out.
+     *
+     * @return list<Triangle>
+     */
+    public function worldTriangles(\PHPolygon\Math\Mat4 $worldMatrix): array
+    {
+        $hx = $this->size->x * 0.5;
+        $hy = $this->size->y * 0.5;
+        $hz = $this->size->z * 0.5;
+        $off = $this->offset;
+
+        // 8 corners in local space
+        $corners = [];
+        foreach ([[-1, 1], [1, 1], [1, -1], [-1, -1]] as [$sx, $sz]) {
+            foreach ([-1, 1] as $sy) {
+                $corners["{$sx}_{$sy}_{$sz}"] = $worldMatrix->transformPoint(new Vec3(
+                    $off->x + $sx * $hx,
+                    $off->y + $sy * $hy,
+                    $off->z + $sz * $hz,
+                ));
+            }
+        }
+
+        $c = static fn(int $sx, int $sy, int $sz): Vec3 => $corners["{$sx}_{$sy}_{$sz}"];
+
+        $triangles = [];
+        // 6 faces, each as 2 triangles, wound clockwise seen from outside: the
+        // normals point into the box. Only double-sided queries read them.
+        $faces = [
+            [$c(1, -1, 1), $c(1, 1, 1), $c(1, 1, -1), $c(1, -1, -1)],     // +X
+            [$c(-1, -1, -1), $c(-1, 1, -1), $c(-1, 1, 1), $c(-1, -1, 1)], // -X
+            [$c(-1, 1, 1), $c(-1, 1, -1), $c(1, 1, -1), $c(1, 1, 1)],     // +Y
+            [$c(-1, -1, -1), $c(-1, -1, 1), $c(1, -1, 1), $c(1, -1, -1)], // -Y
+            [$c(-1, -1, 1), $c(-1, 1, 1), $c(1, 1, 1), $c(1, -1, 1)],     // +Z
+            [$c(1, -1, -1), $c(1, 1, -1), $c(-1, 1, -1), $c(-1, -1, -1)], // -Z
+        ];
+
+        foreach ($faces as [$v0, $v1, $v2, $v3]) {
+            $t1 = new Triangle($v0, $v1, $v2);
+            $t2 = new Triangle($v0, $v2, $v3);
+            if (!$t1->isDegenerate()) {
+                $triangles[] = $t1;
+            }
+            if (!$t2->isDegenerate()) {
+                $triangles[] = $t2;
+            }
+        }
+
+        return $triangles;
     }
 
     /**

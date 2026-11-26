@@ -101,7 +101,8 @@ final class BoxColliderIndexTest extends TestCase
             $collider = $entity->get(BoxCollider3D::class);
             self::assertNotNull($collider->cachedWorldAabb, 'caches exist for triggers');
             if ($collider->cachedRotated) {
-                self::assertNotNull($collider->bvh, 'the ray queries need the triangles of a box that turned solid');
+                self::assertNotNull($collider->cachedOriented, 'the solid form of a turned box exists for triggers too');
+                self::assertNotNull($collider->worldBvh(), 'the ray queries get the triangles of a box that turned solid, built on demand');
             }
         }
 

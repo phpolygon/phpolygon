@@ -86,12 +86,23 @@ class Physics3DSystem extends AbstractSystem
     /** Persistent box-collider index: per-tick cost is the colliders that changed, not all of them. */
     private BoxColliderIndex $colliders;
 
+    /** @var \WeakMap<MeshData, array{float, float, float, float, float, float}>|null local bounds per mesh, for deferred BVHs */
+    private static ?\WeakMap $meshBounds = null;
+
     /**
      * @param bool $broadphase false makes every character test every box, in the same order: the behaviour of
      *                         before the collider index, kept for comparing results and for ruling the grid out.
+     * @param bool $lazyMeshBvh true builds the BVH of a MeshCollider3D the first time a query reaches its world
+     *                         bounds instead of in the first tick: a world of hundreds of mesh colliders pays
+     *                         (memory and build time) only for those a character comes near. Query results are
+     *                         the same; the cost moves to the first approach, one collider at a time.
      */
-    public function __construct(?Vec3 $gravity = null, float $groundPlaneY = 0.0, bool $broadphase = true)
-    {
+    public function __construct(
+        ?Vec3 $gravity = null,
+        float $groundPlaneY = 0.0,
+        bool $broadphase = true,
+        private readonly bool $lazyMeshBvh = false,
+    ) {
         $this->gravity = $gravity ?? new Vec3(0.0, -9.81, 0.0);
         $this->groundPlaneY = $groundPlaneY;
         $this->colliders = new BoxColliderIndex($broadphase);
@@ -662,8 +673,9 @@ class Physics3DSystem extends AbstractSystem
                     continue;
                 }
 
-                $triangles = self::meshDataToWorldTriangles($meshData, $worldMatrix);
-                $meshCollider->bvh = BVH::build($triangles);
+                $meshCollider->bvh = $this->lazyMeshBvh
+                    ? self::deferredMeshBvh($meshData, $worldMatrix)
+                    : BVH::fromMesh($meshData->vertices, $meshData->indices, $worldMatrix, true);
                 $meshCollider->lastWorldMatrixArr = $worldMatrixArr;
             }
             $meshCollider->lastWorldMatrix = $worldMatrix;
@@ -897,45 +909,58 @@ class Physics3DSystem extends AbstractSystem
     }
 
     /**
-     * Convert MeshData triangles to world-space Triangle objects using a world matrix.
-     *
-     * @return Triangle[]
+     * A BVH over the mesh in world space that is built on the first query touching it. Its bound is the
+     * world AABB of the mesh's local bounds (eight corners), padded a little: a superset of the triangles.
      */
-    private static function meshDataToWorldTriangles(MeshData $meshData, Mat4 $worldMatrix): array
+    private static function deferredMeshBvh(MeshData $meshData, Mat4 $worldMatrix): BVH
     {
-        $vertices = $meshData->vertices;
-        $indices = $meshData->indices;
-        $triangles = [];
-
-        $indexCount = count($indices);
-        for ($i = 0; $i < $indexCount; $i += 3) {
-            $i0 = $indices[$i];
-            $i1 = $indices[$i + 1];
-            $i2 = $indices[$i + 2];
-
-            $v0 = $worldMatrix->transformPoint(new Vec3(
-                (float)$vertices[$i0 * 3],
-                (float)$vertices[$i0 * 3 + 1],
-                (float)$vertices[$i0 * 3 + 2],
-            ));
-            $v1 = $worldMatrix->transformPoint(new Vec3(
-                (float)$vertices[$i1 * 3],
-                (float)$vertices[$i1 * 3 + 1],
-                (float)$vertices[$i1 * 3 + 2],
-            ));
-            $v2 = $worldMatrix->transformPoint(new Vec3(
-                (float)$vertices[$i2 * 3],
-                (float)$vertices[$i2 * 3 + 1],
-                (float)$vertices[$i2 * 3 + 2],
-            ));
-
-            $tri = new Triangle($v0, $v1, $v2);
-            if (!$tri->isDegenerate()) {
-                $triangles[] = $tri;
+        self::$meshBounds ??= new \WeakMap();
+        $local = self::$meshBounds[$meshData] ?? null;
+        if ($local === null) {
+            $vertices = $meshData->vertices;
+            $lx = $ly = $lz = INF;
+            $hx = $hy = $hz = -INF;
+            for ($i = 0, $n = intdiv(count($vertices), 3) * 3; $i < $n; $i += 3) {
+                $x = (float) $vertices[$i];
+                $y = (float) $vertices[$i + 1];
+                $z = (float) $vertices[$i + 2];
+                if ($x < $lx) { $lx = $x; }
+                if ($x > $hx) { $hx = $x; }
+                if ($y < $ly) { $ly = $y; }
+                if ($y > $hy) { $hy = $y; }
+                if ($z < $lz) { $lz = $z; }
+                if ($z > $hz) { $hz = $z; }
             }
+            $local = [$lx, $ly, $lz, $hx, $hy, $hz];
+            self::$meshBounds[$meshData] = $local;
         }
 
-        return $triangles;
+        [$lx, $ly, $lz, $hx, $hy, $hz] = $local;
+        if ($lx > $hx) {
+            return BVH::build([]);   // no vertices
+        }
+        $minX = $minY = $minZ = INF;
+        $maxX = $maxY = $maxZ = -INF;
+        foreach ([$lx, $hx] as $x) {
+            foreach ([$ly, $hy] as $y) {
+                foreach ([$lz, $hz] as $z) {
+                    $p = $worldMatrix->transformPoint(new Vec3($x, $y, $z));
+                    $minX = min($minX, $p->x);
+                    $minY = min($minY, $p->y);
+                    $minZ = min($minZ, $p->z);
+                    $maxX = max($maxX, $p->x);
+                    $maxY = max($maxY, $p->y);
+                    $maxZ = max($maxZ, $p->z);
+                }
+            }
+        }
+        $pad = 1e-4 * (1.0 + max(abs($minX), abs($minY), abs($minZ), abs($maxX), abs($maxY), abs($maxZ)));
+
+        return BVH::deferred(
+            static fn (): BVH => BVH::fromMesh($meshData->vertices, $meshData->indices, $worldMatrix, true),
+            new Vec3($minX - $pad, $minY - $pad, $minZ - $pad),
+            new Vec3($maxX + $pad, $maxY + $pad, $maxZ + $pad),
+        );
     }
 
     /**

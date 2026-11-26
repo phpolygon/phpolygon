@@ -157,6 +157,47 @@ class SceneBuilder
     }
 
     /**
+     * Materialize all declarations and let go of each one as soon as its entity exists.
+     *
+     * The declarations of a large scene (tens of thousands of entities, a few KB each) otherwise stay
+     * alive next to the entities they produced, for as long as the caller holds the builder – through
+     * onLoad and the rest of a loader. Here the peak falls to "all declarations" instead of "all
+     * declarations plus all entities", and the builder is empty afterwards. The components are still
+     * cloned, so a component object a scene kept a reference to is not the one in the world.
+     *
+     * @param array<string, true> $persistentNames out: names of the persistent top-level declarations
+     * @return array<string, int> Map of declaration name => entity ID
+     */
+    public function materializeAndRelease(World $world, array &$persistentNames = []): array
+    {
+        $map = [];
+        // Popped from the end of a reversed copy: each declaration is let go of as it is done, in declaration order.
+        $pending = array_reverse($this->declarations);
+        $this->declarations = [];
+        while (($decl = array_pop($pending)) !== null) {
+            $this->materializeDeclaration($decl, $world, null, $map);
+            if ($decl->isPersistent()) {
+                $persistentNames[$decl->getName()] = true;
+            }
+            $decl->dispose();
+        }
+
+        return $map;
+    }
+
+    /**
+     * Drop every declaration (and break the reference cycles they hold with their builder and parents).
+     * Call it when the declarations are no longer needed, e.g. after a manual {@see materialize()}.
+     */
+    public function release(): void
+    {
+        foreach ($this->declarations as $decl) {
+            $decl->dispose();
+        }
+        $this->declarations = [];
+    }
+
+    /**
      * @param array<string, int> $map
      */
     private function materializeDeclaration(

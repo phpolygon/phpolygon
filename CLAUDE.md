@@ -115,6 +115,19 @@ collides as an oriented box only with its own rotation; turned through a parent 
 as its world AABB. Sockets the prefab hands back go through `point()`, `direction()` and
 `yaw()` (object yaw as in `Quaternion::fromEuler(0, yaw, 0)`).
 
+### Scene load memory – declarations are released
+`SceneManager::loadScene()` / `loadSceneProgressive()` materialize with `SceneBuilder::materializeAndRelease()`:
+each top-level declaration is cloned into the World and then `EntityDeclaration::dispose()`d (components, children
+and the parent links that would keep the tree for the cycle collector), so the builder is empty when `onLoad`
+runs and the declarations of a 90,000-entity scene no longer stay alive through the loader. Nothing in the engine
+reads declarations after materialization (editor/serialisation paths build their own builder), but a scene that
+stashes `$builder` or a declaration in `build()` and reads it later finds it empty: copy what it needs instead.
+Persistent tracking uses the names `materializeAndRelease()` collects. `SceneBuilder::release()` does the same
+for a builder materialized by hand. The components are still cloned (a component object a scene kept is not the
+one in the world; skipping the clone changed no measured number). `benchmarks/scenarios/SceneLoadMemory.php`
+(90,000 entities, Transform3D + MeshRenderer + BoxCollider3D, every tenth with a child; PHP 8.5.12, 2026-11-26):
+peak +434.8 -> +331.6 MB, heap during `onLoad` +433.4 -> +327.6 MB (3 runs each, progressive and sync, identical) (the rest is the World itself).
+
 ### Render interface: Layered
 - `RenderContextInterface` — base: `beginFrame()`, `endFrame()`, `clear()`,
   `setViewport()`
@@ -1918,7 +1931,9 @@ $player->start();
   sight, camera/anchor checks). Tests mesh colliders and boxes (rotated ones
   exactly, via their triangles) against the data `Physics3DSystem` already
   caches on them (`MeshCollider3D::$bvh`, `BoxCollider3D::$cachedWorldAabb` /
-  `$bvh` / `$cachedRotated`) — it never transforms or rebuilds anything.
+  `$bvh` / `$cachedRotated`) — it never transforms or rebuilds anything (a turned box's 12-triangle tree is built by
+  `BoxCollider3D::worldBvh()` on first use, a deferred mesh BVH on first reach). Boxes come from the `BoxColliderIndex` grid
+  when the world has a physics system (see "Box-collider index").
   Triggers never block, a box containing `$from` does not block, touching a
   surface counts, heightmaps are ignored, and a collider the physics system has
   not processed yet is invisible to it.
@@ -2014,7 +2029,7 @@ How `Physics3DSystem` moves a `CharacterController3D` (`Physics3DBoxCollisionTes
 
 `Physics3DSystem` no longer scans every `BoxCollider3D` each tick. `Physics\BoxColliderIndex`
 (`BoxColliderIndexTest`, bench `benchmarks/physics-static-colliders.php`) keeps the collision data of every
-box (aligned: AABB; turned: `OrientedBox`, plus the 12-triangle BVH for `Raycaster3D::segmentBlocked()`) and an
+box (aligned: AABB; turned: `OrientedBox`; the 12-triangle BVH for `Raycaster3D::segmentBlocked()` is built lazily by `BoxCollider3D::worldBvh()`, see below) and an
 XZ grid over it (cell 8 m, `BoxColliderIndex::CELL_SIZE`). Per tick `physics.collect` is `sync()`: drain
 the changes, nothing else. A character asks the index for the boxes near it (`boxesIn()` / `rotatedIn()`:
 footprint touching an XZ rectangle), and so does every `StepAssist` probe.
@@ -2028,7 +2043,7 @@ footprint touching an XZ rectangle), and so does every `StepAssist` probe.
   attach and a woken entity lands at the END of the pool.
 - **`isTrigger` is not a change.** Triggers stay in the index with their caches built; the flag is read per
   candidate at query time. Flipping 1,500 colliders between trigger and solid costs nothing and needs no
-  prewarm in a game. The price: the caches (and BVHs of turned boxes) of triggers are built in the first
+  prewarm in a game. The price: the caches of triggers are built in the first
   tick, not at the flip.
 - **Order is behaviour.** Resolution is sequential (each push moves the capsule for the next box), so queries
   return candidates in pool order (attach order, a woken entity last). The AABB loop in `resolveCharacters()`
@@ -2040,13 +2055,57 @@ footprint touching an XZ rectangle), and so does every `StepAssist` probe.
 - **`new Physics3DSystem(broadphase: false)`** makes every character test every box, in the same order: the
   behaviour before the index. For comparing results (the equivalence test runs random worlds both ways and
   asserts identical positions, velocities, `isGrounded` and `groundEntityId`) and for ruling the grid out.
-- **Not covered:** `MeshCollider3D`s are still collected per tick (one matrix-identity check each), and
-  `Raycaster3D::segmentBlocked()` still walks the whole box pool per call (1.6 ms at 8,500 boxes, 2026-11-25).
+- **The BVH of a turned box is lazy:** `BoxCollider3D::worldBvh()` builds the 12-triangle tree from the world matrix
+  the caches were made from, on the first `segmentBlocked()` that reaches the box; a move drops it (`bvh = null`).
+  Only `Raycaster3D` reads it, so moving a turned box no longer pays for it: index sync per moved turned box
+  103-105 us -> 20-22 us (2026-11-26, PHP 8.5.12, no GPU, 3 runs, 2,000 turned boxes moved 10 times each; at
+  8,500 boxes with 8 % turned `benchmarks/scenarios/BoxColliderQueries.php` gives 20.7-23.0 us). Read it through
+  `worldBvh()`, not `BoxCollider3D::$bvh` (null until asked).
+- **Line of sight uses the index:** `Raycaster3D::segmentBlocked()` finds the index of the world's physics system itself
+  (`BoxColliderIndex::forWorld()`, a weak per-world registration made when the index binds; or pass one as the 4th
+  argument) and asks `segmentCandidates($from, $to)`: the boxes in the grid cells the segment passes through, plus
+  the oversized ones. The tests are the same caches as before (`cachedWorldAabb`, `worldBvh()`), so the answer is
+  identical (`Raycaster3DSegmentBlockedTest` compares it with the full scan on random fields, mutation-checked).
+  The pool is walked as before when no index exists, when it is the `broadphase: false` one, or while it is behind
+  the world (`isCurrentFor()`: an entity went dormant or woke since its last sync). Measured (2026-11-26, PHP 8.5.12,
+  no GPU, 3 runs, `benchmarks/scenarios/BoxColliderQueries.php`, 8,500 boxes, 8 % turned, 2,000 camera-length segments,
+  1,122 blocked either way): 1.22-1.53 ms -> 0.014-0.017 ms per `segmentBlocked()`.
+- **Not covered:** `MeshCollider3D`s are still collected per tick (one matrix-identity check each); mesh colliders in
+  `segmentBlocked()` are still all asked (a root-bounds miss each, 214 of them cost little).
 - **Measured** (2026-11-25, PHP 8.5.12 CLI, `benchmarks/physics-static-colliders.php`, 8,500 boxes, 8 % turned,
   1 walking + 1 standing character, 3 runs each, no GPU): tick 7.6-8.6 ms -> 0.045 ms
   (`physics.collect` 2.9-3.2 ms -> 0.001 ms, `physics.resolve` 4.4-5.1 ms -> 0.04 ms); one tick flipping
   1,500 colliders to solid 46-60 ms -> 0.06-0.12 ms; first tick 150-270 ms -> 185-205 ms (it now also builds
   the caches of the 1,500 triggers). With 40 % turned boxes the flip took 83-87 ms before and 0.06 ms after.
+
+### Collider BVH – packed triangles, lazy build
+
+`Physics\BVH` (`BVHTest`, `Physics3DLazyMeshBvhTest`, bench `benchmarks/scenarios/BvhMemory.php`) keeps its
+triangles as ONE packed string (nine doubles each, leaf order) instead of an object graph per triangle
+(`Triangle` + 3 `Vec3` + normal = ~600 B). `query()` still returns `Triangle` objects: made on first use from the
+packed doubles (the exact values that went in, so every downstream answer is identical to the old tree; the tests
+compare against a copy of the old class, `tests/Physics/Fixtures/LegacyBvh.php`, for the returned triangles in
+order, segment and capsule tests) and kept in a cache whose budget is 20,000 objects (~12 MB) summed over ALL trees
+(when it is spent, every tree drops its cache at its next query); `StepAssist` therefore compares the tread triangle by value, not identity). The build passes id lists
+down the recursion instead of splicing one big array: O(n log n) (the old in-place reorder was quadratic: 200k triangles
+took 47-65 s).
+
+- **`BVH::fromMesh($vertices, $indices, ?Mat4 $world = null, bool $dropDegenerate = false)`** builds straight from
+  `MeshData` arrays; with `$world` each vertex is moved once, with `$dropDegenerate` flat triangles are left out (what
+  `Triangle::isDegenerate()` said). `Physics3DSystem` builds mesh colliders this way (no Triangle list in between).
+  `BVH::build(Triangle[])` is unchanged for callers.
+- **`new Physics3DSystem(lazyMeshBvh: true)`** (default false: build in the first tick, as before): a `MeshCollider3D`
+  gets `BVH::deferred()` – the world AABB of the mesh's local bounds, padded – and builds its tree the first time a
+  query reaches that box. A collider nobody comes near costs one bounds pass over its vertices and nothing else
+  (`BVH::isBuilt()` tells). Query results are identical; the build moves to the first approach, one collider at a
+  time (a collider of 2,600 triangles builds in ~12 ms). `Raycaster3D::segmentBlocked()` builds a deferred tree when
+  its segment reaches it.
+- **Measured** (2026-11-26, PHP 8.5.12 CLI, no GPU, 2 runs each): 167 mesh colliders of 2,592 triangles (432,864 in
+  total): old tree build 5.05 s, retained 279.3 MB (677 B/triangle); packed tree 2.0 s, 58.3 MB (141 B/triangle), peak
+  during the build 59.1 MB (old 280.2 MB). One mesh of 200,978 triangles: old 47-65 s / 637 B per triangle retained,
+  packed 1.9-2.0 s / 136 B (`BvhMemory.php 200000 mesh`). 423,200 triangles in one mesh: 3.4-4.0 s, 139 B/triangle.
+  The first 200 character-sized queries on a fresh tree cost 22-37 ms in total (objects made on first touch) against
+  2.3-5.9 ms with the old always-resident objects; repeated queries hit the cache.
 
 ### Procedural geometry — code-driven worlds
 
