@@ -49,10 +49,10 @@ final class VioEngineFrameOrderTest extends TestCase
      */
     private const V092 = [
         'd3d12|Microsoft Basic Render Driver' => '391ff42377944bc705de666b3239d2b6',
-        'd3d12|NVIDIA GeForce RTX 2080' => '63c9a9c698f20b1f9eaf6d07fd1892e9',
-        // Measured 2026-11-25 (php-vio 2.45.0): the same frame as the RTX one by eye (2D rect on top, the blue
+        'd3d12|NVIDIA GeForce RTX 2080' => '8bf032e18a6ebce4212cd38bfad6b4e3',
+        // Re-pinned 2026-11-26 (RTX and Intel) for the SSAO rotation noise (4x4 dither tile instead of a hash per\r\n        // block, fix/ssao-concave-corner-noise): 4209 of 230400 bytes differ on the RTX frame, at most 14 per channel,\r\n        // all around the box where the AO sits; checked by eye, the frame order is unchanged.\r\n        // Measured 2026-11-25 (php-vio 2.45.0): the same frame as the RTX one by eye (2D rect on top, the blue
         // box through the offscreen target); 2432 of 57600 pixels differ, at most 15 per channel.
-        'd3d12|Intel(R) UHD Graphics 630' => 'aff98121207664a3120168f26ee8848f',
+        'd3d12|Intel(R) UHD Graphics 630' => 'b7c9ae11f4e75e3829adc12068618ac1',
     ];
 
     /** @return array{0: string, 1: string, 2: string} rgba, backend, adapter */

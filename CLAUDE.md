@@ -316,6 +316,11 @@ The parity test measures centre and size of each effect against D3D12 numbers wr
   `PHPOLYGON_SSAO_FILTER=0` restores the sampler (frames of v0.96.1 on Direct3D), `=1` forces the filter on every backend.
   Cost at 1920x1080, `ssao` GPU mark (occlusion + blur), median of 279 frames, 3 runs each, measured 2026-11-03: Vulkan 0.137 ->
   0.154 ms, D3D12 0.180 -> 0.215 ms (RTX 2080, idle GPU), Metal 0.293 -> 0.316 ms (M5, php-vio 2.40.0).
+- **SSAO rotation noise is a 4x4 ordered-dither tile** (`NOISE_TILE` in `ssao.frag`: 16 evenly spaced angles, one per half-res
+  texel). It used to be a hash of `floor(uv * noise_scale)`, i.e. ONE random angle per 4x4 block, so the 4x4 blur window saw at
+  most four angles and the residue showed as a dark mottled seam along concave interior corners (D3D12, RTX 2080, Medium).
+  Now an aligned 4x4 window holds each rotation once and the noise cancels. `VioSsaoConcaveCornerTest` measures the row-to-row
+  standard deviation of the blurred AO along a vertical wall corner (forward/MRT path, measured 2026-11-26: D3D12 RTX 0.0233 -> 0.0000, Vulkan RTX 0.0215 -> 0.0000, D3D12 UHD 630 0.0227 -> 0.0000, Vulkan UHD 630 0.0215 -> 0.0000; the temporal path 0.0077-0.0088 -> 0.0000; the contact shadow stays, corner darkening 0.38-0.40 before, 0.3804 after).
 - **Stored depth:** `BackendConventions::forContext()` asks Metal (only Metal: `vio_backend_info()` costs
   ~200 ms on D3D12) for `conventions.clip_z_remap`. Up to php-vio 2.39 the key is missing: Metal stores raw
   ndc z and clips what lies below 0 (`depthStoredRaw()`); from 2.40 it stores (ndc z + 1) / 2 like the others.
