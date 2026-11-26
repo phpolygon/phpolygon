@@ -48,17 +48,47 @@ final class OrientedBox
         $ly = sqrt($m[4] * $m[4] + $m[5] * $m[5] + $m[6] * $m[6]);
         $lz = sqrt($m[8] * $m[8] + $m[9] * $m[9] + $m[10] * $m[10]);
 
+        // An axis scaled to (almost) nothing – a gate barrier sunk to scale 0, a collapsed door leaf – has no
+        // direction left in the matrix. The box is flat along it (half extent 0), so any axis that completes
+        // the frame will do: the cross product of the other two, or the canonical axis when two collapsed.
+        $degenerate = 1.0e-12;
+        $ax = $lx > $degenerate ? [$m[0] / $lx, $m[1] / $lx, $m[2] / $lx] : null;
+        $ay = $ly > $degenerate ? [$m[4] / $ly, $m[5] / $ly, $m[6] / $ly] : null;
+        $az = $lz > $degenerate ? [$m[8] / $lz, $m[9] / $lz, $m[10] / $lz] : null;
+        $ax ??= self::completeAxis($ay, $az, [1.0, 0.0, 0.0]);
+        $ay ??= self::completeAxis($az, $ax, [0.0, 1.0, 0.0]);
+        $az ??= self::completeAxis($ax, $ay, [0.0, 0.0, 1.0]);
+
         return new self(
             $center->x,
             $center->y,
             $center->z,
-            [$m[0] / $lx, $m[1] / $lx, $m[2] / $lx],
-            [$m[4] / $ly, $m[5] / $ly, $m[6] / $ly],
-            [$m[8] / $lz, $m[9] / $lz, $m[10] / $lz],
-            $box->size->x * 0.5 * $lx,
-            $box->size->y * 0.5 * $ly,
-            $box->size->z * 0.5 * $lz,
+            $ax,
+            $ay,
+            $az,
+            $lx > $degenerate ? $box->size->x * 0.5 * $lx : 0.0,
+            $ly > $degenerate ? $box->size->y * 0.5 * $ly : 0.0,
+            $lz > $degenerate ? $box->size->z * 0.5 * $lz : 0.0,
         );
+    }
+
+    /**
+     * @param array{0: float, 1: float, 2: float}|null $a
+     * @param array{0: float, 1: float, 2: float}|null $b
+     * @param array{0: float, 1: float, 2: float}      $fallback
+     * @return array{0: float, 1: float, 2: float}
+     */
+    private static function completeAxis(?array $a, ?array $b, array $fallback): array
+    {
+        if ($a === null || $b === null) {
+            return $fallback;
+        }
+        $x = $a[1] * $b[2] - $a[2] * $b[1];
+        $y = $a[2] * $b[0] - $a[0] * $b[2];
+        $z = $a[0] * $b[1] - $a[1] * $b[0];
+        $len = sqrt($x * $x + $y * $y + $z * $z);
+
+        return $len > 1.0e-12 ? [$x / $len, $y / $len, $z / $len] : $fallback;
     }
 
     /**

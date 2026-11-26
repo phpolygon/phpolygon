@@ -32,6 +32,20 @@ final class OrientedBoxTest extends TestCase
         $this->assertEqualsWithDelta(0.0, $push->y, 1e-9);
     }
 
+    public function testABoxScaledToZeroAlongOneAxisStaysUsableAndHasNoVolume(): void
+    {
+        // A gate barrier sinks to scale.y = 0 when it opens (turned about Y, as in a city).
+        foreach ([[0.18, 0.0, 6.7], [0.0, 3.0, 6.7], [0.18, 3.0, 0.0], [0.0, 0.0, 6.7], [0.0, 0.0, 0.0]] as [$sx, $sy, $sz]) {
+            $box = self::box(new Vec3(1, 2, 3), new Vec3(2, 2, 2), 0.4, 0.0, new Vec3($sx, $sy, $sz));
+            // Far away: nothing to push. On the flat remains: no exception, finite result.
+            $this->assertNull($box->capsulePush(new Vec3(30, 2, 3), new Vec3(30, 4, 3), 0.3));
+            $push = $box->capsulePush(new Vec3(1, 2.2, 3), new Vec3(1, 3.0, 3), 0.3);
+            if ($push !== null) {
+                $this->assertTrue(is_finite($push->x) && is_finite($push->y) && is_finite($push->z));
+            }
+        }
+    }
+
     public function testACapsuleBeyondItsRadiusIsNotTouched(): void
     {
         $box = self::box(new Vec3(0, 0, 0), new Vec3(2, 2, 2), deg2rad(30.0));
