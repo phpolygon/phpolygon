@@ -83,18 +83,20 @@ class SceneManager implements SceneManagerInterface
         $builder = new SceneBuilder();
         try {
             $scene->build($builder);
-            $entityMap = $builder->materialize($world);
+            $persistentNames = [];
+            $entityMap = $builder->materializeAndRelease($world, $persistentNames);
         } catch (\Throwable $e) {
             $this->rollbackFailedLoad($name);
             Engine::logError((new SceneBuildException($name, $e))->getMessage());
             throw new SceneBuildException($name, $e);
         }
         $this->sceneEntities[$name] = $entityMap;
+        unset($builder);
 
         // Track persistent entities
-        foreach ($builder->getDeclarations() as $decl) {
-            if ($decl->isPersistent() && isset($entityMap[$decl->getName()])) {
-                $this->persistentEntities[$entityMap[$decl->getName()]] = true;
+        foreach ($persistentNames as $declName => $_) {
+            if (isset($entityMap[$declName])) {
+                $this->persistentEntities[$entityMap[$declName]] = true;
             }
         }
 
@@ -162,18 +164,20 @@ class SceneManager implements SceneManagerInterface
             }
 
             // Materialize entities (single heavy step) once the build completes.
-            $entityMap = $builder->materialize($world);
+            $persistentNames = [];
+            $entityMap = $builder->materializeAndRelease($world, $persistentNames);
         } catch (\Throwable $e) {
             $this->rollbackFailedLoad($name);
             Engine::logError((new SceneBuildException($name, $e))->getMessage());
             throw new SceneBuildException($name, $e);
         }
         $this->sceneEntities[$name] = $entityMap;
+        unset($builder);
 
         // Track persistent entities
-        foreach ($builder->getDeclarations() as $decl) {
-            if ($decl->isPersistent() && isset($entityMap[$decl->getName()])) {
-                $this->persistentEntities[$entityMap[$decl->getName()]] = true;
+        foreach ($persistentNames as $declName => $_) {
+            if (isset($entityMap[$declName])) {
+                $this->persistentEntities[$entityMap[$declName]] = true;
             }
         }
 

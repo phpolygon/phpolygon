@@ -158,4 +158,51 @@ class SceneBuilderTest extends TestCase
         $this->assertSame('A', $builder->getDeclarations()[0]->getName());
         $this->assertSame('B', $builder->getDeclarations()[1]->getName());
     }
+
+    public function testMaterializeAndReleaseMatchesMaterializeAndEmptiesTheBuilder(): void
+    {
+        $make = static function (): SceneBuilder {
+            $builder = new SceneBuilder();
+            $builder->entity('Keep')->with(new Transform2D(position: new Vec2(1, 2)))->persist()
+                ->child('Kid')->with(new Transform2D(position: new Vec2(3, 4)));
+            $builder->entity('Other')->with(new Transform2D());
+            $builder->entity('Keep')->with(new Transform2D());   // duplicate name: the later one wins in the map
+
+            return $builder;
+        };
+
+        $reference = new World();
+        $expectedMap = $make()->materialize($reference);
+
+        $world = new World();
+        $builder = $make();
+        $persistent = [];
+        $map = $builder->materializeAndRelease($world, $persistent);
+
+        $this->assertSame($expectedMap, $map);
+        $this->assertSame(['Keep' => true], $persistent);
+        $this->assertSame([], $builder->getDeclarations());
+        $this->assertSame(
+            $reference->getComponent($map['Kid'], Transform2D::class)->position->x,
+            $world->getComponent($map['Kid'], Transform2D::class)->position->x,
+        );
+        $this->assertSame(
+            $reference->getComponent($map['Kid'], Transform2D::class)->parentEntityId,
+            $world->getComponent($map['Kid'], Transform2D::class)->parentEntityId,
+        );
+    }
+
+    public function testReleaseBreaksTheDeclarationCycles(): void
+    {
+        $builder = new SceneBuilder();
+        $decl = $builder->entity('A')->with(new Transform2D());
+        $child = $decl->child('A1')->with(new Transform2D());
+        $ref = \WeakReference::create($child);
+
+        $builder->release();
+        unset($decl, $child, $builder);
+
+        // No gc_collect_cycles(): reference counting alone frees the tree.
+        $this->assertNull($ref->get());
+    }
 }

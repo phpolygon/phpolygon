@@ -115,6 +115,22 @@ class EntityDeclaration
 
     // --- Internal API ---
 
+    /**
+     * Empty this declaration and its subtree so it can be freed by reference counting: parent and child
+     * point at each other, which would otherwise keep the whole tree for the cycle collector.
+     */
+    public function dispose(): void
+    {
+        foreach ($this->children as $child) {
+            $child->dispose();
+        }
+        $this->children = [];
+        $this->components = [];
+        $this->tags = [];
+        $this->prefabAuthored = null;
+        $this->parent = null;
+    }
+
     public function setPrefabSource(string $className): void
     {
         $this->prefabSource = $className;

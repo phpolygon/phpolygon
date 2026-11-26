@@ -115,6 +115,19 @@ collides as an oriented box only with its own rotation; turned through a parent 
 as its world AABB. Sockets the prefab hands back go through `point()`, `direction()` and
 `yaw()` (object yaw as in `Quaternion::fromEuler(0, yaw, 0)`).
 
+### Scene load memory – declarations are released
+`SceneManager::loadScene()` / `loadSceneProgressive()` materialize with `SceneBuilder::materializeAndRelease()`:
+each top-level declaration is cloned into the World and then `EntityDeclaration::dispose()`d (components, children
+and the parent links that would keep the tree for the cycle collector), so the builder is empty when `onLoad`
+runs and the declarations of a 90,000-entity scene no longer stay alive through the loader. Nothing in the engine
+reads declarations after materialization (editor/serialisation paths build their own builder), but a scene that
+stashes `$builder` or a declaration in `build()` and reads it later finds it empty: copy what it needs instead.
+Persistent tracking uses the names `materializeAndRelease()` collects. `SceneBuilder::release()` does the same
+for a builder materialized by hand. The components are still cloned (a component object a scene kept is not the
+one in the world; skipping the clone changed no measured number). `benchmarks/scenarios/SceneLoadMemory.php`
+(90,000 entities, Transform3D + MeshRenderer + BoxCollider3D, every tenth with a child; PHP 8.5.12, 2026-11-26):
+peak +434.8 -> +354.8 MB, heap during `onLoad` +433.4 -> +327.5 MB (the rest is the World itself).
+
 ### Render interface: Layered
 - `RenderContextInterface` — base: `beginFrame()`, `endFrame()`, `clear()`,
   `setViewport()`
