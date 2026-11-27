@@ -20,8 +20,10 @@ use PHPolygon\Rendering\Command\SetCamera;
 use PHPolygon\Rendering\Command\SetShader;
 use PHPolygon\Rendering\CubemapRegistry;
 use PHPolygon\Rendering\GraphicsSettings;
+use PHPolygon\Rendering\InstanceParams;
 use PHPolygon\Rendering\Material;
 use PHPolygon\Rendering\MaterialRegistry;
+use PHPolygon\Rendering\ProcModeShaderRegistry;
 use PHPolygon\Rendering\RenderCommandList;
 use PHPolygon\Rendering\VioRenderer3D;
 
@@ -92,6 +94,50 @@ final class VioUnlitInstancingTest extends TestCase
             self::assertGreaterThan(30, $differs(self::px($image, $x, 48)), "$backend: an instance at pixel column $x");
         }
         self::assertLessThan(10, $differs(self::px($image, 64, 48)), "$backend: nothing at the origin, where the old program drew every instance");
+    }
+
+    /**
+     * Instance parameters ride in m[0..2].w of the matrix (InstanceParams). The unlit vertex stage must clear
+     * them like mesh3d.vert does, or a perspective divide by that w row projects the instance wrongly:
+     * the image must be the one of the same draw without parameters.
+     */
+    #[DataProvider('backends')]
+    public function testInstanceParametersDoNotMoveAnUnlitInstance(string $backend): void
+    {
+        $ctx = @vio_create($backend, ['width' => self::W, 'height' => self::H, 'headless' => true, 'vsync' => false, 'shader_cache' => sys_get_temp_dir() . '/phpolygon-test-shader-cache']);
+        if ($ctx === false || vio_backend_name($ctx) !== $backend) {
+            $this->markTestSkipped("$backend unavailable");
+        }
+        $this->ctx = $ctx;
+        MeshRegistry::clear();
+        MaterialRegistry::clear();
+        CubemapRegistry::clear();
+        ProcModeShaderRegistry::clear();
+        ProcModeShaderRegistry::enableInstanceParams();
+        MeshRegistry::register('box', BoxMesh::generate(2.0, 2.0, 2.0));
+        MaterialRegistry::register('stone', new Material(albedo: new Color(0.7, 0.7, 0.7)));
+
+        $images = [];
+        foreach ([false, true] as $withParams) {
+            $matrices = [Mat4::translation(-3.0, 0.0, 0.0), Mat4::translation(3.0, 1.0, 0.0)];
+            if ($withParams) {
+                $matrices = [InstanceParams::matrix($matrices[0], 0.7, 0.4, 0.9), InstanceParams::matrix($matrices[1], 0.2, 0.8, 0.3)];
+            }
+            $list = new RenderCommandList();
+            $list->add(new SetShader('unlit'));
+            $list->add(new SetCamera(
+                Mat4::lookAt(new Vec3(0.0, 0.0, 12.0), new Vec3(0, 0, 0), new Vec3(0, 1, 0)),
+                Mat4::perspective(deg2rad(50.0), self::W / self::H, 0.1, 100.0),
+            ));
+            $list->add(new SetAmbientLight(new Color(1.0, 1.0, 1.0), 1.0));
+            $list->add(new DrawMeshInstanced('box', 'stone', $matrices));
+            $renderer = new VioRenderer3D($ctx, self::W, self::H);
+            $renderer->applySettings(new GraphicsSettings(bloom: false));
+            $images[] = $renderer->renderToImage($list, self::W, self::H, new Color(0.1, 0.2, 0.4, 1.0));
+        }
+        ProcModeShaderRegistry::clear();
+
+        self::assertSame(md5($images[0]), md5($images[1]), "$backend: instances with parameters draw where the same instances without parameters do");
     }
 
     /** @return list<int> */
