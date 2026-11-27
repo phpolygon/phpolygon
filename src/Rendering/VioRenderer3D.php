@@ -5376,9 +5376,17 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             return $source;
         }
         $source = self::withDefine($source, 'PHPOLYGON_BINDLESS_MATERIALS');
-        return $fragment
-            ? (string) preg_replace('/^(\s*#version[^\n]*\n)/', "$1#extension GL_EXT_nonuniform_qualifier : require\n", $source, 1)
-            : $source;
+        if (!$fragment) {
+            return $source;
+        }
+        // The table's `layout(set = 1, binding = N)` needs 420pack under #version 410. The light
+        // grid block adds it too; a program without the grid (the grid-less twin, PHPOLYGON_LIGHT_GRID=0)
+        // must bring it itself, and a program that has it already stays as it was.
+        $extensions = "#extension GL_EXT_nonuniform_qualifier : require\n";
+        if (!str_contains($source, 'GL_ARB_shading_language_420pack') && !str_contains($source, '#version 460')) {
+            $extensions .= "#extension GL_ARB_shading_language_420pack : require\n";
+        }
+        return (string) preg_replace('/^(\s*#version[^\n]*\n)/', '$1' . $extensions, $source, 1);
     }
 
     private function meshVertexSource(bool $storage = false): string
