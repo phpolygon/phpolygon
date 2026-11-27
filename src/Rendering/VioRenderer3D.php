@@ -4545,6 +4545,8 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         $this->variantUniformsUploaded = [];
         // New materials may need a left-out path: rebuild before anything is drawn.
         $this->refreshAutoOmissions(true);
+        // A changed point light budget changes which way the mesh programs are built.
+        $this->syncGridSkip();
         $this->profilesThisFrame = ShaderProfiles::names() !== [] && $this->activeShaderId() === 'default';
         // While a surface cut runs the base program is the one that may discard.
         $this->frameBaseVariant = $this->chooseFrameBaseVariant(count($pointLights));
@@ -5081,6 +5083,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         // After the unit count is known: the pyramid takes the highest unit.
         $this->hizUnitBuilt = $this->settings->occlusionCulling ? $this->hizUnit() : -1;
         $this->refreshAutoOmissions(false);
+        $this->builtGridSkip = $this->gridSkipMode();
         // The total of the progress display, fixed before the first compile.
         $this->warmProgress = $onProgress !== null ? new ShaderWarmProgress($this->warmPlan(), $onProgress) : null;
         try {
@@ -5301,6 +5304,11 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         if ($gridlessSuffix) {
             $variant = substr($variant, 0, -strlen(self::NOGRID_SUFFIX));
         }
+        // '+grid': the program WITH the light grid, where the programs are built without it by default.
+        $gridSuffix = str_ends_with($variant, self::GRID_SUFFIX);
+        if ($gridSuffix) {
+            $variant = substr($variant, 0, -strlen(self::GRID_SUFFIX));
+        }
         // 'profile:<name>': the base program without the paths the profile leaves out.
         $profileOmit = [];
         if (str_starts_with($variant, self::PROFILE_PREFIX)) {
@@ -5321,7 +5329,13 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         if ($variant === ProcModeShaderRegistry::NOGRID_CUT_VARIANT) {
             $cut = true;
         }
-        if ($cut || $lite || $gridTwin) {
+        // The program with the grid in a renderer that builds without it (see gridSkipMode()).
+        $gridProgram = $variant === ProcModeShaderRegistry::GRID_VARIANT || $variant === ProcModeShaderRegistry::GRID_CUT_VARIANT;
+        if ($variant === ProcModeShaderRegistry::GRID_CUT_VARIANT) {
+            $cut = true;
+        }
+        $withGrid = $this->builtGridSkip ? ($gridProgram || $gridSuffix) : !$gridless;
+        if ($cut || $lite || $gridTwin || $gridProgram) {
             $variant = ProcModeShaderRegistry::BASE_VARIANT;
         }
         $source = ProcModeShaderRegistry::spliceGlsl(
@@ -5377,7 +5391,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         // Lite lights with the nearest of the uniform lights instead.
         // The grid-less twin leaves it out for the same reason: a frame of at most eight
         // point lights reads the uniform array only.
-        if (!$lite && !$gridless && $this->lightGridSupported()) {
+        if (!$lite && $withGrid && $this->lightGridSupported()) {
             $source = self::withDefine($source, 'PHPOLYGON_LIGHT_GRID');
             if ($this->fragmentStorageSharesTargets()) {
                 $source = self::withDefine($source, 'PHPOLYGON_UAV_SHARE_TARGETS');
@@ -5526,8 +5540,51 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
      */
     private function gridGateAllowed(): bool
     {
+        return !$this->builtGridSkip && $this->gridGateEnabled();
+    }
+
+    /** The gate may run on this backend and the built-in shader draws. */
+    private function gridGateEnabled(): bool
+    {
         $this->gridGateOn ??= getenv('PHPOLYGON_LIGHT_GRID_GATE') !== '0' && $this->lightGridSupported();
         return $this->gridGateOn && $this->activeShaderId() === 'default';
+    }
+
+    /** Suffix of a program built WITH the light grid in a renderer that builds without it by default. */
+    private const string GRID_SUFFIX = '+grid';
+
+    /** The mesh programs are built without the light grid, the programs with it are the `+grid` twins (see gridSkipMode()). */
+    private bool $builtGridSkip = false;
+
+    /** The grid programs (`tier:grid`, `+grid`) and their cut-out twins are compiled (reset on rebuild). */
+    private bool $gridWarm = false;
+
+    /** This frame needs the programs with the grid (gridSkipMode() only). */
+    private bool $gridSuffixFrame = false;
+
+    /**
+     * Whether the settings keep every frame under the uniform lights: a point light budget of 1..8
+     * means the system emits at most eight, so the grid is not needed in practice. The mesh
+     * programs are then built WITHOUT the grid (no grid program is compiled behind the splash)
+     * and a frame that still carries more lights (a game's own AddPointLight) compiles the
+     * `tier:grid` / `+grid` programs when it first needs them. Off with PHPOLYGON_LIGHT_GRID_GATE=0,
+     * without a light grid on the backend and with shader profiles registered.
+     */
+    private function gridSkipMode(): bool
+    {
+        $this->gridGateOn ??= getenv('PHPOLYGON_LIGHT_GRID_GATE') !== '0' && $this->lightGridSupported();
+        return $this->gridGateOn
+            && $this->settings->pointLightBudget >= 1
+            && $this->settings->pointLightBudget <= Lighting\LightGridGate::UNIFORM_LIGHTS
+            && ShaderProfiles::names() === [];
+    }
+
+    /** Rebuild the mesh programs when the settings changed which way they are built. */
+    private function syncGridSkip(): void
+    {
+        if ($this->gridSkipMode() !== $this->builtGridSkip && isset($this->shaderCache['default'])) {
+            $this->rebuildMeshPrograms();
+        }
     }
 
     /**
@@ -5579,6 +5636,41 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             return;
         }
         $this->ensureUsedVariants($changed);
+    }
+
+    /** The program with the grid that belongs to a plain program in gridSkipMode(); null where there is none (Lite, profiles). */
+    private static function gridTwinOf(string $variant): ?string
+    {
+        $cutout = str_ends_with($variant, self::CUTOUT_SUFFIX) ? self::CUTOUT_SUFFIX : '';
+        $name = $cutout !== '' ? substr($variant, 0, -strlen($cutout)) : $variant;
+        if (str_starts_with($name, 'tier:') || str_starts_with($name, self::PROFILE_PREFIX) || $name === ProcModeShaderRegistry::SURFACE_CUT_VARIANT) {
+            return null;
+        }
+        return ($name === ProcModeShaderRegistry::BASE_VARIANT ? ProcModeShaderRegistry::GRID_VARIANT : $name . self::GRID_SUFFIX) . $cutout;
+    }
+
+    /**
+     * The first frame that needs the light grid in gridSkipMode(): compile the programs with it
+     * (base, the surface-cut twin, the game's variants and the cut-out twins) at the start of the
+     * frame, so no draw waits for a compile in the middle of it.
+     */
+    private function warmGridPrograms(): void
+    {
+        $names = [ProcModeShaderRegistry::GRID_VARIANT, ProcModeShaderRegistry::GRID_CUT_VARIANT];
+        foreach ($this->usedVariants() as $variant => $_) {
+            $twin = self::gridTwinOf((string) $variant);
+            if ($twin !== null) {
+                $names[] = $twin;
+            }
+        }
+        foreach (ProcModeShaderRegistry::variants() as $name) {
+            if (!ProcModeShaderRegistry::isLazyVariant($name)) {
+                $names[] = $name . self::GRID_SUFFIX;
+            }
+        }
+        foreach (array_unique($names) as $name) {
+            $this->ensureVariantCompiled($name);
+        }
     }
 
     /**
@@ -5715,6 +5807,8 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         $this->failedVariants = [];
         $this->liteWarm = false;
         $this->gridlessWarm = false;
+        $this->gridWarm = false;
+        $this->builtGridSkip = $this->gridSkipMode();
         $this->meshletFailed = [];
         $this->tessFailed = [];
         $this->variantUniformsUploaded = [];
@@ -5764,10 +5858,28 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
     private function chooseFrameBaseVariant(int $pointLights = 0): string
     {
         $this->gridlessFrame = false;
+        $this->gridSuffixFrame = false;
         if ($this->activeShaderId() !== 'default') {
             return ProcModeShaderRegistry::BASE_VARIANT;
         }
         $cut = ProcModeShaderRegistry::surfaceCutActive();
+        // gridSkipMode(): the plain programs have no grid, a frame with more lights than the
+        // uniforms hold takes the programs with it (compiled the first time one is needed).
+        if ($this->builtGridSkip && $this->gridGateEnabled()
+            && ($this->gridGate ??= new Lighting\LightGridGate())->needsGrid($pointLights)) {
+            $this->gridSuffixFrame = true;
+            if (!$this->gridWarm) {
+                $this->gridWarm = true;
+                $this->warmGridPrograms();
+            }
+            if ($this->settings->shaderQuality !== ShaderQuality::Lite) {
+                $grid = $cut ? ProcModeShaderRegistry::GRID_CUT_VARIANT : ProcModeShaderRegistry::GRID_VARIANT;
+                if ($this->ensureVariantCompiled($grid)) {
+                    return $grid;
+                }
+                $this->gridSuffixFrame = false;
+            }
+        }
         // Grid-less programs while the frame's point lights fit the uniform array. The gate
         // is asked every frame it could apply, so its hold time counts frames.
         $noGrid = $this->gridGateAllowed() && !($this->gridGate ??= new Lighting\LightGridGate())->needsGrid($pointLights);
@@ -5810,6 +5922,21 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         return isset($this->shaderCache['default@' . $name . self::NOGRID_SUFFIX]);
     }
 
+    /**
+     * Whether the mesh programs are built without the light grid because the settings keep
+     * frames under the uniform lights (point light budget 1..8) - tests and tools.
+     */
+    public function meshProgramsBuiltWithoutGrid(): bool
+    {
+        return $this->builtGridSkip;
+    }
+
+    /** Whether the base program WITH the grid has been compiled (only ever in gridSkipMode()) - tests and tools. */
+    public function gridProgramCompiled(): bool
+    {
+        return isset($this->shaderCache['default@' . ProcModeShaderRegistry::GRID_VARIANT]);
+    }
+
     /** The base program the frame draws base-variant materials with - tests and tools. */
     public function frameBaseProgramVariant(): string
     {
@@ -5834,6 +5961,9 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         } elseif ($this->gridlessFrame) {
             // A game's own program in a frame that fits the uniform lights: its twin without the grid.
             $variant .= self::NOGRID_SUFFIX;
+        } elseif ($this->gridSuffixFrame) {
+            // gridSkipMode(), more lights than the uniforms hold: a game's own program with the grid.
+            $variant .= self::GRID_SUFFIX;
         }
         if (self::needsCutout($material)) {
             $variant .= self::CUTOUT_SUFFIX;
@@ -5845,6 +5975,9 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             // A grid-less twin that does not compile falls back to the program with the grid
             // (not to plain PBR) before the last resort, the base program.
             $withGrid = self::withGrid($variant);
+            if ($withGrid === $variant) {
+                $withGrid = self::withoutGrid($variant);
+            }
             $variant = $withGrid !== $variant && $this->ensureVariantCompiled($withGrid) ? $withGrid : ProcModeShaderRegistry::BASE_VARIANT;
             if ($variant === $this->sceneVariant) {
                 return;
@@ -5874,6 +6007,21 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         foreach ([
             ProcModeShaderRegistry::NOGRID_CUT_VARIANT => ProcModeShaderRegistry::SURFACE_CUT_VARIANT,
             ProcModeShaderRegistry::NOGRID_VARIANT => ProcModeShaderRegistry::BASE_VARIANT,
+        ] as $twin => $program) {
+            if (str_starts_with($variant, $twin)) {
+                return $program . substr($variant, strlen($twin));
+            }
+        }
+        return $variant;
+    }
+
+    /** The plain program of a `+grid` program or a `tier:grid` base, for when the program with the grid does not compile (gridSkipMode()). */
+    private static function withoutGrid(string $variant): string
+    {
+        $variant = str_replace(self::GRID_SUFFIX, '', $variant);
+        foreach ([
+            ProcModeShaderRegistry::GRID_CUT_VARIANT => ProcModeShaderRegistry::SURFACE_CUT_VARIANT,
+            ProcModeShaderRegistry::GRID_VARIANT => ProcModeShaderRegistry::BASE_VARIANT,
         ] as $twin => $program) {
             if (str_starts_with($variant, $twin)) {
                 return $program . substr($variant, strlen($twin));
@@ -11222,8 +11370,9 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
      */
     private function programTime(float $time): float
     {
-        $name = explode(self::NOGRID_SUFFIX, explode(self::CUTOUT_SUFFIX, $this->sceneVariant)[0])[0];
+        $name = explode(self::GRID_SUFFIX, explode(self::NOGRID_SUFFIX, explode(self::CUTOUT_SUFFIX, $this->sceneVariant)[0])[0])[0];
         return $name === ProcModeShaderRegistry::BASE_VARIANT || str_starts_with($name, self::PROFILE_PREFIX)
+            || $name === ProcModeShaderRegistry::GRID_VARIANT || $name === ProcModeShaderRegistry::GRID_CUT_VARIANT
             || $name === ProcModeShaderRegistry::LITE_VARIANT || $name === ProcModeShaderRegistry::LITE_CUT_VARIANT
             || $name === ProcModeShaderRegistry::NOGRID_VARIANT || $name === ProcModeShaderRegistry::NOGRID_CUT_VARIANT
             ? $time

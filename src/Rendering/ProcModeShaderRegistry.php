@@ -394,6 +394,16 @@ final class ProcModeShaderRegistry
     public const string NOGRID_VARIANT = 'tier:nogrid';
     public const string NOGRID_CUT_VARIANT = 'tier:nogrid_cut';
 
+    /**
+     * The mirror of the grid-less twins, for a renderer whose graphics settings keep every frame
+     * under the uniform lights (a point light budget of 1..8): the base program is then built
+     * WITHOUT the light grid, and the program with it is this variant (GRID_CUT_VARIANT under a
+     * surface cut; a game's variants take the suffix `+grid`), compiled when a frame first needs
+     * it instead of behind the splash.
+     */
+    public const string GRID_VARIANT = 'tier:grid';
+    public const string GRID_CUT_VARIANT = 'tier:grid_cut';
+
     private static bool $surfaceCut = false;
 
     /** Whether surface hooks may discard this frame (see SURFACE_CUT_VARIANT). */

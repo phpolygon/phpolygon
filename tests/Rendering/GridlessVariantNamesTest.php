@@ -39,6 +39,19 @@ final class GridlessVariantNamesTest extends TestCase
         self::assertSame(ProcModeShaderRegistry::SURFACE_CUT_VARIANT . '+cutout', self::withGrid(ProcModeShaderRegistry::NOGRID_CUT_VARIANT . '+cutout'));
     }
 
+    /** The programs a renderer without the grid by default falls back to, and the ones it warms. */
+    public function testTheGridProgramsOfASkipRendererMapBothWays(): void
+    {
+        $without = new \ReflectionMethod(VioRenderer3D::class, 'withoutGrid');
+        $twin = new \ReflectionMethod(VioRenderer3D::class, 'gridTwinOf');
+        self::assertSame('water+cutout', $without->invoke(null, 'water+grid+cutout'));
+        self::assertSame(ProcModeShaderRegistry::BASE_VARIANT, $without->invoke(null, ProcModeShaderRegistry::GRID_VARIANT));
+        self::assertSame(ProcModeShaderRegistry::SURFACE_CUT_VARIANT, $without->invoke(null, ProcModeShaderRegistry::GRID_CUT_VARIANT));
+        self::assertSame('water+grid+cutout', $twin->invoke(null, 'water+cutout'));
+        self::assertSame(ProcModeShaderRegistry::GRID_VARIANT . '+cutout', $twin->invoke(null, ProcModeShaderRegistry::BASE_VARIANT . '+cutout'));
+        self::assertNull($twin->invoke(null, ProcModeShaderRegistry::LITE_VARIANT));
+    }
+
     public function testAProgramWithTheGridIsLeftAlone(): void
     {
         foreach (['water', ProcModeShaderRegistry::LITE_VARIANT, ProcModeShaderRegistry::BASE_VARIANT . '+cutout'] as $variant) {

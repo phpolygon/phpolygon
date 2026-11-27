@@ -235,6 +235,49 @@ final class VioLightGridGateTest extends TestCase
         self::assertSame(ProcModeShaderRegistry::NOGRID_VARIANT, $renderer->frameBaseProgramVariant());
     }
 
+    /**
+     * A point light budget of 1..8: the mesh programs are built without the grid (nothing with it is
+     * compiled up front), the image is the old one, and a frame with more lights compiles the grid
+     * program when it first needs it.
+     */
+    public function testABudgetUnderTheLimitSkipsTheGridPrograms(): void
+    {
+        $this->context('auto');
+        $clear = new Color(0.1, 0.2, 0.4, 1.0);
+        $budget = new GraphicsSettings(shadowQuality: ShadowQuality::Off, antiAliasing: AntiAliasing::Off, bloom: false, pointLightBudget: 8);
+
+        putenv('PHPOLYGON_LIGHT_GRID_GATE=0');
+        $old = $this->newRenderer()->renderToImage($this->scene(5), self::W, self::H, $clear);
+        $oldMany = $this->newRenderer()->renderToImage($this->scene(12), self::W, self::H, $clear);
+        putenv('PHPOLYGON_LIGHT_GRID_GATE');
+
+        $renderer = $this->newRenderer($budget);
+        $few = $renderer->renderToImage($this->scene(5), self::W, self::H, $clear);
+        self::assertTrue($renderer->meshProgramsBuiltWithoutGrid());
+        self::assertSame(ProcModeShaderRegistry::BASE_VARIANT, $renderer->frameBaseProgramVariant(), 'the plain program has no grid');
+        self::assertFalse($renderer->gridProgramCompiled(), 'no grid program compiled while the lights fit');
+        self::assertSame(md5($old), md5($few), 'the image of the program with the grid, every pixel');
+
+        $many = $renderer->renderToImage($this->scene(12), self::W, self::H, $clear);
+        self::assertSame(ProcModeShaderRegistry::GRID_VARIANT, $renderer->frameBaseProgramVariant());
+        self::assertTrue($renderer->gridProgramCompiled(), 'compiled when the first frame needed it');
+        self::assertSame(md5($oldMany), md5($many), 'twelve lights light the scene as before');
+    }
+
+    /** Lifting the budget afterwards builds the programs the other way. */
+    public function testChangingTheBudgetRebuildsThePrograms(): void
+    {
+        $this->context('auto');
+        $clear = new Color(0.1, 0.2, 0.4, 1.0);
+        $renderer = $this->newRenderer(new GraphicsSettings(shadowQuality: ShadowQuality::Off, antiAliasing: AntiAliasing::Off, bloom: false, pointLightBudget: 4));
+        $renderer->renderToImage($this->scene(3), self::W, self::H, $clear);
+        self::assertTrue($renderer->meshProgramsBuiltWithoutGrid());
+        $renderer->applySettings(new GraphicsSettings(shadowQuality: ShadowQuality::Off, antiAliasing: AntiAliasing::Off, bloom: false));
+        $renderer->renderToImage($this->scene(3), self::W, self::H, $clear);
+        self::assertFalse($renderer->meshProgramsBuiltWithoutGrid());
+        self::assertSame(ProcModeShaderRegistry::NOGRID_VARIANT, $renderer->frameBaseProgramVariant());
+    }
+
     /** The game's usual frame: sun shadows and SSAO on the G-buffer (MRT) path, shadows on the forward path. */
     #[DataProvider('mrtPaths')]
     public function testTheImageStaysTheSameWithShadowsAndAmbientOcclusion(string $mrt): void

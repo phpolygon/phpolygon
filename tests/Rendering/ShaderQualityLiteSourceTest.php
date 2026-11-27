@@ -58,6 +58,8 @@ final class ShaderQualityLiteSourceTest extends TestCase
             ProcModeShaderRegistry::LITE_CUT_VARIANT,
             ProcModeShaderRegistry::NOGRID_VARIANT,
             ProcModeShaderRegistry::NOGRID_CUT_VARIANT,
+            ProcModeShaderRegistry::GRID_VARIANT,
+            ProcModeShaderRegistry::GRID_CUT_VARIANT,
         ] as $name) {
             try {
                 ProcModeShaderRegistry::defineVariant($name, [99]);
