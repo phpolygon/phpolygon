@@ -238,7 +238,7 @@ Built-in shaders (registered automatically by the renderer):
 | Shader ID | Purpose | Source files |
 |---|---|---|
 | `default` | Full PBR: lighting, shadows, fog, 10 procedural modes | `mesh3d.vert/frag.glsl` |
-| `unlit` | Albedo + emission + fog only, no lighting (perf baseline) | `unlit.vert/frag.glsl` |
+| `unlit` | Albedo + emission + fog only, no lighting (perf baseline); draws instanced batches (`u_use_instancing`, since the Lite change: before, every instance collapsed onto the origin) | `unlit.vert/frag.glsl` |
 | `normals` | Debug: visualize surface normals as RGB | `normals.vert/frag.glsl` |
 | `depth` | Debug: visualize depth buffer (white=near, black=far) | `depth.vert/frag.glsl` |
 | `shadow` | Depth-only pass for shadow maps (used internally by renderer) | `shadow.vert/frag.glsl` |

@@ -3,16 +3,34 @@
 layout(location = 0) in vec3 a_position;
 layout(location = 1) in vec3 a_normal;
 layout(location = 2) in vec2 a_uv;
+// Per-instance model matrix (same layout as mesh3d.vert): read when u_use_instancing is 1.
+layout(location = 3) in vec4 a_instance_col0;
+layout(location = 4) in vec4 a_instance_col1;
+layout(location = 5) in vec4 a_instance_col2;
+layout(location = 6) in vec4 a_instance_col3;
 
 uniform mat4 u_model;
 uniform mat4 u_view;
 uniform mat4 u_projection;
+uniform int u_use_instancing;
 
 out vec3 v_worldPos;
 out vec2 v_uv;
 
 void main() {
-    vec4 worldPos = u_model * vec4(a_position, 1.0);
+    mat4 model = u_model;
+    if (u_use_instancing == 1) {
+        model = mat4(a_instance_col0, a_instance_col1, a_instance_col2, a_instance_col3);
+        // The w row may carry packed per-instance data: parameters in columns 0-2, the
+        // albedo slot in column 3. Unlit reads none of it; a point has w = 1.
+#ifdef PHPOLYGON_INSTANCE_PARAMS
+        model[0].w = 0.0;
+        model[1].w = 0.0;
+        model[2].w = 0.0;
+#endif // PHPOLYGON_INSTANCE_PARAMS
+        model[3].w = 1.0;
+    }
+    vec4 worldPos = model * vec4(a_position, 1.0);
     v_worldPos = worldPos.xyz;
     v_uv = a_uv;
     gl_Position = u_projection * u_view * worldPos;
