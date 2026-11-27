@@ -216,6 +216,25 @@ final class VioLightGridGateTest extends TestCase
         self::assertSame(md5($oldImage), md5($image));
     }
 
+    /**
+     * Temporal anti-aliasing switched on after a first frame: the motion twin of the grid-less program
+     * did not exist yet and the pipeline built on it crashed the process (found by VioReactiveMaterialTest).
+     */
+    public function testTemporalAntiAliasingAfterAGridlessFrame(): void
+    {
+        $this->context('auto');
+        $clear = new Color(0.1, 0.2, 0.4, 1.0);
+        $renderer = $this->newRenderer();
+        $renderer->renderToImage($this->scene(3), self::W, self::H, $clear);
+        self::assertSame(ProcModeShaderRegistry::NOGRID_VARIANT, $renderer->frameBaseProgramVariant());
+        $renderer->applySettings(new GraphicsSettings(shadowQuality: ShadowQuality::Off, antiAliasing: AntiAliasing::Taa, bloom: false, hdr: false));
+        for ($i = 0; $i < 3; $i++) {
+            $image = $renderer->renderToImage($this->scene(3), self::W, self::H, $clear);
+        }
+        self::assertSame(self::W * self::H * 4, strlen($image));
+        self::assertSame(ProcModeShaderRegistry::NOGRID_VARIANT, $renderer->frameBaseProgramVariant());
+    }
+
     /** The game's usual frame: sun shadows and SSAO on the G-buffer (MRT) path, shadows on the forward path. */
     #[DataProvider('mrtPaths')]
     public function testTheImageStaysTheSameWithShadowsAndAmbientOcclusion(string $mrt): void

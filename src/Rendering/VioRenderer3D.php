@@ -1128,6 +1128,13 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             fwrite(STDERR, "[VioRenderer3D] motion-vector shaders unavailable, temporal AA is off: {$e->getMessage()}\n");
             return false;
         }
+        // Variants compiled before the first temporal frame (the grid-less base twin among them)
+        // lack their motion twin: a pipeline built on the missing program is a native crash.
+        foreach (array_keys($this->shaderCache) as $id) {
+            if (str_starts_with((string) $id, 'default_mrt@')) {
+                $this->ensureVariantCompiled(substr((string) $id, strlen('default_mrt@')));
+            }
+        }
         return true;
     }
 
