@@ -27,7 +27,7 @@ use PHPolygon\Rendering\Quality\ScreenSpaceReflections;
  *   9. Bloom           on -> off
  *  10. Vignette        > 0 -> 0 (cheap effect, last among in-shader items)
  *      SurfaceRelief   Cavity -> Off (one height lookup, but visible)
- *  11. ShaderQuality   Full -> Unlit (last because it is highly visible)
+ *  11. ShaderQuality   Full -> Lite -> Unlit (last because it is highly visible)
  *  12. Anisotropy      16 -> 8 -> 4 -> 2 -> 1
  *
  * A game places its own effects with {@see registerStep()} at an {@see AdaptiveSlot}
@@ -231,6 +231,9 @@ final class AdaptiveTierStack
 
         // 10. ShaderQuality
         if ($current->shaderQuality === ShaderQuality::Full) {
+            return $current->with(shaderQuality: ShaderQuality::Lite);
+        }
+        if ($current->shaderQuality === ShaderQuality::Lite) {
             return $current->with(shaderQuality: ShaderQuality::Unlit);
         }
 
@@ -253,6 +256,9 @@ final class AdaptiveTierStack
         }
 
         if ($current->shaderQuality === ShaderQuality::Unlit) {
+            return $current->with(shaderQuality: ShaderQuality::Lite);
+        }
+        if ($current->shaderQuality === ShaderQuality::Lite) {
             return $current->with(shaderQuality: ShaderQuality::Full);
         }
 

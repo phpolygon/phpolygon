@@ -123,7 +123,7 @@ stored by their lower-case value.
 | `vsync` | `true` | Forwarded to the window. |
 | `fpsCap` | `0` | 0 = uncapped; 30, 60, 120 or 144. Any other value becomes 0. |
 | `textureQuality` | `Full` | `Full`, `Half`, `Quarter` — a LOD bias so smaller mip levels are sampled. |
-| `shaderQuality` | `Full` | `Full` or `Unlit` (every draw through the `unlit` shader). |
+| `shaderQuality` | `Full` | `Full`, `Lite` (a reduced lit program: hemispherical ambient, the sun as one Lambert term with a single shadow tap, a few unshadowed local lights, fog, emission; vio renderers only) or `Unlit` (every draw through the `unlit` shader). |
 | `cloudShadows` | `true` | Cloud shadows on the ground. |
 | `bloom` | `true` | Bloom in the post chain. |
 | `hdr` | `true` | FP16 scene target; the source of the highlights. |

@@ -206,11 +206,11 @@ final class ShaderVariantRegistryTest extends TestCase
             if (trim($line) === '// PHPOLYGON:SNIPPET_UNIFORMS') {
                 continue;
             }
-            if (preg_match('/^\s*#ifndef PHPOLYGON_OMIT_/', $line) === 1) {
+            if (preg_match('/^\s*#ifndef PHPOLYGON_(OMIT_|LITE\b)/', $line) === 1) {
                 $stack[] = 'keep';
                 continue;
             }
-            if (preg_match('/^\s*#ifdef PHPOLYGON_(SCENE_DEPTH|INSTANCE_PARAMS|MATERIAL_PARAMS|PRECISE_HASH)\b/', $line) === 1) {
+            if (preg_match('/^\s*#ifdef PHPOLYGON_(SCENE_DEPTH|INSTANCE_PARAMS|MATERIAL_PARAMS|PRECISE_HASH|LITE)\b/', $line) === 1) {
                 $stack[] = 'drop';
                 continue;
             }

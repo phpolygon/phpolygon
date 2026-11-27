@@ -173,5 +173,30 @@ final class GraphicsSettingsTest extends TestCase
     {
         $this->assertNull(ShaderQuality::Full->shaderId());
         $this->assertSame('unlit', ShaderQuality::Unlit->shaderId());
+        $this->assertNull(ShaderQuality::Lite->shaderId(), 'Lite is a program variant, not a shader override');
+    }
+
+    public function testLiteTierRoundTripsThroughTheSavedSettings(): void
+    {
+        $lite = (new GraphicsSettings())->with(shaderQuality: ShaderQuality::Lite);
+        $this->assertSame('lite', $lite->toJson()['shaderQuality']);
+        $this->assertSame(ShaderQuality::Lite, GraphicsSettings::fromJson($lite->toJson())->shaderQuality);
+        $this->assertSame(ShaderQuality::Lite, GraphicsSettings::fromJson(['shaderQuality' => 'lite'])->shaderQuality);
+        $this->assertSame(ShaderQuality::Lite, $lite->with(bloom: false)->shaderQuality, 'with() keeps the tier');
+    }
+
+    public function testSavesWrittenBeforeTheLiteTierStillLoad(): void
+    {
+        $this->assertSame(ShaderQuality::Full, GraphicsSettings::fromJson(['shaderQuality' => 'full'])->shaderQuality);
+        $this->assertSame(ShaderQuality::Unlit, GraphicsSettings::fromJson(['shaderQuality' => 'unlit'])->shaderQuality);
+        $this->assertSame(ShaderQuality::Full, GraphicsSettings::fromJson([])->shaderQuality, 'a missing key is the default');
+        $this->assertSame(ShaderQuality::Full, GraphicsSettings::fromJson(['shaderQuality' => 'medium'])->shaderQuality, 'an unknown value is the default');
+    }
+
+    public function testEveryShaderQualityHasALabel(): void
+    {
+        foreach (ShaderQuality::cases() as $tier) {
+            $this->assertNotSame('', $tier->label());
+        }
     }
 }

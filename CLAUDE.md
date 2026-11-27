@@ -653,6 +653,23 @@ without a definition the program is the v0.92.0 shader (the test pins its hash w
   and Vulkan on an Apple M5 (php-vio 2.35.0): repeat compiles 16-52 ms and 25-95 ms; a first compile on Metal took 1.1-1.6 s,
   one sample per case, so nothing to compare. Compile time is a D3D12 problem.
 
+**Shader quality tier `Lite`** (`ShaderQuality::Lite`, `GraphicsSettings::$shaderQuality`; `VioShaderQualityLiteTest`, `benchmarks/shader-tier-lite.php`).
+A lit tier between `Full` and `Unlit`. It is the base program compiled as the variant `ProcModeShaderRegistry::LITE_VARIANT`
+(`PHPOLYGON_LITE`), not a shader override: instancing, the proc-mode ladder, the surface hook, MRT/motion twins and cut-outs keep working,
+and a game selects it with `with(shaderQuality: ShaderQuality::Lite)` (no `Shader::use`; a game's own override still wins). It keeps albedo,
+emission, distance fog, a hemispherical ambient term, the sun as Lambert plus a Blinn-Phong highlight with one shadow tap (hard cascade
+switch), up to 8 point / 4 spot / 2 sun lights without shadows or specular, and the three accumulators of the shared tail. It drops IBL,
+clearcoat, area lights, curvature AO, micro shadows, probes, ray queries, cloud shadows, height fog/rain/sand, decals, rain, the world
+drift of albedo and `ShaderPath::liteOmissions()` (normal and surface patterns, wetness, weathering, subsurface, material and figure
+looks, snow, volumetrics); a game's own `defineVariant` programs keep theirs. **The program has no light grid**: a fragment shader that
+touches a storage buffer (a UAV on Direct3D) loses the early depth test there, so every hidden fragment of an opaque pass is shaded. That
+alone is the cost: Intel UHD 630, D3D12, 1280x720, 1024 instanced draws / 65 536 instances, opaque GPU ms (median of 100 frames, 3 runs in
+rotating order, 2026-11-27): Full 372.7, Lite 3.6, Unlit 3.5 (Lite with 8 lights 3.6); with MRT + SSAO Medium 379.9 / 12.7 / (Unlit never takes MRT) 3.6;
+Vulkan 254.2 / 11.2 / 4.8; Full with `PHPOLYGON_LIGHT_GRID=0` 3.4 (MRT + SSAO 35.3). RTX 2080 D3D12 is not fill-bound there: 0.49 / 0.49 / 0.50
+(MRT + SSAO 2.11 / 0.83 / 0.30; 4K: Full 2.71, without the grid 2.11, Lite 2.71, Unlit 2.07). The sun shadow pass (about 28 ms on the UHD in this
+scene) is the same in every tier. Only the vio renderers apply Lite (the GL family and native Vulkan draw Full, so the adaptive
+Full -> Lite step does nothing there); Metal is untested. `AdaptiveTierStack` steps Full -> Lite -> Unlit.
+
 **Snippet uniforms and samplers** (`SnippetUniformRegistryTest`, `VioSnippetUniformTest`). `ProcModeShaderRegistry::declareUniform('u_fx_level', 'float')`
 and `declareSampler('u_fx_map', $programs)` add file-scope declarations at `// PHPOLYGON:SNIPPET_UNIFORMS` (both `mesh3d.frag` copies)
 to every mesh program: forward, MRT, motion, storage, each variant. Values travel in the command list, `SetShaderParameter(name,

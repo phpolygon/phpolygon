@@ -26,7 +26,7 @@ use PHPolygon\Rendering\GraphicsSettings;
  *   4. AntiAliasing    MSAA4x -> Off
  *   5. CloudShadows    on -> off
  *   6. Bloom           on -> off
- *   7. ShaderQuality   Full -> Unlit (last because it is most visible)
+ *   7. ShaderQuality   Full -> Lite -> Unlit (last because it is most visible)
  *   8. Anisotropy      16 -> 1
  *
  * TextureQuality and MeshLodTier are intentionally NOT in the adaptive

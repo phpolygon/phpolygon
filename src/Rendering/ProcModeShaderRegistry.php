@@ -373,6 +373,16 @@ final class ProcModeShaderRegistry
      */
     public const string SURFACE_CUT_VARIANT = 'surface_cut';
 
+    /**
+     * The base program of ShaderQuality::Lite: compiled with PHPOLYGON_LITE (reduced lighting)
+     * and without the lighting-only {@see ShaderPath::liteOmissions()}. The names are not
+     * lower snake case, so no game variant can take them. The renderer draws every
+     * base-variant material with it while the tier is on; a game's own variants keep their
+     * programs. LITE_CUT_VARIANT is the same program while a surface cut runs.
+     */
+    public const string LITE_VARIANT = 'tier:lite';
+    public const string LITE_CUT_VARIANT = 'tier:lite_cut';
+
     private static bool $surfaceCut = false;
 
     /** Whether surface hooks may discard this frame (see SURFACE_CUT_VARIANT). */

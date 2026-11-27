@@ -234,7 +234,11 @@ final class GraphicsAutoTuner
         };
         $base += $s->cloudShadows ? 1.5 : 0.0;
         $base += $s->bloom ? 1.0 : 0.0;
-        $base += $s->shaderQuality === ShaderQuality::Full ? 2.5 : 0.0;
+        $base += match ($s->shaderQuality) {
+            ShaderQuality::Full => 2.5,
+            ShaderQuality::Lite => 0.8,
+            ShaderQuality::Unlit => 0.0,
+        };
         $base += match ($s->anisotropy) {
             16 => 0.6, 8 => 0.4, 4 => 0.2, 2 => 0.1, default => 0.0,
         };

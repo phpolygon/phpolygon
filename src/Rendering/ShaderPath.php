@@ -100,6 +100,23 @@ enum ShaderPath: string
         return array_values(array_filter(self::cases(), static fn (self $p): bool => !in_array($p, $frameDriven, true)));
     }
 
+    /**
+     * The paths the Lite tier's program leaves out on top of the automatic omissions
+     * ({@see ProcModeShaderRegistry::LITE_VARIANT}): the lighting-only looks. Paths that
+     * change albedo, alpha or geometry (splat, triplanar, flipbook, fur, grass, hair, soft
+     * particles, emissive looks, glass, refraction) stay until no material needs them.
+     *
+     * @return list<string> OMIT defines
+     */
+    public static function liteOmissions(): array
+    {
+        return array_map(static fn (self $p): string => $p->define(), [
+            self::NormalPatterns, self::SurfacePatterns, self::Wetness, self::Weathering,
+            self::Subsurface, self::Clearcoat, self::MaterialLook, self::FigureLook,
+            self::Snow, self::Volumetric, self::CloudShadow, self::ProbeGi,
+        ]);
+    }
+
     private static function splatPatterned(Material $material): bool
     {
         foreach ($material->splatLayers as $layer) {

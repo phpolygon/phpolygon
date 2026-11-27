@@ -819,6 +819,30 @@ float rectFormFactor(vec3 P, vec3 N, vec3 c, vec3 ex, vec3 ey) {
     return abs(dot(F, N)) * 0.5;
 }
 
+#ifdef PHPOLYGON_LITE
+// Lite tier (ShaderQuality::Lite): one comparison tap of the cascade that covers the
+// fragment - the hardware's 2x2 filter is the only softening - and a hard switch
+// between cascades. No loop, no per-pixel rotation.
+float sampleCascadeLite(sampler2DShadow map, mat4 lightSpace, vec3 worldPos, vec3 N) {
+    vec4 lsp = lightSpace * vec4(worldPos, 1.0);
+    vec3 pc  = lsp.xyz / lsp.w * 0.5 + 0.5;
+    if (pc.x < 0.0 || pc.x > 1.0 || pc.y < 0.0 || pc.y > 1.0 || pc.z > 1.0) return 1.0;
+    float NdotL = max(dot(N, normalize(-u_dir_light_direction)), 0.0);
+    return texture(map, vec3(pc.xy, pc.z - mix(0.005, 0.001, NdotL)));
+}
+
+float calcShadow(vec4 lsp, vec3 N) {
+    if (u_has_shadow_map == 0) return 1.0;
+    float dist = length(v_worldPos - u_camera_pos);
+    if (u_csm_count >= 2 && dist > u_csm_far_0) {
+        if (u_csm_count >= 3 && dist > u_csm_far_1) {
+            return sampleCascadeLite(u_csm_map_2, u_csm_matrix_2, v_worldPos, N);
+        }
+        return sampleCascadeLite(u_csm_map_1, u_csm_matrix_1, v_worldPos, N);
+    }
+    return sampleCascadeLite(u_csm_map_0, u_csm_matrix_0, v_worldPos, N);
+}
+#else
 float calcShadow(vec4 lsp, vec3 N) {
     if (u_has_shadow_map == 0) return 1.0;
     // Pick the smallest CSM cascade still containing the fragment based
@@ -839,6 +863,7 @@ float calcShadow(vec4 lsp, vec3 N) {
     float b0 = u_csm_count >= 2 ? smoothstep(u_csm_far_0 * 0.875, u_csm_far_0, dist) : 0.0;
     return b0 > 0.0 ? mix(s0, sampleCascade(u_csm_map_1, u_csm_matrix_1, v_worldPos, N), b0) : s0;
 }
+#endif // PHPOLYGON_LITE
 
 // ================================================================
 //  PBR helpers
@@ -991,6 +1016,13 @@ vec4 mediaFog(vec3 p, float d, vec4 fog) {
     return vec4(c, total);
 }
 
+#ifdef PHPOLYGON_LITE
+// Lite tier: the distance fog only - no height fog, fog volumes, rain veil or sandstorm.
+vec4 sceneFog(vec3 p) {
+    float f = clamp((length(p - u_camera_pos) - u_fog_near) / (u_fog_far - u_fog_near), 0.0, 1.0);
+    return vec4(u_fog_color, 1.0 - exp(-f * f * 3.0));
+}
+#else
 vec4 sceneFog(vec3 p) {
     float d = length(p - u_camera_pos);
     float f = clamp((d - u_fog_near) / (u_fog_far - u_fog_near), 0.0, 1.0);
@@ -1007,12 +1039,16 @@ vec4 sceneFog(vec3 p) {
     }
     return sandVeil(p, d, base);
 }
+#endif // PHPOLYGON_LITE
 
 // Light the air scatters towards the eye between it and p (shader plan 4.2): a halo
 // round each of the nearest point lights - the inverse-square in-scatter along
 // the ray in closed form, windowed by the light's radius - and the visible cone
 // of each spot light, sampled through its range sphere (with the spot shadow for
 // the beam that has one). Rain thickens the air. Additive local light.
+#ifdef PHPOLYGON_LITE
+vec3 lightInscatter(vec3 p) { return vec3(0.0); }
+#else
 vec3 lightInscatter(vec3 p) {
     float sigma = u_light_halo + 0.03 * clamp(u_rain_wetness, 0.0, 1.0);
     // Indoor air is dry: a third of the scattering from inside an interior volume.
@@ -1087,6 +1123,7 @@ vec3 lightInscatter(vec3 p) {
     }
     return sum * sigma * 0.08;
 }
+#endif // PHPOLYGON_LITE
 
 // Rain drops on glass (shader plan 4.1): resting drops in 2 cm cells and, on steep
 // panes, drops running down in columns. Surface coordinates: along the pane's
@@ -2072,6 +2109,9 @@ void main() {
         // brightness and hue drift and a fine grain, both from the 3D position
         // projected along the dominant normal axis - walls vary like the ground,
         // repeated surfaces stop looking stamped. Only rough materials.
+#ifdef PHPOLYGON_LITE
+        albedo = texAlbedo; // Lite tier: no world-space drift (three noise lookups per pixel)
+#else
         vec3 an = abs(N);
         vec2 wp = an.y > max(an.x, an.z) ? v_worldPos.xz : (an.x > an.z ? v_worldPos.zy : v_worldPos.xy);
         float macro = noise(wp * 0.07) * 0.65 + noise(wp * 0.21) * 0.35;
@@ -2079,6 +2119,7 @@ void main() {
         float noiseMask = smoothstep(0.3, 0.9, roughness);
         vec3 drift = vec3(1.0 + (macro - 0.5) * 0.16, 1.0 + (macro - 0.5) * 0.12, 1.0 + (macro - 0.5) * 0.06);
         albedo = texAlbedo * mix(vec3(1.0), drift * (1.0 + (grain - 0.5) * 0.08), noiseMask);
+#endif // PHPOLYGON_LITE
     }
 
 #ifndef PHPOLYGON_OMIT_GRASS
@@ -2171,6 +2212,7 @@ void main() {
 
     // Rain-soaked ground (shader plan 4.1): porous surfaces darken, the water film
     // smooths them, puddles are near mirrors lying flat. Mirrors in the G-buffer.
+#ifndef PHPOLYGON_LITE
     vec2 soak = rainSoak(v_worldPos, N);
     if (soak.x > 0.0) {
         albedo *= mix(1.0, 0.6, soak.x * (1.0 - metallic));
@@ -2182,10 +2224,12 @@ void main() {
         vec2 rip = ripFade > 0.0 ? rainRipples(v_worldPos.xz, u_frag_time) * (soak.y + 0.25 * soak.x) * u_rain_wetness * ripFade : vec2(0.0);
         N = normalize(N + vec3(rip.x, 0.0, rip.y));
     }
+#endif // PHPOLYGON_LITE
 
     // Decal volumes (shader plan 5.1): stains, soot, moss and cracks painted on
     // whatever lies inside each box (the ground, a wall, a crate), fading towards
     // its edges and broken up by noise. Not on water or unlit materials.
+#ifndef PHPOLYGON_LITE
     if (u_decal_count > 0 && u_proc_mode != 2) {
         for (int k = 0; k < 8; k++) {
             if (k >= u_decal_count) break;
@@ -2236,6 +2280,7 @@ void main() {
         float bh = hash21(bcell + 4.1);
         albedo *= vec3(0.88 + 0.24 * bh, 0.9 + 0.18 * bh, 0.92 + 0.12 * hash21(bcell + 9.3));
     }
+#endif // PHPOLYGON_LITE
 
     // Weathering (shader plan 5.2): inside the aging zones dust settles on top,
     // rain streaks run down walls, metal rusts (copper turns green), moss grows
@@ -2308,6 +2353,7 @@ void main() {
     // Rain on glass (shader plan 4.1): transparent, smooth, default-shaded panes
     // outside interior volumes. Drops thicken the pane a little and catch the sky.
     float glassDrops = 0.0;
+#ifndef PHPOLYGON_LITE
     if (u_rain_wetness > 0.0 && alpha < 0.95 && u_roughness < 0.25 && u_proc_mode == 0
         && v_worldPos.y >= u_rain_dry_below && interiorMask(v_worldPos) <= 0.0) {
         vec3 gr = glassRain(v_worldPos, N, u_frag_time);
@@ -2317,6 +2363,7 @@ void main() {
         N = normalize(N + (gt * gr.y + vec3(0.0, 1.0, 0.0) * gr.z) * glassDrops);
         alpha = mix(alpha, min(1.0, alpha + 0.35), glassDrops);
     }
+#endif // PHPOLYGON_LITE
 
     // Glass (shader plan 5.3, Material::$glass): towards grazing angles the pane
     // turns opaque and mirror-like, so edges and curvature read; dirt (smudges and
@@ -2456,6 +2503,70 @@ void main() {
     vec3 surfaceEmission = vec3(0.0);
     // PHPOLYGON:SURFACE
 
+#ifdef PHPOLYGON_LITE
+    // ---- Lite lighting (ShaderQuality::Lite) ----
+    // One hemispherical ambient term, the sun as a Lambert term with a single shadow tap
+    // (plus a Blinn-Phong highlight), and a few local lights without shadows or
+    // specular. No IBL, clearcoat, area lights, curvature AO, micro shadows, probes or
+    // ray queries. The three accumulators and the shared tail below stay as they are.
+    roughness = clamp(roughness, 0.04, 1.0);
+    vec3 liteF0 = mix(vec3(0.04), albedo, metallic);
+    vec3 liteDiffuse = albedo * (1.0 - 0.6 * metallic) * (1.0 / 3.14159265);
+    float shadow = calcShadow(v_lightSpacePos, N);
+    float primaryIntensity = u_dir_light_count > 0 ? u_dir_lights[0].intensity : 0.0;
+    float ambientShadow = mix(1.0, mix(0.5, 1.0, shadow), clamp(primaryIntensity, 0.0, 1.0));
+    float liteAo = 1.0;
+#ifndef PHPOLYGON_MRT
+    if (u_ssao_enabled == 1) {
+        liteAo = clamp(texture(u_ssao_map, gl_FragCoord.xy / u_viewport_size).r, 0.0, 1.0);
+    }
+#endif
+    float liteHemi = N.y * 0.5 + 0.5;
+    vec3 liteSky = u_ambient_color * 1.3 + vec3(0.015, 0.03, 0.06);
+    vec3 liteGround = u_ambient_color * 0.7;
+    vec3 ambientAcc = albedo * (1.0 - 0.6 * metallic) * mix(liteGround, liteSky, liteHemi)
+                    * u_ambient_intensity * ambientShadow * liteAo;
+    vec3 sunAcc = vec3(0.0);
+    vec3 localAcc = vec3(0.0);
+    float liteN = exp2((1.0 - roughness) * 9.0 + 1.0);
+    int dirCount = min(u_dir_light_count, 2);
+    for (int dl = 0; dl < dirCount; dl++) {
+        vec3 dL = normalize(-u_dir_lights[dl].direction);
+        float dNdotL = max(dot(N, dL), 0.0);
+        float dShadow = (dl == 0) ? shadow : 1.0;
+        vec3 radiance = u_dir_lights[dl].color * u_dir_lights[dl].intensity;
+        float liteNdotH = max(dot(N, normalize(V + dL)), 0.0);
+        vec3 liteSpec = liteF0 * ((liteN + 8.0) * (1.0 / 25.1327412)) * pow(liteNdotH, liteN);
+        vec3 lit = (liteDiffuse + liteSpec) * radiance * dNdotL * dShadow;
+        if (dl == 0) sunAcc += lit; else localAcc += lit;
+    }
+    sunAcc *= 1.0 - interiorMask(v_worldPos);
+    // The lights of the uniform array (the eight nearest, as in a Full frame without the grid);
+    // never the light grid: its storage buffers would cost the program its early depth test.
+    int pointCount = min(u_point_light_count, 8);
+    for (int i = 0; i < pointCount; i++) {
+        vec3 Lp = u_point_lights[i].position - v_worldPos;
+        float dist = max(length(Lp), 1e-4);
+        float r = max(u_point_lights[i].radius, 0.001);
+        float atten = clamp(1.0 - dist * dist / (r * r), 0.0, 1.0);
+        atten *= atten;
+        localAcc += liteDiffuse * u_point_lights[i].color * u_point_lights[i].intensity * atten
+                  * max(dot(N, Lp / dist), 0.0);
+    }
+    int spotCount = min(u_spot_light_count, 4);
+    for (int i = 0; i < spotCount; i++) {
+        vec3 Ls = u_spot_lights[i].position - v_worldPos;
+        float dist = max(length(Ls), 1e-4);
+        Ls /= dist;
+        float r = max(u_spot_lights[i].range, 0.001);
+        float atten = clamp(1.0 - dist * dist / (r * r), 0.0, 1.0);
+        atten *= atten;
+        float cosOuter = cos(u_spot_lights[i].angle);
+        float cosInner = cos(u_spot_lights[i].angle * (1.0 - u_spot_lights[i].penumbra));
+        atten *= smoothstep(cosOuter, cosInner, dot(-Ls, normalize(u_spot_lights[i].direction)));
+        localAcc += liteDiffuse * u_spot_lights[i].color * u_spot_lights[i].intensity * atten * max(dot(N, Ls), 0.0);
+    }
+#else
     // ---- PBR Lighting (Cook-Torrance GGX) ----
     roughness = clamp(roughness, 0.04, 1.0);
     vec3 F0 = mix(vec3(0.04), albedo, metallic);
@@ -2954,6 +3065,7 @@ void main() {
         }
     }
 #endif // PHPOLYGON_OMIT_CLEARCOAT
+#endif // PHPOLYGON_LITE
 
     // Emissive looks (shader plan 5.4).
     vec3 emission = u_emission * particleRgb;

@@ -39,6 +39,7 @@ use PHPolygon\Rendering\PostProcess\VioNativeUpscalerPass;
 use PHPolygon\Rendering\PostProcess\VioShadowDebugPass;
 use PHPolygon\Rendering\PostProcess\VioTaaPass;
 use PHPolygon\Rendering\Quality\AntiAliasing;
+use PHPolygon\Rendering\Quality\ShaderQuality;
 use PHPolygon\Rendering\Quality\UpscalerDispatch;
 use PHPolygon\Rendering\Shadow\PointShadowPlanner;
 use PHPolygon\Rendering\Shadow\PointShadowSlot;
@@ -4539,11 +4540,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         $this->refreshAutoOmissions(true);
         $this->profilesThisFrame = ShaderProfiles::names() !== [] && $this->activeShaderId() === 'default';
         // While a surface cut runs the base program is the one that may discard.
-        $this->frameBaseVariant = ProcModeShaderRegistry::surfaceCutActive()
-            && $this->activeShaderId() === 'default'
-            && $this->ensureVariantCompiled(ProcModeShaderRegistry::SURFACE_CUT_VARIANT)
-            ? ProcModeShaderRegistry::SURFACE_CUT_VARIANT
-            : ProcModeShaderRegistry::BASE_VARIANT;
+        $this->frameBaseVariant = $this->chooseFrameBaseVariant();
         $this->sceneVariant = $this->frameBaseVariant;
         if ($this->frameBaseVariant !== ProcModeShaderRegistry::BASE_VARIANT) {
             $this->variantUniformsUploaded[$this->frameBaseVariant] = true;
@@ -5300,7 +5297,13 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         }
         // The surface-cut program is the base program with discards allowed.
         $cut = $variant === ProcModeShaderRegistry::SURFACE_CUT_VARIANT;
-        if ($cut) {
+        // The Lite tier's program: the base program, reduced (and with discards allowed
+        // while a surface cut runs).
+        $lite = $variant === ProcModeShaderRegistry::LITE_VARIANT || $variant === ProcModeShaderRegistry::LITE_CUT_VARIANT;
+        if ($variant === ProcModeShaderRegistry::LITE_CUT_VARIANT) {
+            $cut = true;
+        }
+        if ($cut || $lite) {
             $variant = ProcModeShaderRegistry::BASE_VARIANT;
         }
         $source = ProcModeShaderRegistry::spliceGlsl(
@@ -5312,10 +5315,14 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         foreach ($variantDefines as $define) {
             $source = self::withDefine($source, $define);
         }
-        foreach (array_unique([...$this->autoOmit, ...$profileOmit, ...$this->effectOff]) as $define) {
+        $liteOmit = $lite ? ShaderPath::liteOmissions() : [];
+        foreach (array_unique([...$this->autoOmit, ...$profileOmit, ...$this->effectOff, ...$liteOmit]) as $define) {
             if (!in_array($define, $variantDefines, true)) {
                 $source = self::withDefine($source, $define);
             }
+        }
+        if ($lite) {
+            $source = self::withDefine($source, 'PHPOLYGON_LITE');
         }
         if ($cut) {
             $source = self::withDefine($source, 'PHPOLYGON_SURFACE_CUT');
@@ -5341,12 +5348,16 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         if (self::sceneColorAvailable()) {
             $source = self::withDefine($source, 'PHPOLYGON_SCENE_COLOR');
         }
-        if (($this->settings->rayTracedShadows || $this->settings->rayTracedReflections || $this->settings->rayTracedGi) && $this->rayQueryAvailable()) {
+        if (!$lite && ($this->settings->rayTracedShadows || $this->settings->rayTracedReflections || $this->settings->rayTracedGi) && $this->rayQueryAvailable()) {
             $source = self::withDefine($source, 'PHPOLYGON_RAY_QUERY');
             // GL_EXT_ray_query needs GLSL 460.
             $source = (string) preg_replace('/^\s*#version[^\n]*\n/', "#version 460 core\n#extension GL_EXT_ray_query : require\n", $source, 1);
         }
-        if ($this->lightGridSupported()) {
+        // Not in the Lite program: a fragment shader that touches a storage buffer (a UAV on
+        // Direct3D) loses the early depth test there, so every hidden fragment of an opaque pass
+        // is shaded (measured: 5 ms -> 52 ms on an integrated GPU with nothing else in the shader).
+        // Lite lights with the nearest of the uniform lights instead.
+        if (!$lite && $this->lightGridSupported()) {
             $source = self::withDefine($source, 'PHPOLYGON_LIGHT_GRID');
             if ($this->fragmentStorageSharesTargets()) {
                 $source = self::withDefine($source, 'PHPOLYGON_UAV_SHARE_TARGETS');
@@ -5452,6 +5463,9 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
     /** Shader profiles are registered: base-variant materials may switch to theirs. */
     private bool $profilesThisFrame = false;
 
+    /** The Lite tier's cut-out twins are compiled (reset when the mesh programs are rebuilt). */
+    private bool $liteWarm = false;
+
     /**
      * Re-read the material registry (only when it changed) and leave out every
      * automatic path no material needs. With $rebuild, programs built without a path
@@ -5534,12 +5548,20 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
      */
     private function usedVariants(?array $materials = null): array
     {
-        $profiles = ShaderProfiles::names() !== [];
+        $liteBase = $this->settings->shaderQuality === ShaderQuality::Lite && $this->activeShaderId() === 'default'
+            ? ProcModeShaderRegistry::LITE_VARIANT : null;
+        $profiles = $liteBase === null && ShaderProfiles::names() !== [];
         $wanted = [];
+        if ($liteBase !== null) {
+            $wanted[$liteBase] = false; // the frame's base program, compiled behind the splash
+        }
         foreach ($materials ?? MaterialRegistry::all() as $id => $material) {
             $variant = $material->grass
                 ? ProcModeShaderRegistry::BASE_VARIANT
                 : ProcModeShaderRegistry::variantOf(ProcModeRegistry::resolve((string) $id));
+            if ($variant === ProcModeShaderRegistry::BASE_VARIANT && $liteBase !== null) {
+                $variant = $liteBase;
+            }
             if ($variant === ProcModeShaderRegistry::BASE_VARIANT && $profiles) {
                 $profile = ShaderProfiles::profileOf((string) $id, $material);
                 if ($profile !== null) {
@@ -5604,6 +5626,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             }
         }
         $this->failedVariants = [];
+        $this->liteWarm = false;
         $this->meshletFailed = [];
         $this->tessFailed = [];
         $this->variantUniformsUploaded = [];
@@ -5642,6 +5665,42 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
     private function wantsVariantSwitch(Material $material): bool
     {
         return $this->variantsThisFrame || $this->profilesThisFrame || $this->sceneVariant !== $this->frameBaseVariant || self::needsCutout($material);
+    }
+
+    /**
+     * The opaque base program of the frame: base, surface_cut while a cut runs, or the
+     * Lite tier's program (ShaderQuality::Lite, built-in shader active only: a game's
+     * shader override wins). A program that does not compile is skipped, the next one
+     * in this order is used.
+     */
+    private function chooseFrameBaseVariant(): string
+    {
+        if ($this->activeShaderId() !== 'default') {
+            return ProcModeShaderRegistry::BASE_VARIANT;
+        }
+        $cut = ProcModeShaderRegistry::surfaceCutActive();
+        if ($this->settings->shaderQuality === ShaderQuality::Lite) {
+            $lite = $cut ? ProcModeShaderRegistry::LITE_CUT_VARIANT : ProcModeShaderRegistry::LITE_VARIANT;
+            if ($this->ensureVariantCompiled($lite)) {
+                if (!$this->liteWarm) {
+                    // The cut-out twins too: compiled in the middle of a frame, the first
+                    // draw with a new program lost its albedo texture (D3D12, cold cache).
+                    $this->liteWarm = true;
+                    $this->ensureUsedVariants();
+                }
+                return $lite;
+            }
+        }
+        if ($cut && $this->ensureVariantCompiled(ProcModeShaderRegistry::SURFACE_CUT_VARIANT)) {
+            return ProcModeShaderRegistry::SURFACE_CUT_VARIANT;
+        }
+        return ProcModeShaderRegistry::BASE_VARIANT;
+    }
+
+    /** The base program the frame draws base-variant materials with - tests and tools. */
+    public function frameBaseProgramVariant(): string
+    {
+        return $this->frameBaseVariant;
     }
 
     private function selectVariant(Material $material, string $materialId): void
@@ -11031,6 +11090,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
     {
         $name = explode(self::CUTOUT_SUFFIX, $this->sceneVariant)[0];
         return $name === ProcModeShaderRegistry::BASE_VARIANT || str_starts_with($name, self::PROFILE_PREFIX)
+            || $name === ProcModeShaderRegistry::LITE_VARIANT || $name === ProcModeShaderRegistry::LITE_CUT_VARIANT
             ? $time
             : EffectRegistry::effectTime(EffectRegistry::get($name), $time);
     }

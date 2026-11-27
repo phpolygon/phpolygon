@@ -148,6 +148,38 @@ final class AdaptiveTierStackTest extends TestCase
         }
     }
 
+    public function testShaderQualityStepsThroughLiteOnTheWayDownAndUp(): void
+    {
+        $base = new GraphicsSettings(
+            renderScale: 0.5,
+            shadowQuality: ShadowQuality::Off,
+            viewDistance: 75.0,
+            antiAliasing: AntiAliasing::Off,
+            anisotropy: 1,
+            cloudShadows: false,
+            bloom: false,
+            ambientOcclusion: ScreenSpaceAO::Off,
+            vignetteIntensity: 0.0,
+            volumetricFog: false,
+            surfaceRelief: SurfaceRelief::Off,
+            shaderQuality: ShaderQuality::Full,
+        );
+        $lite = AdaptiveTierStack::downgrade($base);
+        $this->assertNotNull($lite);
+        $this->assertSame(ShaderQuality::Lite, $lite->shaderQuality, 'Full gives way to Lite first');
+        $unlit = AdaptiveTierStack::downgrade($lite);
+        $this->assertNotNull($unlit);
+        $this->assertSame(ShaderQuality::Unlit, $unlit->shaderQuality);
+        $this->assertNull(AdaptiveTierStack::downgrade($unlit));
+
+        $up = AdaptiveTierStack::upgrade($unlit->with(anisotropy: 16));
+        $this->assertNotNull($up);
+        $this->assertSame(ShaderQuality::Lite, $up->shaderQuality, 'Unlit comes back as Lite, not as Full');
+        $up2 = AdaptiveTierStack::upgrade($up);
+        $this->assertNotNull($up2);
+        $this->assertSame(ShaderQuality::Full, $up2->shaderQuality);
+    }
+
     public function testUpgradeReturnsNullAtMax(): void
     {
         $top = new GraphicsSettings(

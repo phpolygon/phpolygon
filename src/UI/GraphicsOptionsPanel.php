@@ -292,7 +292,7 @@ final class GraphicsOptionsPanel
         }
 
         // Shader quality
-        $shaders = [ShaderQuality::Full, ShaderQuality::Unlit];
+        $shaders = [ShaderQuality::Full, ShaderQuality::Lite, ShaderQuality::Unlit];
         $shaderLabels = array_map(static fn(ShaderQuality $q): string => $q->label(), $shaders);
         $idx = array_search($s->shaderQuality, $shaders, true);
         if (!is_int($idx)) {

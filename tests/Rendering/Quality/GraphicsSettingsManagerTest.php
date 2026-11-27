@@ -12,6 +12,7 @@ use PHPolygon\Rendering\GraphicsSettings;
 use PHPolygon\Rendering\GraphicsSettingsManager;
 use PHPolygon\Rendering\NullRenderer3D;
 use PHPolygon\Rendering\Quality\QualityMode;
+use PHPolygon\Rendering\Quality\ShaderQuality;
 use PHPolygon\Rendering\Quality\ShadowQuality;
 
 final class GraphicsSettingsManagerTest extends TestCase
@@ -116,6 +117,40 @@ final class GraphicsSettingsManagerTest extends TestCase
         $r = $engine->renderer3D;
         $this->assertNotNull($r->getLastAppliedSettings());
         $this->assertSame(ShadowQuality::Low, $r->getLastAppliedSettings()->shadowQuality);
+    }
+
+    /**
+     * Unlit is a standing shader override, Lite and Full are not: leaving Unlit for Lite clears the
+     * override (so the renderer's tier choice applies) and Lite itself sets none.
+     */
+    public function testShaderQualityTiersSwitchThroughTheManager(): void
+    {
+        $engine = new Engine(new EngineConfig(
+            headless: true,
+            is3D: true,
+            renderBackend3D: 'null',
+            firstLaunchCalibration: false,
+            graphicsSettingsPath: $this->tmpPath,
+        ));
+        $list = $engine->commandList3D;
+        $this->assertNotNull($list);
+
+        $engine->graphics->update(static fn(GraphicsSettings $s): GraphicsSettings => $s->with(shaderQuality: ShaderQuality::Unlit));
+        $this->assertSame('unlit', $engine->shaders->active());
+        $this->assertSame('unlit', $list->standingShader()?->shaderId);
+
+        $engine->graphics->update(static fn(GraphicsSettings $s): GraphicsSettings => $s->with(shaderQuality: ShaderQuality::Lite));
+        $this->assertNull($engine->shaders->active(), 'Lite is no override');
+        $this->assertNull($list->standingShader(), 'the standing Unlit shader is gone');
+        $this->assertSame(ShaderQuality::Lite, $engine->graphics->settings()->shaderQuality);
+
+        $engine->graphics->update(static fn(GraphicsSettings $s): GraphicsSettings => $s->with(bloom: false));
+        $this->assertNull($list->standingShader(), 'an unrelated change keeps it that way');
+        $this->assertSame(ShaderQuality::Lite, $engine->graphics->settings()->shaderQuality);
+
+        $engine->graphics->update(static fn(GraphicsSettings $s): GraphicsSettings => $s->with(shaderQuality: ShaderQuality::Full));
+        $this->assertNull($engine->shaders->active());
+        $this->assertNull($list->standingShader());
     }
 
     public function testUpdateEmitsGraphicsSettingsChangedEvent(): void
