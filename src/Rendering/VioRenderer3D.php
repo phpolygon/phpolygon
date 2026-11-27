@@ -4540,7 +4540,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         $this->refreshAutoOmissions(true);
         $this->profilesThisFrame = ShaderProfiles::names() !== [] && $this->activeShaderId() === 'default';
         // While a surface cut runs the base program is the one that may discard.
-        $this->frameBaseVariant = $this->chooseFrameBaseVariant();
+        $this->frameBaseVariant = $this->chooseFrameBaseVariant(count($pointLights));
         $this->sceneVariant = $this->frameBaseVariant;
         if ($this->frameBaseVariant !== ProcModeShaderRegistry::BASE_VARIANT) {
             $this->variantUniformsUploaded[$this->frameBaseVariant] = true;
@@ -5289,6 +5289,11 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         if ($cutout) {
             $variant = substr($variant, 0, -strlen(self::CUTOUT_SUFFIX));
         }
+        // '+nogrid': any program (a game's own variant too) without the light grid.
+        $gridlessSuffix = str_ends_with($variant, self::NOGRID_SUFFIX);
+        if ($gridlessSuffix) {
+            $variant = substr($variant, 0, -strlen(self::NOGRID_SUFFIX));
+        }
         // 'profile:<name>': the base program without the paths the profile leaves out.
         $profileOmit = [];
         if (str_starts_with($variant, self::PROFILE_PREFIX)) {
@@ -5303,7 +5308,13 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         if ($variant === ProcModeShaderRegistry::LITE_CUT_VARIANT) {
             $cut = true;
         }
-        if ($cut || $lite) {
+        // The grid-less twin of the base program (see LightGridGate).
+        $gridTwin = $variant === ProcModeShaderRegistry::NOGRID_VARIANT || $variant === ProcModeShaderRegistry::NOGRID_CUT_VARIANT;
+        $gridless = $gridTwin || $gridlessSuffix;
+        if ($variant === ProcModeShaderRegistry::NOGRID_CUT_VARIANT) {
+            $cut = true;
+        }
+        if ($cut || $lite || $gridTwin) {
             $variant = ProcModeShaderRegistry::BASE_VARIANT;
         }
         $source = ProcModeShaderRegistry::spliceGlsl(
@@ -5357,7 +5368,9 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         // Direct3D) loses the early depth test there, so every hidden fragment of an opaque pass
         // is shaded (measured: 5 ms -> 52 ms on an integrated GPU with nothing else in the shader).
         // Lite lights with the nearest of the uniform lights instead.
-        if (!$lite && $this->lightGridSupported()) {
+        // The grid-less twin leaves it out for the same reason: a frame of at most eight
+        // point lights reads the uniform array only.
+        if (!$lite && !$gridless && $this->lightGridSupported()) {
             $source = self::withDefine($source, 'PHPOLYGON_LIGHT_GRID');
             if ($this->fragmentStorageSharesTargets()) {
                 $source = self::withDefine($source, 'PHPOLYGON_UAV_SHARE_TARGETS');
@@ -5465,6 +5478,9 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
      */
     private const string CUTOUT_SUFFIX = '+cutout';
 
+    /** Suffix of a program built without the light grid (before '+cutout'): `water+nogrid+cutout`. */
+    private const string NOGRID_SUFFIX = '+nogrid';
+
     /** Variant name of a shader profile's program ({@see ShaderProfiles}). */
     private const string PROFILE_PREFIX = 'profile:';
 
@@ -5473,6 +5489,39 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
 
     /** The Lite tier's cut-out twins are compiled (reset when the mesh programs are rebuilt). */
     private bool $liteWarm = false;
+
+    /** The grid-less twins and their cut-out twins are compiled (reset when the mesh programs are rebuilt). */
+    private bool $gridlessWarm = false;
+
+    /** This frame draws every program without the light grid (the base twin and the suffix twins of variants). */
+    private bool $gridlessFrame = false;
+
+    private ?bool $gridGateOn = null;
+    private ?Lighting\LightGridGate $gridGate = null;
+
+    /**
+     * Whether a frame may draw base materials with the grid-less program: the backend has the
+     * light grid (else the base program has none either), the Full tier is on with the built-in
+     * shader, and no shader profile is registered (profile programs are built from the grid
+     * program). PHPOLYGON_LIGHT_GRID_GATE=0 keeps the grid program in every frame.
+     */
+    private function gridlessPossible(): bool
+    {
+        return $this->gridGateAllowed()
+            && $this->settings->shaderQuality !== ShaderQuality::Lite
+            && ShaderProfiles::names() === [];
+    }
+
+    /**
+     * Whether frames may skip the light grid at all: the backend has it, the built-in shader
+     * draws, PHPOLYGON_LIGHT_GRID_GATE is not 0. The Lite program has no grid of its own, but a
+     * game's variants in a Lite frame do, so Lite takes the gate for those.
+     */
+    private function gridGateAllowed(): bool
+    {
+        $this->gridGateOn ??= getenv('PHPOLYGON_LIGHT_GRID_GATE') !== '0' && $this->lightGridSupported();
+        return $this->gridGateOn && $this->activeShaderId() === 'default';
+    }
 
     /**
      * Re-read the material registry (only when it changed) and leave out every
@@ -5563,12 +5612,35 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         if ($liteBase !== null) {
             $wanted[$liteBase] = false; // the frame's base program, compiled behind the splash
         }
+        // Frames that fit the uniform lights draw base materials with the grid-less twin; the
+        // grid program stays (frames with more lights), so both sets are warm.
+        $gridless = $liteBase !== null ? $this->gridGateAllowed() : $this->gridlessPossible();
+        if ($gridless) {
+            if ($liteBase === null) {
+                $wanted[ProcModeShaderRegistry::NOGRID_VARIANT] = false;
+            }
+            // The game's non-lazy variants, up front like their grid programs.
+            foreach (ProcModeShaderRegistry::variants() as $name) {
+                if (!ProcModeShaderRegistry::isLazyVariant($name)) {
+                    $wanted[$name . self::NOGRID_SUFFIX] = false;
+                }
+            }
+        }
         foreach ($materials ?? MaterialRegistry::all() as $id => $material) {
             $variant = $material->grass
                 ? ProcModeShaderRegistry::BASE_VARIANT
                 : ProcModeShaderRegistry::variantOf(ProcModeRegistry::resolve((string) $id));
             if ($variant === ProcModeShaderRegistry::BASE_VARIANT && $liteBase !== null) {
                 $variant = $liteBase;
+            }
+            if ($gridless && $variant !== $liteBase) {
+                // A game's own variant gets the suffix twin, a base material the base twin.
+                $twin = ($variant === ProcModeShaderRegistry::BASE_VARIANT ? ProcModeShaderRegistry::NOGRID_VARIANT : $variant . self::NOGRID_SUFFIX)
+                    . (self::needsCutout($material) ? self::CUTOUT_SUFFIX : '');
+                $wanted[$twin] ??= false;
+                if ($material->tessellation > 0.0) {
+                    $wanted[$twin] = true;
+                }
             }
             if ($variant === ProcModeShaderRegistry::BASE_VARIANT && $profiles) {
                 $profile = ShaderProfiles::profileOf((string) $id, $material);
@@ -5635,6 +5707,7 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         }
         $this->failedVariants = [];
         $this->liteWarm = false;
+        $this->gridlessWarm = false;
         $this->meshletFailed = [];
         $this->tessFailed = [];
         $this->variantUniformsUploaded = [];
@@ -5681,15 +5754,34 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
      * shader override wins). A program that does not compile is skipped, the next one
      * in this order is used.
      */
-    private function chooseFrameBaseVariant(): string
+    private function chooseFrameBaseVariant(int $pointLights = 0): string
     {
+        $this->gridlessFrame = false;
         if ($this->activeShaderId() !== 'default') {
             return ProcModeShaderRegistry::BASE_VARIANT;
         }
         $cut = ProcModeShaderRegistry::surfaceCutActive();
+        // Grid-less programs while the frame's point lights fit the uniform array. The gate
+        // is asked every frame it could apply, so its hold time counts frames.
+        $noGrid = $this->gridGateAllowed() && !($this->gridGate ??= new Lighting\LightGridGate())->needsGrid($pointLights);
+        if ($noGrid && $this->gridlessPossible()) {
+            $twin = $cut ? ProcModeShaderRegistry::NOGRID_CUT_VARIANT : ProcModeShaderRegistry::NOGRID_VARIANT;
+            if ($this->ensureVariantCompiled($twin)) {
+                $this->gridlessFrame = true;
+                if (!$this->gridlessWarm) {
+                    // The cut-out twins too (a compile in the middle of a frame lost the
+                    // first draw's albedo texture on D3D12, cold cache).
+                    $this->gridlessWarm = true;
+                    $this->ensureUsedVariants();
+                }
+                return $twin;
+            }
+        }
         if ($this->settings->shaderQuality === ShaderQuality::Lite) {
             $lite = $cut ? ProcModeShaderRegistry::LITE_CUT_VARIANT : ProcModeShaderRegistry::LITE_VARIANT;
             if ($this->ensureVariantCompiled($lite)) {
+                // The Lite program has no grid; a game's variants in the frame get theirs without it too.
+                $this->gridlessFrame = $noGrid;
                 if (!$this->liteWarm) {
                     // The cut-out twins too: compiled in the middle of a frame, the first
                     // draw with a new program lost its albedo texture (D3D12, cold cache).
@@ -5703,6 +5795,12 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             return ProcModeShaderRegistry::SURFACE_CUT_VARIANT;
         }
         return ProcModeShaderRegistry::BASE_VARIANT;
+    }
+
+    /** Whether the program of game variant $name was built without the grid and compiled - tests and tools. */
+    public function gridlessVariantCompiled(string $name): bool
+    {
+        return isset($this->shaderCache['default@' . $name . self::NOGRID_SUFFIX]);
     }
 
     /** The base program the frame draws base-variant materials with - tests and tools. */
@@ -5726,6 +5824,9 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
                     $variant = self::PROFILE_PREFIX . $profile;
                 }
             }
+        } elseif ($this->gridlessFrame) {
+            // A game's own program in a frame that fits the uniform lights: its twin without the grid.
+            $variant .= self::NOGRID_SUFFIX;
         }
         if (self::needsCutout($material)) {
             $variant .= self::CUTOUT_SUFFIX;
@@ -5734,7 +5835,10 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
             return;
         }
         if (!$this->ensureVariantCompiled($variant)) {
-            $variant = ProcModeShaderRegistry::BASE_VARIANT;
+            // A grid-less twin that does not compile falls back to the program with the grid
+            // (not to plain PBR) before the last resort, the base program.
+            $withGrid = self::withGrid($variant);
+            $variant = $withGrid !== $variant && $this->ensureVariantCompiled($withGrid) ? $withGrid : ProcModeShaderRegistry::BASE_VARIANT;
             if ($variant === $this->sceneVariant) {
                 return;
             }
@@ -5754,6 +5858,21 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
         $this->uploadSdfAoUniforms();
         $this->uploadSnippetInputs();
         $this->uploadMotionUniforms();
+    }
+
+    /** The program of $variant with the light grid: a `+nogrid` suffix dropped, a base twin turned back into the base program. */
+    private static function withGrid(string $variant): string
+    {
+        $variant = str_replace(self::NOGRID_SUFFIX, '', $variant);
+        foreach ([
+            ProcModeShaderRegistry::NOGRID_CUT_VARIANT => ProcModeShaderRegistry::SURFACE_CUT_VARIANT,
+            ProcModeShaderRegistry::NOGRID_VARIANT => ProcModeShaderRegistry::BASE_VARIANT,
+        ] as $twin => $program) {
+            if (str_starts_with($variant, $twin)) {
+                return $program . substr($variant, strlen($twin));
+            }
+        }
+        return $variant;
     }
 
     private function loadShader(string $relativeFile): string
@@ -11096,9 +11215,10 @@ class VioRenderer3D implements Renderer3DInterface, AnimationClockInterface
      */
     private function programTime(float $time): float
     {
-        $name = explode(self::CUTOUT_SUFFIX, $this->sceneVariant)[0];
+        $name = explode(self::NOGRID_SUFFIX, explode(self::CUTOUT_SUFFIX, $this->sceneVariant)[0])[0];
         return $name === ProcModeShaderRegistry::BASE_VARIANT || str_starts_with($name, self::PROFILE_PREFIX)
             || $name === ProcModeShaderRegistry::LITE_VARIANT || $name === ProcModeShaderRegistry::LITE_CUT_VARIANT
+            || $name === ProcModeShaderRegistry::NOGRID_VARIANT || $name === ProcModeShaderRegistry::NOGRID_CUT_VARIANT
             ? $time
             : EffectRegistry::effectTime(EffectRegistry::get($name), $time);
     }

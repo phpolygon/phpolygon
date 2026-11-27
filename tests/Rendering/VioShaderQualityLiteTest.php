@@ -261,7 +261,7 @@ final class VioShaderQualityLiteTest extends TestCase
         $this->context('auto');
         $list = $this->boxScene('stone');
         $first = $this->render(ShaderQuality::Full, $list);
-        self::assertSame(ProcModeShaderRegistry::BASE_VARIANT, $this->renderer?->frameBaseProgramVariant());
+        self::assertSame(self::fullBase($this->renderer), $this->renderer?->frameBaseProgramVariant());
 
         $renderer = $this->renderer;
         self::assertNotNull($renderer);
@@ -272,7 +272,7 @@ final class VioShaderQualityLiteTest extends TestCase
         }
         $renderer->applySettings($this->settings(ShaderQuality::Full));
         $again = $renderer->renderToImage($list, self::W, self::H, $this->clear());
-        self::assertSame(ProcModeShaderRegistry::BASE_VARIANT, $renderer->frameBaseProgramVariant());
+        self::assertSame(self::fullBase($renderer), $renderer->frameBaseProgramVariant());
         self::assertSame(md5($first), md5($again), 'Full after Lite: every pixel as before');
     }
 
@@ -283,6 +283,12 @@ final class VioShaderQualityLiteTest extends TestCase
         $list = $this->boxScene('stone', override: 'unlit');
         $this->render(ShaderQuality::Lite, $list);
         self::assertSame(ProcModeShaderRegistry::BASE_VARIANT, $this->renderer?->frameBaseProgramVariant());
+    }
+
+    /** The program a Full frame draws base materials with: the grid-less twin where the backend has the light grid. */
+    private static function fullBase(?VioRenderer3D $renderer): string
+    {
+        return $renderer !== null && $renderer->maxPointLights() > 8 ? ProcModeShaderRegistry::NOGRID_VARIANT : ProcModeShaderRegistry::BASE_VARIANT;
     }
 
     private function context(string $backend): void

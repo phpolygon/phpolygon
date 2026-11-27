@@ -53,7 +53,12 @@ final class ShaderQualityLiteSourceTest extends TestCase
 
     public function testTheLiteVariantNamesCannotBeTakenByAGame(): void
     {
-        foreach ([ProcModeShaderRegistry::LITE_VARIANT, ProcModeShaderRegistry::LITE_CUT_VARIANT] as $name) {
+        foreach ([
+            ProcModeShaderRegistry::LITE_VARIANT,
+            ProcModeShaderRegistry::LITE_CUT_VARIANT,
+            ProcModeShaderRegistry::NOGRID_VARIANT,
+            ProcModeShaderRegistry::NOGRID_CUT_VARIANT,
+        ] as $name) {
             try {
                 ProcModeShaderRegistry::defineVariant($name, [99]);
                 self::fail("a game defined the variant '{$name}'");

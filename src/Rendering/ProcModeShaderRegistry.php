@@ -383,6 +383,17 @@ final class ProcModeShaderRegistry
     public const string LITE_VARIANT = 'tier:lite';
     public const string LITE_CUT_VARIANT = 'tier:lite_cut';
 
+    /**
+     * The base program without the world light grid: byte for byte the base program minus
+     * PHPOLYGON_LIGHT_GRID (a fragment shader that touches a storage buffer loses the early
+     * depth test on Direct3D). The renderer draws base-variant materials with it while the
+     * frame's point lights fit the uniform array ({@see Lighting\LightGridGate}); a game's
+     * own variants and shader profiles keep their programs, so a frame with a profile
+     * registered never uses it. NOGRID_CUT_VARIANT is the same program while a surface cut runs.
+     */
+    public const string NOGRID_VARIANT = 'tier:nogrid';
+    public const string NOGRID_CUT_VARIANT = 'tier:nogrid_cut';
+
     private static bool $surfaceCut = false;
 
     /** Whether surface hooks may discard this frame (see SURFACE_CUT_VARIANT). */
