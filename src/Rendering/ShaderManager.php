@@ -55,22 +55,27 @@ class ShaderManager
     }
 
     /**
-     * Activate a shader globally for all subsequent draw commands this frame.
-     * Emits a SetShader command into the current RenderCommandList.
+     * Activate a shader globally for all subsequent draw commands until reset().
+     * Emits a SetShader command into the current RenderCommandList, and the list
+     * puts it back at the start of every following frame (the renderer drops its
+     * override each frame, so a command sent once used to hold for one frame only).
      */
     public function use(string $shaderId): void
     {
         $this->activeOverride = $shaderId;
-        $this->commandList?->add(new SetShader($shaderId));
+        $command = new SetShader($shaderId);
+        $this->commandList?->add($command);
+        $this->commandList?->setStandingShader($command);
     }
 
     /**
      * Reset to material-driven shader selection.
-     * Emits a SetShader(null) command into the current RenderCommandList.
+     * Emits a SetShader(null) command into the current RenderCommandList and ends the repeat.
      */
     public function reset(): void
     {
         $this->activeOverride = null;
+        $this->commandList?->setStandingShader(null);
         $this->commandList?->add(new SetShader(null));
     }
 

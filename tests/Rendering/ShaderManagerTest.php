@@ -117,6 +117,82 @@ class ShaderManagerTest extends TestCase
         $this->assertNull($commands[2]->shaderId);
     }
 
+    public function testTheOverrideIsInTheListAgainAfterEveryFrameClear(): void
+    {
+        $this->manager->use('unlit');
+
+        // The renderer drops its override at the start of each frame and the system clears the list after
+        // submitting it: without a repeat the override held for exactly one frame (ShaderQuality::Unlit never took).
+        for ($frame = 0; $frame < 3; $frame++) {
+            $this->commandList->clear();
+            $commands = $this->commandList->getCommands();
+            $this->assertCount(1, $commands, "frame {$frame}");
+            $this->assertInstanceOf(SetShader::class, $commands[0]);
+            $this->assertSame('unlit', $commands[0]->shaderId);
+        }
+    }
+
+    public function testTheOverrideComesFirstSoItReachesEveryDraw(): void
+    {
+        $this->manager->use('normals');
+        $this->commandList->clear();
+        $this->commandList->add(new \PHPolygon\Rendering\Command\SetAmbientLight(new \PHPolygon\Rendering\Color(1.0, 1.0, 1.0), 1.0));
+
+        $this->assertInstanceOf(SetShader::class, $this->commandList->getCommands()[0]);
+    }
+
+    public function testResetStopsTheRepeat(): void
+    {
+        $this->manager->use('unlit');
+        $this->manager->reset();
+
+        $this->commandList->clear();
+        $this->assertTrue($this->commandList->isEmpty());
+    }
+
+    public function testASecondUseReplacesTheRepeatedOverride(): void
+    {
+        $this->manager->use('unlit');
+        $this->manager->use('depth');
+
+        $this->commandList->clear();
+        $commands = $this->commandList->getCommands();
+        $this->assertCount(1, $commands);
+        $this->assertSame('depth', $commands[0]->shaderId);
+    }
+
+    public function testAListWithoutAnOverrideClearsToEmptyAsBefore(): void
+    {
+        $this->commandList->add(new \PHPolygon\Rendering\Command\SetAmbientLight(new \PHPolygon\Rendering\Color(1.0, 1.0, 1.0), 1.0));
+        $this->commandList->clear();
+
+        $this->assertTrue($this->commandList->isEmpty());
+    }
+
+    public function testRenderedFramesCarryTheOverrideThroughTheSystem(): void
+    {
+        $renderer = new \PHPolygon\Rendering\NullRenderer3D(64, 64);
+        $system = new \PHPolygon\System\Renderer3DSystem($renderer, $this->commandList);
+        $world = new \PHPolygon\ECS\World();
+        $this->manager->use('unlit');
+
+        for ($frame = 0; $frame < 3; $frame++) {
+            $system->render($world);
+            $sent = $renderer->getLastCommandList()?->ofType(SetShader::class) ?? [];
+            $this->assertNotEmpty($sent, "frame {$frame}: the renderer saw no SetShader");
+            $this->assertSame('unlit', $sent[0]->shaderId, "frame {$frame}");
+        }
+
+        $this->manager->reset();
+        $system->render($world);
+        $afterReset = $renderer->getLastCommandList()?->ofType(SetShader::class) ?? [];
+        // The frame in which reset() ran still holds the override put back by the last clear(); the last
+        // SetShader before any draw is the null that ends it.
+        $this->assertNull($afterReset[array_key_last($afterReset)]->shaderId);
+        $system->render($world);
+        $this->assertSame([], $renderer->getLastCommandList()?->ofType(SetShader::class) ?? []);
+    }
+
     public function testWorksWithNullCommandList(): void
     {
         $manager = new ShaderManager(null);

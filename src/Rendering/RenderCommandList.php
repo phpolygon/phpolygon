@@ -14,10 +14,32 @@ class RenderCommandList
         $this->commands[] = $command;
     }
 
+    /**
+     * Empty the list for the next frame. A standing shader override (see setStandingShader()) is put back
+     * as the first command, so it reaches every draw of every frame.
+     */
     public function clear(): void
     {
-        $this->commands = [];
+        $this->commands = $this->standingShader === null ? [] : [$this->standingShader];
     }
+
+    /**
+     * A shader override that holds until it is replaced or reset, not for one frame. The renderer drops
+     * its override at the start of each frame and the frame loop clears the list after submitting it, so
+     * a SetShader added once reached exactly one frame. The ShaderManager sets this; a command that is
+     * null (or SetShader with a null id) ends the repeat.
+     */
+    public function setStandingShader(?Command\SetShader $command): void
+    {
+        $this->standingShader = $command !== null && $command->shaderId !== null ? $command : null;
+    }
+
+    public function standingShader(): ?Command\SetShader
+    {
+        return $this->standingShader;
+    }
+
+    private ?Command\SetShader $standingShader = null;
 
     /**
      * Replace the whole list (e.g. after reordering it). The caller keeps
