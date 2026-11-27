@@ -154,6 +154,72 @@ class Renderer3DSystem extends AbstractSystem
         $this->fieldtracingMode = $mode;
     }
 
+    /** Local lights per kind that may burn (0 = the system's own limit), see GraphicsSettings::$pointLightBudget. */
+    private int $pointLightBudget = 0;
+    private int $spotLightBudget = 0;
+    private int $rectLightBudget = 0;
+
+    /** @var array<string, array<int|string, true>> entity ids the budget kept last frame, per kind */
+    private array $budgetKept = [];
+
+    /** What the system takes from the player's graphics settings (the Engine calls this on start and on every change). */
+    public function applyGraphicsSettings(\PHPolygon\Rendering\GraphicsSettings $settings): void
+    {
+        $this->setFieldtracingMode($settings->fieldtracing);
+        $this->setLightBudget($settings->pointLightBudget, $settings->spotLightBudget, $settings->rectLightBudget);
+    }
+
+    /** Set the per-kind budget of emitted local lights; 0 keeps a kind at its own limit. */
+    public function setLightBudget(int $point, int $spot, int $rect): void
+    {
+        $this->pointLightBudget = max(0, $point);
+        $this->spotLightBudget = max(0, $spot);
+        $this->rectLightBudget = max(0, $rect);
+        $this->budgetKept = [];
+    }
+
+    /**
+     * Keep the best lights of one kind: the system's own $limit, or the smaller $budget
+     * when one is set (nearest first, a light that is in keeps its slot at the border,
+     * see LocalLightBudget). Rows are keyed by entity id, rank first.
+     *
+     * @template T of array{0: array{0: float, 1: float}}
+     * @param array<int, T> $candidates
+     * @return list<T>
+     */
+    private function limitLights(string $kind, array $candidates, int $limit, int $budget): array
+    {
+        if ($budget <= 0) {
+            unset($this->budgetKept[$kind]);
+            $rows = array_values($candidates);
+            if (count($rows) > $limit) {
+                usort($rows, self::byRank(...));
+                $rows = array_slice($rows, 0, $limit);
+            }
+            return $rows;
+        }
+        $ranks = [];
+        foreach ($candidates as $id => $row) {
+            $ranks[$id] = $row[0];
+        }
+        $kept = \PHPolygon\Rendering\Lighting\LocalLightBudget::select($ranks, min($limit, $budget), $this->budgetKept[$kind] ?? []);
+        $this->budgetKept[$kind] = $kept;
+        $rows = array_values(array_intersect_key($candidates, $kept));
+        if (count($rows) < count($candidates)) {
+            usort($rows, self::byRank(...));
+        }
+        return $rows;
+    }
+
+    /**
+     * @param array{0: array{0: float, 1: float}} $a
+     * @param array{0: array{0: float, 1: float}} $b
+     */
+    private static function byRank(array $a, array $b): int
+    {
+        return ($a[0][0] <=> $b[0][0]) ?: ($a[0][1] <=> $b[0][1]);
+    }
+
     public function __construct(
         private readonly Renderer3DInterface $renderer,
         private readonly RenderCommandList $commandList,
@@ -299,17 +365,14 @@ class Renderer3DSystem extends AbstractSystem
             if ($rank === null) {
                 continue;
             }
-            $candidates[] = [$rank, $pos, $light];
+            $candidates[$entity->id] = [$rank, $pos, $light];
         }
 
         // A renderer with the world light grid reads every light per cell and takes
         // up to its own limit; the others honour MAX_POINT_LIGHTS.
         $rendererLimit = method_exists($this->renderer, 'maxPointLights') ? $this->renderer->maxPointLights() : null;
         $limit = is_int($rendererLimit) ? max(self::MAX_POINT_LIGHTS, $rendererLimit) : self::MAX_POINT_LIGHTS;
-        if (count($candidates) > $limit) {
-            usort($candidates, static fn(array $a, array $b): int => ($a[0][0] <=> $b[0][0]) ?: ($a[0][1] <=> $b[0][1]));
-            $candidates = array_slice($candidates, 0, $limit);
-        }
+        $candidates = $this->limitLights('point', $candidates, $limit, $this->pointLightBudget);
 
         foreach ($candidates as [$distSq, $pos, $light]) {
             $this->commandList->add(new AddPointLight(
@@ -349,13 +412,10 @@ class Renderer3DSystem extends AbstractSystem
             if ($rank === null) {
                 continue;
             }
-            $spotCandidates[] = [$rank, $pos, $light];
+            $spotCandidates[$entity->id] = [$rank, $pos, $light];
         }
 
-        if (count($spotCandidates) > self::MAX_SPOT_LIGHTS) {
-            usort($spotCandidates, static fn(array $a, array $b): int => ($a[0][0] <=> $b[0][0]) ?: ($a[0][1] <=> $b[0][1]));
-            $spotCandidates = array_slice($spotCandidates, 0, self::MAX_SPOT_LIGHTS);
-        }
+        $spotCandidates = $this->limitLights('spot', $spotCandidates, self::MAX_SPOT_LIGHTS, $this->spotLightBudget);
 
         foreach ($spotCandidates as [$distSq, $pos, $light]) {
             $this->commandList->add(new AddSpotLight(
@@ -384,12 +444,9 @@ class Renderer3DSystem extends AbstractSystem
             if ($rank === null) {
                 continue;
             }
-            $rectCandidates[] = [$rank, $pos, $m, $light];
+            $rectCandidates[$entity->id] = [$rank, $pos, $m, $light];
         }
-        if (count($rectCandidates) > self::MAX_RECT_LIGHTS) {
-            usort($rectCandidates, static fn(array $a, array $b): int => ($a[0][0] <=> $b[0][0]) ?: ($a[0][1] <=> $b[0][1]));
-            $rectCandidates = array_slice($rectCandidates, 0, self::MAX_RECT_LIGHTS);
-        }
+        $rectCandidates = $this->limitLights('rect', $rectCandidates, self::MAX_RECT_LIGHTS, $this->rectLightBudget);
         foreach ($rectCandidates as [, $pos, $m, $light]) {
             $this->commandList->add(new AddRectLight(
                 $pos,

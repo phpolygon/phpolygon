@@ -908,7 +908,7 @@ class Engine
             $this->window->setVsync($event->current->vsync);
             $this->applyRenderFpsCap($event->current);
             $this->textures->applySettings($event->current);
-            $this->syncFieldtracingToSystems($event->current);
+            $this->syncSettingsToSystems($event->current);
         });
         $this->textures->applySettings($this->graphics->settings());
 
@@ -1002,10 +1002,9 @@ class Engine
         // The splash path ran the warm-up inside showSplashScreen(); this is then a no-op.
         $this->runWarmup(false);
 
-        // Now that game systems are registered, push the persisted Fieldtracing
-        // tier into any Renderer3DSystem so it emits the matching SetFieldtracing
-        // command each frame (runtime changes are handled by the listener below).
-        $this->syncFieldtracingToSystems($this->graphics->settings());
+        // Now that game systems are registered, push the persisted Fieldtracing tier and
+        // light budget into any Renderer3DSystem (runtime changes are handled by the listener).
+        $this->syncSettingsToSystems($this->graphics->settings());
 
         // Hardware-aware targetFps ceiling: on known throttle-prone Macs
         // (e.g. 2018/2019 15" MBP i9) lower the calibration target so the
@@ -1674,17 +1673,18 @@ class Engine
      *      higher rates by setting an explicit `fpsCap`.
      */
     /**
-     * Push the active Fieldtracing tier into every registered Renderer3DSystem so
-     * it emits a matching SetFieldtracing command each frame. The 3D backends are
-     * the authority (they read GraphicsSettings::$fieldtracing directly too), so
-     * this only matters for the canonical command-list path; it is a no-op for
-     * 2D-only games (no Renderer3DSystem present).
+     * Push the graphics settings a Renderer3DSystem acts on into every registered one: the
+     * Fieldtracing tier (it emits a matching SetFieldtracing command each frame; the 3D
+     * backends are the authority and read GraphicsSettings::$fieldtracing directly too) and the
+     * per-kind local-light budget (GraphicsSettings::$pointLightBudget and its siblings, which only
+     * the system can apply). A no-op for 2D-only games (no Renderer3DSystem present). A system
+     * added after startup takes the settings with the next change.
      */
-    private function syncFieldtracingToSystems(\PHPolygon\Rendering\GraphicsSettings $settings): void
+    private function syncSettingsToSystems(\PHPolygon\Rendering\GraphicsSettings $settings): void
     {
         foreach ($this->world->getSystems() as $system) {
             if ($system instanceof \PHPolygon\System\Renderer3DSystem) {
-                $system->setFieldtracingMode($settings->fieldtracing);
+                $system->applyGraphicsSettings($settings);
             }
         }
     }

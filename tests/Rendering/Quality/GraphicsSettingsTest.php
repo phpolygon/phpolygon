@@ -140,6 +140,36 @@ final class GraphicsSettingsTest extends TestCase
         $this->assertSame(1, GraphicsSettings::fromJson(['pointShadowLights' => 'many'])->pointShadowLights);
     }
 
+    public function testLocalLightBudgetsAreUnlimitedByDefaultAndRoundTrip(): void
+    {
+        $s = new GraphicsSettings();
+        $this->assertSame([0, 0, 0], [$s->pointLightBudget, $s->spotLightBudget, $s->rectLightBudget]);
+        foreach (['pointLightBudget', 'spotLightBudget', 'rectLightBudget'] as $key) {
+            $this->assertArrayNotHasKey($key, $s->toJson(), 'the default stays out of the file');
+        }
+
+        $capped = $s->with(pointLightBudget: 8, spotLightBudget: 4, rectLightBudget: 2);
+        $back = GraphicsSettings::fromJson($capped->toJson());
+        $this->assertSame([8, 4, 2], [$back->pointLightBudget, $back->spotLightBudget, $back->rectLightBudget]);
+
+        // with() keeps what it is not given.
+        $this->assertSame(8, $capped->with(bloom: false)->pointLightBudget);
+        $this->assertSame(0, $capped->with(pointLightBudget: 0)->pointLightBudget);
+        // Clamped.
+        $this->assertSame(0, $s->with(spotLightBudget: -5)->spotLightBudget);
+        $this->assertSame(GraphicsSettings::LIGHT_BUDGET_MAX, $s->with(pointLightBudget: 9999)->pointLightBudget);
+        $this->assertSame(GraphicsSettings::LIGHT_BUDGET_MAX, GraphicsSettings::fromJson(['pointLightBudget' => 9999])->pointLightBudget);
+        $this->assertSame(0, GraphicsSettings::fromJson(['rectLightBudget' => 'many'])->rectLightBudget);
+    }
+
+    public function testASaveWithoutTheBudgetFieldsLoadsAsUnlimited(): void
+    {
+        $old = (new GraphicsSettings())->toJson();
+        unset($old['pointLightBudget'], $old['spotLightBudget'], $old['rectLightBudget']);
+        $loaded = GraphicsSettings::fromJson($old);
+        $this->assertSame([0, 0, 0], [$loaded->pointLightBudget, $loaded->spotLightBudget, $loaded->rectLightBudget]);
+    }
+
     public function testFromJsonHandlesEmptyArray(): void
     {
         $rebuilt = GraphicsSettings::fromJson([]);

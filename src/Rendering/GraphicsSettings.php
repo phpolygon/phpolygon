@@ -207,7 +207,26 @@ final class GraphicsSettings
          * renderer stays at one light.
          */
         public readonly int $pointShadowLights = 1,
+        /**
+         * Local lights per kind that Renderer3DSystem emits per frame, the nearest ones
+         * ({@see \PHPolygon\Rendering\Lighting\LocalLightBudget}); 0 (the default) = no
+         * budget of its own, the system's limits apply (point: the renderer's, up to 512
+         * with the light grid; spot 8; rect 4). A budget above a limit changes nothing; a
+         * lowest quality tier sets small ones, e.g. 8 point lights keep the frame on the
+         * uniform lights and off the light grid.
+         */
+        public readonly int $pointLightBudget = 0,
+        public readonly int $spotLightBudget = 0,
+        public readonly int $rectLightBudget = 0,
     ) {
+    }
+
+    /** Largest local-light budget a setting may hold (the light grid's own limit). */
+    public const LIGHT_BUDGET_MAX = 512;
+
+    private static function clampLightBudget(int $v): int
+    {
+        return max(0, min(self::LIGHT_BUDGET_MAX, $v));
     }
 
     /** Shadowed point lights at most: six layers each in one 2D array target (64 layers). */
@@ -283,6 +302,9 @@ final class GraphicsSettings
         ?bool $screenSpaceSss = null,
         ?bool $bakedLight = null,
         ?int $pointShadowLights = null,
+        ?int $pointLightBudget = null,
+        ?int $spotLightBudget = null,
+        ?int $rectLightBudget = null,
     ): self {
         $nextUpscaler = $upscaler ?? $this->upscaler;
         // Leaving a temporal upscaler re-clamps a sub-half render scale.
@@ -342,6 +364,9 @@ final class GraphicsSettings
             screenSpaceSss: $screenSpaceSss ?? $this->screenSpaceSss,
             bakedLight: $bakedLight ?? $this->bakedLight,
             pointShadowLights: $pointShadowLights !== null ? self::clampPointShadowLights($pointShadowLights) : $this->pointShadowLights,
+            pointLightBudget: $pointLightBudget !== null ? self::clampLightBudget($pointLightBudget) : $this->pointLightBudget,
+            spotLightBudget: $spotLightBudget !== null ? self::clampLightBudget($spotLightBudget) : $this->spotLightBudget,
+            rectLightBudget: $rectLightBudget !== null ? self::clampLightBudget($rectLightBudget) : $this->rectLightBudget,
         );
     }
 
@@ -412,6 +437,11 @@ final class GraphicsSettings
         if ($this->pointShadowLights !== 1) {
             $json['pointShadowLights'] = $this->pointShadowLights;
         }
+        foreach (['pointLightBudget', 'spotLightBudget', 'rectLightBudget'] as $field) {
+            if ($this->{$field} !== 0) {
+                $json[$field] = $this->{$field};
+            }
+        }
         return $json;
     }
 
@@ -475,6 +505,9 @@ final class GraphicsSettings
             screenSpaceSss: self::asBool($data['screenSpaceSss'] ?? null) ?? $defaults->screenSpaceSss,
             bakedLight: self::asBool($data['bakedLight'] ?? null) ?? $defaults->bakedLight,
             pointShadowLights: ($v = self::asInt($data['pointShadowLights'] ?? null)) !== null ? self::clampPointShadowLights($v) : $defaults->pointShadowLights,
+            pointLightBudget: ($v = self::asInt($data['pointLightBudget'] ?? null)) !== null ? self::clampLightBudget($v) : $defaults->pointLightBudget,
+            spotLightBudget: ($v = self::asInt($data['spotLightBudget'] ?? null)) !== null ? self::clampLightBudget($v) : $defaults->spotLightBudget,
+            rectLightBudget: ($v = self::asInt($data['rectLightBudget'] ?? null)) !== null ? self::clampLightBudget($v) : $defaults->rectLightBudget,
         );
     }
 
