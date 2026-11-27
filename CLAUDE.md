@@ -661,7 +661,7 @@ emission, distance fog, a hemispherical ambient term, the sun as Lambert plus a 
 switch), up to 8 point / 4 spot / 2 sun lights without shadows or specular, and the three accumulators of the shared tail. It drops IBL,
 clearcoat, area lights, curvature AO, micro shadows, probes, ray queries, cloud shadows, height fog/rain/sand, decals, rain, the world
 drift of albedo and `ShaderPath::liteOmissions()` (normal and surface patterns, wetness, weathering, subsurface, material and figure
-looks, snow, volumetrics); a game's own `defineVariant` programs keep theirs. **The program has no light grid**: a fragment shader that
+looks, snow, volumetrics); a game's own `defineVariant` programs keep their looks (they take the grid-less twin below). **The program has no light grid**: a fragment shader that
 touches a storage buffer (a UAV on Direct3D) loses the early depth test there, so every hidden fragment of an opaque pass is shaded. That
 alone is the cost: Intel UHD 630, D3D12, 1280x720, 1024 instanced draws / 65 536 instances, opaque GPU ms (median of 100 frames, 3 runs in
 rotating order, 2026-11-27): Full 372.7, Lite 3.6, Unlit 3.5 (Lite with 8 lights 3.6); with MRT + SSAO Medium 379.9 / 12.7 / (Unlit never takes MRT) 3.6;
@@ -670,6 +670,38 @@ Vulkan 254.2 / 11.2 / 4.8; Full with `PHPOLYGON_LIGHT_GRID=0` 3.4 (MRT + SSAO 35
 scene) is the same in every tier. Only the vio renderers apply Lite (the GL family and native Vulkan draw Full, so the adaptive
 Full -> Lite step does nothing there); Metal is untested. `AdaptiveTierStack` steps Full -> Lite -> Unlit.
 
+**Light grid gate** (`Rendering\Lighting\LightGridGate`, `ProcModeShaderRegistry::NOGRID_VARIANT`, `VioLightGridGateTest`, `VioBindlessWithoutGridTest`).
+The Full mesh program declares the light grid's three storage buffers, and a fragment shader that touches a storage buffer (a UAV on Direct3D) loses
+the early depth test, so an opaque pass shaded every hidden fragment even with at most eight point lights (the grid is off then). Each frame
+now asks the gate: more than eight `AddPointLight` take the grid at once, a frame is released from it after 60 quiet frames (no flip around
+the limit). A grid-less frame draws base materials with `tier:nogrid` (`tier:nogrid_cut` under a surface cut), the base program compiled without
+`PHPOLYGON_LIGHT_GRID`, and a game's own `defineVariant` programs with their `<name>+nogrid` twin (`water+nogrid+cutout` is a name too), in the Full
+and the Lite tier. The shader text is untouched: the base program and its pinned preprocess hash are as before, the twins only leave out the
+grid define (so an image with at most eight lights is the old one, pixel for pixel: forward, MRT + SSAO, shadows, cut-outs, surface cut,
+variants, Lite; d3d12 on RTX 2080 and UHD 630, vulkan, d3d11, opengl). A twin that fails to compile falls back to the program with the grid,
+not to plain PBR. The twins are compiled behind the splash with the other warm programs (their cost: see below); storage-instance twins
+(`default_storage@...`) still compile at their first draw, as in Lite. **Shader profiles** (`ShaderProfiles`) switch the base program per material
+and are built from the grid program, so a frame with a profile registered keeps the grid program (the gate is off for it).
+`PHPOLYGON_LIGHT_GRID_GATE=0` restores the grid program in every frame. `GraphicsSettings::$pointLightBudget` (8 on a lowest tier) keeps a frame
+under the limit: the budget caps only what `Renderer3DSystem` emits, a light a game puts into the command list itself still counts.
+Measured 2026-11-27, Intel UHD 630, D3D12, 1280x720, `benchmarks/shader-tier-lite.php` (1024 instanced draws / 65 536 instances, Full tier, opaque GPU ms,
+median of 60 frames, 3 runs each): 6 point lights 3.46-3.52 with the gate (`base_variant` `tier:nogrid`) against 360.9 without it; 12 lights 298.8-302.2 and
+24 lights 299.0-300.9 with or without it (the grid program in both: the switch costs nothing and gains nothing). In a real scene of a consuming game
+(same engine, gate off / on, single runs of 60 samples): frame / opaque ms 153.3 / 117.6 -> 89.7 / 55.3 (open yard), 363.3 / 330.7 -> 90.1 / 57.8 (interior),
+unchanged 105.7 / 70.7 vs 106.0 / 70.6 in a view that emits more than eight point lights, which with `pointLightBudget` 8 gives 83.1 / 50.1 (81.8 / 49.8 again).
+What stays (50-58 ms opaque, `tier:nogrid`, forward path) is the Full shading itself: the same game views in Lite measure 12-26 ms opaque.
+`PHPOLYGON_LIGHT_GRID=0` used to fail to compile when `bindlessMaterials` was on (the bindless table needs `GL_ARB_shading_language_420pack`, which only the
+grid block emitted); fixed together with the gate.
+Cost: the twins double the mesh programs compiled behind the splash. Cold shader cache, a consuming game's program set (proc-mode variants, surface hook,
+bindless on), `new VioRenderer3D` + first frame, single runs 2026-11-27: UHD 630 / D3D12 121.5 s -> 188.5 s, RTX 2080 / D3D12 99.6 s -> 181.6 s; warm cache 4.0 -> 7.4 s
+and 1.5 -> 2.6 s. The cache persists, so it is a first-start cost; where it matters, skipping the grid programs' warm-up under a point-light budget of at most 8 is the lever (not built).
+RTX 2080 is not fill bound in the synthetic scene: opaque 0.49 ms with and without the gate at 6, 12 and 24 lights (3 runs).
+
+**Local light budget** (`GraphicsSettings::$pointLightBudget`, `$spotLightBudget`, `$rectLightBudget`, `Rendering\Lighting\LocalLightBudget`, `Renderer3DSystemLightBudgetTest`).
+Per kind, `Renderer3DSystem` keeps at most that many of the lights that reach the view: the nearest by the distance to the light's sphere, a light that was in last frame keeps its
+slot against a challenger less than 6 m nearer. 0 (default, and what an old save loads) = no budget of its own: point lights up to the renderer's limit (512 with the grid), spot 8, rect 4.
+The Engine pushes the settings into every `Renderer3DSystem` at start and on a change (`applyGraphicsSettings()`; a system added later takes them with the next change). A game's lowest
+tier sets 8 / 4 / 4: that also keeps every frame under the light grid gate above. No options-panel entry; see `docs/graphics-settings.md`.
 **Snippet uniforms and samplers** (`SnippetUniformRegistryTest`, `VioSnippetUniformTest`). `ProcModeShaderRegistry::declareUniform('u_fx_level', 'float')`
 and `declareSampler('u_fx_map', $programs)` add file-scope declarations at `// PHPOLYGON:SNIPPET_UNIFORMS` (both `mesh3d.frag` copies)
 to every mesh program: forward, MRT, motion, storage, each variant. Values travel in the command list, `SetShaderParameter(name,
