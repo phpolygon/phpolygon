@@ -392,17 +392,23 @@ final class FrameSpikeRecorderTest extends TestCase
     {
         $recorder = $this->recorder();
         $this->frames($recorder, 300, 10.0);
-        $before = memory_get_usage();
-        for ($i = 0; $i < 5000; $i++) {
-            $recorder->frame($this->now);
-            $recorder->beginUpdate();
-            $recorder->enter(FrameSpikeRecorder::RENDER);
-            $recorder->enter(FrameSpikeRecorder::PRESENT);
-            $recorder->enter(FrameSpikeRecorder::OTHER);
-            $this->now += 10 * self::MS;
+        // A leak grows in every round. A single allocation by the runtime (seen on CI:
+        // one 64 KB step) shows in one round only, so the smallest growth counts.
+        $growth = [];
+        for ($round = 0; $round < 3; $round++) {
+            $before = memory_get_usage();
+            for ($i = 0; $i < 5000; $i++) {
+                $recorder->frame($this->now);
+                $recorder->beginUpdate();
+                $recorder->enter(FrameSpikeRecorder::RENDER);
+                $recorder->enter(FrameSpikeRecorder::PRESENT);
+                $recorder->enter(FrameSpikeRecorder::OTHER);
+                $this->now += 10 * self::MS;
+            }
+            $growth[] = memory_get_usage() - $before;
         }
 
-        $this->assertSame($before, memory_get_usage());
+        $this->assertSame(0, min($growth), 'memory growth per round of 5000 frames: ' . implode(', ', $growth));
     }
 
     public function testSleepInUpdateIsNamedInTheLine(): void
