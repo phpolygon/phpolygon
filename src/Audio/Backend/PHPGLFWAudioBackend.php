@@ -8,6 +8,7 @@ use GL\Audio\Engine as GLAudioEngine;
 use GL\Audio\Sound as GLSound;
 use PHPolygon\Audio\AudioBackendInterface;
 use PHPolygon\Audio\AudioClip;
+use PHPolygon\Audio\ReportsUnplayableClips;
 
 /**
  * Audio backend using php-glfw's built-in audio engine (miniaudio).
@@ -15,6 +16,8 @@ use PHPolygon\Audio\AudioClip;
  */
 class PHPGLFWAudioBackend implements AudioBackendInterface
 {
+    use ReportsUnplayableClips;
+
     private GLAudioEngine $engine;
 
     /** @var array<string, GLSound> loaded sounds by clip ID */
@@ -56,6 +59,9 @@ class PHPGLFWAudioBackend implements AudioBackendInterface
     public function play(string $clipId, float $volume = 1.0, bool $loop = false): int
     {
         $sound = $this->getOrLoadSound($clipId);
+        if ($sound === null) {
+            return 0;
+        }
         // Output gain lives on the engine (setMasterVolume); the voice gets
         // exactly what it was given.
         $sound->setVolume($volume);
@@ -125,16 +131,25 @@ class PHPGLFWAudioBackend implements AudioBackendInterface
         $this->dispose();
     }
 
-    private function getOrLoadSound(string $clipId): GLSound
+    /** Null for a clip that was never loaded or cannot be opened; see {@see ReportsUnplayableClips}. */
+    private function getOrLoadSound(string $clipId): ?GLSound
     {
-        if (!isset($this->sounds[$clipId])) {
-            $path = $this->clipPaths[$clipId] ?? null;
-            if ($path === null) {
-                throw new \RuntimeException("Audio clip not loaded: {$clipId}");
-            }
-            $this->sounds[$clipId] = $this->engine->soundFromDisk($path);
+        if (isset($this->sounds[$clipId])) {
+            return $this->sounds[$clipId];
         }
-
-        return $this->sounds[$clipId];
+        $path = $this->clipPaths[$clipId] ?? '';
+        if ($this->isUnplayable($clipId, $path)) {
+            return null;
+        }
+        if ($path === '' || !is_file($path)) {
+            $this->reportUnplayable($clipId, $path, $path === '' ? 'the clip was never loaded' : 'file not found');
+            return null;
+        }
+        try {
+            return $this->sounds[$clipId] = $this->engine->soundFromDisk($path);
+        } catch (\Throwable $e) {
+            $this->reportUnplayable($clipId, $path, $e->getMessage());
+            return null;
+        }
     }
 }

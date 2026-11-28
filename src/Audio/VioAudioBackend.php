@@ -44,6 +44,8 @@ use VioSound;
  */
 class VioAudioBackend implements NativeSpatialAudioBackendInterface, WarmableAudioBackendInterface
 {
+    use ReportsUnplayableClips;
+
     /** miniaudio's default minSpatializationChannelGain. */
     private const float MIN_CHANNEL_GAIN = 0.2;
 
@@ -474,13 +476,23 @@ class VioAudioBackend implements NativeSpatialAudioBackendInterface, WarmableAud
     private function openSound(string $clipId): ?VioSound
     {
         $path = $this->clipPaths[$clipId] ?? null;
-        if ($path === null || !file_exists($path)) {
+        if ($path === null || $this->isUnplayable($clipId, $path)) {
+            return null;
+        }
+        if (!file_exists($path)) {
+            $this->reportUnplayable($clipId, $path, 'file not found');
             return null;
         }
         $start = hrtime(true);
-        $sound = vio_audio_load($path);
+        try {
+            $sound = vio_audio_load($path);
+        } catch (\Throwable $e) {
+            $this->reportUnplayable($clipId, $path, $e->getMessage());
+            return null;
+        }
         \PHPolygon\Runtime\FrameSpikeRecorder::note(\PHPolygon\Runtime\FrameSpikeRecorder::NOTE_AUDIO, 1, hrtime(true) - $start);
         if ($sound === false) {
+            $this->reportUnplayable($clipId, $path, 'vio_audio_load failed');
             return null;
         }
         // Loading starts the engine: apply a listener pose set before it.

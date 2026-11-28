@@ -13,6 +13,8 @@ use GL\Audio\Sound;
  */
 class GLFWAudioBackend implements AudioBackendInterface
 {
+    use ReportsUnplayableClips;
+
     private AudioEngine $engine;
 
     /** @var array<string, string> clipId => file path */
@@ -39,11 +41,20 @@ class GLFWAudioBackend implements AudioBackendInterface
     public function play(string $clipId, float $volume = 1.0, bool $loop = false): int
     {
         $path = $this->clipPaths[$clipId] ?? null;
-        if ($path === null || !file_exists($path)) {
+        if ($path === null || $this->isUnplayable($clipId, $path)) {
+            return 0;
+        }
+        if (!is_file($path)) {
+            $this->reportUnplayable($clipId, $path, 'file not found');
             return 0;
         }
 
-        $sound = $this->engine->soundFromDisk($path);
+        try {
+            $sound = $this->engine->soundFromDisk($path);
+        } catch (\Throwable $e) {
+            $this->reportUnplayable($clipId, $path, $e->getMessage());
+            return 0;
+        }
         // Output gain lives on the engine (setMasterVolume); the voice gets
         // exactly what it was given.
         $sound->setVolume($volume);
