@@ -2825,8 +2825,8 @@ classic per-target build.
 > Phases 1–3 are PHAR-producing and identical across desktop targets of the same
 > variant/build-type. With `--phar PATH`, they run once for the first target and
 > are skipped on every later target (the cached PHAR is reused).
-4. **micro.sfx** — resolve static PHP binary (explicit path → cache
-   `~/.phpolygon/build-cache/` → download from GitHub Release)
+4. **micro.sfx** — resolve static PHP binary (explicit `--micro-sfx` path, else
+   the asset the runtime release publishes now, see "Runtime cache")
 5. **Combine** — concatenate micro.sfx + game.phar into single executable
    (macOS: micro.sfx + a small launcher, see "macOS bundle layout")
 6. **Package** — platform-specific: macOS `.app` bundle with Info.plist,
@@ -3007,11 +3007,46 @@ shows a plain-line status block per app (label = `uploads.<t>.label` or the targ
 name) parsed from this run's `depot_build_*/app_build_*` logs (mtime ≥ start),
 upload MB/s from `/proc/net/dev`, then a per-depot summary (manifest, chunks,
 files, duration) and the log tail on failure. Tested without Steam by
-`docker/tests/steam-upload-test.sh` + `fake-steamcmd.sh`; details in `docker/README.md` §4. Signing (`docker/build-all.sh`): the bare micro.sfx is
-ad-hoc signed before the launcher is appended, with JIT/library entitlements
+`docker/tests/steam-upload-test.sh` + `fake-steamcmd.sh`; details in `docker/README.md` §4. Signing (`docker/build-all.sh`): a copy of the bare micro.sfx (outside the cache,
+passed as `--micro-sfx`) is ad-hoc signed before the launcher is appended, with JIT/library entitlements
 (`allow-jit`, `allow-unsigned-executable-memory`, `disable-library-validation`);
 `MAC_HARDENED=1` adds the hardened-runtime flag. **Unverified on hardware** -
 run a build once on an Apple Silicon Mac.
+
+### Runtime cache
+
+Everything a build downloads from a GitHub release (micro.sfx, vulkan-1,
+d3dcompiler_47, the Steam API library, DXC, a DLSS release) follows one rule
+(`Build\ReleaseAssetCache`): **a cached file is used only while the release still
+publishes what it was made from.**
+
+- Next to every cached file lies `<file>.asset.json` with the published asset
+  (release, name, id, `updated_at`, size, digest). Validity never depends on the
+  file existing, on its mtime or on its content - signing or touching it changes
+  nothing. The digest decides when known (an identical re-published asset stays
+  current), else id + `updated_at` + size. **No sidecar = stale**; a file copied
+  into the cache by hand is replaced (use `--micro-sfx`).
+- Downloads are checked against the release's size and digest and written via a
+  temp file; the sidecar is written last.
+- Release index unreadable (offline, rate limit, a tag being re-published) =
+  the build **fails**, also for optional libraries. `PHPOLYGON_RUNTIME_OFFLINE=1`
+  allows the cached files that have a sidecar of the same release, with a
+  `WARNING ... UNVERIFIED` log line; an index that answers is always obeyed.
+- An asset the release publishes but that cannot be downloaded fails the build
+  (DLSS: warning, built without it). An asset it does not publish is left out
+  (micro.sfx: error), even when a cached copy exists.
+- `phpolygon runtime:fetch <target> [--variant] [--php-version] [--path-file]` runs
+  the same resolution on its own; `docker/build-all.sh` prefetches with it and
+  never writes into the cache. It exports `PHPOLYGON_BUILD_HARNESS`; inside a
+  build image without it (older script, which signed the cache in place) macOS
+  targets are refused until the image is rebuilt.
+- The log says per file `downloaded and cached` or `verified current`, and per
+  runtime the php-vio version. Only a runtime of the build host can say it (it is
+  run, `Build\RuntimeProbe`); for the others the log says `unknown` - the release
+  states no version and the binaries carry no marker that holds across compilers.
+- Cache dir: `$PHPOLYGON_HOME/build-cache`, else `~/.phpolygon/build-cache`.
+  Releases repository: `$SPC_REPO`, else `hmennen90/static-php-cli`. FSR 3 files
+  are pinned by SHA-256 instead.
 
 ### Build classes
 
@@ -3022,7 +3057,9 @@ run a build once on an Apple Silicon Mac.
 | `PharBuilder` | Stages sources (minus external/excluded paths), builds PHAR with custom stub + build id, macOS launcher |
 | `PathGlob` | build.json path patterns (`resources.external` / `resources.exclude`): validation + matching |
 | `Runtime\BundleExtractor` | Stub-side: extract PHAR assets/resources once per build id (marker, atomic, cache fallback with links) |
-| `StaticPhpResolver` | Finds/downloads/caches micro.sfx binary + Windows runtime libs (vulkan-1, d3dcompiler_47, DXC `dxcompiler.dll`/`dxil.dll` from the latest DirectXShaderCompiler release for Shader Model 6, Steam API) |
+| `StaticPhpResolver` | Resolves micro.sfx binary + Windows runtime libs (vulkan-1, d3dcompiler_47, DXC `dxcompiler.dll`/`dxil.dll` from the latest DirectXShaderCompiler release for Shader Model 6, Steam API) through the runtime cache |
+| `ReleaseAssetCache` / `ReleaseAsset` | The one rule for cached release files: identity sidecar, verified download, offline opt-in (see "Runtime cache") |
+| `RuntimeProbe` | Asks a runtime of the build host for its php-vio version |
 | `PlatformPackager` | Creates .app bundle, Linux dir, Windows .exe |
 | `Icon\AppIconConfig` / `Icon\AppIconBuilder` | build.json `icon` + `platforms.<os>.icon`; makes the .ico entries, .icns, Linux PNG and window icon set (see "Application icon") |
 | `Icon\IcoFile` / `Icon\IcnsFile` / `Icon\PeIconWriter` / `Icon\PeImage` | .ico and .icns writers/readers; icon resources in a PE runtime |
@@ -3032,7 +3069,7 @@ run a build once on an Apple Silicon Mac.
 | `BuildVerifier` / `BuildVerification` | Checks a built PHAR / package against build.json (see "Build verification") |
 | `MicroIni` | Encodes build.json `php.ini` as the ini section between micro.sfx and PHAR (see below) |
 | `UpscalerConfig` | Parses/validates build.json `upscalers` (see below) |
-| `NativeUpscalerResolver` | FSR 3 / DLSS runtimes for a target: FidelityFX SDK tag (checksummed) or folder; DLSS plugin from a folder or a private GitHub release; cached; warnings, never a failed build |
+| `NativeUpscalerResolver` | FSR 3 / DLSS runtimes for a target: FidelityFX SDK tag (checksummed) or folder; DLSS plugin from a folder or a private GitHub release; cached; warnings, except a cached DLSS release that cannot be verified (build fails, see "Runtime cache") |
 | `ThirdPartyNotices` | `THIRD-PARTY-NOTICES.txt` next to the binary (AMD MIT text, NVIDIA notices) |
 | `HttpClient` / `StreamHttpClient` | GET without auto-redirect (the resolver decides who gets the token); fake it in tests |
 | `PrebakeProgress` | Progress lines of a pre-bake hook (see "Pre-bake progress and worker pool") |
@@ -3152,7 +3189,7 @@ $remove, $keep, $dryRun)`, or declaratively for external resources in the packag
 ```
 
 - `fsr`: `true` = `amd_fidelityfx_dx12.dll` / `_vk.dll` (MIT) from the FidelityFX SDK tag `v1.1.4` (`PrebuiltSignedDLL/`, fetched raw by tag; the release asset is the whole 470 MB SDK), SHA-256 pinned, cached in `~/.phpolygon/build-cache/upscalers/`. A folder string / `{"path"}` = from there. Windows only, unless a folder has `libamd_fidelityfx_vk.so`.
-- `dlss.plugin`: a folder with `vio_dlss.dll` + `nvngx_dlss.dll`, or `github:owner/repo@tag`: a release of a private repository (`GITHUB_TOKEN` / `GH_TOKEN` / `gh auth token`; a public repository is refused; the token never goes to the redirect host; cached per tag). Linux only with `libvio_dlss.so` + `libnvidia-ngx-dlss.so.*`, otherwise "not supported"; never macOS.
+- `dlss.plugin`: a folder with `vio_dlss.dll` + `nvngx_dlss.dll`, or `github:owner/repo@tag`: a release of a private repository (`GITHUB_TOKEN` / `GH_TOKEN` / `gh auth token`; a public repository is refused; the token never goes to the redirect host; cached, and checked against the release on every build). Linux only with `libvio_dlss.so` + `libnvidia-ngx-dlss.so.*`, otherwise "not supported"; never macOS.
 - `dlss.projectId` -> embedded ini `vio.dlss_project_id`. `EngineConfig::$dlssProjectId` overrides it when set; it must not contradict `php.ini`.
 - Anything missing is a warning, and the game builds without that upscaler.
 - `THIRD-PARTY-NOTICES.txt` lands next to the binary: the AMD MIT text, plus for DLSS NVIDIA's copyright and trademark lines, "This software contains source code provided by NVIDIA Corporation." and the RTX SDK restrictions passed on to users.

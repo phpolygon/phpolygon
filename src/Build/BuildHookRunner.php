@@ -272,7 +272,8 @@ final class BuildHookRunner
         // Checked on every call, so a runner built before its libraries were known gets them too.
         foreach ($libs as $lib) {
             $target = dirname($path) . '/' . basename($lib);
-            if (is_file($lib) && (!is_file($target) || filesize($target) !== filesize($lib)) && !copy($lib, $target)) {
+            // By content: a refreshed library can have the size of the old one.
+            if (is_file($lib) && (!is_file($target) || hash_file('xxh128', $target) !== hash_file('xxh128', $lib)) && !copy($lib, $target)) {
                 throw new \RuntimeException("Cannot copy runtime library {$lib} next to the hook runner");
             }
         }

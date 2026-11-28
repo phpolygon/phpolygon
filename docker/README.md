@@ -29,8 +29,9 @@ The only genuinely macOS-bound step is **code signing**. We sidestep it:
 phpmicro produces the final binary by **appending the PHAR after the Mach-O**.
 Any Mach-O signer - rcodesign *and* Apple's `codesign` - rewrites the Mach-O and
 **drops trailing data**, which would strip the PHAR and break the game. So the
-order matters: the image signs the **bare `micro.sfx` runtime first**, then
-`phpolygon build` appends the PHAR. The final layout is `[signed Mach-O][PHAR]` -
+order matters: the image signs a **copy of the bare `micro.sfx` runtime first**
+(the download cache stays untouched), then `phpolygon build --micro-sfx <copy>`
+appends the PHAR. The final layout is `[signed Mach-O][PHAR]` -
 the signature covers the runtime, the PHAR is trailing data that phpmicro reads
 from the end. This is the only order that yields a binary that is both signed and
 runnable. The build verifies it and prints the trailing payload size.
@@ -72,10 +73,27 @@ are public, so no special scopes are needed):
 - Easiest: `gh auth token` (if you have `gh` set up).
 - Or a classic/fine-grained PAT with default read access.
 
-The token is also used to prefetch `micro.sfx` with an authenticated request
-into the resolver's cache dir (`~/.phpolygon/build-cache/<key>/`). The engine's
-`StaticPhpResolver` then finds it in cache and skips the rate-limited anonymous
-download.
+The token also authenticates the release lookups of the runtime prefetch
+(`phpolygon runtime:fetch`, the engine's own resolver) into the cache dir
+(`~/.phpolygon/build-cache/<key>/`).
+
+### Runtime cache
+
+A cached runtime or library is used only while its release still publishes it:
+every build reads the release index and compares it with the identity recorded
+next to the file (`<file>.asset.json`). Existence and file times do not count; a
+file without that record is downloaded again. The log says per file whether it was
+`downloaded` or `verified current`, and the php-vio version of the runtime the
+container can run (linux-x86_64; the other targets are reported as unknown).
+
+If the index cannot be read, the build fails. For an offline build pass
+`-e PHPOLYGON_RUNTIME_OFFLINE=1`: cached files are then used **unverified**, with a
+warning in the log.
+
+The image and the project's engine belong together: the script needs the
+`runtime:fetch` command of the engine in the project's `vendor/`, and the engine
+refuses macOS targets under an older script. **Rebuild the image** after updating
+the engine.
 
 ## 1. Build the image
 
@@ -231,7 +249,8 @@ docker run --rm --platform linux/amd64 \
 | `VARIANT` | `steam` | any variant the engine supports (e.g. `base`, `steam`), or `both` (builds steam then base, sequentially, in one run; a Steam upload target still only applies to the steam pass) |
 | `SIGN_MAC` | `1` | `1`, `0` |
 | `PHP_VERSION` | `8.5` | micro.sfx runtime PHP version (matches `StaticPhpResolver`) |
-| `SPC_REPO` | `hmennen90/static-php-cli` | static-php-cli releases repo (matches `StaticPhpResolver::GITHUB_REPO`) |
+| `SPC_REPO` | `hmennen90/static-php-cli` | static-php-cli releases repo (read by `StaticPhpResolver`) |
+| `PHPOLYGON_RUNTIME_OFFLINE` | _(off)_ | `1`: use cached runtimes unverified when the release index is unreachable (see "Runtime cache") |
 | `INTERACTIVE` | _(auto)_ | `1` forces the menu even without a detected TTY |
 | `NONINTERACTIVE` | `0` | `1` forces env-driven mode even with a TTY |
 | `VERSION_CONST_FILE` / `VERSION_CONST` | _(auto)_ | override the in-game version constant file / name (default `bootstrap_version.php` / `GAME_VERSION`); `phpolygon.project.json` `version` follows too |

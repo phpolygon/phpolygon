@@ -16,6 +16,7 @@ use PHPUnit\Framework\TestCase;
  * FidelityFX SDK tag (checksummed, cached) or a local folder; DLSS only when
  * configured, from a local folder or a PRIVATE GitHub release (token, cached).
  * Anything missing is a warning - the game then builds without that upscaler.
+ * Cached DLSS files are checked against the release on every build.
  */
 final class NativeUpscalerResolverTest extends TestCase
 {
@@ -279,11 +280,57 @@ final class NativeUpscalerResolverTest extends TestCase
             }
         }
 
-        // cached per tag: a second build asks nobody
+        // a second build asks the release and downloads nothing
         $this->http->requests = [];
         $again = $this->resolver()->resolve($config, 'windows');
         $this->assertSame($bundle->files, $again->files);
-        $this->assertSame([], $this->http->requests);
+        $this->assertSame([], preg_grep('#/releases/assets/#', array_column($this->http->requests, 0)));
+    }
+
+    public function testDlssFilesFollowARepublishedRelease(): void
+    {
+        $this->githubRelease();
+        $config = $this->config(['dlss' => ['plugin' => 'github:studio/php-vio-dlss@v1.0.0', 'projectId' => self::GUID]]);
+        $this->resolver()->resolve($config, 'windows');
+
+        $this->http->on('https://api.github.com/repos/studio/php-vio-dlss/releases/tags/v1.0.0', new HttpResponse(200, (string) json_encode([
+            'assets' => [['id' => 21, 'name' => 'vio_dlss.dll'], ['id' => 12, 'name' => 'nvngx_dlss.dll']],
+        ])));
+        $this->http->on('https://api.github.com/repos/studio/php-vio-dlss/releases/assets/21', new HttpResponse(200, 'PLUGIN2'));
+
+        $bundle = $this->resolver()->resolve($config, 'windows');
+
+        $this->assertSame('PLUGIN2', file_get_contents($bundle->files[0]));
+        $this->assertSame('RUNTIME', file_get_contents($bundle->files[1]));
+    }
+
+    public function testCachedDlssIsNotUsedUnverified(): void
+    {
+        $this->githubRelease();
+        $config = $this->config(['dlss' => ['plugin' => 'github:studio/php-vio-dlss@v1.0.0', 'projectId' => self::GUID]]);
+        $this->resolver()->resolve($config, 'windows');
+
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('PHPOLYGON_RUNTIME_OFFLINE');
+        $this->resolver(token: null)->resolve($config, 'windows');
+    }
+
+    public function testCachedDlssIsUsedOfflineOnRequest(): void
+    {
+        $this->githubRelease();
+        $config = $this->config(['dlss' => ['plugin' => 'github:studio/php-vio-dlss@v1.0.0', 'projectId' => self::GUID]]);
+        $first = $this->resolver()->resolve($config, 'windows');
+
+        $before = getenv('PHPOLYGON_RUNTIME_OFFLINE');
+        putenv('PHPOLYGON_RUNTIME_OFFLINE=1');
+        try {
+            $bundle = $this->resolver(token: null)->resolve($config, 'windows');
+        } finally {
+            putenv($before === false ? 'PHPOLYGON_RUNTIME_OFFLINE' : "PHPOLYGON_RUNTIME_OFFLINE={$before}");
+        }
+
+        $this->assertSame($first->files, $bundle->files);
+        $this->assertStringContainsString('UNVERIFIED', $this->warnings());
     }
 
     public function testDlssIsNeverTakenFromAPublicRepository(): void

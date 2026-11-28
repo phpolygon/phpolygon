@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace PHPolygon\Tests\Build;
 
+use PHPolygon\Build\HttpResponse;
+use PHPolygon\Build\ReleaseAssetCache;
 use PHPolygon\Build\StaticPhpResolver;
 use PHPUnit\Framework\TestCase;
 
@@ -55,35 +57,14 @@ class StaticPhpResolverTest extends TestCase
         $sourceFile = $tempDir . '/source.bin';
         file_put_contents($sourceFile, 'fake-sfx-binary-content');
 
-        $resolver = new StaticPhpResolver();
+        $resolver = new StaticPhpResolver($tempDir . '/cache');
         $cachedPath = $resolver->cache($sourceFile, 'macos', 'arm64');
 
         $this->assertFileExists($cachedPath);
         $this->assertSame('fake-sfx-binary-content', file_get_contents($cachedPath));
 
         // Cleanup
-        $this->removeDir(dirname(dirname($cachedPath)));
         $this->removeDir($tempDir);
-    }
-
-    public function testResolveWithCachedBinary(): void
-    {
-        $resolver = new StaticPhpResolver();
-
-        // Cache a fake binary in the versioned cache path
-        $home = getenv('HOME') ?: getenv('USERPROFILE') ?: sys_get_temp_dir();
-        $cacheDir = $home . '/.phpolygon/build-cache/test-os-test-arch-php8.5';
-        @mkdir($cacheDir, 0755, true);
-        $cachedPath = $cacheDir . '/micro.sfx';
-        file_put_contents($cachedPath, 'cached-binary');
-
-        // Now resolve without explicit path — should find cached
-        $result = $resolver->resolve(null, 'test-os', 'test-arch', 'base', '8.5');
-        $this->assertSame($cachedPath, $result);
-
-        // Cleanup
-        @unlink($cachedPath);
-        @rmdir($cacheDir);
     }
 
     private function removeDir(string $dir): void
@@ -122,7 +103,7 @@ class StaticPhpResolverTest extends TestCase
         $this->assertArrayHasKey('bin/arm64/dxil.dll', StaticPhpResolver::dxcZipEntries('aarch64'));
     }
 
-    public function testZipEntriesAreFoundWithBackslashPaths(): void
+    public function testZipMembersAreFoundWithBackslashPaths(): void
     {
         if (!class_exists(\ZipArchive::class)) {
             $this->markTestSkipped('zip extension missing');
@@ -139,10 +120,10 @@ class StaticPhpResolverTest extends TestCase
 
         $this->assertTrue($zip->open($file));
         try {
-            $this->assertSame('COMPILER', StaticPhpResolver::zipEntry($zip, 'bin/x64/dxcompiler.dll'));
-            $this->assertSame('DXIL', StaticPhpResolver::zipEntry($zip, 'bin/x64/dxil.dll'));
-            $this->assertNull(StaticPhpResolver::zipEntry($zip, 'bin/x64/empty.dll'));
-            $this->assertNull(StaticPhpResolver::zipEntry($zip, 'bin/arm64/dxil.dll'));
+            $this->assertSame('bin\\x64\\dxcompiler.dll', StaticPhpResolver::zipMemberName($zip, ['bin/x64/dxcompiler.dll']));
+            $this->assertSame('bin/x64/dxil.dll', StaticPhpResolver::zipMemberName($zip, ['bin/x64/dxil.dll']));
+            $this->assertNull(StaticPhpResolver::zipMemberName($zip, ['bin/x64/empty.dll']));
+            $this->assertNull(StaticPhpResolver::zipMemberName($zip, ['bin/arm64/dxil.dll']));
         } finally {
             $zip->close();
             @unlink($file);
@@ -167,15 +148,15 @@ class StaticPhpResolverTest extends TestCase
 
     public function testFailureReasonNamesTheStatusAndTheMissingToken(): void
     {
-        $redirectThenLimit = ['HTTP/1.1 302 Found', 'Location: https://api.github.com/x', 'HTTP/1.1 403 rate limit exceeded', 'X-RateLimit-Remaining: 0'];
+        $limit = new HttpResponse(403, '');
 
         $this->assertSame(
-            'HTTP/1.1 403 rate limit exceeded; anonymous GitHub API calls are rate-limited, set GITHUB_TOKEN',
-            StaticPhpResolver::failureReason($redirectThenLimit, 'stream error', false),
+            'HTTP 403; anonymous GitHub API calls are rate-limited, set GITHUB_TOKEN',
+            ReleaseAssetCache::describeFailure($limit, false),
         );
-        $this->assertSame('HTTP/1.1 403 rate limit exceeded', StaticPhpResolver::failureReason($redirectThenLimit, '', true));
-        $this->assertSame('HTTP/1.1 404 Not Found', StaticPhpResolver::failureReason(['HTTP/1.1 404 Not Found'], '', false));
-        $this->assertSame('getaddrinfo failed', StaticPhpResolver::failureReason([], 'getaddrinfo failed', false));
-        $this->assertSame('no response', StaticPhpResolver::failureReason([], '', false));
+        $this->assertSame('HTTP 403', ReleaseAssetCache::describeFailure($limit, true));
+        $this->assertSame('HTTP 404', ReleaseAssetCache::describeFailure(new HttpResponse(404, ''), false));
+        $this->assertSame('getaddrinfo failed', ReleaseAssetCache::describeFailure(new HttpResponse(0, '', [], 'getaddrinfo failed'), false));
+        $this->assertSame('no response', ReleaseAssetCache::describeFailure(new HttpResponse(0, ''), false));
     }
 }

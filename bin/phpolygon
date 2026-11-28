@@ -8,6 +8,7 @@ declare(strict_types=1);
  *
  * Usage:
  *   php bin/phpolygon build [platform] [options]
+ *   php bin/phpolygon runtime:fetch <target> [--variant NAME] [--php-version VER] [--path-file FILE]
  *
  * Platforms:
  *   macos-arm64, macos-x86_64, linux-x86_64, linux-arm64, windows-x86_64
@@ -85,6 +86,7 @@ $platformArg = '';
 $options = [
     'dry-run' => false,
     'micro-sfx' => null,
+    'path-file' => null, // runtime:fetch: write the micro.sfx path here
     'phar' => null, // cross-target PHAR cache path: build once, reuse per target
     'derive-phar' => null, // PHAR of another build type to derive --phar from (constants only)
     'output' => '',
@@ -108,6 +110,8 @@ while ($i < count($args)) {
         $options['game'] = false;
     } elseif ($arg === '--micro-sfx' && isset($args[$i + 1])) {
         $options['micro-sfx'] = $args[++$i];
+    } elseif ($arg === '--path-file' && isset($args[$i + 1])) {
+        $options['path-file'] = $args[++$i];
     } elseif ($arg === '--phar' && isset($args[$i + 1])) {
         $options['phar'] = $args[++$i];
     } elseif ($arg === '--derive-phar' && isset($args[$i + 1])) {
@@ -209,6 +213,10 @@ if ($command === 'speech:setup') {
 
 if ($command === 'speech:design') {
     exit(speechDesign($args));
+}
+
+if ($command === 'runtime:fetch') {
+    exit(runtimeFetch($platformArg, $options['variant'], $options['php-version'], $options['path-file']));
 }
 
 if ($command !== 'build') {
@@ -434,6 +442,49 @@ function dryRun(BuildConfig $config, array $targets, string $outputDir, ?string 
     echo str_repeat('-', 50) . "\n";
 }
 
+/**
+ * `runtime:fetch <target>`: bring the runtime (micro.sfx and its libraries) of one
+ * desktop target up to date in the build cache, by the same rule a build uses
+ * ({@see \PHPolygon\Build\ReleaseAssetCache}), and say which php-vio it carries.
+ */
+function runtimeFetch(string $targetArg, string $variant, string $phpVersion, ?string $pathFile): int
+{
+    if ($targetArg === '' || !in_array($variant, ['base', 'steam'], true)) {
+        fwrite(STDERR, "Usage: phpolygon runtime:fetch <target> [--variant base|steam] [--php-version VER] [--path-file FILE]\n");
+        return 1;
+    }
+    // The variant a build of this project resolves (threading turns base into zts).
+    $config = BuildConfig::load(getcwd() ?: '.');
+    if ($variant === 'base' && $config->enableThreading) {
+        $variant = $config->getPhpVariant();
+    }
+
+    $resolver = new StaticPhpResolver();
+    $resolver->setLogger(static function (string $message): void {
+        echo "  {$message}\n";
+    });
+    foreach (resolveTargets($targetArg) as $name => $target) {
+        if (str_starts_with($target['platform'], 'ios')) {
+            fwrite(STDERR, "runtime:fetch: {$name} links an embedded libphp.a, it has no runtime release\n");
+            return 1;
+        }
+        try {
+            $sfx = $resolver->resolve(null, $target['platform'], $target['arch'], $variant, $phpVersion);
+            $libs = $resolver->resolveRuntimeLibs($target['platform'], $target['arch'], $variant, $phpVersion);
+        } catch (\RuntimeException $e) {
+            fwrite(STDERR, "\033[31mError:\033[0m {$e->getMessage()}\n");
+            return 1;
+        }
+        echo '  ' . $resolver->describeRuntime($sfx, $libs, $target['platform'], $target['arch']) . "\n";
+        if ($pathFile !== null && file_put_contents($pathFile, $sfx) === false) {
+            fwrite(STDERR, "Cannot write {$pathFile}\n");
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
 function launchEditor(): void
 {
     // Resolve editor directory: check PHPolygon's own editor/ first,
@@ -552,6 +603,7 @@ PHPolygon CLI
 
 Usage:
   phpolygon build [platform] [options]
+  phpolygon runtime:fetch <target> [--variant NAME] [--php-version VER] [--path-file FILE]
   phpolygon editor
   phpolygon perf:report <scenario> [<sha-a> <sha-b>]
   phpolygon prototype:scaffold [--out DIR]
@@ -562,6 +614,8 @@ Usage:
 
 Commands:
   build              Build game for distribution (auto-transpiles UI layouts)
+  runtime:fetch      Update the cached game runtime of a target from its release and report
+                     its php-vio version (offline: PHPOLYGON_RUNTIME_OFFLINE=1)
   build:transpile    Transpile resources/ui/*.ui.json into PHP builder classes
                      (--check verifies they are in sync instead of writing)
   verify-build       Check built packages against build.json: build type constants,

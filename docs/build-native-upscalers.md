@@ -44,8 +44,11 @@ is private: NVIDIA's runtime may be passed on only inside an application, so
 a public repository is refused. It then downloads the two assets through the
 GitHub asset API. The token goes to `api.github.com` only, never to the
 storage host the download redirects to. The files are cached per tag in
-`~/.phpolygon/build-cache/upscalers/dlss/<owner>/<repo>/<tag>/<platform>/`.
-Release tags are never moved, so a tag is fetched only once.
+`~/.phpolygon/build-cache/upscalers/dlss/<owner>/<repo>/<tag>/<platform>/`,
+each with an identity sidecar (`<file>.asset.json`). Every build reads the
+release and downloads a file again when the release publishes another one. A
+cached file whose release cannot be read (no token, offline) fails the build;
+`PHPOLYGON_RUNTIME_OFFLINE=1` uses it unverified.
 
 **Local folders** are read in place on every build.
 

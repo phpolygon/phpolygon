@@ -80,6 +80,18 @@ class GameBuilder
     {
         $arch = $arch ?? StaticPhpResolver::detectArch();
 
+        // Before anything is built: the build image's entry script has to know
+        // that the runtime cache is verified and may be refreshed.
+        $outdated = StaticPhpResolver::outdatedHarness(
+            $platform,
+            $microSfxPath,
+            is_file('/usr/local/bin/build-all'),
+            getenv('PHPOLYGON_BUILD_HARNESS') !== false,
+        );
+        if ($outdated !== null) {
+            throw new \RuntimeException($outdated);
+        }
+
         // Auto-select ZTS variant when threading is enabled
         if ($variant === 'base' && $this->config->enableThreading) {
             $variant = $this->config->getPhpVariant();
@@ -255,6 +267,7 @@ class GameBuilder
             $this->log('info', 'Resolving micro.sfx binary...');
             $sfxPath = $this->staticPhpResolver->resolve($microSfxPath, $platform, $arch, $variant, $phpVersion);
             $this->log('success', 'Found micro.sfx: ' . $sfxPath);
+            $runtimeSfx = $sfxPath;
 
             // Phase 4a: Windows icon resource, written into a copy of the bare
             // runtime before the PHAR is appended (micro finds its payload at the
@@ -274,6 +287,7 @@ class GameBuilder
             foreach ($runtimeLibs as $lib) {
                 $this->log('success', 'Found runtime lib: ' . $lib);
             }
+            $this->log('info', $this->staticPhpResolver->describeRuntime($runtimeSfx, $runtimeLibs, $platform, $arch));
 
             // Phase 4c: build.json upscalers - FSR 3 / DLSS runtimes next to the
             // binary, their notices, the DLSS project id for the embedded ini.

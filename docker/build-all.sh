@@ -30,6 +30,8 @@
 #                  (default: 0; the JIT/library entitlements are always embedded)
 #   PHP_VERSION    micro.sfx PHP runtime version        (default: 8.5)
 #   SPC_REPO       static-php-cli releases repo         (default: hmennen90/static-php-cli)
+#   PHPOLYGON_RUNTIME_OFFLINE  1 = when the release index is unreachable, build with
+#                  the cached runtime (unverified, logged); default: the build fails
 #   NONINTERACTIVE 1 to force env-driven mode even with a TTY
 #   VERSION_CONST_FILE / VERSION_CONST  override the in-game version constant file
 #                  (default: auto-detect bootstrap_version.php, const GAME_VERSION)
@@ -46,6 +48,10 @@
 #   PHPOLYGON_COPY_OUT "<package dir> ..." or "all": with PHPOLYGON_WORKDIR, copy
 #                  finished packages back to /app/build
 set -uo pipefail
+
+# Tells the engine that this script knows the verified runtime cache (it signs a
+# copy of the macOS runtime); an older image is refused for macOS targets.
+export PHPOLYGON_BUILD_HARNESS=2
 
 cd /app
 
@@ -346,25 +352,15 @@ git config --global url."https://github.com/".insteadOf "git@github.com:" || tru
 # internally (in a working copy; the project's vendor/ stays untouched).
 composer config --global use-github-api false >/dev/null 2>&1 || true
 
-# ── micro.sfx prefetch (cache key + osName MUST match StaticPhpResolver) ──────
-RELEASE_TAG="runtime-php${PHP_VERSION}"
+# ── runtime prefetch (the engine decides what is current) ──────────────────────
+# Downloading and cache validity live in the engine (`phpolygon runtime:fetch`,
+# PHPolygon\Build\ReleaseAssetCache), the same code every build uses. This script
+# never writes into the cache: macOS runtimes are signed as a copy outside it.
+export SPC_REPO
 CACHE_ROOT="${PHPOLYGON_HOME:-/root/.phpolygon}/build-cache"
-RELEASE_JSON="/tmp/spc-release.json"
-RELEASE_FETCHED=0
+SIGNED_ROOT="/tmp/phpolygon-signed-runtime"
+declare -A SIGNED_SFX=()
 
-os_name_for() {
-    case "$1" in
-        macos-arm64)    echo "macos-aarch64" ;;
-        macos-x86_64)   echo "macos-x86_64"  ;;
-        linux-x86_64)   echo "linux-x86_64"  ;;
-        linux-arm64)    echo "linux-aarch64" ;;
-        windows-x86_64) echo "windows-x86_64";;
-        *) echo "" ;;
-    esac
-}
-cache_key_for() {
-    if [ "$VARIANT" != "base" ]; then echo "$1-${VARIANT}-php${PHP_VERSION}"; else echo "$1-php${PHP_VERSION}"; fi
-}
 # Package directory suffix GameBuilder actually appends for $VARIANT (see
 # GameBuilder::build): "" for "base" unless build.json php.threading is true,
 # in which case GameBuilder silently swaps it for the "zts" variant; any other
@@ -378,92 +374,40 @@ variant_suffix_for() {
         echo ""
     fi
 }
-# Per-OS destination name for the Steam API library (must match
-# StaticPhpResolver::steamLibName / PlatformPackager basename copy).
-steam_lib_name_for() {
-    case "$1" in
-        windows-x86_64) echo "steam_api64.dll" ;;
-        macos-*)        echo "libsteam_api.dylib" ;;
-        *)              echo "libsteam_api.so" ;;
-    esac
+
+require_runtime_fetch() {
+    [ -f vendor/bin/phpolygon ] || { echo "FATAL: vendor/bin/phpolygon not found - run composer install in the project." >&2; return 1; }
+    # Not piped into grep -q: with pipefail an early exit of grep would fail the check.
+    [[ "$(php vendor/bin/phpolygon help 2>/dev/null)" == *runtime:fetch* ]] && return 0
+    echo "FATAL: the project's phpolygon/phpolygon is older than this build image (no 'runtime:fetch' command)." >&2
+    echo "       Update the engine in the project, or build with the image of the engine version it uses." >&2
+    return 1
 }
-curl_gh() {
-    if [ -n "$TOKEN" ]; then
-        curl -fsSL --retry 4 --retry-delay 2 --retry-connrefused -H "Authorization: Bearer $TOKEN" "$@"
-    else
-        curl -fsSL --retry 4 --retry-delay 2 --retry-connrefused "$@"
-    fi
-}
-ensure_release_json() {
-    [ "$RELEASE_FETCHED" = "1" ] && return 0
-    echo "  fetching release index ($RELEASE_TAG from $SPC_REPO)..."
-    curl_gh -H "Accept: application/vnd.github+json" \
-        "https://api.github.com/repos/${SPC_REPO}/releases/tags/${RELEASE_TAG}" \
-        -o "$RELEASE_JSON" || { echo "  ! could not fetch release index"; return 1; }
-    RELEASE_FETCHED=1
-}
-asset_url() { jq -r --arg n "$1" '.assets[]? | select(.name==$n) | .browser_download_url' "$RELEASE_JSON" 2>/dev/null | head -1; }
-fetch_zip_member() {
-    local asset="$1" dest="$2"; shift 2
-    ensure_release_json || return 1
-    local url; url="$(asset_url "$asset")"
-    [ -z "$url" ] || [ "$url" = "null" ] && { echo "  ! asset not found in release: $asset"; return 1; }
-    echo "  prefetch $asset"
-    local zip="/tmp/dl-$$.zip" ex="/tmp/dlx-$$"
-    curl_gh -L "$url" -o "$zip" || { echo "  ! download failed: $asset"; return 1; }
-    rm -rf "$ex"; mkdir -p "$ex"
-    unzip -o -q "$zip" -d "$ex" || { echo "  ! unzip failed: $asset"; rm -rf "$zip" "$ex"; return 1; }
-    local found="" n
-    for n in "$@"; do [ -f "$ex/$n" ] && { found="$ex/$n"; break; }; done
-    [ -z "$found" ] && { echo "  ! none of [$*] in $asset"; rm -rf "$zip" "$ex"; return 1; }
-    mkdir -p "$(dirname "$dest")"; cp "$found" "$dest"; rm -rf "$zip" "$ex"
-}
+
 prefetch_runtime() {
-    local target="$1" os key dir sfx
-    os="$(os_name_for "$target")"; key="$(cache_key_for "$target")"
-    dir="${CACHE_ROOT}/${key}"; sfx="${dir}/micro.sfx"
-    [ -z "$os" ] && { echo "  ! unknown target: $target"; return 1; }
-    if [ ! -f "$sfx" ]; then
-        fetch_zip_member "micro-sfx-${VARIANT}-${PHP_VERSION}-${os}.zip" "$sfx" \
-            micro.sfx micro.sfx.exe buildroot/bin/micro.sfx buildroot/bin/micro.sfx.exe || return 1
-        chmod +x "$sfx" || true
-    else
-        echo "  cached: $key/micro.sfx"
-    fi
+    local target="$1" path_file sfx
+    path_file="$(mktemp)"
+    php -d memory_limit=-1 vendor/bin/phpolygon runtime:fetch "$target" \
+        --variant "$VARIANT" --php-version "$PHP_VERSION" --path-file "$path_file" \
+        || { rm -f "$path_file"; return 1; }
+    sfx="$(cat "$path_file")"; rm -f "$path_file"
+    [ -f "$sfx" ] || { echo "  ! no runtime for $target"; return 1; }
     # Sign the bare runtime BEFORE the launcher is appended (see header / signing
     # note). The entitlements let OPcache's JIT map executable memory, and let the
     # runtime load libraries signed by someone else (libsteam_api.dylib) - both
     # only matter under the hardened runtime (MAC_HARDENED=1), but cost nothing
     # without it.
     if [[ "$target" == macos-* ]] && [ "$SIGN_MAC" = "1" ]; then
-        echo "  ad-hoc signing runtime $key/micro.sfx (hardened runtime: ${MAC_HARDENED})"
+        local copy="${SIGNED_ROOT}/${VARIANT}-${target}/micro.sfx"
+        mkdir -p "$(dirname "$copy")" && cp -f "$sfx" "$copy" || { echo "  ! cannot copy $sfx"; return 1; }
+        echo "  ad-hoc signing a copy of the ${target} runtime (hardened runtime: ${MAC_HARDENED})"
         local -a sign_args=()
         [ "$MAC_HARDENED" = "1" ] && sign_args+=(--code-signature-flags runtime)
-        if ! rcodesign sign --entitlements-xml-file "$MAC_ENTITLEMENTS" "${sign_args[@]}" "$sfx" >/dev/null 2>&1 \
-            && ! rcodesign sign --entitlements-xml-path "$MAC_ENTITLEMENTS" "${sign_args[@]}" "$sfx" >/dev/null 2>&1; then
-            echo "  ${C_R}! rcodesign failed on $sfx${C_0}"; return 1
+        if ! rcodesign sign --entitlements-xml-file "$MAC_ENTITLEMENTS" "${sign_args[@]}" "$copy" >/dev/null 2>&1 \
+            && ! rcodesign sign --entitlements-xml-path "$MAC_ENTITLEMENTS" "${sign_args[@]}" "$copy" >/dev/null 2>&1; then
+            echo "  ${C_R}! rcodesign failed on $copy${C_0}"; return 1
         fi
-    fi
-    if [ "$target" = "windows-x86_64" ] && [ ! -f "${dir}/vulkan-1.dll" ]; then
-        fetch_zip_member "vulkan-1-dll-${VARIANT}-${PHP_VERSION}-${os}.zip" "${dir}/vulkan-1.dll" \
-            vulkan-1.dll buildroot/bin/vulkan-1.dll || echo "  (vulkan-1.dll optional - skipped)"
-    fi
-    # d3dcompiler_47.dll: hard load-time import of the d3d11/d3d12 backends
-    # (runtime HLSL compile). Missing it = exe dies at startup with 0xC0000135.
-    if [ "$target" = "windows-x86_64" ] && [ ! -f "${dir}/d3dcompiler_47.dll" ]; then
-        fetch_zip_member "d3dcompiler-47-dll-${VARIANT}-${PHP_VERSION}-${os}.zip" "${dir}/d3dcompiler_47.dll" \
-            d3dcompiler_47.dll buildroot/bin/d3dcompiler_47.dll \
-            || echo "  ${C_Y}! d3dcompiler_47.dll missing - Windows d3d11/d3d12 build will crash at startup (0xC0000135)${C_0}"
-    fi
-    # Steam API library: all four desktop platforms. A game built against
-    # php-steamworks hard-imports it, so a missing one = the shipped binary
-    # fails to start. The asset name has NO variant suffix; the cache file uses
-    # the per-OS destination name so PlatformPackager copies it by basename.
-    local steamlib; steamlib="$(steam_lib_name_for "$target")"
-    if [ ! -f "${dir}/${steamlib}" ]; then
-        fetch_zip_member "libsteam-api-${PHP_VERSION}-${os}.zip" "${dir}/${steamlib}" \
-            "$steamlib" "buildroot/bin/${steamlib}" \
-            || echo "  ${C_Y}! ${steamlib} missing - the Steam API library is REQUIRED; the shipped ${target} binary will fail to start${C_0}"
+        SIGNED_SFX[$target]="$copy"
     fi
 }
 
@@ -482,6 +426,8 @@ for VARIANT in "${VARIANT_LIST[@]}"; do
 
 echo ""
 echo "Prefetching micro.sfx runtimes..."
+require_runtime_fetch || exit 1
+SIGNED_SFX=()
 for target in $PLATFORMS; do
     prefetch_runtime "$target" || { echo "FATAL: could not prepare runtime for $target"; exit 1; }
 done
@@ -521,6 +467,8 @@ build_target() {
     local t0=$SECONDS rc=0 log="/tmp/buildlog-${target}-${type}.txt"
     local -a extra=()
     [ -n "$derive" ] && extra=(--derive-phar "$derive")
+    # macOS: the signed copy of the runtime prefetched above.
+    [ -n "${SIGNED_SFX[$target]:-}" ] && extra+=(--micro-sfx "${SIGNED_SFX[$target]}")
     # memory_limit=-1: PeIconWriter (Windows icon patching) allocates against the whole
     # PE binary; the default 128M CLI limit is exhausted on a game with a real icon set
     # (observed on a 7-size icon, Allowed memory size of 134217728 bytes exhausted) -

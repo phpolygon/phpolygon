@@ -18,13 +18,16 @@ namespace PHPolygon\Build;
  *         Windows only, unless a local folder holds `libamd_fidelityfx_vk.so`.
  * DLSS    php-vio's plugin `vio_dlss.dll` + NVIDIA's `nvngx_dlss.dll`, from a
  *         local folder or a release of a PRIVATE GitHub repository (token from
- *         GITHUB_TOKEN / GH_TOKEN / `gh auth token`, cached per tag). NVIDIA's
- *         runtime may only travel inside an application, so a public
+ *         GITHUB_TOKEN / GH_TOKEN / `gh auth token`). Cached files are used
+ *         only when the release still publishes them ({@see ReleaseAssetCache}).
+ *         NVIDIA's runtime may only travel inside an application, so a public
  *         repository is refused. Linux only with `libvio_dlss.so` +
  *         `libnvidia-ngx-dlss.so.*` present (untested), never macOS.
  *
- * Nothing here fails a build: what cannot be resolved is a warning and the
- * game builds without that upscaler (php-vio then reports it unsupported).
+ * What cannot be resolved is a warning and the game builds without that
+ * upscaler (php-vio then reports it unsupported). One exception fails the
+ * build: a cached DLSS release that cannot be verified, unless offline builds
+ * are allowed ({@see ReleaseAssetCache::OFFLINE_ENV}).
  */
 final class NativeUpscalerResolver
 {
@@ -37,13 +40,13 @@ final class NativeUpscalerResolver
         'amd_fidelityfx_vk.dll' => 'a1624cc4238fef046f30c4d80ce3f47be63fc5f5373f49e3ee9edb9960f54c78',
     ];
 
-    private const int MAX_REDIRECTS = 5;
-
     /** @var \Closure(): ?string */
     private \Closure $token;
 
     /** @var callable(string, string): void */
     private $logger;
+
+    private ReleaseAssetCache $assets;
 
     /**
      * @param (\Closure(): ?string)|null $token GitHub token for private DLSS
@@ -53,10 +56,11 @@ final class NativeUpscalerResolver
     public function __construct(
         private readonly string $projectRoot,
         private readonly string $cacheDir,
-        private readonly HttpClient $http = new StreamHttpClient(),
+        HttpClient $http = new StreamHttpClient(),
         ?\Closure $token = null,
         private readonly array $ffxSha256 = self::FFX_SHA256,
     ) {
+        $this->assets = new ReleaseAssetCache($http);
         $this->token = $token ?? self::defaultToken(...);
         $this->logger = static function (string $level, string $message): void {};
     }
@@ -155,7 +159,7 @@ final class NativeUpscalerResolver
 
         $url = 'https://raw.githubusercontent.com/' . self::FFX_REPO . '/' . self::FFX_TAG . '/PrebuiltSignedDLL/' . $name;
         $this->log('info', "FSR 3: downloading {$name} (FidelityFX SDK " . self::FFX_TAG . ')...');
-        $response = $this->fetch($url, StaticPhpResolver::requestHeaders($url, null), null);
+        $response = $this->assets->get($url, StaticPhpResolver::requestHeaders($url, null));
         if (!$response->ok()) {
             $this->log('warning', "FSR 3: {$name} could not be downloaded (" . self::describe($response) . ") - building without FSR 3");
             return null;
@@ -210,14 +214,7 @@ final class NativeUpscalerResolver
 
         ['owner' => $owner, 'repo' => $repo, 'tag' => $tag] = $github;
         $dir = $this->cacheDir . "/upscalers/dlss/{$owner}/{$repo}/" . self::safe($tag) . "/{$platform}";
-        $cached = $this->find($dir, $names, $platform);
-        if (count($cached) === count($names)) {
-            return $cached;
-        }
-        if (!$this->downloadDlss($owner, $repo, $tag, $names, $platform, $dir)) {
-            return [];
-        }
-        return $this->dlssFrom($dir, $names, $platform, "in the release {$owner}/{$repo}@{$tag}");
+        return $this->dlssFromRelease($owner, $repo, $tag, $names, $platform, $dir);
     }
 
     /**
@@ -253,7 +250,9 @@ final class NativeUpscalerResolver
         $found = [];
         foreach ($names as $name) {
             foreach ($entries as $entry) {
-                if (self::matches($entry, $name, $platform) && is_file($dir . '/' . $entry)) {
+                if (self::matches($entry, $name, $platform) && is_file($dir . '/' . $entry)
+                    && !str_contains($entry, ReleaseAssetCache::SIDECAR_SUFFIX) && !str_contains($entry, '.part')
+                ) {
                     $found[] = $dir . '/' . $entry;
                     break;
                 }
@@ -262,93 +261,112 @@ final class NativeUpscalerResolver
         return $found;
     }
 
-    /** @param list<string> $names */
-    private function downloadDlss(string $owner, string $repo, string $tag, array $names, string $platform, string $dir): bool
+    /**
+     * The files of a private release, each verified against what the release
+     * publishes now and downloaded when it differs.
+     *
+     * @param list<string> $names
+     * @return list<string>
+     */
+    private function dlssFromRelease(string $owner, string $repo, string $tag, array $names, string $platform, string $dir): array
     {
         $source = "github:{$owner}/{$repo}@{$tag}";
         $token = ($this->token)();
         if ($token === null || $token === '') {
-            $this->log('warning', "DLSS: {$source} is a private release - set GITHUB_TOKEN / GH_TOKEN or run `gh auth login`; building without DLSS");
-            return false;
+            return $this->unverifiedDlss($source, $names, $platform, $dir, "{$source} is a private release - set GITHUB_TOKEN / GH_TOKEN or run `gh auth login`");
         }
 
         $api = "https://api.github.com/repos/{$owner}/{$repo}";
-        $repoInfo = $this->json($this->fetch($api, StaticPhpResolver::requestHeaders($api, $token), $token));
+        $repoInfo = $this->json($this->assets->get($api, StaticPhpResolver::requestHeaders($api, $token), $token));
         if ($repoInfo === null) {
-            $this->log('warning', "DLSS: cannot read the repository {$owner}/{$repo} with the token - building without DLSS");
-            return false;
+            return $this->unverifiedDlss($source, $names, $platform, $dir, "cannot read the repository {$owner}/{$repo} with the token");
         }
         if (($repoInfo['private'] ?? null) !== true) {
             $this->log('warning', "DLSS: {$owner}/{$repo} is public - NVIDIA's DLSS runtime may only be passed on inside an application, never from a public release; refused, building without DLSS");
-            return false;
+            return [];
         }
 
         $releaseUrl = "{$api}/releases/tags/" . rawurlencode($tag);
-        $release = $this->json($this->fetch($releaseUrl, StaticPhpResolver::requestHeaders($releaseUrl, $token), $token));
-        if ($release === null) {
-            $this->log('warning', "DLSS: no release {$tag} in {$owner}/{$repo} - building without DLSS");
-            return false;
+        $release = $this->assets->release($releaseUrl, $token);
+        if (is_string($release)) {
+            return $this->unverifiedDlss($source, $names, $platform, $dir, "no release {$tag} in {$owner}/{$repo} readable ({$release})");
         }
 
-        $assets = [];
-        foreach (is_array($release['assets'] ?? null) ? $release['assets'] : [] as $asset) {
-            if (is_array($asset) && is_string($asset['name'] ?? null) && is_int($asset['id'] ?? null)) {
-                $assets[$asset['name']] = $asset['id'];
-            }
-        }
-
+        $assets = ReleaseAsset::fromRelease($release);
         $picked = [];
+        $missing = [];
         foreach ($names as $name) {
-            foreach ($assets as $assetName => $id) {
-                if (self::matches($assetName, $name, $platform)) {
-                    $picked[$assetName] = $id;
+            foreach ($assets as $asset) {
+                if (self::matches($asset->name, $name, $platform)) {
+                    $picked[] = $asset;
                     continue 2;
                 }
             }
+            $missing[] = $name;
         }
-        if (count($picked) !== count($names)) {
-            // dlssFrom() names what is missing
-            return true;
+        if ($missing !== []) {
+            $this->log('warning', 'DLSS: ' . implode(', ', $missing) . " missing in the release {$owner}/{$repo}@{$tag} - building without DLSS");
+            return [];
         }
 
-        foreach ($picked as $assetName => $id) {
-            $url = "{$api}/releases/assets/{$id}";
+        $files = [];
+        foreach ($picked as $asset) {
+            $target = $dir . '/' . basename($asset->name);
+            $reason = ReleaseAssetCache::staleReason($target, $source, $asset);
+            if ($reason === null) {
+                $this->log('info', "DLSS: {$asset->name} verified current ({$asset->describe()})");
+                $files[] = $target;
+                continue;
+            }
+            $url = "{$api}/releases/assets/{$asset->id}";
             $headers = StaticPhpResolver::requestHeaders($url, $token);
             $headers = [...array_values(array_filter($headers, static fn (string $h): bool => !str_starts_with($h, 'Accept:'))), 'Accept: application/octet-stream'];
-            $this->log('info', "DLSS: downloading {$assetName} from {$source}...");
-            $response = $this->fetch($url, $headers, $token);
-            if (!$response->ok() || $response->body === '') {
-                $this->log('warning', "DLSS: {$assetName} could not be downloaded (" . self::describe($response) . ') - building without DLSS');
-                return false;
+            $this->log('info', "DLSS: downloading {$asset->name} from {$source} ({$reason})...");
+            try {
+                $content = $this->assets->download($asset, $url, $headers, $token);
+            } catch (\RuntimeException $e) {
+                $this->log('warning', 'DLSS: ' . $e->getMessage() . ' - building without DLSS');
+                return [];
             }
-            $this->store($dir . '/' . basename($assetName), $response->body);
+            ReleaseAssetCache::store($target, $source, $asset, static fn (string $temp): bool => file_put_contents($temp, $content) === strlen($content));
+            $files[] = $target;
         }
-        return true;
+        return $files;
+    }
+
+    /**
+     * The release cannot be read. Without cached files that is a warning; cached
+     * ones are never used unverified, unless offline builds are allowed.
+     *
+     * @param list<string> $names
+     * @return list<string>
+     */
+    private function unverifiedDlss(string $source, array $names, string $platform, string $dir, string $why): array
+    {
+        $cached = $this->find($dir, $names, $platform);
+        $recorded = array_values(array_filter(
+            $cached,
+            static fn (string $file): bool => (ReleaseAssetCache::record($file)['source'] ?? null) === $source,
+        ));
+        if ($cached === []) {
+            $this->log('warning', "DLSS: {$why} - building without DLSS");
+            return [];
+        }
+        if (!ReleaseAssetCache::offlineAllowed()) {
+            throw new \RuntimeException(
+                "DLSS: cannot verify the cached files of {$source}: {$why}. A cached file is not used unverified. " .
+                'To build offline from the cache anyway, set ' . ReleaseAssetCache::OFFLINE_ENV . '=1.'
+            );
+        }
+        if (count($recorded) !== count($names)) {
+            $this->log('warning', "DLSS: {$why}, and the cache holds no complete set with identity records - building without DLSS");
+            return [];
+        }
+        $this->log('warning', 'DLSS: ' . ReleaseAssetCache::OFFLINE_ENV . " is set - using the UNVERIFIED cached files of {$source} ({$why})");
+        return $recorded;
     }
 
     // ── HTTP / files ──────────────────────────────────────────────────────
-
-    /**
-     * GET with redirects followed here, so the token only ever goes to
-     * api.github.com - never to the storage host a download redirects to.
-     *
-     * @param list<string> $headers
-     */
-    private function fetch(string $url, array $headers, ?string $token): HttpResponse
-    {
-        for ($i = 0; $i <= self::MAX_REDIRECTS; $i++) {
-            $response = $this->http->get($url, $headers);
-            if (!$response->isRedirect()) {
-                return $response;
-            }
-            $url = (string) $response->header('Location');
-            $headers = array_values(array_filter($headers, static fn (string $h): bool => !str_starts_with($h, 'Authorization:')));
-            if ($token !== null && parse_url($url, PHP_URL_HOST) === 'api.github.com') {
-                $headers[] = 'Authorization: Bearer ' . $token;
-            }
-        }
-        return new HttpResponse(0, '', [], 'too many redirects');
-    }
 
     /** @return array<mixed>|null */
     private function json(HttpResponse $response): ?array

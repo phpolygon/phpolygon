@@ -8,15 +8,28 @@ class StaticPhpResolver
 {
     private const GITHUB_REPO = 'hmennen90/static-php-cli';
 
+    /** Release feed of the DirectX Shader Compiler (MIT/LLVM licensed, dxil.dll redistributable). */
+    private const string DXC_RELEASE_URL = 'https://api.github.com/repos/microsoft/DirectXShaderCompiler/releases/latest';
+
     private string $cacheDir;
+
+    private string $repository;
 
     /** @var callable|null */
     private $logger = null;
 
-    public function __construct()
-    {
-        $home = getenv('HOME') ?: getenv('USERPROFILE') ?: sys_get_temp_dir();
-        $this->cacheDir = $home . '/.phpolygon/build-cache';
+    /**
+     * @param ?string $cacheDir null = `$PHPOLYGON_HOME/build-cache`, else `~/.phpolygon/build-cache`
+     * @param ?string $repository releases repository of the runtimes; null = `$SPC_REPO`, else the default fork
+     */
+    public function __construct(
+        ?string $cacheDir = null,
+        private readonly ReleaseAssetCache $assets = new ReleaseAssetCache(),
+        ?string $repository = null,
+        private readonly RuntimeProbe $probe = new RuntimeProbe(),
+    ) {
+        $this->cacheDir = $cacheDir ?? self::defaultCacheDir();
+        $this->repository = $repository ?? (getenv('SPC_REPO') ?: self::GITHUB_REPO);
     }
 
     /** The build cache (`~/.phpolygon/build-cache`) runtimes are kept in. */
@@ -35,7 +48,9 @@ class StaticPhpResolver
 
     /**
      * Resolve a micro.sfx binary path.
-     * Priority: explicit path > download from GitHub Release (if newer) > cached
+     * Priority: explicit path > the asset the runtime release publishes now
+     * (from the cache when its identity record matches, downloaded otherwise).
+     * The cache alone is only used offline, on request ({@see ReleaseAssetCache}).
      */
     public function resolve(?string $explicitPath, string $platform, string $arch, string $variant = 'base', string $phpVersion = '8.5'): string
     {
@@ -44,35 +59,33 @@ class StaticPhpResolver
             if (!file_exists($explicitPath)) {
                 throw new \RuntimeException("micro.sfx not found at: {$explicitPath}");
             }
+            $this->log("Runtime micro.sfx: using the given file, not checked against the release: {$explicitPath}");
             return $explicitPath;
         }
 
-        $cacheKey = $variant !== 'base'
-            ? "{$platform}-{$arch}-{$variant}-php{$phpVersion}"
-            : "{$platform}-{$arch}-php{$phpVersion}";
-        $cachedPath = $this->cacheDir . "/{$cacheKey}/micro.sfx";
-
-        // 2. Check GitHub for a newer release, download if available
-        $downloaded = $this->downloadIfNewer($platform, $arch, $variant, $cachedPath, $phpVersion);
-        if ($downloaded !== null) {
-            return $downloaded;
-        }
-
-        // 3. Fall back to cached version
-        if (file_exists($cachedPath)) {
-            $this->log("Using cached micro.sfx for {$cacheKey}");
-            return $cachedPath;
+        // 2. The published runtime
+        $cacheKey = self::cacheKey($platform, $arch, $variant, $phpVersion);
+        $prefix = "micro-sfx-{$variant}-";
+        $suffix = '-' . self::releaseOsName($platform, $arch) . '.zip';
+        $path = $this->releaseFile(
+            "{$cacheKey}/micro.sfx",
+            $phpVersion,
+            static fn (string $name): bool => str_starts_with($name, $prefix) && str_ends_with($name, $suffix),
+            ['micro.sfx', 'micro.sfx.exe', 'buildroot/bin/micro.sfx', 'buildroot/bin/micro.sfx.exe'],
+            $this->cacheDir . "/{$cacheKey}/micro.sfx",
+        );
+        if ($path !== null) {
+            chmod($path, 0755);
+            return $path;
         }
 
         throw new \RuntimeException(
-            "No micro.sfx binary found for {$variant}/{$platform}-{$arch}.\n\n" .
+            "No micro.sfx binary found for {$variant}/{$platform}-{$arch}: release runtime-php{$phpVersion} of " .
+            "{$this->repository} publishes none, or (offline) none is cached with an identity record.\n\n" .
             "Options:\n" .
             "  1. Provide one with --micro-sfx <path>\n" .
-            "  2. Trigger the 'Build Game micro.sfx' workflow in " . self::GITHUB_REPO . "\n" .
-            "  3. Try a different PHP version with --php-version 8.4 or 8.5\n" .
-            "  4. Cache a pre-built binary:\n" .
-            "     mkdir -p ~/.phpolygon/build-cache/{$cacheKey}\n" .
-            "     cp /path/to/micro.sfx ~/.phpolygon/build-cache/{$cacheKey}/micro.sfx"
+            "  2. Trigger the 'Build Game micro.sfx' workflow in " . $this->repository . "\n" .
+            "  3. Try a different PHP version with --php-version 8.4 or 8.5"
         );
     }
 
@@ -94,41 +107,38 @@ class StaticPhpResolver
      *     it must ship next to the binary / inside the .app. The asset name has
      *     no variant suffix (libsteam-api-<ver>-<os>.zip).
      *
+     * A library the release does not publish is left out with a log line. One it
+     * publishes but that cannot be verified or downloaded fails the build.
+     *
      * @return list<string> Absolute paths to runtime libs, empty if none needed
      */
     public function resolveRuntimeLibs(string $platform, string $arch, string $variant = 'base', string $phpVersion = '8.5'): array
     {
-        $cacheKey = $variant !== 'base'
-            ? "{$platform}-{$arch}-{$variant}-php{$phpVersion}"
-            : "{$platform}-{$arch}-php{$phpVersion}";
+        $cacheKey = self::cacheKey($platform, $arch, $variant, $phpVersion);
+        $osName = self::releaseOsName($platform, $arch);
 
         $libs = [];
 
         if ($platform === 'windows') {
-            // vulkan-1.dll
-            $vulkanPath = $this->cacheDir . "/{$cacheKey}/vulkan-1.dll";
-            $downloaded = $this->downloadVulkanDllIfNewer($platform, $arch, $variant, $phpVersion, $vulkanPath);
-            if ($downloaded !== null) {
-                $libs[] = $downloaded;
-            } elseif (file_exists($vulkanPath)) {
-                $libs[] = $vulkanPath;
-            } else {
-                // vulkan-1.dll is optional — Vulkan backend just won't be available
-                // if absent. Log once so the user knows.
-                $this->log("No vulkan-1.dll found for {$cacheKey} — Vulkan backend will be unavailable in the shipped binary.");
-            }
-
-            // d3dcompiler_47.dll
-            $d3dPath = $this->cacheDir . "/{$cacheKey}/d3dcompiler_47.dll";
-            $downloaded = $this->downloadD3DCompilerDllIfNewer($platform, $arch, $variant, $phpVersion, $d3dPath);
-            if ($downloaded !== null) {
-                $libs[] = $downloaded;
-            } elseif (file_exists($d3dPath)) {
-                $libs[] = $d3dPath;
-            } else {
-                // d3dcompiler_47.dll is required for the d3d11/d3d12 backends. Without
-                // it the shipped exe dies at startup with 0xC0000135.
-                $this->log("No d3dcompiler_47.dll found for {$cacheKey} — the d3d11/d3d12 backends will fail to start (0xC0000135) on a clean Windows install.");
+            foreach ([
+                // Optional: without it the Vulkan backend is unavailable.
+                ['vulkan-1.dll', "vulkan-1-dll-{$variant}-{$phpVersion}-", 'the Vulkan backend will be unavailable in the shipped binary.'],
+                // Required by the d3d11/d3d12 backends.
+                ['d3dcompiler_47.dll', "d3dcompiler-47-dll-{$variant}-{$phpVersion}-", 'the d3d11/d3d12 backends will fail to start (0xC0000135) on a clean Windows install.'],
+            ] as [$file, $prefix, $consequence]) {
+                $suffix = "-{$osName}.zip";
+                $path = $this->releaseFile(
+                    "{$cacheKey}/{$file}",
+                    $phpVersion,
+                    static fn (string $name): bool => str_starts_with($name, $prefix) && str_ends_with($name, $suffix),
+                    [$file, "buildroot/bin/{$file}"],
+                    $this->cacheDir . "/{$cacheKey}/{$file}",
+                );
+                if ($path !== null) {
+                    $libs[] = $path;
+                } else {
+                    $this->log("No {$file} found for {$cacheKey} — {$consequence}");
+                }
             }
 
             // dxcompiler.dll + dxil.dll: Shader Model 6 on D3D12 (php-vio >= 2.16,
@@ -147,11 +157,16 @@ class StaticPhpResolver
         // copies runtime libs by basename) lands the correct name next to the
         // binary / into the .app.
         $steamLibName = $this->steamLibName($platform);
-        $steamPath = $this->cacheDir . "/{$cacheKey}/{$steamLibName}";
-        $downloaded = $this->downloadSteamApiLibIfNewer($platform, $arch, $phpVersion, $steamPath);
-        if ($downloaded !== null) {
-            $libs[] = $downloaded;
-        } elseif (file_exists($steamPath)) {
+        // No variant suffix: libsteam-api-<phpVersion>-<os>.zip
+        $assetName = "libsteam-api-{$phpVersion}-{$osName}.zip";
+        $steamPath = $this->releaseFile(
+            "{$cacheKey}/{$steamLibName}",
+            $phpVersion,
+            static fn (string $name): bool => $name === $assetName,
+            [$steamLibName, "buildroot/bin/{$steamLibName}"],
+            $this->cacheDir . "/{$cacheKey}/{$steamLibName}",
+        );
+        if ($steamPath !== null) {
             $libs[] = $steamPath;
         } else {
             // Required: a game built against php-steamworks hard-imports the
@@ -164,6 +179,280 @@ class StaticPhpResolver
     }
 
     /**
+     * One build log line saying which php-vio a runtime contains, or that it
+     * cannot be told ({@see RuntimeProbe}).
+     *
+     * @param list<string> $libs
+     */
+    public function describeRuntime(string $microSfx, array $libs, string $platform, string $arch): string
+    {
+        return "Runtime {$platform}-{$arch}: " . $this->probe->describe($microSfx, $libs, $platform, $arch);
+    }
+
+    /**
+     * Why a build must not go on under the build image's old entry script, or
+     * null. That script signs the cached macOS runtime in place before the build;
+     * the resolver may then replace it with the published, unsigned one, and the
+     * bundle does not start on Apple Silicon.
+     */
+    public static function outdatedHarness(string $platform, ?string $microSfxPath, bool $insideBuildImage, bool $harnessAnnounced): ?string
+    {
+        if ($platform !== 'macos' || $microSfxPath !== null || !$insideBuildImage || $harnessAnnounced) {
+            return null;
+        }
+        return 'This build image is older than the engine: its build-all script does not sign a copy of the macOS ' .
+            'runtime, so the bundle could ship unsigned. Rebuild the image from the engine you build with: ' .
+            'docker build -f docker/Dockerfile.build -t phpolygon-build docker';
+    }
+
+    /** Cache folder name of one runtime; `docker/build-all.sh` relies on the resolver for it. */
+    private static function cacheKey(string $platform, string $arch, string $variant, string $phpVersion): string
+    {
+        return $variant !== 'base'
+            ? "{$platform}-{$arch}-{$variant}-php{$phpVersion}"
+            : "{$platform}-{$arch}-php{$phpVersion}";
+    }
+
+    /** OS name as the runtime release's asset names spell it. */
+    private static function releaseOsName(string $platform, string $arch): string
+    {
+        return match (true) {
+            $platform === 'macos' && $arch === 'arm64'   => 'macos-aarch64',
+            $platform === 'macos' && $arch === 'x86_64'  => 'macos-x86_64',
+            $platform === 'linux' && $arch === 'arm64'   => 'linux-aarch64',
+            $platform === 'linux' && $arch === 'x86_64'  => 'linux-x86_64',
+            $platform === 'windows'                       => 'windows-x86_64',
+            default                                       => "{$platform}-{$arch}",
+        };
+    }
+
+    private static function defaultCacheDir(): string
+    {
+        $base = getenv('PHPOLYGON_HOME');
+        if (!is_string($base) || $base === '') {
+            $base = (getenv('HOME') ?: getenv('USERPROFILE') ?: sys_get_temp_dir()) . '/.phpolygon';
+        }
+        return $base . '/build-cache';
+    }
+
+    /**
+     * One file out of a zip asset of the runtime release, through the cache.
+     *
+     * @param callable(string): bool $isAsset picks the asset by its name
+     * @param list<string> $members paths the file may have inside the zip
+     * @return ?string $target, or null when the release publishes no such asset
+     * @throws \RuntimeException when it cannot be verified or downloaded
+     */
+    private function releaseFile(string $label, string $phpVersion, callable $isAsset, array $members, string $target): ?string
+    {
+        $tag = "runtime-php{$phpVersion}";
+        $source = "{$this->repository}@{$tag}";
+        $token = self::token();
+        $release = $this->assets->release("https://api.github.com/repos/{$this->repository}/releases/tags/{$tag}", $token);
+
+        if (is_string($release)) {
+            return $this->offlineFiles($label, $source, $release, [$target]) ? $target : null;
+        }
+
+        $asset = null;
+        foreach (ReleaseAsset::fromRelease($release) as $candidate) {
+            if ($isAsset($candidate->name)) {
+                $asset = $candidate;
+                break;
+            }
+        }
+        if ($asset === null) {
+            $this->log("Runtime {$label}: not published in {$source}" . (is_file($target) ? ' - the cached file is ignored' : ''));
+            return null;
+        }
+
+        $reason = ReleaseAssetCache::staleReason($target, $source, $asset);
+        if ($reason === null) {
+            $this->log("Runtime {$label}: verified current ({$asset->name}, {$asset->describe()})");
+            return $target;
+        }
+
+        $this->downloadZip($label, $source, $asset, [$target => $members], $token, $reason);
+        return $target;
+    }
+
+    /**
+     * dxcompiler.dll + dxil.dll for the target arch, as the latest DXC release
+     * publishes them (cached like every release file). Both or nothing: DXC
+     * without dxil.dll cannot sign the DXIL it produces, and php-vio then refuses
+     * Shader Model 6 anyway.
+     *
+     * @return list<string>
+     */
+    private function resolveDxcDlls(string $cacheKey, string $arch): array
+    {
+        $dir = $this->cacheDir . "/{$cacheKey}/dxc";
+        $label = "{$cacheKey}/dxc";
+        $source = 'microsoft/DirectXShaderCompiler@latest';
+        $paths = [$dir . '/dxcompiler.dll', $dir . '/dxil.dll'];
+        $token = self::token();
+        $release = $this->assets->release(self::DXC_RELEASE_URL, $token);
+
+        if (is_string($release)) {
+            return $this->offlineFiles($label, $source, $release, $paths) ? $paths : [];
+        }
+
+        $windows = self::dxcWindowsAsset($release)['name'] ?? null;
+        $asset = null;
+        foreach (ReleaseAsset::fromRelease($release) as $candidate) {
+            if ($candidate->name === $windows) {
+                $asset = $candidate;
+                break;
+            }
+        }
+        if ($asset === null) {
+            $this->log("Runtime {$label}: the latest DXC release publishes no Windows archive");
+            return [];
+        }
+
+        $reason = ReleaseAssetCache::staleReason($paths[0], $source, $asset)
+            ?? ReleaseAssetCache::staleReason($paths[1], $source, $asset);
+        if ($reason === null) {
+            $this->log("Runtime {$label}: verified current ({$asset->name}, {$asset->describe()})");
+            return $paths;
+        }
+
+        $targets = [];
+        foreach (self::dxcZipEntries($arch) as $entry => $name) {
+            $targets[$dir . '/' . $name] = [$entry];
+        }
+        $this->downloadZip($label, $source, $asset, $targets, $token, $reason);
+        return $paths;
+    }
+
+    /**
+     * The release index is unreachable: fail, or - offline mode only - allow the
+     * cached files that carry an identity record of the same release.
+     *
+     * @param list<string> $files
+     * @return bool true = use the cached files, false = offline and not cached
+     */
+    private function offlineFiles(string $label, string $source, string $why, array $files): bool
+    {
+        if (!ReleaseAssetCache::offlineAllowed()) {
+            throw new \RuntimeException(
+                "Cannot verify runtime {$label}: the release index of {$source} is unreachable ({$why}).\n" .
+                "A cached file is not used unverified. A release being re-published is missing for a moment - " .
+                "retry then. To build offline from the cache anyway, set " . ReleaseAssetCache::OFFLINE_ENV . '=1.'
+            );
+        }
+        $records = [];
+        foreach ($files as $file) {
+            $record = is_file($file) ? ReleaseAssetCache::record($file) : null;
+            if ($record === null || $record['source'] !== $source) {
+                $this->log("WARNING: offline - runtime {$label} has no cached file with an identity record of {$source}");
+                return false;
+            }
+            $records[] = $record;
+        }
+        $this->log(sprintf(
+            'WARNING: %s is set - using the UNVERIFIED cached runtime %s (%s, asset %d, updated %s); a newer one may be published (%s)',
+            ReleaseAssetCache::OFFLINE_ENV,
+            $label,
+            is_string($records[0]['name']) ? $records[0]['name'] : '?',
+            is_int($records[0]['id']) ? $records[0]['id'] : 0,
+            is_string($records[0]['updatedAt'] ?? null) ? $records[0]['updatedAt'] : 'unknown',
+            $why,
+        ));
+        return true;
+    }
+
+    /**
+     * Download a zip asset, verify it and cache the wanted members. The archive
+     * goes to a temporary file and the members are streamed out of it: a runtime
+     * is some 80 MB, more than a default memory_limit holds twice.
+     *
+     * @param array<string, list<string>> $targets cache file => paths it may have in the zip
+     */
+    private function downloadZip(string $label, string $source, ReleaseAsset $asset, array $targets, ?string $token, string $reason): void
+    {
+        if (!class_exists(\ZipArchive::class)) {
+            throw new \RuntimeException("Cannot unpack {$asset->name}: the build PHP lacks the zip extension");
+        }
+        $this->log("Runtime {$label}: downloading {$asset->name} ({$reason})...");
+        $tempFile = tempnam(sys_get_temp_dir(), 'phpolygon-runtime-');
+        if ($tempFile === false) {
+            throw new \RuntimeException('Cannot create a temporary file for the download');
+        }
+        try {
+            $content = $this->assets->download($asset, $asset->downloadUrl, self::requestHeaders($asset->downloadUrl, $token), $token);
+            if (file_put_contents($tempFile, $content) !== strlen($content)) {
+                throw new \RuntimeException("Cannot write {$tempFile}");
+            }
+            unset($content);
+
+            $zip = new \ZipArchive();
+            if ($zip->open($tempFile) !== true) {
+                throw new \RuntimeException("{$asset->name} is not a zip archive");
+            }
+            try {
+                // All members are looked up first: nothing is cached from an archive that lacks one.
+                $found = [];
+                foreach ($targets as $target => $members) {
+                    $found[$target] = self::zipMemberName($zip, $members)
+                        ?? throw new \RuntimeException("{$asset->name} contains none of: " . implode(', ', $members));
+                }
+                foreach ($found as $target => $member) {
+                    ReleaseAssetCache::store($target, $source, $asset, static fn (string $temp): bool => self::extract($zip, $member, $temp));
+                    $this->log(sprintf('Runtime %s: downloaded and cached %s (%.1f MB; %s)', $label, $target, (int) filesize($target) / 1024 / 1024, $asset->describe()));
+                }
+            } finally {
+                $zip->close();
+            }
+        } finally {
+            @unlink($tempFile);
+        }
+    }
+
+    /**
+     * The name under which one of $members (`/` paths) is a non-empty entry of the
+     * archive, also when the archive stores paths with backslashes (the DXC
+     * release archives do), or null.
+     *
+     * @param list<string> $members
+     */
+    public static function zipMemberName(\ZipArchive $zip, array $members): ?string
+    {
+        foreach ($members as $member) {
+            foreach ([$member, str_replace('/', '\\', $member)] as $name) {
+                $stat = $zip->statName($name);
+                if (is_array($stat) && $stat['size'] > 0) {
+                    return $name;
+                }
+            }
+        }
+        return null;
+    }
+
+    private static function extract(\ZipArchive $zip, string $member, string $target): bool
+    {
+        $in = $zip->getStream($member);
+        if ($in === false) {
+            return false;
+        }
+        $out = fopen($target, 'wb');
+        if ($out === false) {
+            fclose($in);
+            return false;
+        }
+        $copied = stream_copy_to_stream($in, $out);
+        fclose($in);
+        $closed = fclose($out);
+        $stat = $zip->statName($member);
+        return $closed && is_array($stat) && $copied === $stat['size'];
+    }
+
+    private static function token(): ?string
+    {
+        return getenv('GITHUB_TOKEN') ?: getenv('GH_TOKEN') ?: null;
+    }
+
+    /**
      * Per-OS destination name for the Steam API library.
      */
     private function steamLibName(string $platform): string
@@ -173,277 +462,6 @@ class StaticPhpResolver
             'macos'   => 'libsteam_api.dylib',
             default   => 'libsteam_api.so',
         };
-    }
-
-    private function downloadSteamApiLibIfNewer(string $platform, string $arch, string $phpVersion, string $cachedPath): ?string
-    {
-        $releaseUrl = $this->findRuntimeRelease($phpVersion);
-        if ($releaseUrl === null) {
-            return null;
-        }
-
-        $json = $this->httpGet($releaseUrl);
-        $release = $json !== null ? json_decode($json, true) : null;
-        if (!is_array($release)) {
-            return null;
-        }
-
-        $publishedAt = isset($release['published_at']) && is_string($release['published_at'])
-            ? strtotime($release['published_at'])
-            : null;
-
-        if ($publishedAt !== false && $publishedAt !== null && file_exists($cachedPath)) {
-            $cachedMtime = filemtime($cachedPath);
-            if ($cachedMtime !== false && $cachedMtime >= $publishedAt) {
-                return null;
-            }
-        }
-
-        $osName = match (true) {
-            $platform === 'macos' && $arch === 'arm64'   => 'macos-aarch64',
-            $platform === 'macos' && $arch === 'x86_64'  => 'macos-x86_64',
-            $platform === 'linux' && $arch === 'arm64'   => 'linux-aarch64',
-            $platform === 'linux' && $arch === 'x86_64'  => 'linux-x86_64',
-            $platform === 'windows'                       => 'windows-x86_64',
-            default                                       => "{$platform}-{$arch}",
-        };
-
-        // No variant suffix: libsteam-api-<phpVersion>-<os>.zip
-        $assetName = "libsteam-api-{$phpVersion}-{$osName}.zip";
-        $libName = $this->steamLibName($platform);
-
-        $downloadUrl = null;
-        if (isset($release['assets']) && is_array($release['assets'])) {
-            foreach ($release['assets'] as $asset) {
-                if (!is_array($asset)) {
-                    continue;
-                }
-                $name = isset($asset['name']) && is_string($asset['name']) ? $asset['name'] : '';
-                if ($name === $assetName) {
-                    $downloadUrl = isset($asset['browser_download_url']) && is_string($asset['browser_download_url'])
-                        ? $asset['browser_download_url']
-                        : null;
-                    break;
-                }
-            }
-        }
-
-        if ($downloadUrl === null) {
-            return null;
-        }
-
-        $this->log("Downloading {$assetName}...");
-        /** @var string $downloadUrl */
-
-        $tempFile = tempnam(sys_get_temp_dir(), 'phpolygon-steamlib-');
-        if ($tempFile === false) {
-            return null;
-        }
-
-        $content = $this->httpGet($downloadUrl);
-        if ($content === null) {
-            @unlink($tempFile);
-            return null;
-        }
-        file_put_contents($tempFile, $content);
-
-        $actualFile = null;
-        if (class_exists(\ZipArchive::class)) {
-            $zip = new \ZipArchive();
-            if ($zip->open($tempFile) === true) {
-                $extractDir = sys_get_temp_dir() . '/phpolygon-steamlib-extract-' . getmypid();
-                $zip->extractTo($extractDir);
-                $zip->close();
-                foreach ([$libName, "buildroot/bin/{$libName}"] as $candidate) {
-                    if (file_exists($extractDir . '/' . $candidate)) {
-                        $actualFile = $extractDir . '/' . $candidate;
-                        break;
-                    }
-                }
-            }
-        }
-
-        if ($actualFile === null) {
-            @unlink($tempFile);
-            return null;
-        }
-
-        $cachedDir = dirname($cachedPath);
-        if (!is_dir($cachedDir)) {
-            mkdir($cachedDir, 0755, true);
-        }
-        copy($actualFile, $cachedPath);
-
-        @unlink($tempFile);
-        if (isset($extractDir) && is_dir($extractDir)) {
-            $this->removeDir($extractDir);
-        }
-
-        $size = filesize($cachedPath);
-        $this->log(sprintf("Downloaded and cached: %s (%.1f KB)", $cachedPath, $size / 1024));
-
-        return $cachedPath;
-    }
-
-    private function downloadVulkanDllIfNewer(string $platform, string $arch, string $variant, string $phpVersion, string $cachedPath): ?string
-    {
-        $releaseUrl = $this->findRuntimeRelease($phpVersion);
-        if ($releaseUrl === null) {
-            return null;
-        }
-
-        $json = $this->httpGet($releaseUrl);
-        $release = $json !== null ? json_decode($json, true) : null;
-        if (!is_array($release)) {
-            return null;
-        }
-
-        $publishedAt = isset($release['published_at']) && is_string($release['published_at'])
-            ? strtotime($release['published_at'])
-            : null;
-
-        if ($publishedAt !== false && $publishedAt !== null && file_exists($cachedPath)) {
-            $cachedMtime = filemtime($cachedPath);
-            if ($cachedMtime !== false && $cachedMtime >= $publishedAt) {
-                return null;
-            }
-        }
-
-        $osName = match (true) {
-            $platform === 'windows' => 'windows-x86_64',
-            default                 => "{$platform}-{$arch}",
-        };
-
-        $prefix = "vulkan-1-dll-{$variant}-{$phpVersion}-";
-        $suffix = "-{$osName}.zip";
-
-        $downloadUrl = null;
-        $matchedAsset = null;
-        if (isset($release['assets']) && is_array($release['assets'])) {
-            foreach ($release['assets'] as $asset) {
-                if (!is_array($asset)) {
-                    continue;
-                }
-                $name = isset($asset['name']) && is_string($asset['name']) ? $asset['name'] : '';
-                if (str_starts_with($name, $prefix) && str_ends_with($name, $suffix)) {
-                    $downloadUrl = isset($asset['browser_download_url']) && is_string($asset['browser_download_url'])
-                        ? $asset['browser_download_url']
-                        : null;
-                    $matchedAsset = $name;
-                    break;
-                }
-            }
-        }
-
-        if ($downloadUrl === null) {
-            return null;
-        }
-
-        $this->log("Downloading {$matchedAsset}...");
-        /** @var string $downloadUrl */
-
-        $tempFile = tempnam(sys_get_temp_dir(), 'phpolygon-vkdll-');
-        if ($tempFile === false) {
-            return null;
-        }
-
-        $content = $this->httpGet($downloadUrl);
-        if ($content === null) {
-            @unlink($tempFile);
-            return null;
-        }
-        file_put_contents($tempFile, $content);
-
-        $actualFile = null;
-        if (class_exists(\ZipArchive::class)) {
-            $zip = new \ZipArchive();
-            if ($zip->open($tempFile) === true) {
-                $extractDir = sys_get_temp_dir() . '/phpolygon-vkdll-extract-' . getmypid();
-                $zip->extractTo($extractDir);
-                $zip->close();
-                foreach (['vulkan-1.dll', 'buildroot/bin/vulkan-1.dll'] as $candidate) {
-                    if (file_exists($extractDir . '/' . $candidate)) {
-                        $actualFile = $extractDir . '/' . $candidate;
-                        break;
-                    }
-                }
-            }
-        }
-
-        if ($actualFile === null) {
-            @unlink($tempFile);
-            return null;
-        }
-
-        $cachedDir = dirname($cachedPath);
-        if (!is_dir($cachedDir)) {
-            mkdir($cachedDir, 0755, true);
-        }
-        copy($actualFile, $cachedPath);
-
-        @unlink($tempFile);
-        if (isset($extractDir) && is_dir($extractDir)) {
-            $this->removeDir($extractDir);
-        }
-
-        $size = filesize($cachedPath);
-        $this->log(sprintf("Downloaded and cached: %s (%.1f KB)", $cachedPath, $size / 1024));
-
-        return $cachedPath;
-    }
-
-    /** Release feed of the DirectX Shader Compiler (MIT/LLVM licensed, dxil.dll redistributable). */
-    private const string DXC_RELEASE_URL = 'https://api.github.com/repos/microsoft/DirectXShaderCompiler/releases/latest';
-
-    /**
-     * dxcompiler.dll + dxil.dll for the target arch, from the build cache or the
-     * latest DXC release. Both or nothing: DXC without dxil.dll cannot sign the
-     * DXIL it produces, and php-vio then refuses Shader Model 6 anyway.
-     *
-     * @return list<string>
-     */
-    private function resolveDxcDlls(string $cacheKey, string $arch): array
-    {
-        $dir = $this->cacheDir . "/{$cacheKey}/dxc";
-        $paths = [$dir . '/dxcompiler.dll', $dir . '/dxil.dll'];
-        $present = static fn (): bool => is_file($paths[0]) && is_file($paths[1]);
-        if (!$present()) {
-            $this->downloadDxc($dir, $arch);
-        }
-        return $present() ? $paths : [];
-    }
-
-    private function downloadDxc(string $dir, string $arch): void
-    {
-        $json = $this->httpGet(self::DXC_RELEASE_URL);
-        $release = $json !== null ? json_decode($json, true) : null;
-        $asset = is_array($release) ? self::dxcWindowsAsset($release) : null;
-        if ($asset === null || !class_exists(\ZipArchive::class)) {
-            return;
-        }
-
-        $this->log("Downloading {$asset['name']}...");
-        $content = $this->httpGet($asset['url']);
-        $tempFile = tempnam(sys_get_temp_dir(), 'phpolygon-dxc-');
-        if ($content === null || $tempFile === false) {
-            return;
-        }
-        file_put_contents($tempFile, $content);
-
-        $zip = new \ZipArchive();
-        if ($zip->open($tempFile) === true) {
-            if (!is_dir($dir)) {
-                mkdir($dir, 0755, true);
-            }
-            foreach (self::dxcZipEntries($arch) as $entry => $name) {
-                $data = self::zipEntry($zip, $entry);
-                if ($data !== null) {
-                    file_put_contents($dir . '/' . $name, $data);
-                }
-            }
-            $zip->close();
-        }
-        @unlink($tempFile);
     }
 
     /**
@@ -483,313 +501,6 @@ class StaticPhpResolver
     }
 
     /**
-     * A non-empty zip entry by its `/` path, also when the archive stores the path
-     * with backslashes (the DXC release archives do), or null.
-     */
-    public static function zipEntry(\ZipArchive $zip, string $entry): ?string
-    {
-        foreach ([$entry, str_replace('/', '\\', $entry)] as $name) {
-            $data = $zip->getFromName($name);
-            if (is_string($data) && $data !== '') {
-                return $data;
-            }
-        }
-        return null;
-    }
-
-    private function downloadD3DCompilerDllIfNewer(string $platform, string $arch, string $variant, string $phpVersion, string $cachedPath): ?string
-    {
-        $releaseUrl = $this->findRuntimeRelease($phpVersion);
-        if ($releaseUrl === null) {
-            return null;
-        }
-
-        $json = $this->httpGet($releaseUrl);
-        $release = $json !== null ? json_decode($json, true) : null;
-        if (!is_array($release)) {
-            return null;
-        }
-
-        $publishedAt = isset($release['published_at']) && is_string($release['published_at'])
-            ? strtotime($release['published_at'])
-            : null;
-
-        if ($publishedAt !== false && $publishedAt !== null && file_exists($cachedPath)) {
-            $cachedMtime = filemtime($cachedPath);
-            if ($cachedMtime !== false && $cachedMtime >= $publishedAt) {
-                return null;
-            }
-        }
-
-        $osName = match (true) {
-            $platform === 'windows' => 'windows-x86_64',
-            default                 => "{$platform}-{$arch}",
-        };
-
-        $prefix = "d3dcompiler-47-dll-{$variant}-{$phpVersion}-";
-        $suffix = "-{$osName}.zip";
-
-        $downloadUrl = null;
-        $matchedAsset = null;
-        if (isset($release['assets']) && is_array($release['assets'])) {
-            foreach ($release['assets'] as $asset) {
-                if (!is_array($asset)) {
-                    continue;
-                }
-                $name = isset($asset['name']) && is_string($asset['name']) ? $asset['name'] : '';
-                if (str_starts_with($name, $prefix) && str_ends_with($name, $suffix)) {
-                    $downloadUrl = isset($asset['browser_download_url']) && is_string($asset['browser_download_url'])
-                        ? $asset['browser_download_url']
-                        : null;
-                    $matchedAsset = $name;
-                    break;
-                }
-            }
-        }
-
-        if ($downloadUrl === null) {
-            return null;
-        }
-
-        $this->log("Downloading {$matchedAsset}...");
-        /** @var string $downloadUrl */
-
-        $tempFile = tempnam(sys_get_temp_dir(), 'phpolygon-d3ddll-');
-        if ($tempFile === false) {
-            return null;
-        }
-
-        $content = $this->httpGet($downloadUrl);
-        if ($content === null) {
-            @unlink($tempFile);
-            return null;
-        }
-        file_put_contents($tempFile, $content);
-
-        $actualFile = null;
-        if (class_exists(\ZipArchive::class)) {
-            $zip = new \ZipArchive();
-            if ($zip->open($tempFile) === true) {
-                $extractDir = sys_get_temp_dir() . '/phpolygon-d3ddll-extract-' . getmypid();
-                $zip->extractTo($extractDir);
-                $zip->close();
-                foreach (['d3dcompiler_47.dll', 'buildroot/bin/d3dcompiler_47.dll'] as $candidate) {
-                    if (file_exists($extractDir . '/' . $candidate)) {
-                        $actualFile = $extractDir . '/' . $candidate;
-                        break;
-                    }
-                }
-            }
-        }
-
-        if ($actualFile === null) {
-            @unlink($tempFile);
-            return null;
-        }
-
-        $cachedDir = dirname($cachedPath);
-        if (!is_dir($cachedDir)) {
-            mkdir($cachedDir, 0755, true);
-        }
-        copy($actualFile, $cachedPath);
-
-        @unlink($tempFile);
-        if (isset($extractDir) && is_dir($extractDir)) {
-            $this->removeDir($extractDir);
-        }
-
-        $size = filesize($cachedPath);
-        $this->log(sprintf("Downloaded and cached: %s (%.1f KB)", $cachedPath, $size / 1024));
-
-        return $cachedPath;
-    }
-
-    /**
-     * Check if a newer release exists on GitHub than the cached binary.
-     * Downloads and caches if newer; returns null if cache is up-to-date or offline.
-     */
-    private function downloadIfNewer(string $platform, string $arch, string $variant, string $cachedPath, string $phpVersion): ?string
-    {
-        $releaseUrl = $this->findRuntimeRelease($phpVersion);
-        if ($releaseUrl === null) {
-            return null;
-        }
-
-        $json = $this->httpGet($releaseUrl);
-        $release = $json !== null ? json_decode($json, true) : null;
-        if (!is_array($release)) {
-            return null;
-        }
-
-        // Compare release date with cached file mtime
-        $publishedAt = isset($release['published_at']) && is_string($release['published_at'])
-            ? strtotime($release['published_at'])
-            : null;
-
-        if ($publishedAt !== false && $publishedAt !== null && file_exists($cachedPath)) {
-            $cachedMtime = filemtime($cachedPath);
-            if ($cachedMtime !== false && $cachedMtime >= $publishedAt) {
-                return null; // cache is up-to-date
-            }
-            $this->log("Newer release found, updating cache...");
-        }
-
-        /** @var array<string, mixed> $release */
-        return $this->downloadFromReleaseData($release, $platform, $arch, $variant, $phpVersion);
-    }
-
-    /**
-     * Download micro.sfx from a parsed GitHub release response.
-     *
-     * @param array<string, mixed> $release
-     */
-    private function downloadFromReleaseData(array $release, string $platform, string $arch, string $variant, string $phpVersion = '8.5'): ?string
-    {
-        $osName = match (true) {
-            $platform === 'macos' && $arch === 'arm64'   => 'macos-aarch64',
-            $platform === 'macos' && $arch === 'x86_64'  => 'macos-x86_64',
-            $platform === 'linux' && $arch === 'arm64'   => 'linux-aarch64',
-            $platform === 'linux' && $arch === 'x86_64'  => 'linux-x86_64',
-            $platform === 'windows'                       => 'windows-x86_64',
-            default                                       => "{$platform}-{$arch}",
-        };
-
-        $downloadUrl = null;
-        $matchedAsset = null;
-        $prefix = "micro-sfx-{$variant}-";
-        $suffix = "-{$osName}.zip";
-
-        if (isset($release['assets']) && is_array($release['assets'])) {
-            foreach ($release['assets'] as $asset) {
-                if (!is_array($asset)) {
-                    continue;
-                }
-                $name = isset($asset['name']) && is_string($asset['name']) ? $asset['name'] : '';
-                if (str_starts_with($name, $prefix) && str_ends_with($name, $suffix)) {
-                    $downloadUrl = isset($asset['browser_download_url']) && is_string($asset['browser_download_url'])
-                        ? $asset['browser_download_url']
-                        : null;
-                    $matchedAsset = $name;
-                    break;
-                }
-            }
-        }
-
-        if ($downloadUrl === null) {
-            $this->log("No matching micro.sfx asset found for {$variant}/{$osName}");
-            return null;
-        }
-
-        $this->log("Downloading {$matchedAsset}...");
-
-        /** @var string $downloadUrl */
-        $tempFile = tempnam(sys_get_temp_dir(), 'phpolygon-micro-');
-        if ($tempFile === false) {
-            return null;
-        }
-
-        $content = $this->httpGet($downloadUrl);
-        if ($content === null) {
-            @unlink($tempFile);
-            return null;
-        }
-
-        file_put_contents($tempFile, $content);
-
-        // Extract micro.sfx from zip
-        $actualFile = $tempFile;
-        if ($matchedAsset !== null && str_ends_with($matchedAsset, '.zip') && class_exists(\ZipArchive::class)) {
-            $zip = new \ZipArchive();
-            if ($zip->open($tempFile) === true) {
-                $extractDir = sys_get_temp_dir() . '/phpolygon-micro-extract-' . getmypid();
-                $zip->extractTo($extractDir);
-                $zip->close();
-                foreach (['micro.sfx', 'micro.sfx.exe'] as $binName) {
-                    $candidate = $extractDir . '/' . $binName;
-                    if (!file_exists($candidate)) {
-                        $candidate = $extractDir . '/buildroot/bin/' . $binName;
-                    }
-                    if (file_exists($candidate)) {
-                        $actualFile = $candidate;
-                        break;
-                    }
-                }
-            }
-        }
-
-        $cacheKey = $variant !== 'base'
-            ? "{$platform}-{$arch}-{$variant}-php{$phpVersion}"
-            : "{$platform}-{$arch}-php{$phpVersion}";
-        $cachedDir = $this->cacheDir . "/{$cacheKey}";
-        if (!is_dir($cachedDir)) {
-            mkdir($cachedDir, 0755, true);
-        }
-        $cachedPath = $cachedDir . '/micro.sfx';
-        copy($actualFile, $cachedPath);
-        chmod($cachedPath, 0755);
-
-        // Cleanup
-        @unlink($tempFile);
-        if (isset($extractDir) && is_dir($extractDir)) {
-            $this->removeDir($extractDir);
-        }
-
-        $size = filesize($cachedPath);
-        $this->log(sprintf("Downloaded and cached: %s (%.1f MB)", $cachedPath, $size / 1024 / 1024));
-
-        return $cachedPath;
-    }
-
-    private function findRuntimeRelease(string $phpVersion): ?string
-    {
-        $tag = "runtime-php{$phpVersion}";
-        $url = "https://api.github.com/repos/" . self::GITHUB_REPO . "/releases/tags/{$tag}";
-        $json = $this->httpGet($url);
-        if ($json === null) {
-            $this->log("No release found for tag {$tag}");
-            return null;
-        }
-
-        $release = json_decode($json, true);
-        if (!is_array($release) || !isset($release['url'])) {
-            return null;
-        }
-
-        return is_string($release['url']) ? $release['url'] : null;
-    }
-
-    /** Best effort: a leftover extraction directory in the temp dir does not fail a download. */
-    private function removeDir(string $dir): void
-    {
-        try {
-            FileTree::remove($dir);
-        } catch (\RuntimeException) {
-        }
-    }
-
-    private function httpGet(string $url): ?string
-    {
-        $token = getenv('GITHUB_TOKEN') ?: getenv('GH_TOKEN') ?: null;
-        $context = stream_context_create([
-            'http' => [
-                'method' => 'GET',
-                'header' => self::requestHeaders($url, $token),
-                'timeout' => 30,
-                'follow_location' => true,
-            ],
-        ]);
-
-        error_clear_last();
-        $result = @file_get_contents($url, false, $context);
-        if ($result === false) {
-            $reason = self::failureReason(http_get_last_response_headers() ?? [], error_get_last()['message'] ?? '', $token !== null);
-            $this->log("Request failed ({$reason}): {$url}");
-            return null;
-        }
-        return $result;
-    }
-
-    /**
      * Headers of a GET request to $url. $token goes to the GitHub API only, where
      * anonymous calls are limited to 60 an hour per IP - and CI runners share IPs.
      * Downloads go without it: they redirect to another host, which must not get it.
@@ -806,29 +517,6 @@ class StaticPhpResolver
             $headers[] = 'Authorization: Bearer ' . $token;
         }
         return $headers;
-    }
-
-    /**
-     * Why a request failed: the last response status line, or the stream error when
-     * no response came. A rejected anonymous call gets a hint to set a token.
-     *
-     * @param array<int, string> $responseHeaders
-     */
-    public static function failureReason(array $responseHeaders, string $error, bool $authenticated): string
-    {
-        $statusLine = null;
-        foreach ($responseHeaders as $header) {
-            if (preg_match('#^HTTP/\S+\s+\d{3}#', $header) === 1) {
-                $statusLine = trim($header);
-            }
-        }
-        if ($statusLine === null) {
-            return $error !== '' ? $error : 'no response';
-        }
-        if (!$authenticated && preg_match('#^HTTP/\S+\s+(403|429)\b#', $statusLine) === 1) {
-            return $statusLine . '; anonymous GitHub API calls are rate-limited, set GITHUB_TOKEN';
-        }
-        return $statusLine;
     }
 
     /**
